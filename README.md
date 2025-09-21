@@ -3,7 +3,7 @@
 Core package badges:
 
 ![Codecov (with branch)](https://img.shields.io/codecov/c/gh/gwr3n/pyopl/main)
- ![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Fpython-package.yml) ![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Flint-type.yml?branch=main&label=lint%20%2B%20type-check) [![PyPI](https://img.shields.io/pypi/v/pyopl)](https://pypi.org/project/pyopl/) [![Python versions](https://img.shields.io/pypi/pyversions/pyopl)](https://pypi.org/project/pyopl/) [![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE) [![Downloads](https://static.pepy.tech/badge/pyopl)](https://pepy.tech/project/pyopl) [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) [![Wheel](https://img.shields.io/pypi/wheel/pyopl)](https://pypi.org/project/pyopl/)
+ ![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Fpython-package.yml) ![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Flint-type.yml?branch=main&label=lint%20%2B%20type-check) [![PyPI](https://img.shields.io/pypi/v/pyopl-rhetor)](https://pypi.org/project/pyopl-rhetor/) [![Python versions](https://img.shields.io/pypi/pyversions/pyopl-rhetor)](https://pypi.org/project/pyopl-rhetor/) [![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE) [![Downloads](https://static.pepy.tech/badge/pyopl)](https://pepy.tech/project/pyopl) [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) [![Wheel](https://img.shields.io/pypi/wheel/pyopl)](https://pypi.org/project/pyopl/)
 
 Quality and tooling:
 
@@ -23,23 +23,25 @@ Docs:
 
 ## Installation
 
+Install via pip (recommended):
 
-You need Python 3.7+ and the following packages:
-
-- `sly` (for parsing OPL)
-- `gurobipy` (for Gurobi solver, requires a Gurobi license)
-- `scipy` and `highspy` (for open-source HiGHS solver via SciPy)
-- `numpy`, `Pillow`
-
-Install all dependencies with:
-
-```sh
-pip install sly gurobipy scipy numpy Pillow highspy
+```
+pip install pyopl-rhetor
 ```
 
+Or clone the repository and install locally:
 
+```
+git clone https://github.com/gwr3n/pyopl.git
+cd pyopl
+pip install .
+```
 
-You can use either Gurobi or SciPy/HiGHS as the solver. Gurobi is required for mixed-integer models; SciPy/HiGHS supports linear programs and, in recent versions, can also handle integer and boolean variables (MIP) if the solver and SciPy version support it. Integrality is passed to `linprog` if present, but full MIP support depends on your SciPy installation. Both solvers are selectable in the API and the IDE. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
+Dependencies are managed via `pyproject.toml` and are listed in [`requirements.txt`](./requirements.txt)
+
+PyOPL requires Python 3.9+
+
+You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selectable in the API and the IDE. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
 
 ## Usage
 
@@ -138,14 +140,14 @@ The function returns a dictionary with solver results and prints:
 ### Notes
 
 - You must have a valid Gurobi license to solve models with Gurobi.
-- SciPy/HiGHS is open-source and can be used for linear programs and, if supported by your SciPy version, mixed-integer programs (MIP). Integrality is passed to `linprog` if present, but full MIP support depends on your SciPy installation.
+- SciPy/HiGHS is open-source.
 - The library is designed for educational and prototyping purposes and supports a rich subset of OPL syntax, including advanced tuple, boolean, and logical constructs.
 
 
 
 ## PyOPL IDE
 
-PyOPL includes a graphical IDE for editing, running, and debugging OPL models and data files. The IDE features:
+PyOPL includes the Rhetor graphical IDE for editing, running, and debugging OPL models and data files. The IDE features:
 
 - Syntax highlighting for OPL models and data files
 - Side-by-side model and data editors
