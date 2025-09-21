@@ -1,0 +1,8 @@
+sly
+numpy>=1.20
+scipy>=1.11
+gurobipy
+highspy
+Pillow
+ttkbootstrap
+platformdirs

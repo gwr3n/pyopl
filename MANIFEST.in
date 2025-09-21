@@ -1,0 +1,4 @@
+recursive-include pyopl/icon *.png
+exclude pyopl/pyopl_generative_openai.py
+exclude pyopl/pyopl_generative_gemini.py
+exclude test/*

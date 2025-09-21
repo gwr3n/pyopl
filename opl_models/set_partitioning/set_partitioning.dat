@@ -1,0 +1,6 @@
+nbSets = 3;
+nbElements = 4;
+cost = [5, 6, 7];
+a = [ [1, 0, 0, 1],   // set 1 covers elements 1 and 4
+      [0, 1, 1, 0],   // set 2 covers elements 2 and 3
+      [0, 0, 1, 1] ]; // set 3 covers elements 3 and 4

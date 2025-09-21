@@ -1,0 +1,33 @@
+Stores = { "StoreA", "StoreB", "StoreC" };
+
+# Costs
+holding_cost = 0.5;
+
+# Per-store per-unit transport cost
+transport_cost = [
+    "StoreA" 2.0,
+    "StoreB" 3.0,
+    "StoreC" 1.5
+];
+
+# Storage capacities
+capacity = [
+    "StoreA" 100,
+    "StoreB" 80,
+    "StoreC" 60
+];
+
+# Initial inventories
+init_inv = [
+    "StoreA" 10,
+    "StoreB" 5,
+    "StoreC" 8
+];
+
+# Demand per store per period (each row is a list of demands for periods 1..3)
+demand = [
+    "StoreA" [10, 12, 8],
+    "StoreB" [5, 7, 6],
+    "StoreC" [8, 9, 7]
+];
+

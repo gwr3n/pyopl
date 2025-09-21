@@ -1,0 +1,80 @@
+[project]
+name = "pyopl-rhetor"
+version = "1.0.0"
+description = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
+authors = [
+  { name = "Roberto Rossi", email = "robros@gmail.com" },
+]
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+license = { text = "MIT" }
+dependencies = [
+  "sly",
+  "numpy>=1.20",
+  "scipy>=1.11",
+  "gurobipy",
+  "highspy",
+  "Pillow",
+  "ttkbootstrap",
+  "platformdirs",
+]
+
+[project.urls]
+Homepage = "https://github.com/gwr3n/pyopl"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["test", "test.*"]
+
+[tool.setuptools.package-data]
+pyopl = ["icon/gear.png"]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.black]
+line-length = 127
+target-version = ["py39", "py310", "py311"]
+exclude = '''
+/(
+  \.git
+| \.venv
+| build
+| dist
+)/
+'''
+
+[tool.flake8]
+max-line-length = 300
+extend-ignore = ["E203", "W503", "F811"]
+
+[tool.ruff]
+line-length = 300
+target-version = "py310"
+
+[tool.ruff.lint]
+# Core Flake8 rules + import sorting
+select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+"pyopl/pyopl_core.py" = ["F811"]
+"test/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pyopl"]
+
+[[tool.mypy.overrides]]
+module = "pyopl.pyopl_ide_bootstrap"
+disable_error_code = ["import-untyped"]

@@ -1,0 +1,7 @@
+nbPlants = 2;
+nbCustomers = 3;
+fixed_cost = [100, 120];
+trans_cost = [ [4, 6, 9], [5, 4, 7] ];
+demand = [20, 25, 15];
+capacity = [30, 40];
+

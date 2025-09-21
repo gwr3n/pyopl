@@ -1,0 +1,16 @@
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+build/
+dist/
+misc/
+tmp/
+.vscode/
+*.egg-info/
+*.egg
+.vscode/settings.json
+
+.DS_Store
+.coverage
+docs/dev_notes.md

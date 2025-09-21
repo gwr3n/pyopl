@@ -1,0 +1,44 @@
+T = 3;    // number of periods
+S = 2;    // number of skill levels
+K = 2;    // number of tasks/job types
+
+// Cost data per skill [1..S]
+hiringCost = [ 1000, 1500 ];
+firingCost = [ 500, 800 ];
+trainingCost = [ 700 ];   // only S-1, i.e., training from level 1 to level 2
+
+wage = [ 25, 35 ];
+otWage = [ 40, 55 ];
+
+productivity = [ 40, 50 ];   // regular worker-hours per period per skill 1 and 2
+
+maxOvertime = [ 10, 15 ];    // overtime hours per worker per period
+
+initialWorkforce = [ 15, 10 ];
+
+demand = [
+   [ 400, 530, 460 ],      // Demand for Task 1 over 3 periods
+   [ 250, 220, 300 ]       // Demand for Task 2 over 3 periods
+];
+
+skillsRequired = [
+   [1, 1],     // Task 1: both skill 1 and 2 can do
+   [0, 1]      // Task 2: only skill 2 can do
+];
+
+// Budget per period (same for each period for illustration)
+budget = [ 25000, 25000, 25000 ];
+
+// Maximums per period per skill
+maxHire = [
+   [ 5, 5, 5 ],   // Skill 1: max 5 hires each period
+   [ 3, 3, 3 ]    // Skill 2: max 3 hires each period
+];
+maxFire = [
+   [ 5, 5, 5 ],   // Skill 1: max 5 fires each period
+   [ 3, 3, 3 ]    // Skill 2: max 3 fires each period
+];
+
+// Managerial span of control
+spanControl = 10;
+nManagers = 3;

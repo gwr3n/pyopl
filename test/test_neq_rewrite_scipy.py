@@ -1,0 +1,87 @@
+import unittest
+
+from pyopl.pyopl_core import OPLLexer, OPLParser
+from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+
+
+class TestNotEqualRewriteSciPy(unittest.TestCase):
+    def gen(self, src: str):
+        lexer = OPLLexer()
+        parser = OPLParser()
+        ast = parser.parse(lexer.tokenize(src))
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+        gen._build_constraints()
+        return gen
+
+    def test_boolean_neq_rewritten_to_xor(self):
+        opl = """
+        dvar boolean a; dvar boolean b; minimize 0; subject to { a != b; }
+        """
+        gen = self.gen(opl)
+        # Expect an equality row enforcing a + b == 1
+        # Build expected row coefficients: a and b each appear once in some equality row with RHS=1
+        a_idx = gen.var_indices["a"]
+        b_idx = gen.var_indices["b"]
+        found = False
+        for row, rhs in zip(gen.A_eq, gen.b_eq):
+            if abs(rhs - 1.0) < 1e-9 and abs(row[a_idx] - 1.0) < 1e-9 and abs(row[b_idx] - 1.0) < 1e-9:
+                found = True
+                break
+        self.assertTrue(found, f"Did not find XOR row a + b == 1; A_eq={gen.A_eq}, b_eq={gen.b_eq}")
+
+    def test_integer_neq_uses_bigM_delta(self):
+        opl = """
+        dvar int x; dvar int y; minimize 0; subject to { x != y; }
+        """
+        gen = self.gen(opl)
+        # Identify newly introduced binary variable (not x or y)
+        aux_vars = [v for v in gen.var_indices if v not in ("x", "y")]
+        self.assertEqual(
+            len(aux_vars),
+            1,
+            f"Expected exactly one auxiliary binary var, found {aux_vars}",
+        )
+        delta = aux_vars[0]
+        delta_idx = gen.var_indices[delta]
+        x_idx = gen.var_indices["x"]
+        y_idx = gen.var_indices["y"]
+        # Determine M heuristically: look at absolute coefficient on delta (largest)
+        M_candidates = [abs(row[delta_idx]) for row in gen.A_ub]
+        M = max(M_candidates) if M_candidates else 1_000_000.0
+        found_forms = 0
+        for row, rhs in zip(gen.A_ub, gen.b_ub):
+            # Form 1: -x + y - M*delta <= -1 (or algebraically equivalent scaling)
+            if (
+                abs(row[x_idx] + 1.0) < 1e-9
+                and abs(row[y_idx] - 1.0) < 1e-9
+                and abs(row[delta_idx] + M) < 1e-6
+                and abs(rhs + 1.0) < 1e-6
+            ):
+                found_forms += 1
+            # Form 2: -x + y + M*delta <= M - 1 (generic unified encoding variant)
+            if (
+                abs(row[x_idx] + 1.0) < 1e-9
+                and abs(row[y_idx] - 1.0) < 1e-9
+                and abs(row[delta_idx] - M) < 1e-6
+                and abs(rhs - (M - 1.0)) < 1e-3
+            ):
+                found_forms += 1
+            # Alternative legacy: x - y + M*delta <= M - 1
+            if (
+                abs(row[x_idx] - 1.0) < 1e-9
+                and abs(row[y_idx] + 1.0) < 1e-9
+                and abs(row[delta_idx] - M) < 1e-6
+                and abs(rhs - (M - 1.0)) < 1e-3
+            ):
+                found_forms += 1
+        self.assertGreaterEqual(
+            found_forms,
+            2,
+            f"Did not detect two distinct big-M inequalities for x != y; rows={gen.A_ub}, b_ub={gen.b_ub}, M={M}, delta={delta}",
+        )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

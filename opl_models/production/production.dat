@@ -1,0 +1,5 @@
+nbProducts = 2;
+nbPeriods = 3;
+cost = [ [3, 2, 4], [2, 3, 5] ];
+demand = [40, 50, 0];
+capacity = [30, 40, 20];
