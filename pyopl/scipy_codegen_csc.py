@@ -1643,7 +1643,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     logger.debug(f"[resolve_variable] Found symbolic indexed variable: {k}")
                     return True, k, False
 
-            # NEW: Graceful handling for out-of-domain indices -> treat as zero coefficient
+            # Strict handling for out-of-domain indices -> raise SemanticError
             try:
                 decl = self._find_decl(name)
                 if decl and decl.get("type") in ("dvar_indexed",):
@@ -1651,56 +1651,62 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # Only attempt if arity matches
                     if len(dims) == len(norm_indices):
                         out_of_domain = False
+                        details: list[str] = []
                         for dim_decl, idx_val in zip(dims, norm_indices):
                             dtyp = dim_decl.get("type")
                             if dtyp == "range_index":
-                                start = self._eval_bound(dim_decl["start"])
-                                end = self._eval_bound(dim_decl["end"])
-                                if isinstance(idx_val, (int, float)) and int(idx_val) < int(start) or int(idx_val) > int(end):
+                                # Evaluate bounds
+                                s = self._eval_bound(dim_decl["start"])
+                                e = self._eval_bound(dim_decl["end"])
+                                if not isinstance(idx_val, int) or idx_val < int(s) or idx_val > int(e):
                                     out_of_domain = True
-                                    break
+                                    details.append(f"{idx_val} not in [{int(s)}..{int(e)}]")
                             elif dtyp == "named_range_dimension":
-                                # Find the named range declaration
-                                rng = self._find_decl(dim_decl["name"], decl_type="range_declaration_inline")
-                                if rng:
-                                    start = self._eval_bound(rng["start"])
-                                    end = self._eval_bound(rng["end"])
-                                    if (
-                                        isinstance(idx_val, (int, float))
-                                        and int(idx_val) < int(start)
-                                        or int(idx_val) > int(end)
-                                    ):
+                                rng_name = dim_decl.get("name")
+                                rng_decl = self._find_decl(rng_name, "range_declaration_inline")
+                                if rng_decl:
+                                    s = self._eval_bound(rng_decl["start"])
+                                    e = self._eval_bound(rng_decl["end"])
+                                    if not isinstance(idx_val, int) or idx_val < int(s) or idx_val > int(e):
                                         out_of_domain = True
-                                        break
+                                        details.append(f"{idx_val} not in [{int(s)}..{int(e)}]")
                             elif dtyp == "named_set_dimension":
-                                # Check membership if we can resolve the set elements
-                                set_name = dim_decl["name"]
-                                elems = None
+                                set_name = dim_decl.get("name")
+                                # Get set elements from data or AST
+                                set_vals = None
                                 set_decl = self._find_decl(set_name)
-                                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                                    elems = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
-                                elif set_decl and set_decl.get("type") in (
-                                    "typed_set",
-                                    "typed_set_external",
-                                    "set_declaration",
-                                ):
-                                    elems = self.data_dict.get(set_name, set_decl.get("value") or [])
-                                else:
-                                    elems = self.data_dict.get(set_name)
-                                if elems is not None:
-                                    # Normalize tuple-like
-                                    key = tuple(idx_val) if isinstance(idx_val, (list, tuple)) else idx_val
-                                    if key not in elems:
+                                if set_name in self.data_dict:
+                                    raw = self.data_dict[set_name]
+                                    set_vals = raw["elements"] if isinstance(raw, dict) and "elements" in raw else raw
+                                elif set_decl:
+                                    # typed_set stores list in 'value'; set_of_tuples value is list of dicts with elements
+                                    if set_decl.get("type") == "typed_set":
+                                        set_vals = set_decl.get("value") or []
+                                    elif set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external") and set_decl.get(
+                                        "value"
+                                    ):
+                                        set_vals = [tuple(t["elements"]) for t in set_decl["value"]]
+                                if set_vals is not None:
+                                    # For tuple-valued sets keep tuple keys; else compare directly
+                                    if idx_val not in set_vals:
                                         out_of_domain = True
-                                        break
+                                        details.append(f"{idx_val} not in {set_name}")
+                            # Other dimension types are not expected here
+
                         if out_of_domain:
-                            logger.debug(
-                                f"[resolve_variable] Index out-of-domain for {name} with indices={norm_indices}; treating as 0"
-                            )
-                            return False, 0.0, False
-            except Exception:
-                # Be conservative: if anything fails in the domain check, fall through to original behavior
-                pass
+                            msg = f"Index {norm_indices} for '{name}' is out of declared domain"
+                            if details:
+                                msg += f" ({'; '.join(details)})"
+                            logger.debug(f"[resolve_variable] {msg}")
+                            from .semantic_error import SemanticError
+
+                            raise SemanticError(msg)
+            except Exception as ex:
+                # If we purposely raised our SemanticError, propagate it. Otherwise, fall through.
+                from .semantic_error import SemanticError
+
+                if isinstance(ex, SemanticError):
+                    raise
 
             logger.debug(f"[resolve_variable] Indexed variable not found: {vname} (indices={indices})")
         return None

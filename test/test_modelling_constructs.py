@@ -22,6 +22,42 @@ class DummyAST:
 
 
 class TestModellingConstructs(unittest.TestCase):
+    def test_out_of_range_index_in_variable_reference(self):
+        """
+        Verify out-of-range index detection for i[0] when i is declared over T=1..6.
+
+        Gurobi backend:
+          - Code generation succeeds (string-based), but the code shows i[0] together with the
+            declaration over range(1, T + 1), making the mismatch explicit.
+
+        SciPy backend:
+          - Code generation should fail with a SemanticError because the indexed variable i_0
+            does not exist in the constructed variable set (i_1..i_6).
+        """
+        lexer = OPLLexer()
+        parser = OPLParser()
+        model_text = """
+            range T = 1..6;
+            dvar int+ i[T];  // Inventory at end of period t
+
+            minimize 0;
+
+            subject to {
+              // Initial inventory 0
+              i[0] == 0;  // Not a variable; not indexed in x (skip or comment if 0)
+            }
+        """
+        ast = parser.parse(lexer.tokenize(model_text))
+
+        # Gurobi: generates code; confirm it clearly contains the out-of-range access.
+        code_g = GurobiCodeGenerator(ast).generate_code()
+        self.assertIn("range(1, T + 1)", code_g, "Expected i to be declared over range(1, T + 1)")
+        self.assertIn("i[0]", code_g, "Expected out-of-range indexed reference i[0] in generated code")
+
+        # SciPy: should raise a SemanticError during code generation due to i_0 not existing.
+        with self.assertRaises(SemanticError):
+            SciPyCodeGenerator(ast).generate_code()
+
     def test_multi_indexed_var_name_and_format_varname(self):
         """
         Test _multi_indexed_var_name and _format_varname for tuple-indexed and range-indexed variables.
