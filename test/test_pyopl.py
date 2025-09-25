@@ -409,6 +409,50 @@ class TestPyOPLParser(TestPyOPL):
 
 
 class TestPyOPLCompiler(TestPyOPL):
+    def test_computed_param_sqrt_inline_gurobi_and_scipy(self):
+        model_code = """
+            range T = 1..6;
+            dvar float+ x[T];
+            dvar float+ y[T];
+            float demand[T] = ...;
+            float sqrt_demand[t in T] = sqrt(demand[t]);
+
+            minimize 0;
+            subject to {
+                forall(t in T) {
+                    x[t] == sqrt_demand[t];
+                    y[t] == demand[t];
+                }
+            }
+        """
+        data_code = """
+            demand = [80, 60, 70, 90, 50, 60];
+        """
+        import math
+
+        from pyopl.pyopl_core import OPLCompiler
+
+        compiler = OPLCompiler()
+
+        # Gurobi backend compile
+        ast_g, code_g, data_g = compiler.compile_model(model_code, data_code=data_code, solver="gurobi")
+        assert "sqrt_demand" in data_g
+        # Expect list of 6 values
+        assert isinstance(data_g["sqrt_demand"], list)
+        assert len(data_g["sqrt_demand"]) == 6
+        # Check some values
+        expected = [math.sqrt(v) for v in [80, 60, 70, 90, 50, 60]]
+        for a, b in zip(data_g["sqrt_demand"], expected):
+            assert abs(a - b) < 1e-9
+
+        # SciPy backend compile (ensures cross-backend works too)
+        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
+        assert "sqrt_demand" in data_s
+        assert isinstance(data_s["sqrt_demand"], list)
+        assert len(data_s["sqrt_demand"]) == 6
+        for a, b in zip(data_s["sqrt_demand"], expected):
+            assert abs(a - b) < 1e-9
+
     def test_param_range_length_mismatch_raises(self):
         """
         Test that both solvers return an error if a parameter's data length does not match the declared range.

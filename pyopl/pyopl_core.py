@@ -813,6 +813,16 @@ class OPLParser(Parser):
             "sem_type": field_type,
         }
 
+    # --- NEW: simple function calls (currently only sqrt) ---
+    @_("NAME '(' expression ')'")  # type: ignore
+    def primary(self, p):
+        func = p.NAME
+        if func != "sqrt":
+            raise SemanticError(f"Unsupported function '{func}'. Only sqrt(...) is supported.")
+        arg = p.expression
+        # Result of sqrt is float
+        return {"type": "funcall", "name": "sqrt", "args": [arg], "sem_type": "float"}
+
     # --- Untyped set literal on LHS: allow only set of tuples; scalar sets must be typed ---
     @_('NAME "=" "{" set_value_list "}" ";"')  # type: ignore
     def declaration(self, p):
@@ -2251,6 +2261,43 @@ class OPLParser(Parser):
             "value": value,
         }
 
+    # NEW: computed indexed parameter from expression with iterators, e.g.
+    # float sqrt_demand[t in T] = sqrt(demand[t]);
+    @_('opt_PARAM type NAME dexpr_index_header "=" expression ";"')  # type: ignore
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        iterators = p.dexpr_index_header["iterators"]
+
+        # Reuse dexpr dimension shape conversion
+        def to_decl_dim(rng):
+            if rng["type"] == "range_specifier":
+                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+            if rng["type"] == "named_range":
+                # store as named_range_dimension so codegen can treat it as 1-based
+                return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
+            if rng["type"] == "named_set":
+                return {"type": "named_set_dimension", "name": rng["name"]}
+            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
+        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+        # Store in symbol table so indexed use checks succeed
+        self.symbol_table.add_symbol(
+            name,
+            var_type,
+            dimensions=dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "parameter_inline_indexed_expr",
+            "var_type": var_type,
+            "name": name,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "expression": p.expression,
+        }
+
     @_('opt_PARAM type NAME indexed_dimensions "=" array_value ";"')  # type: ignore
     def declaration(self, p):
         # Indexed parameter with direct value assignment (e.g., float w[1..5] = [1,2,3,4,5];)
@@ -2818,6 +2865,7 @@ class OPLCompiler:
                     value = decl.get("value")
                     if value is not None:
                         data_dict[name] = value
+
         # Build a single canonical working_data that merges .dat data with inline parameter values
         working_data = dict(data_dict or {})
         # Inject inline declarations (parameters, typed sets, tuple-array inline values) into working_data
@@ -2844,6 +2892,195 @@ class OPLCompiler:
                         "elements": elems,
                         "tuple_type": decl.get("tuple_type"),
                     }
+
+        # NEW: evaluate computed indexed parameter declarations and rewrite them into concrete inline params
+        if model_ast and "declarations" in model_ast:
+            import math
+
+            # Helpers to evaluate simple int bounds from AST using working_data
+            def eval_bound(expr):
+                if isinstance(expr, dict):
+                    t = expr.get("type")
+                    if t == "number":
+                        return int(expr.get("value"))
+                    if t == "name":
+                        # named range bound could reference a number param
+                        val = working_data.get(expr.get("value"))
+                        if isinstance(val, (int, float)):
+                            return int(val)
+                        raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
+                    if t == "binop":
+                        op = expr.get("op")
+                        left = eval_bound(expr.get("left"))
+                        right = eval_bound(expr.get("right"))
+                        if op == "+":
+                            return left + right
+                        if op == "-":
+                            return left - right
+                        if op == "*":
+                            return left * right
+                        if op == "/":
+                            return int(left / right)
+                raise SemanticError(f"Unsupported bound expr: {expr}")
+
+            # Evaluate general numeric expression for param RHS. Limited support: number, name, indexed_name, binop, uminus, parenthesis, funcall(sqrt)
+            def eval_expr(expr, env):
+                t = expr.get("type") if isinstance(expr, dict) else None
+                if t == "number":
+                    return float(expr.get("value"))
+                if t == "boolean_literal":
+                    return 1.0 if expr.get("value") else 0.0
+                if t == "string_literal":
+                    return expr.get("value")
+                if t == "name":
+                    nm = expr.get("value")
+                    if nm in env:
+                        return float(env[nm])
+                    if nm in working_data:
+                        return working_data[nm]
+                    # allow simple numeric scalar parameters from inline model
+                    return working_data.get(nm)
+                if t == "indexed_name":
+                    base = expr.get("name")
+                    dims = expr.get("dimensions", [])
+                    # Single-dim support for now
+                    if len(dims) != 1:
+                        raise SemanticError("Only single-dimension indexed parameters supported in eval.")
+                    idx_val = eval_index(dims[0], env)
+                    arr = working_data.get(base)
+                    if isinstance(arr, dict):
+                        return arr[idx_val]
+                    if isinstance(arr, list):
+                        # 1-based indexing
+                        pos = int(idx_val) - 1
+                        return float(arr[pos])
+                    raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                if t == "binop":
+                    op = expr.get("op")
+                    lv = eval_expr(expr.get("left"), env)
+                    rv = eval_expr(expr.get("right"), env)
+                    if op == "+":
+                        return float(lv) + float(rv)
+                    if op == "-":
+                        return float(lv) - float(rv)
+                    if op == "*":
+                        return float(lv) * float(rv)
+                    if op == "/":
+                        return float(lv) / float(rv)
+                    if op in ("==", "!=", ">=", "<=", ">", "<"):
+                        return 1.0 if eval(f"{float(lv)} {op} {float(rv)}") else 0.0
+                    raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
+                if t == "uminus":
+                    return -float(eval_expr(expr.get("value"), env))
+                if t == "parenthesized_expression":
+                    return eval_expr(expr.get("expression"), env)
+                if t == "funcall":
+                    fname = expr.get("name")
+                    args = expr.get("args", [])
+                    if fname == "sqrt" and len(args) == 1:
+                        return math.sqrt(float(eval_expr(args[0], env)))
+                    raise SemanticError(f"Unsupported function '{fname}' in computed parameter expression.")
+                raise SemanticError(f"Unsupported node in computed parameter expression: {t}")
+
+            def eval_index(idx_expr, env):
+                t = idx_expr.get("type")
+                if t == "number_literal_index":
+                    return idx_expr.get("value")
+                if t == "name_reference_index":
+                    nm = idx_expr.get("name")
+                    return env.get(nm, nm)
+                if t == "name":
+                    return env.get(idx_expr.get("value"), idx_expr.get("value"))
+                if t == "field_access_index" or t == "field_access":
+                    # not needed for this feature; add if required later
+                    raise SemanticError("Field access in computed parameter indices not supported.")
+                if t == "binop":
+                    # allow simple integer arithmetic for index positions
+                    op = idx_expr.get("op")
+                    left = eval_index(idx_expr.get("left"), env)
+                    right = eval_index(idx_expr.get("right"), env)
+                    if op == "+":
+                        return int(left) + int(right)
+                    if op == "-":
+                        return int(left) - int(right)
+                    if op == "*":
+                        return int(left) * int(right)
+                    raise SemanticError(f"Unsupported index binop: {op}")
+                if t == "uminus":
+                    return -int(eval_index(idx_expr.get("value"), env))
+                if t == "parenthesized_expression":
+                    return eval_index(idx_expr.get("expression"), env)
+                if t == "string_literal":
+                    return idx_expr.get("value")
+                raise SemanticError(f"Unsupported index expr: {t}")
+
+            new_decls = []
+            for decl in model_ast["declarations"]:
+                if decl.get("type") != "parameter_inline_indexed_expr":
+                    new_decls.append(decl)
+                    continue
+                name = decl["name"]
+                dimensions = decl.get("dimensions", [])
+                iterators = decl.get("iterators", [])
+                # Currently support 1D (common case like [t in T])
+                if len(dimensions) != 1 or len(iterators) != 1:
+                    raise SemanticError("Computed indexed params currently support exactly one iterator/dimension.")
+                it = iterators[0]
+                rng = it["range"]
+                # Build iteration list for named_range or range_specifier
+                if rng["type"] == "range_specifier":
+                    start = eval_bound(rng["start"])
+                    end = eval_bound(rng["end"])
+                    values = []
+                    for v in range(start, end + 1):
+                        env = {it["iterator"]: v}
+                        values.append(float(eval_expr(decl["expression"], env)))
+                    working_data[name] = values
+                    # Rewrite declaration to concrete inline
+                    new_decls.append(
+                        {
+                            "type": "parameter_inline_indexed",
+                            "var_type": decl.get("var_type"),
+                            "name": name,
+                            "dimensions": dimensions,
+                            "value": values,
+                        }
+                    )
+                elif rng["type"] == "named_range":
+                    # Find named range declaration and evaluate as 1..N
+                    named = rng["name"]
+                    # Find the declaration
+                    rng_decl = None
+                    for d in model_ast["declarations"]:
+                        if d.get("type") == "range_declaration_inline" and d.get("name") == named:
+                            rng_decl = d
+                            break
+                    if not rng_decl:
+                        raise SemanticError(f"Named range '{named}' not found for computed parameter.")
+                    start = eval_bound(rng_decl["start"])
+                    end = eval_bound(rng_decl["end"])
+                    values = []
+                    for v in range(start, end + 1):
+                        env = {it["iterator"]: v}
+                        values.append(float(eval_expr(decl["expression"], env)))
+                    working_data[name] = values
+                    new_decls.append(
+                        {
+                            "type": "parameter_inline_indexed",
+                            "var_type": decl.get("var_type"),
+                            "name": name,
+                            "dimensions": dimensions,
+                            "value": values,
+                        }
+                    )
+                else:
+                    # Extendable: named_set, typed_set etc. could be done similarly (emit dict keyed by elements)
+                    raise SemanticError("Only numeric ranges supported in computed indexed parameter.")
+            # Replace declarations list
+            model_ast["declarations"] = new_decls
+            # Also update data_dict since generators may consult it directly
+            data_dict = dict(working_data)
+
         # Use working_data for subsequent validation/emission
         data_dict = working_data
 

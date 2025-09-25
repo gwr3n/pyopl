@@ -90,6 +90,7 @@ class GurobiCodeGenerator:
         self._add_code_line("import gurobipy as gp")
         self._add_code_line("from gurobipy import GRB")
         self._add_code_line("import itertools  # needed for multi-index forall")
+        self._add_code_line("import math  # for math.sqrt and friends")
         self._add_code_line("")
         # SAFE ACCESSOR: protects against accidental out-of-domain index lookups in codegen paths
         self._add_code_line("def _safe_get(container, key, default=0):")
@@ -2144,6 +2145,15 @@ class GurobiCodeGenerator:
         if not method:
             raise NotImplementedError(f"Expression type '{node_type}' is not supported by the Gurobi code generator.")
         return method(expr_node, current_iterators, symbolic)
+
+    # NEW: function call support (sqrt)
+    def _expr_funcall(self, expr_node, current_iterators, symbolic):
+        name = expr_node.get("name")
+        args = expr_node.get("args", [])
+        if name == "sqrt" and len(args) == 1:
+            arg_str = self._traverse_expression(args[0], current_iterators, symbolic)
+            return f"math.sqrt({arg_str})"
+        raise NotImplementedError(f"Unsupported function call '{name}' in expression.")
 
     def _expr_number(self, expr_node, current_iterators, symbolic):
         return expr_node["value"]
