@@ -165,6 +165,7 @@ class OPLLexer(Lexer):
         "-",
         "*",
         "/",
+        "%",
         "=",
         "(",
         ")",
@@ -406,6 +407,8 @@ class OPLParser(Parser):
     # Header: [ i in I, j in J ] — keep iterators in scope until RHS parsed
     @_('"[" dexpr_index_list "]"')  # type: ignore
     def dexpr_index_header(self, p):
+        # Open a fresh scope for the iterator(s) used by this header
+        self.symbol_table.enter_scope()
         # Iterators already added to current scope by dexpr_index_list/dexpr_index
         return {"iterators": p.dexpr_index_list}
 
@@ -758,7 +761,7 @@ class OPLParser(Parser):
             "<",
         ),  # comparisons (non-associative)
         ("left", "+", "-"),
-        ("left", "*", "/"),
+        ("left", "*", "/", "%"),
         ("right", "!"),  # unary logical NOT
         ("right", "DOT"),  # field access binds tightest
     )
@@ -999,6 +1002,11 @@ class OPLParser(Parser):
     @_('multiplicative "/" unary')
     def multiplicative(self, p):
         return self._handle_binop(p.multiplicative, p.unary, "/", getattr(p, "lineno", None))
+
+    # NEW: modulo operator
+    @_('multiplicative "%" unary')
+    def multiplicative(self, p):
+        return self._handle_binop(p.multiplicative, p.unary, "%", getattr(p, "lineno", None))
 
     # additive
     @_("multiplicative")
@@ -2261,7 +2269,7 @@ class OPLParser(Parser):
             "value": value,
         }
 
-    # NEW: computed indexed parameter from expression with iterators, e.g.
+    # --- computed indexed parameter from expression with iterators, e.g.
     # float sqrt_demand[t in T] = sqrt(demand[t]);
     @_('opt_PARAM type NAME dexpr_index_header "=" expression ";"')  # type: ignore
     def declaration(self, p):
@@ -2269,19 +2277,19 @@ class OPLParser(Parser):
         var_type = p.type
         iterators = p.dexpr_index_header["iterators"]
 
-        # Reuse dexpr dimension shape conversion
+        # Map the iterator ranges to declaration dimensions
         def to_decl_dim(rng):
             if rng["type"] == "range_specifier":
                 return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
             if rng["type"] == "named_range":
-                # store as named_range_dimension so codegen can treat it as 1-based
                 return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
             if rng["type"] == "named_set":
                 return {"type": "named_set_dimension", "name": rng["name"]}
             return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
 
         dimensions = [to_decl_dim(it["range"]) for it in iterators]
-        # Store in symbol table so indexed use checks succeed
+
+        # Register symbol so subsequent uses pass semantic checks
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -2289,7 +2297,8 @@ class OPLParser(Parser):
             is_dvar=False,
             lineno=p.lineno,
         )
-        return {
+
+        decl = {
             "type": "parameter_inline_indexed_expr",
             "var_type": var_type,
             "name": name,
@@ -2297,6 +2306,17 @@ class OPLParser(Parser):
             "dimensions": dimensions,
             "expression": p.expression,
         }
+
+        # IMPORTANT: close the iterator scope that dexpr_index_header opened
+        # to avoid leaking iterator variables into the next declaration.
+        try:
+            if p.dexpr_index_header.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            # Graceful if header didn't open a scope
+            pass
+
+        return decl
 
     @_('opt_PARAM type NAME indexed_dimensions "=" array_value ";"')  # type: ignore
     def declaration(self, p):
@@ -2935,15 +2955,13 @@ class OPLCompiler:
                 if t == "name":
                     nm = expr.get("value")
                     if nm in env:
-                        return float(env[nm])
+                        return float(env[nm]) if isinstance(env[nm], (int, float)) else env[nm]
                     if nm in working_data:
                         return working_data[nm]
-                    # allow simple numeric scalar parameters from inline model
                     return working_data.get(nm)
                 if t == "indexed_name":
                     base = expr.get("name")
                     dims = expr.get("dimensions", [])
-                    # Single-dim support for now
                     if len(dims) != 1:
                         raise SemanticError("Only single-dimension indexed parameters supported in eval.")
                     idx_val = eval_index(dims[0], env)
@@ -2951,7 +2969,6 @@ class OPLCompiler:
                     if isinstance(arr, dict):
                         return arr[idx_val]
                     if isinstance(arr, list):
-                        # 1-based indexing
                         pos = int(idx_val) - 1
                         return float(arr[pos])
                     raise SemanticError(f"Parameter '{base}' not found for indexed access.")
@@ -2967,6 +2984,8 @@ class OPLCompiler:
                         return float(lv) * float(rv)
                     if op == "/":
                         return float(lv) / float(rv)
+                    if op == "%":
+                        return float(lv) % float(rv)
                     if op in ("==", "!=", ">=", "<=", ">", "<"):
                         return 1.0 if eval(f"{float(lv)} {op} {float(rv)}") else 0.0
                     raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
@@ -3020,36 +3039,39 @@ class OPLCompiler:
                     new_decls.append(decl)
                     continue
                 name = decl["name"]
+                var_type = decl.get("var_type") or ""
                 dimensions = decl.get("dimensions", [])
                 iterators = decl.get("iterators", [])
-                # Currently support 1D (common case like [t in T])
                 if len(dimensions) != 1 or len(iterators) != 1:
                     raise SemanticError("Computed indexed params currently support exactly one iterator/dimension.")
                 it = iterators[0]
                 rng = it["range"]
-                # Build iteration list for named_range or range_specifier
+
+                def cast_value(v):
+                    # Cast to int for int/int+ parameters, else keep float
+                    if isinstance(var_type, str) and var_type.startswith("int"):
+                        return int(round(float(v)))
+                    return float(v)
+
                 if rng["type"] == "range_specifier":
                     start = eval_bound(rng["start"])
                     end = eval_bound(rng["end"])
                     values = []
                     for v in range(start, end + 1):
                         env = {it["iterator"]: v}
-                        values.append(float(eval_expr(decl["expression"], env)))
+                        values.append(cast_value(eval_expr(decl["expression"], env)))
                     working_data[name] = values
-                    # Rewrite declaration to concrete inline
                     new_decls.append(
                         {
                             "type": "parameter_inline_indexed",
-                            "var_type": decl.get("var_type"),
+                            "var_type": var_type,
                             "name": name,
                             "dimensions": dimensions,
                             "value": values,
                         }
                     )
                 elif rng["type"] == "named_range":
-                    # Find named range declaration and evaluate as 1..N
                     named = rng["name"]
-                    # Find the declaration
                     rng_decl = None
                     for d in model_ast["declarations"]:
                         if d.get("type") == "range_declaration_inline" and d.get("name") == named:
@@ -3062,19 +3084,18 @@ class OPLCompiler:
                     values = []
                     for v in range(start, end + 1):
                         env = {it["iterator"]: v}
-                        values.append(float(eval_expr(decl["expression"], env)))
+                        values.append(cast_value(eval_expr(decl["expression"], env)))
                     working_data[name] = values
                     new_decls.append(
                         {
                             "type": "parameter_inline_indexed",
-                            "var_type": decl.get("var_type"),
+                            "var_type": var_type,
                             "name": name,
                             "dimensions": dimensions,
                             "value": values,
                         }
                     )
                 else:
-                    # Extendable: named_set, typed_set etc. could be done similarly (emit dict keyed by elements)
                     raise SemanticError("Only numeric ranges supported in computed indexed parameter.")
             # Replace declarations list
             model_ast["declarations"] = new_decls

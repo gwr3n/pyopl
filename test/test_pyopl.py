@@ -409,6 +409,56 @@ class TestPyOPLParser(TestPyOPL):
 
 
 class TestPyOPLCompiler(TestPyOPL):
+    def test_computed_param_general_expr_inline(self):
+        model_code = """
+            range T = 1..6;
+            dvar float+ x[T];
+            float demand[T] = ...;
+
+            // general RHS expressions in computed parameters
+            float sqrt_half[t in T] = sqrt(demand[t]) / 2;
+            int mod_demand[t in T] = demand[t] % 5;
+
+            minimize 0;
+            subject to { }
+        """
+        data_code = """
+            demand = [80, 60, 70, 90, 50, 60];
+        """
+        import math
+
+        from pyopl.pyopl_core import OPLCompiler
+
+        compiler = OPLCompiler()
+
+        # Gurobi backend compile
+        ast_g, code_g, data_g = compiler.compile_model(model_code, data_code=data_code, solver="gurobi")
+        self.assertIn("sqrt_half", data_g)
+        self.assertIn("mod_demand", data_g)
+        self.assertIsInstance(data_g["sqrt_half"], list)
+        self.assertIsInstance(data_g["mod_demand"], list)
+        self.assertEqual(len(data_g["sqrt_half"]), 6)
+        self.assertEqual(len(data_g["mod_demand"]), 6)
+
+        expected_sqrt_half = [math.sqrt(v) / 2.0 for v in [80, 60, 70, 90, 50, 60]]
+        expected_mod = [v % 5 for v in [80, 60, 70, 90, 50, 60]]
+
+        for a, b in zip(data_g["sqrt_half"], expected_sqrt_half):
+            self.assertAlmostEqual(a, b, places=9)
+        for a, b in zip(data_g["mod_demand"], expected_mod):
+            self.assertEqual(int(a), int(b))
+
+        # SciPy backend compile
+        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
+        self.assertIn("sqrt_half", data_s)
+        self.assertIn("mod_demand", data_s)
+        self.assertEqual(len(data_s["sqrt_half"]), 6)
+        self.assertEqual(len(data_s["mod_demand"]), 6)
+        for a, b in zip(data_s["sqrt_half"], expected_sqrt_half):
+            self.assertAlmostEqual(a, b, places=9)
+        for a, b in zip(data_s["mod_demand"], expected_mod):
+            self.assertEqual(int(a), int(b))
+
     def test_computed_param_sqrt_inline_gurobi_and_scipy(self):
         model_code = """
             range T = 1..6;
