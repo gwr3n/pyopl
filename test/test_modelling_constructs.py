@@ -22,6 +22,36 @@ class DummyAST:
 
 
 class TestModellingConstructs(unittest.TestCase):
+    def test_scalar_param_expression_in_declaration(self):
+        """
+        Verify that a scalar parameter declared with a general expression is accepted,
+        evaluated, and rewritten into a concrete inline parameter with its computed value.
+        """
+        from pyopl.pyopl_core import OPLCompiler
+
+        model = """
+            float C = 5 / 6;
+            dvar float z;
+            minimize C * z;
+            subject to { z == 1; }
+        """
+        compiler = OPLCompiler()
+        ast, code, data = compiler.compile_model(model, solver="gurobi")
+
+        # AST: parameter_inline_expr should be rewritten to parameter_inline with computed value
+        decls = [d for d in ast["declarations"] if d.get("name") == "C"]
+        self.assertEqual(len(decls), 1, "Expected exactly one declaration for C")
+        self.assertEqual(decls[0]["type"], "parameter_inline")
+        self.assertAlmostEqual(decls[0]["value"], 5.0 / 6.0, places=12)
+
+        # data_dict: must contain computed value
+        self.assertIn("C", data)
+        self.assertAlmostEqual(data["C"], 5.0 / 6.0, places=12)
+
+        # Generated code should emit a concrete numeric assignment for C
+        # json.dumps(5/6) -> "0.8333333333333334" in Python
+        self.assertIn("C = 0.8333333333333334", code)
+
     def test_out_of_range_index_in_variable_reference(self):
         """
         Verify out-of-range index detection for i[0] when i is declared over T=1..6.

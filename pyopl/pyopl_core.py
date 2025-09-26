@@ -2269,6 +2269,21 @@ class OPLParser(Parser):
             "value": value,
         }
 
+    # NEW: scalar parameter with general expression on RHS (e.g., float C = 5 / 6;)
+    @_('opt_PARAM type NAME "=" expression ";"')
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        expr = p.expression
+        # Don't evaluate here; compile_model will evaluate and rewrite to parameter_inline
+        self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
+        return {
+            "type": "parameter_inline_expr",
+            "var_type": var_type,
+            "name": name,
+            "expression": expr,
+        }
+
     # --- computed indexed parameter from expression with iterators, e.g.
     # float sqrt_demand[t in T] = sqrt(demand[t]);
     @_('opt_PARAM type NAME dexpr_index_header "=" expression ";"')  # type: ignore
@@ -3035,9 +3050,35 @@ class OPLCompiler:
 
             new_decls = []
             for decl in model_ast["declarations"]:
-                if decl.get("type") != "parameter_inline_indexed_expr":
+                if decl.get("type") != "parameter_inline_indexed_expr" and decl.get("type") != "parameter_inline_expr":
                     new_decls.append(decl)
                     continue
+
+                # Shared caster by declared var_type
+                def cast_value(v, var_type):
+                    if isinstance(var_type, str) and var_type.startswith("int"):
+                        return int(round(float(v)))
+                    if var_type == "boolean":
+                        return bool(round(float(v)))
+                    return float(v)
+
+                # Handle scalar parameter from expression
+                if decl.get("type") == "parameter_inline_expr":
+                    name = decl["name"]
+                    var_type = decl.get("var_type") or ""
+                    value = cast_value(eval_expr(decl["expression"], {}), var_type)
+                    working_data[name] = value
+                    new_decls.append(
+                        {
+                            "type": "parameter_inline",
+                            "var_type": var_type,
+                            "name": name,
+                            "value": value,
+                        }
+                    )
+                    continue
+
+                # Existing: computed indexed param
                 name = decl["name"]
                 var_type = decl.get("var_type") or ""
                 dimensions = decl.get("dimensions", [])
@@ -3047,19 +3088,13 @@ class OPLCompiler:
                 it = iterators[0]
                 rng = it["range"]
 
-                def cast_value(v):
-                    # Cast to int for int/int+ parameters, else keep float
-                    if isinstance(var_type, str) and var_type.startswith("int"):
-                        return int(round(float(v)))
-                    return float(v)
-
                 if rng["type"] == "range_specifier":
                     start = eval_bound(rng["start"])
                     end = eval_bound(rng["end"])
                     values = []
                     for v in range(start, end + 1):
                         env = {it["iterator"]: v}
-                        values.append(cast_value(eval_expr(decl["expression"], env)))
+                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
                     working_data[name] = values
                     new_decls.append(
                         {
@@ -3084,7 +3119,7 @@ class OPLCompiler:
                     values = []
                     for v in range(start, end + 1):
                         env = {it["iterator"]: v}
-                        values.append(cast_value(eval_expr(decl["expression"], env)))
+                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
                     working_data[name] = values
                     new_decls.append(
                         {
