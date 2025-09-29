@@ -84,9 +84,9 @@ def generative_solve(prompt, model_file, data_file):
     client = OpenAI(api_key=api_key)
     # Use GPT-5 model
     # model_name = "gpt-5"
-    # model_name = "gpt-5-mini"
+    model_name = "gpt-5-mini"
     # model_name = "gpt-5-nano"
-    model_name = "gpt-4.1"
+    # model_name = "gpt-4.1"
 
     user_prompt = (
         "You are an expert in mathematical optimization and PyOPL. "
