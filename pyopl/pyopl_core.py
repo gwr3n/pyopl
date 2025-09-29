@@ -2119,6 +2119,35 @@ class OPLParser(Parser):
             "right": right_expr,
             "sem_type": result_type,
         }
+    
+    @_("expression ',' arg_list")
+    def arg_list(self, p):
+        return [p.expression] + p.arg_list
+
+    @_("expression")
+    def arg_list(self, p):
+        return [p.expression]
+
+    # --- Function calls: sqrt (1 arg), maxl/minl (>=1 arg) ---
+    @_("NAME '(' arg_list ')'")  # type: ignore
+    def primary(self, p):
+        func = p.NAME
+        args = p.arg_list
+        if func == "sqrt":
+            if len(args) != 1:
+                raise SemanticError("sqrt(...) takes exactly one argument.", lineno=p.lineno)
+            return {"type": "funcall", "name": "sqrt", "args": [args[0]], "sem_type": "float"}
+        if func in ("maxl", "minl"):
+            if len(args) == 0:
+                raise SemanticError(f"{func}(...) requires at least one argument.", lineno=p.lineno)
+            # Enforce numeric args at parse-time to catch obvious mistakes early
+            for a in args:
+                at = a.get("sem_type")
+                if at not in ("int", "int+", "float", "float+"):
+                    raise SemanticError(f"{func}(...) expects numeric arguments.", lineno=p.lineno)
+            sem = "float" if any(a.get("sem_type") in ("float", "float+") for a in args) else "int"
+            return {"type": func, "args": args, "sem_type": sem}
+        raise SemanticError(f"Unsupported function '{func}'. Only sqrt, maxl, minl are supported.", lineno=p.lineno)
 
     # Indexed variable reference: x[i], x[i,j], etc.
     @_("NAME indexed_dimensions")  # type: ignore
@@ -3043,6 +3072,15 @@ class OPLCompiler:
                     if fname == "sqrt" and len(args) == 1:
                         return math.sqrt(float(eval_expr(args[0], env)))
                     raise SemanticError(f"Unsupported function '{fname}' in computed parameter expression.")
+                if t in ("maxl", "minl"):
+                    vals = [eval_expr(e, env) for e in (expr.get("args") or [])]
+                    try:
+                        nums = [float(v) for v in vals]
+                    except Exception:
+                        raise SemanticError(f"{t} in parameter must be numeric and ground.")
+                    if not nums:
+                        raise SemanticError(f"{t} requires at least one argument.")
+                    return max(nums) if t == "maxl" else min(nums)
                 raise SemanticError(f"Unsupported node in computed parameter expression: {t}")
 
             def eval_index(idx_expr, env):
@@ -3327,6 +3365,7 @@ class OPLCompiler:
         # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
+            self._lower_maxmin_convex(ast)
         except SemanticError as e:
             logger.error(f"Conditional constraint error: {e}")
             # Surface the error similarly to other semantic errors
@@ -3592,6 +3631,166 @@ class OPLCompiler:
             raise SemanticError(f"Unsupported operator in ground expression: {op}")
         # Unsupported in conditions
         raise SemanticError(f"Unsupported expression in ground condition: {t}")
+    
+    def _lower_maxmin_convex(self, ast: dict) -> None:
+        """
+        Convex lowering for maxl/minl:
+          - Objective: minimize maxl(...) or maximize minl(...): add aux z and epigraph/hypograph.
+          - Constraints: expand four convex forms into per-argument linear constraints.
+          - Otherwise: raise SemanticError.
+        """
+        if not isinstance(ast, dict):
+            return
+
+        def is_max(n): return isinstance(n, dict) and n.get("type") == "maxl"
+        def is_min(n): return isinstance(n, dict) and n.get("type") == "minl"
+
+        def args_or_err(node):
+            args = node.get("args") or []
+            if len(args) == 0:
+                raise SemanticError("maxl/minl require at least one argument.")
+            if len(args) == 1:
+                return [args[0]], True
+            return args, False
+
+        # Objective
+        if "objective" in ast and isinstance(ast["objective"], dict):
+            obj = ast["objective"]
+            expr = obj.get("expression")
+            # unwrap parentheses
+            if isinstance(expr, dict) and expr.get("type") == "parenthesized_expression":
+                expr = expr.get("expression")
+
+            if obj.get("type") == "minimize" and is_max(expr):
+                args, single = args_or_err(expr)
+                if single:
+                    ast["objective"]["expression"] = args[0]
+                else:
+                    zname = self._gensym("__maxl_obj")
+                    # declare aux continuous variable
+                    (ast.get("declarations") or []).append({"type": "dvar", "var_type": "float", "name": zname})
+                    # replace objective expression with aux
+                    ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
+                    # add epigraph constraints: z >= ei
+                    for ei in args:
+                        ast["constraints"].append({"type": "constraint", "op": ">=", "left": {"type": "name", "value": zname, "sem_type": "float"}, "right": ei})
+            elif obj.get("type") == "maximize" and is_min(expr):
+                args, single = args_or_err(expr)
+                if single:
+                    ast["objective"]["expression"] = args[0]
+                else:
+                    zname = self._gensym("__minl_obj")
+                    (ast.get("declarations") or []).append({"type": "dvar", "var_type": "float", "name": zname})
+                    ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
+                    # hypograph: z <= ei
+                    for ei in args:
+                        ast["constraints"].append({"type": "constraint", "op": "<=", "left": {"type": "name", "value": zname, "sem_type": "float"}, "right": ei})
+            else:
+                # If maxl/minl appears anywhere in objective, reject (non-convex usage)
+                if self._contains_maxmin(obj.get("expression")):
+                    raise SemanticError("Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...).")
+
+        # Constraints
+        def expand_constraint(cnode: dict) -> list[dict]:
+            # Returns a list of linear constraints replacing cnode, or raises on non-convex use.
+            if not isinstance(cnode, dict):
+                return [cnode]
+            t = cnode.get("type")
+            if t == "constraint":
+                op = cnode.get("op")
+                L = cnode.get("left")
+                R = cnode.get("right")
+                label = cnode.get("label")
+                # Helper to attach label if present
+                def with_label(cons: dict) -> dict:
+                    if label:
+                        cons = dict(cons)
+                        cons["label"] = label
+                    return cons
+
+                # Allowed convex patterns (including reversed sides)
+                if op == "<=" and is_max(L):
+                    args, single = args_or_err(L)
+                    if single:
+                        return [with_label({"type": "constraint", "op": "<=", "left": args[0], "right": R})]
+                    return [with_label({"type": "constraint", "op": "<=", "left": ei, "right": R}) for ei in args]
+                if op == ">=" and is_max(R):
+                    args, single = args_or_err(R)
+                    if single:
+                        return [with_label({"type": "constraint", "op": ">=", "left": L, "right": args[0]})]
+                    return [with_label({"type": "constraint", "op": ">=", "left": L, "right": ei}) for ei in args]
+                if op == ">=" and is_min(L):
+                    args, single = args_or_err(L)
+                    if single:
+                        return [with_label({"type": "constraint", "op": ">=", "left": args[0], "right": R})]
+                    return [with_label({"type": "constraint", "op": ">=", "left": ei, "right": R}) for ei in args]
+                if op == "<=" and is_min(R):
+                    args, single = args_or_err(R)
+                    if single:
+                        return [with_label({"type": "constraint", "op": "<=", "left": L, "right": args[0]})]
+                    return [with_label({"type": "constraint", "op": "<=", "left": L, "right": ei}) for ei in args]
+
+                # If equality involves maxl/minl, reject
+                if op == "==" and (self._contains_maxmin(L) or self._contains_maxmin(R)):
+                    raise SemanticError("Non-convex: equality with maxl/minl is not supported.")
+                # If maxl/minl appear elsewhere (inside arithmetic), reject
+                if self._contains_maxmin(L) or self._contains_maxmin(R):
+                    raise SemanticError("Non-convex or unsupported placement of maxl/minl in constraint. Allowed only in: maxl(...) <= rhs, lhs >= maxl(...), minl(...) >= rhs, lhs <= minl(...).")
+                return [cnode]
+
+            if t == "implication_constraint":
+                # Do not allow maxl/minl under implication for now (non-convex in general)
+                if self._contains_maxmin(cnode.get("antecedent")) or self._contains_maxmin(cnode.get("consequent")):
+                    raise SemanticError("Non-convex: maxl/minl not supported inside implication constraints.")
+                return [cnode]
+
+            if t == "forall_constraint":
+                # Rewrite children and keep structure
+                iterators = cnode.get("iterators", [])
+                ic = cnode.get("index_constraint")
+                if "constraint" in cnode:
+                    expanded = expand_constraint(cnode["constraint"])
+                    if len(expanded) == 1:
+                        return [dict(cnode, **{"constraint": expanded[0]})]
+                    else:
+                        node = dict(cnode)
+                        node.pop("constraint", None)
+                        node["constraints"] = expanded
+                        return [node]
+                elif "constraints" in cnode and isinstance(cnode["constraints"], list):
+                    new_children: list[dict] = []
+                    for child in cnode["constraints"]:
+                        new_children.extend(expand_constraint(child))
+                    return [dict(cnode, **{"iterators": iterators, "index_constraint": ic, "constraints": new_children})]
+                return [cnode]
+
+            # Other nodes unchanged
+            return [cnode]
+
+        if "constraints" in ast and isinstance(ast["constraints"], list):
+            new_cons: list[dict] = []
+            for c in ast["constraints"]:
+                if isinstance(c, dict):
+                    new_cons.extend(expand_constraint(c))
+                else:
+                    new_cons.append(c)
+            ast["constraints"] = new_cons
+
+    # Helper: unique symbol names
+    _mm_counter: int = 0
+    def _gensym(self, prefix: str) -> str:
+        self._mm_counter = getattr(self, "_mm_counter", 0) + 1
+        return f"{prefix}_{self._mm_counter}"
+
+    def _contains_maxmin(self, node: Any) -> bool:
+        if isinstance(node, dict):
+            t = node.get("type")
+            if t in ("maxl", "minl"):
+                return True
+            return any(self._contains_maxmin(v) for v in node.values())
+        if isinstance(node, list):
+            return any(self._contains_maxmin(x) for x in node)
+        return False
 
 
 # Convenience helper for tests and simple parsing without code generation

@@ -31,6 +31,59 @@ except ImportError:
 
 class TestPyOPLProblems(unittest.TestCase):
 
+    def test_minl_maxl(self):
+        """
+        Test minl/maxl model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            range N = 1..5;
+            float a[N] = ...;
+            dvar float x[N];
+            dvar float y;
+
+            minimize maxl(y, 0);
+
+            subject to {
+            sum(i in N) x[i] == 1;
+            forall(i in N)
+                x[i] >= 0;
+            forall(i in N)
+                y >= a[i] * x[i];
+            min_constr: minl(x[1], x[2], x[3], x[4], x[5]) >= 0.1;
+            max_constr: maxl(x[2], x[3], x[4], x[5]) <= 0.7;
+            }
+            """
+        data_code = """
+            a = [2.3, 4.7, 1.1, 3.5, 5.2];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+    
     def test_production_planning_conditional_compare_solvers_1(self):
         """
         Test production planning model with both solvers.
