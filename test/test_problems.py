@@ -31,6 +31,126 @@ except ImportError:
 
 class TestPyOPLProblems(unittest.TestCase):
 
+    def test_production_planning_conditional_compare_solvers_1(self):
+        """
+        Test production planning model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            int N = 6;
+            range T = 1..N;
+            range TT = 2..N;
+            dvar float+ Q[T];
+            dvar float+ I[T];
+            dvar boolean order[T];
+            float demand[T] = ...;
+
+            float K = 5;
+            float h = 1;
+
+            minimize sum(t in T) (K*order[t] + h*I[t]);
+            subject to {
+                forall(t in T){
+                    if (t == 1) {
+                        I[1] == Q[1] - demand[1];
+                    } else {
+                        I[t] == I[t-1] + Q[t] - demand[t];
+                    }
+                    // SciPy accepts inequality consequent; Q[t] is float+ so this forces Q[t]=0
+                    (order[t] == 0) => (Q[t] <= 0);
+                }
+            }
+            """
+        data_code = """
+            demand = [80, 60, 70, 90, 50, 60];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
+    def test_production_planning_conditional_compare_solvers_2(self):
+        """
+        Test production planning model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            int N = 6;
+            range T = 1..N;
+            range TT = 2..N;
+            dvar float+ Q[T];
+            dvar float+ I[T];
+            dvar boolean order[T];
+            float demand[T] = ...;
+
+            float K = 5;
+            float h = 1;
+
+            minimize sum(t in T) (K*order[t] + h*I[t]);
+            subject to {
+                forall(t in T){
+                    if (t == 1) {
+                        I[1] == Q[1] - demand[1];
+                    } else {
+                        I[t] == I[t-1] + Q[t] - demand[t];
+                    }
+                    // if produce, then setup
+                    (Q[t] > 0) => (order[t] == 1);
+                }
+            }
+            """
+        data_code = """
+            demand = [80, 60, 70, 90, 50, 60];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_production_planning_compare_solvers(self):
         """
         Test production planning model with both solvers.

@@ -151,10 +151,15 @@ class OPLLexer(Lexer):
         "BOOLEAN_LITERAL",
         "TUPLE",
         "DEXPR",
+        "IF",
+        "ELSE",
     }
     # Implication operator: =>
     IMPLIES = r"=>"
     STRING = r"string"
+    # Keywords for conditional constraints
+    IF = r"\bif\b"
+    ELSE = r"\belse\b"
 
     # Ignore whitespace
     ignore = " \t\r"
@@ -1660,6 +1665,30 @@ class OPLParser(Parser):
             raise SemanticError("forall labeled constraint must be comparison or boolean expression.")
         fc = self._build_forall_constraint(p.forall_index_header, base_constraint, getattr(p, "lineno", None))
         return fc
+    
+    # --- NEW: Conditional constraints ---
+    # if (<ground_condition>) { <list-of-constraints> } else { <list-of-constraints> }
+    @_('IF "(" expression ")" constraint_block ELSE constraint_block')
+    def constraint(self, p):
+        # Build an AST node; validation and evaluation occur in OPLCompiler
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": p.constraint_block0,
+            "else_constraints": p.constraint_block1,
+            "lineno": getattr(p, "lineno", None),
+        }
+
+    # if (<ground_condition>) { <list-of-constraints> }
+    @_('IF "(" expression ")" constraint_block')
+    def constraint(self, p):
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": p.constraint_block,
+            "else_constraints": None,
+            "lineno": getattr(p, "lineno", None),
+        }
 
     # (Boolean standalone constraint rule merged into unified expression ';' rule above)
 
@@ -2854,7 +2883,7 @@ class OPLCompiler:
         self.data_lexer = OPLDataLexer()
         self.data_parser = OPLDataParser()
 
-    def compile_model(self, model_code, data_code=None, solver="gurobi"):
+    def compile_model(self, model_code: str, data_code: Optional[str] = None, solver: str = "gurobi"):
         """
         Compiles an OPL model and optional data into solver-specific code.
 
@@ -3295,6 +3324,14 @@ class OPLCompiler:
 
         ast = model_ast
 
+         # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
+        try:
+            self._evaluate_and_splice_if_constraints(ast, data_dict)
+        except SemanticError as e:
+            logger.error(f"Conditional constraint error: {e}")
+            # Surface the error similarly to other semantic errors
+            raise
+
         if solver == "gurobi":
             code_generator = GurobiCodeGenerator(ast, data_dict)
             code = code_generator.generate_code()
@@ -3306,6 +3343,247 @@ class OPLCompiler:
 
         return ast, code, data_dict
 
+    # ----------------- NEW: Conditional-constraint compile-time rewrite -----------------
+
+    def _evaluate_and_splice_if_constraints(self, ast: dict, env: dict) -> None:
+        """
+        Validate groundness of all if-constraint conditions, evaluate them using env,
+        and splice only the selected branch into ast['constraints'].
+
+        Extended: if an if-constraint appears inside a forall, rewrite it into two
+        forall nodes with augmented index constraints (cond) and (!cond). Conditions
+        inside forall must not reference decision variables but may reference
+        iterators and parameters.
+        """
+        if not isinstance(ast, dict) or "constraints" not in ast:
+            return
+
+        dvar_names = self._collect_dvar_names(ast.get("declarations", []))
+
+        def contains_dvar(expr: Any) -> bool:
+            return self._expr_contains_dvar(expr, dvar_names)
+
+        def is_ground(expr: Any) -> bool:
+            # Ground = contains no decision variables and no free iterators.
+            # Top-level evaluation uses only env (data); iterators are not available.
+            # Groundness here only checks dvars; evaluation will fail if unknown names remain.
+            return not contains_dvar(expr)
+
+        def and_expr(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
+            if a is None:
+                return b
+            if b is None:
+                return a
+            return {"type": "and", "left": a, "right": b, "sem_type": "boolean"}
+
+        def not_expr(e: dict) -> dict:
+            return {"type": "not", "value": e, "sem_type": "boolean"}
+
+        def normalize_forall_body(fc: dict) -> list[dict]:
+            if "constraints" in fc and isinstance(fc["constraints"], list):
+                return fc["constraints"]
+            if "constraint" in fc and isinstance(fc["constraint"], dict):
+                return [fc["constraint"]]
+            return []
+
+        def make_forall(iterators, index_constraint, body_constraints) -> dict:
+            # Return a new forall_constraint node; preserve single vs list shape
+            node = {
+                "type": "forall_constraint",
+                "iterators": iterators,
+                "index_constraint": index_constraint,
+            }
+            if len(body_constraints) == 1:
+                node["constraint"] = body_constraints[0]
+            else:
+                node["constraints"] = body_constraints
+            return node
+
+        # Rewrite a single forall node: split any inner if-constraints into separate forall nodes
+        def rewrite_forall_node(fc: dict) -> list[dict]:
+            iterators = fc.get("iterators", [])
+            base_ic = fc.get("index_constraint")
+            body = normalize_forall_body(fc)
+
+            # Collect non-if constraints to keep under the original base_ic
+            regular_constraints: list[dict] = []
+            new_foralls: list[dict] = []
+
+            for c in body:
+                if isinstance(c, dict) and c.get("type") == "if_constraint":
+                    cond = c.get("condition")
+                    if contains_dvar(cond):
+                        raise SemanticError(
+                            "Condition of if-constraint inside forall must not reference decision variables."
+                        )
+                    then_list = c.get("then_constraints") or []
+                    else_list = c.get("else_constraints") or []
+
+                    # Recursively rewrite nested ifs inside the branch bodies
+                    if then_list:
+                        then_fc = make_forall(iterators, and_expr(base_ic, cond), then_list)
+                        new_foralls.extend(rewrite_forall_node(then_fc))
+                    if else_list:
+                        else_fc = make_forall(iterators, and_expr(base_ic, not_expr(cond)), else_list)
+                        new_foralls.extend(rewrite_forall_node(else_fc))
+                    # If no else branch, omit those iterations (no constraints emitted)
+                else:
+                    regular_constraints.append(c)
+
+            # Keep the regular constraints under the original base_ic (if any)
+            if regular_constraints:
+                new_foralls.append(make_forall(iterators, base_ic, regular_constraints))
+
+            return new_foralls
+
+        # Top-level pass: splice ground if-constraints and rewrite forall bodies
+        out_top: list = []
+
+        for c in ast.get("constraints", []):
+            if isinstance(c, dict) and c.get("type") == "if_constraint":
+                cond = c.get("condition")
+                if not is_ground(cond):
+                    if contains_dvar(cond):
+                        raise SemanticError("Condition of if-constraint must be ground (must not reference decision variables).")
+                    raise SemanticError("Condition of if-constraint at top level cannot reference iterators.")
+                val = self._eval_ground_condition(cond, env)
+                chosen = c.get("then_constraints") if val else (c.get("else_constraints") or [])
+                # Splice chosen branch. If it contains forall blocks, rewrite them; else append as-is.
+                for cc in chosen:
+                    if isinstance(cc, dict) and cc.get("type") == "forall_constraint":
+                        out_top.extend(rewrite_forall_node(cc))
+                    else:
+                        out_top.append(cc)
+            elif isinstance(c, dict) and c.get("type") == "forall_constraint":
+                out_top.extend(rewrite_forall_node(c))
+            else:
+                out_top.append(c)
+
+        ast["constraints"] = out_top
+
+    def _collect_dvar_names(self, declarations: list) -> set:
+        names = set()
+        for d in declarations or []:
+            if not isinstance(d, dict):
+                continue
+            t = d.get("type")
+            if t in ("dvar", "dvar_indexed"):
+                n = d.get("name")
+                if isinstance(n, str):
+                    names.add(n)
+        return names
+
+    def _expr_contains_dvar(self, node: Any, dvar_names: set) -> bool:
+        """
+        Returns True if node refers to any decision variable name.
+        """
+        if isinstance(node, dict):
+            t = node.get("type")
+            if t == "name":
+                v = node.get("value")
+                return isinstance(v, str) and v in dvar_names
+            if t == "indexed_name":
+                n = node.get("name")
+                return isinstance(n, str) and n in dvar_names
+            # Recurse over children
+            for v in node.values():
+                if self._expr_contains_dvar(v, dvar_names):
+                    return True
+            return False
+        if isinstance(node, list):
+            return any(self._expr_contains_dvar(x, dvar_names) for x in node)
+        return False
+
+    def _eval_ground_condition(self, expr: Any, env: dict) -> bool:
+        """
+        Evaluate a ground boolean expression using provided env (merged inline/.dat data).
+        Supports: number, boolean_literal, string_literal, name, indexed_name,
+                    binop (arith and comparisons), and/or/not, parenthesized_expression, conditional.
+        """
+        val = self._eval_ground_expr(expr, env)
+        if isinstance(val, (int, float)):
+            # nonzero treated as True
+            return bool(val)
+        if isinstance(val, bool):
+            return val
+        raise SemanticError(f"Condition does not evaluate to boolean: {expr}")
+
+    def _eval_ground_expr(self, expr: Any, env: dict):
+        if not isinstance(expr, dict):
+            return expr
+        t = expr.get("type")
+        if t == "number":
+            return expr.get("value")
+        if t == "boolean_literal":
+            return bool(expr.get("value"))
+        if t == "string_literal":
+            return expr.get("value")
+        if t == "name":
+            name = expr.get("value")
+            if name in env:
+                return env[name]
+            # If it's a known scalar set/range name etc., leave as-is or raise
+            raise SemanticError(f"Unknown symbol in ground expression: {name}")
+        if t == "indexed_name":
+            base = expr.get("name")
+            if base not in env:
+                raise SemanticError(f"Unknown symbol in ground expression: {base}")
+            target = env[base]
+            dims = expr.get("dimensions", [])
+            # Evaluate each index dimension
+            for d in dims:
+                idx = self._eval_ground_expr(d, env)
+                # Coerce booleans to int if needed
+                if isinstance(idx, bool):
+                    idx = int(idx)
+                try:
+                    target = target[idx]
+                except Exception as e:
+                    raise SemanticError(f"Index error in ground expression {base}[...]: {e}") from e
+            return target
+        if t == "parenthesized_expression":
+            return self._eval_ground_expr(expr.get("expression"), env)
+        if t == "not":
+            return not self._eval_ground_condition(expr.get("value"), env)
+        if t == "and":
+            return bool(self._eval_ground_condition(expr.get("left"), env) and self._eval_ground_condition(expr.get("right"), env))
+        if t == "or":
+            return bool(self._eval_ground_condition(expr.get("left"), env) or self._eval_ground_condition(expr.get("right"), env))
+        if t == "conditional":
+            cond = self._eval_ground_condition(expr.get("condition"), env)
+            return self._eval_ground_expr(expr.get("then") if cond else expr.get("else"), env)
+        if t == "binop":
+            op = expr.get("op")
+            l = self._eval_ground_expr(expr.get("left"), env)
+            r = self._eval_ground_expr(expr.get("right"), env)
+            try:
+                if op == "+":
+                    return l + r
+                if op == "-":
+                    return l - r
+                if op == "*":
+                    return l * r
+                if op == "/":
+                    return l / r
+                if op == "%":
+                    return l % r
+                if op == "<":
+                    return l < r
+                if op == "<=":
+                    return l <= r
+                if op == ">":
+                    return l > r
+                if op == ">=":
+                    return l >= r
+                if op == "==":
+                    return l == r
+                if op == "!=":
+                    return l != r
+            except Exception as e:
+                raise SemanticError(f"Error evaluating ground binop '{op}': {e}") from e
+            raise SemanticError(f"Unsupported operator in ground expression: {op}")
+        # Unsupported in conditions
+        raise SemanticError(f"Unsupported expression in ground condition: {t}")
 
 # Convenience helper for tests and simple parsing without code generation
 def parse_model(model_code: str):

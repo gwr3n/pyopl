@@ -4585,6 +4585,99 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 ant_var_node = _extract_var_eq_val(ant_unwrapped, 1)
 
+                # --- NEW specialized pattern: (bool_var == 0) => (lin_var <= const) ---
+                # Encode: x - M * b <= c   (since b in {0,1})
+                ant_eq_zero = _extract_var_eq_val(ant_unwrapped, 0)
+                if ant_eq_zero is not None and isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") == "constraint":
+                    op_c = cons_unwrapped.get("op")
+                    lc = cons_unwrapped.get("left")
+                    rc = cons_unwrapped.get("right")
+
+                    def _is_var(n):
+                        return isinstance(n, dict) and n.get("type") in ("name", "indexed_name")
+
+                    def _is_num(n):
+                        return isinstance(n, dict) and n.get("type") == "number"
+
+                    # Support canonical form: var <= const
+                    if op_c == "<=" and _is_var(lc) and _is_num(rc):
+                        ant_vname = (
+                            self._multi_indexed_var_name(ant_eq_zero, env)
+                            if ant_eq_zero.get("type") == "indexed_name"
+                            else ant_eq_zero["value"]
+                        )
+                        cons_vname = (
+                            self._multi_indexed_var_name(lc, env)
+                            if lc.get("type") == "indexed_name"
+                            else lc["value"]
+                        )
+                        rhs_val = float(rc.get("value", 0.0))
+
+                        # Pick big-M from inferred upper bound of cons_var when available
+                        M = None
+                        try:
+                            lb, ub = self._infer_var_bounds(cons_vname)
+                            if ub is not None:
+                                M = max(1.0, float(ub))
+                        except Exception:
+                            M = None
+                        if M is None:
+                            M = BIG_M_DEFAULT
+
+                        # Add inequality: cons_v - M * ant_b <= rhs_val
+                        row = [0.0] * len(self.var_names)
+                        if cons_vname in self.var_indices:
+                            row[self.var_indices[cons_vname]] += 1.0
+                        if ant_vname in self.var_indices:
+                            row[self.var_indices[ant_vname]] -= M
+
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(rhs_val)
+                        ub_row_idx += 1
+                        return
+
+                    # Also accept equality to zero when x >= 0 (common with float+)
+                    if op_c == "==" and _is_var(lc) and _is_num(rc) and abs(float(rc.get("value", 0.0))) < 1e-12:
+                        ant_vname = (
+                            self._multi_indexed_var_name(ant_eq_zero, env)
+                            if ant_eq_zero.get("type") == "indexed_name"
+                            else ant_eq_zero["value"]
+                        )
+                        cons_vname = (
+                            self._multi_indexed_var_name(lc, env)
+                            if lc.get("type") == "indexed_name"
+                            else lc["value"]
+                        )
+                        # Use same gating as <= 0: x - M*b <= 0 (nonnegativity enforces x==0 when b==0)
+                        M = None
+                        try:
+                            lb, ub = self._infer_var_bounds(cons_vname)
+                            if ub is not None:
+                                M = max(1.0, float(ub))
+                        except Exception:
+                            M = None
+                        if M is None:
+                            M = BIG_M_DEFAULT
+
+                        row = [0.0] * len(self.var_names)
+                        if cons_vname in self.var_indices:
+                            row[self.var_indices[cons_vname]] += 1.0
+                        if ant_vname in self.var_indices:
+                            row[self.var_indices[ant_vname]] -= M
+
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(0.0)
+                        ub_row_idx += 1
+                        return
+
                 # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
                 # Recognize antecedent: constraint with op in ('>','>=') comparing single var to 0; consequent: var == 1 on boolean var
                 def _is_zero_number(n):
