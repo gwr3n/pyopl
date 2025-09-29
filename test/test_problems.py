@@ -130,6 +130,86 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
         self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
 
+    def test_wagner_whitin_backorders(self):
+        """
+        Test Wagner-Whitin with backorders.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            param int nbPeriods = ...;
+            range T = 1..nbPeriods;
+
+            param float demand[T] = ...;
+            param float setup_cost[T] = ...;
+            param float prod_cost[T] = ...;
+            param float hold_cost[T] = ...;
+            param float penalty_cost[T] = ...;
+
+            dvar float+ Q[T];          // quantity produced in period t
+            dvar boolean y[T];         // setup binary: 1 if setup in period t
+            dvar float I[T];           // inventory after period t (can be negative for backlog)
+            dvar float+ h[T];          // max(s[t], 0): inventory held (aux variable)
+            dvar float+ p[T];          // max(-s[t], 0): backlog/penalty (aux variable)
+
+            minimize
+            sum(t in T) ( setup_cost[t]*y[t]
+                            + prod_cost[t]*Q[t]
+                            + hold_cost[t]*h[t] 
+                            + penalty_cost[t]*p[t] );
+
+            subject to {
+            forall(t in T)
+                if (t == 1) { 
+                balance_1: I[1] == Q[1] - demand[1]; 
+                } else { 
+                balance_t: I[t] == I[t-1] + Q[t] - demand[t]; 
+                }
+
+            forall(t in T)
+                prod_link: Q[t] <= y[t] * sum(k in t..nbPeriods) demand[k];
+
+            forall(t in T)
+                hold_lb: h[t] >= I[t];
+
+            forall(t in T)
+                penal_lb: p[t] >= -I[t];
+            }
+            """
+        data_code = """
+            nbPeriods = 6;
+            demand = [20, 40, 30, 10, 50, 60];
+            setup_cost = [100, 80, 100, 120, 110, 90];
+            prod_cost = [5, 5, 5, 5, 5, 5];
+            hold_cost = [1, 1, 1, 1, 1, 1];
+            penalty_cost = [2, 2, 2, 2, 2, 2];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_production_planning_conditional_compare_solvers_1(self):
         """
         Test production planning model with both solvers.
