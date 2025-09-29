@@ -15,7 +15,7 @@ import os
 import sys
 import traceback
 from io import StringIO
-from typing import Any, Optional  # typing helpers
+from typing import Any, Optional, cast  # typing helpers
 
 # === Third-party imports ===
 from sly import Lexer, Parser  # type: ignore[import-untyped]
@@ -27,7 +27,7 @@ except Exception:  # pragma: no cover
 
 # === Local imports ===
 from .gurobi_codegen import GurobiCodeGenerator
-from .scipy_codegen import SciPyCodeGenerator
+from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 
 # --- Logging Setup ---
@@ -1665,7 +1665,7 @@ class OPLParser(Parser):
             raise SemanticError("forall labeled constraint must be comparison or boolean expression.")
         fc = self._build_forall_constraint(p.forall_index_header, base_constraint, getattr(p, "lineno", None))
         return fc
-    
+
     # --- NEW: Conditional constraints ---
     # if (<ground_condition>) { <list-of-constraints> } else { <list-of-constraints> }
     @_('IF "(" expression ")" constraint_block ELSE constraint_block')
@@ -3324,7 +3324,7 @@ class OPLCompiler:
 
         ast = model_ast
 
-         # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
+        # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
         except SemanticError as e:
@@ -3333,11 +3333,9 @@ class OPLCompiler:
             raise
 
         if solver == "gurobi":
-            code_generator = GurobiCodeGenerator(ast, data_dict)
-            code = code_generator.generate_code()
+            code = GurobiCodeGenerator(ast, data_dict).generate_code()
         elif solver == "scipy":
-            code_generator = SciPyCodeGenerator(ast, data_dict)
-            code = code_generator.generate_code()
+            code = cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(ast, data_dict)).generate_code()
         else:
             raise ValueError(f"Unsupported solver: {solver}")
 
@@ -3411,11 +3409,12 @@ class OPLCompiler:
 
             for c in body:
                 if isinstance(c, dict) and c.get("type") == "if_constraint":
-                    cond = c.get("condition")
+                    cond_any = c.get("condition")
+                    if not isinstance(cond_any, dict):
+                        raise SemanticError("Malformed if-constraint: missing condition.")
+                    cond: dict = cond_any
                     if contains_dvar(cond):
-                        raise SemanticError(
-                            "Condition of if-constraint inside forall must not reference decision variables."
-                        )
+                        raise SemanticError("Condition of if-constraint inside forall must not reference decision variables.")
                     then_list = c.get("then_constraints") or []
                     else_list = c.get("else_constraints") or []
 
@@ -3441,15 +3440,20 @@ class OPLCompiler:
 
         for c in ast.get("constraints", []):
             if isinstance(c, dict) and c.get("type") == "if_constraint":
-                cond = c.get("condition")
+                cond_any = c.get("condition")
+                if not isinstance(cond_any, dict):
+                    raise SemanticError("Malformed if-constraint: missing condition.")
+                cond: dict = cond_any
                 if not is_ground(cond):
                     if contains_dvar(cond):
-                        raise SemanticError("Condition of if-constraint must be ground (must not reference decision variables).")
+                        raise SemanticError(
+                            "Condition of if-constraint must be ground (must not reference decision variables)."
+                        )
                     raise SemanticError("Condition of if-constraint at top level cannot reference iterators.")
                 val = self._eval_ground_condition(cond, env)
-                chosen = c.get("then_constraints") if val else (c.get("else_constraints") or [])
+                chosen_list = (c.get("then_constraints") or []) if val else (c.get("else_constraints") or [])
                 # Splice chosen branch. If it contains forall blocks, rewrite them; else append as-is.
-                for cc in chosen:
+                for cc in chosen_list:
                     if isinstance(cc, dict) and cc.get("type") == "forall_constraint":
                         out_top.extend(rewrite_forall_node(cc))
                     else:
@@ -3546,44 +3550,49 @@ class OPLCompiler:
         if t == "not":
             return not self._eval_ground_condition(expr.get("value"), env)
         if t == "and":
-            return bool(self._eval_ground_condition(expr.get("left"), env) and self._eval_ground_condition(expr.get("right"), env))
+            return bool(
+                self._eval_ground_condition(expr.get("left"), env) and self._eval_ground_condition(expr.get("right"), env)
+            )
         if t == "or":
-            return bool(self._eval_ground_condition(expr.get("left"), env) or self._eval_ground_condition(expr.get("right"), env))
+            return bool(
+                self._eval_ground_condition(expr.get("left"), env) or self._eval_ground_condition(expr.get("right"), env)
+            )
         if t == "conditional":
             cond = self._eval_ground_condition(expr.get("condition"), env)
             return self._eval_ground_expr(expr.get("then") if cond else expr.get("else"), env)
         if t == "binop":
             op = expr.get("op")
-            l = self._eval_ground_expr(expr.get("left"), env)
-            r = self._eval_ground_expr(expr.get("right"), env)
+            left = self._eval_ground_expr(expr.get("left"), env)
+            right = self._eval_ground_expr(expr.get("right"), env)
             try:
                 if op == "+":
-                    return l + r
+                    return left + right
                 if op == "-":
-                    return l - r
+                    return left - right
                 if op == "*":
-                    return l * r
+                    return left * right
                 if op == "/":
-                    return l / r
+                    return left / right
                 if op == "%":
-                    return l % r
+                    return left % right
                 if op == "<":
-                    return l < r
+                    return left < right
                 if op == "<=":
-                    return l <= r
+                    return left <= right
                 if op == ">":
-                    return l > r
+                    return left > right
                 if op == ">=":
-                    return l >= r
+                    return left >= right
                 if op == "==":
-                    return l == r
+                    return left == right
                 if op == "!=":
-                    return l != r
+                    return left != right
             except Exception as e:
                 raise SemanticError(f"Error evaluating ground binop '{op}': {e}") from e
             raise SemanticError(f"Unsupported operator in ground expression: {op}")
         # Unsupported in conditions
         raise SemanticError(f"Unsupported expression in ground condition: {t}")
+
 
 # Convenience helper for tests and simple parsing without code generation
 def parse_model(model_code: str):

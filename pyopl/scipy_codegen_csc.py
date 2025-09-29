@@ -4606,11 +4606,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if ant_eq_zero.get("type") == "indexed_name"
                             else ant_eq_zero["value"]
                         )
-                        cons_vname = (
-                            self._multi_indexed_var_name(lc, env)
-                            if lc.get("type") == "indexed_name"
-                            else lc["value"]
-                        )
+                        cons_vname = self._multi_indexed_var_name(lc, env) if lc.get("type") == "indexed_name" else lc["value"]
                         rhs_val = float(rc.get("value", 0.0))
 
                         # Pick big-M from inferred upper bound of cons_var when available
@@ -4647,11 +4643,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if ant_eq_zero.get("type") == "indexed_name"
                             else ant_eq_zero["value"]
                         )
-                        cons_vname = (
-                            self._multi_indexed_var_name(lc, env)
-                            if lc.get("type") == "indexed_name"
-                            else lc["value"]
-                        )
+                        cons_vname = self._multi_indexed_var_name(lc, env) if lc.get("type") == "indexed_name" else lc["value"]
                         # Use same gating as <= 0: x - M*b <= 0 (nonnegativity enforces x==0 when b==0)
                         M = None
                         try:
