@@ -129,7 +129,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
         self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
-    
+
     def test_production_planning_conditional_compare_solvers_1(self):
         """
         Test production planning model with both solvers.

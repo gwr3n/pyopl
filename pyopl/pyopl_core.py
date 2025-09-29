@@ -153,7 +153,8 @@ class OPLLexer(Lexer):
         "DEXPR",
         "IF",
         "ELSE",
-        "AGG_MIN", "AGG_MAX",
+        "AGG_MIN",
+        "AGG_MAX",
     }
     # Implication operator: =>
     IMPLIES = r"=>"
@@ -2122,7 +2123,7 @@ class OPLParser(Parser):
             "right": right_expr,
             "sem_type": result_type,
         }
-    
+
     @_("expression ',' arg_list")
     def arg_list(self, p):
         return [p.expression] + p.arg_list
@@ -2158,10 +2159,14 @@ class OPLParser(Parser):
         expr_type = p.nonparen_expression["sem_type"]
         if expr_type not in ("int", "int+", "float", "float+"):
             raise SemanticError("min aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float","float+") else "int"
-        return {"type":"min_agg","iterators":p.sum_index_header["iterators"],
-                "index_constraint":p.sum_index_header.get("index_constraint"),
-                "expression":p.nonparen_expression,"sem_type":sem}
+        sem = "float" if expr_type in ("float", "float+") else "int"
+        return {
+            "type": "min_agg",
+            "iterators": p.sum_index_header["iterators"],
+            "index_constraint": p.sum_index_header.get("index_constraint"),
+            "expression": p.nonparen_expression,
+            "sem_type": sem,
+        }
 
     # min(...) (parenthesized body)
     @_("AGG_MIN sum_index_header parenthesized_expression")
@@ -2169,10 +2174,14 @@ class OPLParser(Parser):
         expr_type = p.parenthesized_expression["sem_type"]
         if expr_type not in ("int", "int+", "float", "float+"):
             raise SemanticError("min aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float","float+") else "int"
-        return {"type":"min_agg","iterators":p.sum_index_header["iterators"],
-                "index_constraint":p.sum_index_header.get("index_constraint"),
-                "expression":p.parenthesized_expression,"sem_type":sem}
+        sem = "float" if expr_type in ("float", "float+") else "int"
+        return {
+            "type": "min_agg",
+            "iterators": p.sum_index_header["iterators"],
+            "index_constraint": p.sum_index_header.get("index_constraint"),
+            "expression": p.parenthesized_expression,
+            "sem_type": sem,
+        }
 
     # max(i in I : cond) expr
     @_("AGG_MAX sum_index_header nonparen_expression")
@@ -2180,20 +2189,28 @@ class OPLParser(Parser):
         expr_type = p.nonparen_expression["sem_type"]
         if expr_type not in ("int", "int+", "float", "float+"):
             raise SemanticError("max aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float","float+") else "int"
-        return {"type":"max_agg","iterators":p.sum_index_header["iterators"],
-                "index_constraint":p.sum_index_header.get("index_constraint"),
-                "expression":p.nonparen_expression,"sem_type":sem}
+        sem = "float" if expr_type in ("float", "float+") else "int"
+        return {
+            "type": "max_agg",
+            "iterators": p.sum_index_header["iterators"],
+            "index_constraint": p.sum_index_header.get("index_constraint"),
+            "expression": p.nonparen_expression,
+            "sem_type": sem,
+        }
 
     @_("AGG_MAX sum_index_header parenthesized_expression")
     def max_expression(self, p):
         expr_type = p.parenthesized_expression["sem_type"]
         if expr_type not in ("int", "int+", "float", "float+"):
             raise SemanticError("max aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float","float+") else "int"
-        return {"type":"max_agg","iterators":p.sum_index_header["iterators"],
-                "index_constraint":p.sum_index_header.get("index_constraint"),
-                "expression":p.parenthesized_expression,"sem_type":sem}
+        sem = "float" if expr_type in ("float", "float+") else "int"
+        return {
+            "type": "max_agg",
+            "iterators": p.sum_index_header["iterators"],
+            "index_constraint": p.sum_index_header.get("index_constraint"),
+            "expression": p.parenthesized_expression,
+            "sem_type": sem,
+        }
 
     # Allow min/max aggregates as primary
     @_("min_expression")
@@ -2203,7 +2220,7 @@ class OPLParser(Parser):
     @_("max_expression")
     def primary(self, p):
         return p.max_expression
-    
+
     # Indexed variable reference: x[i], x[i,j], etc.
     @_("NAME indexed_dimensions")  # type: ignore
     def primary(self, p):
@@ -3420,7 +3437,7 @@ class OPLCompiler:
         # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
-            self._lower_minmax_aggregates(ast)  
+            self._lower_minmax_aggregates(ast)
             self._lower_maxmin_convex(ast)
         except SemanticError as e:
             logger.error(f"Conditional constraint error: {e}")
@@ -3559,14 +3576,17 @@ class OPLCompiler:
                 out_top.append(c)
 
         ast["constraints"] = out_top
-    
+
     def _lower_minmax_aggregates(self, ast: dict) -> None:
-        if not isinstance(ast, dict): return
+        if not isinstance(ast, dict):
+            return
 
         def make_forall(iterators, idxc, cons):
-            node = {"type":"forall_constraint","iterators":iterators,"index_constraint":idxc}
-            if isinstance(cons, list): node["constraints"]=cons
-            else: node["constraint"]=cons
+            node = {"type": "forall_constraint", "iterators": iterators, "index_constraint": idxc}
+            if isinstance(cons, list):
+                node["constraints"] = cons
+            else:
+                node["constraint"] = cons
             return node
 
         def agg_to_forall(agg, op_side: str, other):
@@ -3575,73 +3595,113 @@ class OPLCompiler:
             idxc = agg.get("index_constraint")
             e = agg.get("expression")
 
-            def wrap(c): return make_forall(iters, idxc, c)
+            def wrap(c):
+                return make_forall(iters, idxc, c)
 
             # Builds a list of rewritten constraints per rule
-            return wrap if op_side=="wrap" else (iters, idxc, e)
+            return wrap if op_side == "wrap" else (iters, idxc, e)
 
         # Objective rewrite
         obj = ast.get("objective")
         if isinstance(obj, dict):
             expr = obj.get("expression")
-            if isinstance(expr, dict) and expr.get("type") in ("max_agg","min_agg"):
+            if isinstance(expr, dict) and expr.get("type") in ("max_agg", "min_agg"):
                 t = expr["type"]
                 if t == "max_agg" and obj.get("type") == "minimize":
                     z = self._gensym("__maxagg_obj")
-                    ast["declarations"].append({"type":"dvar","var_type":"float","name":z})
+                    ast["declarations"].append({"type": "dvar", "var_type": "float", "name": z})
                     # forall(i): e(i) <= z
-                    iters = expr["iterators"]; idxc = expr.get("index_constraint"); e = expr["expression"]
-                    ast["constraints"].append(make_forall(iters, idxc, {"type":"constraint","op":"<=",
-                        "left": e, "right": {"type":"name","value":z,"sem_type":"float"}}))
-                    ast["objective"]["expression"] = {"type":"name","value":z,"sem_type":"float"}
+                    iters = expr["iterators"]
+                    idxc = expr.get("index_constraint")
+                    e = expr["expression"]
+                    ast["constraints"].append(
+                        make_forall(
+                            iters,
+                            idxc,
+                            {
+                                "type": "constraint",
+                                "op": "<=",
+                                "left": e,
+                                "right": {"type": "name", "value": z, "sem_type": "float"},
+                            },
+                        )
+                    )
+                    ast["objective"]["expression"] = {"type": "name", "value": z, "sem_type": "float"}
                 elif t == "min_agg" and obj.get("type") == "maximize":
                     z = self._gensym("__minagg_obj")
-                    ast["declarations"].append({"type":"dvar","var_type":"float","name":z})
+                    ast["declarations"].append({"type": "dvar", "var_type": "float", "name": z})
                     # forall(i): e(i) >= z
-                    iters = expr["iterators"]; idxc = expr.get("index_constraint"); e = expr["expression"]
-                    ast["constraints"].append(make_forall(iters, idxc, {"type":"constraint","op":">=",
-                        "left": e, "right": {"type":"name","value":z,"sem_type":"float"}}))
-                    ast["objective"]["expression"] = {"type":"name","value":z,"sem_type":"float"}
+                    iters = expr["iterators"]
+                    idxc = expr.get("index_constraint")
+                    e = expr["expression"]
+                    ast["constraints"].append(
+                        make_forall(
+                            iters,
+                            idxc,
+                            {
+                                "type": "constraint",
+                                "op": ">=",
+                                "left": e,
+                                "right": {"type": "name", "value": z, "sem_type": "float"},
+                            },
+                        )
+                    )
+                    ast["objective"]["expression"] = {"type": "name", "value": z, "sem_type": "float"}
                 else:
                     raise SemanticError("Non-convex objective: supported only minimize max(...) or maximize min(...).")
 
         # Constraint rewrite (walk all constraints)
         def rewrite_constraint(c):
-            if not isinstance(c, dict): return [c]
+            if not isinstance(c, dict):
+                return [c]
             if c.get("type") == "constraint":
                 L, R, op = c.get("left"), c.get("right"), c.get("op")
+
                 # Helpers to build per-iterator constraints
                 def forall_from(agg_side, other_side, opLR):
-                    iters = agg_side["iterators"]; idxc = agg_side.get("index_constraint"); e = agg_side["expression"]
-                    cons = {"type":"constraint","op":opLR,"left":e if opLR in ("<=" ,">=") and agg_side is L else other_side,
-                            "right": other_side if opLR in ("<=" ,">=") and agg_side is L else e}
+                    iters = agg_side["iterators"]
+                    idxc = agg_side.get("index_constraint")
+                    e = agg_side["expression"]
+                    cons = {
+                        "type": "constraint",
+                        "op": opLR,
+                        "left": e if opLR in ("<=", ">=") and agg_side is L else other_side,
+                        "right": other_side if opLR in ("<=", ">=") and agg_side is L else e,
+                    }
                     return [make_forall(iters, idxc, cons)]
 
                 # max-agg convex forms
-                if isinstance(L, dict) and L.get("type")=="max_agg" and op=="<=":
+                if isinstance(L, dict) and L.get("type") == "max_agg" and op == "<=":
                     return forall_from(L, R, "<=")
-                if isinstance(R, dict) and R.get("type")=="max_agg" and op==">=":
+                if isinstance(R, dict) and R.get("type") == "max_agg" and op == ">=":
                     return forall_from(R, L, ">=")
                 # min-agg convex forms
-                if isinstance(L, dict) and L.get("type")=="min_agg" and op==">=":
+                if isinstance(L, dict) and L.get("type") == "min_agg" and op == ">=":
                     return forall_from(L, R, ">=")
-                if isinstance(R, dict) and R.get("type")=="min_agg" and op=="<=":
+                if isinstance(R, dict) and R.get("type") == "min_agg" and op == "<=":
                     return forall_from(R, L, "<=")
 
                 # Disallow other placements
-                if (isinstance(L, dict) and L.get("type") in ("min_agg","max_agg")) or (isinstance(R, dict) and R.get("type") in ("min_agg","max_agg")):
+                if (isinstance(L, dict) and L.get("type") in ("min_agg", "max_agg")) or (
+                    isinstance(R, dict) and R.get("type") in ("min_agg", "max_agg")
+                ):
                     raise SemanticError("Unsupported non-convex aggregate placement (==, >, <, or reversed forms).")
                 return [c]
 
-            if c.get("type")=="forall_constraint":
+            if c.get("type") == "forall_constraint":
                 inner = []
                 if "constraint" in c:
-                    for cc in rewrite_constraint(c["constraint"]): inner.append(cc)
-                    return [dict(c, **({"constraints":inner, "constraint":None}))] if len(inner)>1 else [dict(c, **({"constraint":inner[0]}))]
+                    for cc in rewrite_constraint(c["constraint"]):
+                        inner.append(cc)
+                    return (
+                        [dict(c, **({"constraints": inner, "constraint": None}))]
+                        if len(inner) > 1
+                        else [dict(c, **({"constraint": inner[0]}))]
+                    )
                 elif "constraints" in c:
                     for cc in c["constraints"]:
                         inner.extend(rewrite_constraint(cc))
-                    return [dict(c, **({"constraints":inner}))]
+                    return [dict(c, **({"constraints": inner}))]
                 return [c]
             # Pass through others
             return [c]
@@ -3779,7 +3839,7 @@ class OPLCompiler:
             raise SemanticError(f"Unsupported operator in ground expression: {op}")
         # Unsupported in conditions
         raise SemanticError(f"Unsupported expression in ground condition: {t}")
-    
+
     def _lower_maxmin_convex(self, ast: dict) -> None:
         """
         Convex lowering for maxl/minl:
@@ -3790,8 +3850,11 @@ class OPLCompiler:
         if not isinstance(ast, dict):
             return
 
-        def is_max(n): return isinstance(n, dict) and n.get("type") == "maxl"
-        def is_min(n): return isinstance(n, dict) and n.get("type") == "minl"
+        def is_max(n):
+            return isinstance(n, dict) and n.get("type") == "maxl"
+
+        def is_min(n):
+            return isinstance(n, dict) and n.get("type") == "minl"
 
         def args_or_err(node):
             args = node.get("args") or []
@@ -3821,7 +3884,14 @@ class OPLCompiler:
                     ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
                     # add epigraph constraints: z >= ei
                     for ei in args:
-                        ast["constraints"].append({"type": "constraint", "op": ">=", "left": {"type": "name", "value": zname, "sem_type": "float"}, "right": ei})
+                        ast["constraints"].append(
+                            {
+                                "type": "constraint",
+                                "op": ">=",
+                                "left": {"type": "name", "value": zname, "sem_type": "float"},
+                                "right": ei,
+                            }
+                        )
             elif obj.get("type") == "maximize" and is_min(expr):
                 args, single = args_or_err(expr)
                 if single:
@@ -3832,11 +3902,20 @@ class OPLCompiler:
                     ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
                     # hypograph: z <= ei
                     for ei in args:
-                        ast["constraints"].append({"type": "constraint", "op": "<=", "left": {"type": "name", "value": zname, "sem_type": "float"}, "right": ei})
+                        ast["constraints"].append(
+                            {
+                                "type": "constraint",
+                                "op": "<=",
+                                "left": {"type": "name", "value": zname, "sem_type": "float"},
+                                "right": ei,
+                            }
+                        )
             else:
                 # If maxl/minl appears anywhere in objective, reject (non-convex usage)
                 if self._contains_maxmin(obj.get("expression")):
-                    raise SemanticError("Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...).")
+                    raise SemanticError(
+                        "Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...)."
+                    )
 
         # Constraints
         def expand_constraint(cnode: dict) -> list[dict]:
@@ -3849,6 +3928,7 @@ class OPLCompiler:
                 L = cnode.get("left")
                 R = cnode.get("right")
                 label = cnode.get("label")
+
                 # Helper to attach label if present
                 def with_label(cons: dict) -> dict:
                     if label:
@@ -3883,7 +3963,9 @@ class OPLCompiler:
                     raise SemanticError("Non-convex: equality with maxl/minl is not supported.")
                 # If maxl/minl appear elsewhere (inside arithmetic), reject
                 if self._contains_maxmin(L) or self._contains_maxmin(R):
-                    raise SemanticError("Non-convex or unsupported placement of maxl/minl in constraint. Allowed only in: maxl(...) <= rhs, lhs >= maxl(...), minl(...) >= rhs, lhs <= minl(...).")
+                    raise SemanticError(
+                        "Non-convex or unsupported placement of maxl/minl in constraint. Allowed only in: maxl(...) <= rhs, lhs >= maxl(...), minl(...) >= rhs, lhs <= minl(...)."
+                    )
                 return [cnode]
 
             if t == "implication_constraint":
@@ -3926,6 +4008,7 @@ class OPLCompiler:
 
     # Helper: unique symbol names
     _mm_counter: int = 0
+
     def _gensym(self, prefix: str) -> str:
         self._mm_counter = getattr(self, "_mm_counter", 0) + 1
         return f"{prefix}_{self._mm_counter}"
