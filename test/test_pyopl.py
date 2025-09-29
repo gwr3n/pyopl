@@ -715,7 +715,7 @@ class TestPyOPLCompiler(TestPyOPL):
         """Test that a sum expression can be used as the left-hand side of a constraint."""
         model = """
         range I = 1..3;
-        dvar float x[I];
+        dvar float+ x[I];
         minimize sum(i in I) x[i];
         subject to {
             sum(i in I : i != 2) x[i] >= 6;
@@ -736,7 +736,7 @@ class TestPyOPLCompiler(TestPyOPL):
         """Test that a sum expression can be used as the left-hand side of a constraint."""
         model = """
         range I = 1..3;
-        dvar float x[I];
+        dvar float+ x[I];
         minimize sum(i in I) x[i];
         subject to {
             sum(i in I : i == 2) x[i] >= 6;
@@ -1193,8 +1193,8 @@ class TestPyOPLCompiler(TestPyOPL):
     def test_all_zero_constraints(self):
         """Test models with constraints that are always satisfied (zero coefficients)."""
         model = """
-        dvar float x;
-        dvar float y;
+        dvar float+ x;
+        dvar float+ y;
         minimize x + y;
         subject to {
             0*x + 0*y >= 0;
@@ -1214,8 +1214,8 @@ class TestPyOPLCompiler(TestPyOPL):
     def test_variable_only_in_objective(self):
         """Test models where a variable appears only in the objective."""
         model = """
-        dvar float x;
-        dvar float y;
+        dvar float+ x;
+        dvar float+ y;
         minimize x;
         subject to {
             y >= 1;

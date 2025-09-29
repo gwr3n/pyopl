@@ -113,6 +113,12 @@ class GurobiCodeGenerator:
         self._collect_variable_bounds(self.ast.get("constraints", []))
         self._generate_constraints(self.ast["constraints"])
         self._add_code_line("model.optimize()")
+        # Disambiguate INF_OR_UNBD into INFEASIBLE or UNBOUNDED when possible
+        self._add_code_line("if model.status == GRB.INF_OR_UNBD:")
+        self.indent_level += 1
+        self._add_code_line("model.setParam(GRB.Param.DualReductions, 0)")
+        self._add_code_line("model.optimize()")
+        self.indent_level -= 1
         self._add_code_line("")
         # Results capture
         self._add_code_line("results = {}")
@@ -991,8 +997,16 @@ class GurobiCodeGenerator:
                         if vtype == "boolean"
                         else ("GRB.INTEGER" if vtype.startswith("int") else "GRB.CONTINUOUS")
                     )
+                    # Ensure lower bounds match domain semantics for tuple-indexed variables
+                    if vtype == "boolean":
+                        lb_arg = ""  # binaries are [0,1] by default
+                    elif vtype in ("int+", "float+"):
+                        lb_arg = ", lb=0"
+                    else:
+                        # plain int/float: allow negative domain
+                        lb_arg = ", lb=-GRB.INFINITY"
                     self._add_code_line(
-                        f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}')"
+                        f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg})"
                     )
                     continue
             # Skip emitting parameter again if already transformed to dict form in data section
@@ -1048,9 +1062,11 @@ class GurobiCodeGenerator:
         vtype = decl.get("var_type")
         if vtype == "boolean":
             return (0.0, 1.0)
-        if vtype in ("int", "int+", "float", "float+"):
-            # Known lower bound 0, unknown upper (None)
+        # Only '+' variants are nonnegative; plain int/float are free
+        if vtype in ("int+", "float+"):
             return (0.0, None)
+        if vtype in ("int", "float"):
+            return (None, None)
         return (None, None)
 
     def _linear_bounds_safe(self, node):
@@ -1609,11 +1625,11 @@ class GurobiCodeGenerator:
         elif var_type == "int+":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.INTEGER, name='{name}', lb=0)")
         elif var_type == "int":
-            self._add_code_line(f"{name} = model.addVar(vtype=GRB.INTEGER, name='{name}')")
+            self._add_code_line(f"{name} = model.addVar(vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)")
         elif var_type == "float+":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.CONTINUOUS, name='{name}', lb=0)")
         elif var_type == "float":
-            self._add_code_line(f"{name} = model.addVar(vtype=GRB.CONTINUOUS, name='{name}')")
+            self._add_code_line(f"{name} = model.addVar(vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)")
         else:
             self._add_code_line(f"{name} = model.addVar(name='{name}')")
         self.gurobi_var_map[name] = name
@@ -1660,11 +1676,11 @@ class GurobiCodeGenerator:
             elif var_type == "int+":
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=0)")
             elif var_type == "int":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}')")
+                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)")
             elif var_type == "float+":
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=0)")
             elif var_type == "float":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}')")
+                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)")
             else:
                 self._add_code_line(f"{name} = model.addVars({product_args}, name='{name}')")
         else:
@@ -1678,7 +1694,7 @@ class GurobiCodeGenerator:
                 )
             elif var_type == "int":
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}')"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)"
                 )
             elif var_type == "float+":
                 self._add_code_line(
@@ -1686,7 +1702,7 @@ class GurobiCodeGenerator:
                 )
             elif var_type == "float":
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}')"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)"
                 )
             else:
                 self._add_code_line(f"{name} = model.addVars({', '.join(map(str, range_args))}, name='{name}')")

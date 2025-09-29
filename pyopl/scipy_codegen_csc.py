@@ -1110,7 +1110,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """Return (lb, ub) for a variable or numeric literal node when cheaply available.
         Supported forms:
           - boolean dvar: (0,1)
-          - int/int+/float/float+ dvar: (0, +inf) if nonnegative type, else (0, +inf) fallback (we currently do not track negatives)
+          - int/float dvar: (-inf, +inf) 
+          - int+/float+ dvar: (0, +inf) 
           - numeric literal: (v,v)
         Returns (None, None) if unknown/unbounded.
         """
@@ -1127,9 +1128,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     vtype = d.get("var_type")
                     if vtype == "boolean":
                         return (0.0, 1.0)
-                    if vtype in ("int", "float", "int+", "float+"):
-                        # Nonnegative variants already covered; generic falls back to [0, +inf) due to lack of neg info
+                    if vtype in ("int+", "float+"):
                         return (0.0, None)
+                    if vtype in ("int", "float"):
+                        return (None, None)
         if t == "number":
             v = float(node.get("value", 0))
             return (v, v)
@@ -1409,14 +1411,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if vtype == "boolean":
             bounds.append([0, 1])
             integrality.append(1)
-        elif vtype in ("int", "int+"):
+        elif vtype == "int+":
             bounds.append([0, None])
             integrality.append(1)
-        elif vtype in ("float", "float+"):
+        elif vtype == "int":
+            bounds.append([None, None])
+            integrality.append(1)
+        elif vtype == "float+":
             bounds.append([0, None])
             integrality.append(0)
+        elif vtype == "float":
+            bounds.append([None, None])
+            integrality.append(0)
         else:
-            bounds.append([0, None])
+            bounds.append([None, None])
             integrality.append(0)
 
     def _handle_indexed_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
@@ -1460,14 +1468,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if vtype == "boolean":
                     bounds.append([0, 1])
                     integrality.append(1)
-                elif vtype in ("int", "int+"):
+                elif vtype == "int+":
                     bounds.append([0, None])
                     integrality.append(1)
-                elif vtype in ("float", "float+"):
+                elif vtype == "int":
+                    bounds.append([None, None])
+                    integrality.append(1)
+                elif vtype == "float+":
                     bounds.append([0, None])
                     integrality.append(0)
+                elif vtype == "float":
+                    bounds.append([None, None])
+                    integrality.append(0)
                 else:
-                    bounds.append([0, None])
+                    bounds.append([None, None])
                     integrality.append(0)
             return
         # Fallback: treat as before (should not happen for tuple-indexed)
@@ -1529,14 +1543,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if vtype == "boolean":
                 bounds.append([0, 1])
                 integrality.append(1)
-            elif vtype in ("int", "int+"):
+            elif vtype == "int+":
                 bounds.append([0, None])
                 integrality.append(1)
-            elif vtype in ("float", "float+"):
+            elif vtype == "int":
+                bounds.append([None, None])
+                integrality.append(1)
+            elif vtype == "float+":
                 bounds.append([0, None])
                 integrality.append(0)
+            elif vtype == "float":
+                bounds.append([None, None])
+                integrality.append(0)
             else:
-                bounds.append([0, None])
+                bounds.append([None, None])
                 integrality.append(0)
 
     # === Section: Index/Range/Iterator Utilities ===

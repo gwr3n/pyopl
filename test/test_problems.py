@@ -1974,7 +1974,7 @@ class TestPyOPLProblems(unittest.TestCase):
     def test_multi_indexed_variable_and_constraint(self):
         """Test 3D indexed variables and constraints (multi-indexed arrays) with both solvers."""
         opl_code = """
-        dvar float x[1..2][1..3][1..2];
+        dvar float+ x[1..2][1..3][1..2];
         range I = 1..2;
         range J = 1..3;
         range K = 1..2;
@@ -2010,7 +2010,7 @@ class TestPyOPLProblems(unittest.TestCase):
         tuple Inner { int id; float val; };
         tuple Outer { Inner inner; float weight; };
         {Outer} outers = { < <1, 2.5>, 3.0 >, < <2, 4.0>, 1.5 > };
-        dvar float x[outers];
+        dvar float+ x[outers];
         minimize sum(o in outers) o.inner.val * x[o];
         subject to {
             forall(o in outers) x[o] <= o.weight;
@@ -3260,7 +3260,7 @@ class TestPyOPLProblems(unittest.TestCase):
         {Arc} arcs = ...;
         int source = ...;
         int dest = ...;
-        dvar int x[arcs];
+        dvar int+ x[arcs];
 
         minimize sum(a in arcs) a.cost * x[a];
 
@@ -3331,7 +3331,7 @@ class TestPyOPLProblems(unittest.TestCase):
         {Arc} arcs = ...;
         string source = ...;
         string dest = ...;
-        dvar int x[arcs];
+        dvar int+ x[arcs];
 
         minimize sum(a in arcs) a.cost * x[a];
 
