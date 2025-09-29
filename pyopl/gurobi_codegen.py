@@ -1676,11 +1676,15 @@ class GurobiCodeGenerator:
             elif var_type == "int+":
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=0)")
             elif var_type == "int":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)")
+                self._add_code_line(
+                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)"
+                )
             elif var_type == "float+":
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=0)")
             elif var_type == "float":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)")
+                self._add_code_line(
+                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)"
+                )
             else:
                 self._add_code_line(f"{name} = model.addVars({product_args}, name='{name}')")
         else:

@@ -154,15 +154,15 @@ class TestPyOPLProblems(unittest.TestCase):
             minimize
             sum(t in T) ( setup_cost[t]*y[t]
                             + prod_cost[t]*Q[t]
-                            + hold_cost[t]*h[t] 
+                            + hold_cost[t]*h[t]
                             + penalty_cost[t]*p[t] );
 
             subject to {
             forall(t in T)
-                if (t == 1) { 
-                balance_1: I[1] == Q[1] - demand[1]; 
-                } else { 
-                balance_t: I[t] == I[t-1] + Q[t] - demand[t]; 
+                if (t == 1) {
+                balance_1: I[1] == Q[1] - demand[1];
+                } else {
+                balance_t: I[t] == I[t-1] + Q[t] - demand[t];
                 }
 
             forall(t in T)

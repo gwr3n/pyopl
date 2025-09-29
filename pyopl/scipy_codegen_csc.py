@@ -1110,8 +1110,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """Return (lb, ub) for a variable or numeric literal node when cheaply available.
         Supported forms:
           - boolean dvar: (0,1)
-          - int/float dvar: (-inf, +inf) 
-          - int+/float+ dvar: (0, +inf) 
+          - int/float dvar: (-inf, +inf)
+          - int+/float+ dvar: (0, +inf)
           - numeric literal: (v,v)
         Returns (None, None) if unknown/unbounded.
         """
