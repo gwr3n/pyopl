@@ -31,6 +31,52 @@ except ImportError:
 
 class TestPyOPLProblems(unittest.TestCase):
 
+    def test_min_max(self):
+        """
+        Test minl/maxl model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            int N = 4;
+            float a[1..N] = ...;
+            dvar float x[1..N];
+            minimize max(i in 1..N) (a[i] * x[i]);
+            subject to {
+                sum(i in 1..N) x[i] == 1;
+                forall(i in 1..N) x[i] >= 0;
+                min(i in 1..N) (x[i]) >= 0.1;
+            }
+            """
+        data_code = """
+            a = [2.0, 4.5, 1.0, 3.0];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_minl_maxl(self):
         """
         Test minl/maxl model with both solvers.
