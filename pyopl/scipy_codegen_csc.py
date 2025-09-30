@@ -1261,7 +1261,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 base, key = vname.split("[", 1)
                 key = key.rstrip("]")
                 if key.startswith("(") and key.endswith(")"):
-                    key_tuple = eval(key)
+                    import ast
+                    try:
+                        key_tuple = ast.literal_eval(key)
+                    except Exception:
+                        return None
                     vname_norm = f"{base}[{repr(key_tuple)}]"
                     idx = self.var_indices.get(vname_norm)
                     if idx is not None:
@@ -1313,15 +1317,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     elif idx["type"] == "number_literal_index":
                         remapped_indices.append(idx["value"])
                     elif idx["type"] == "binop":
-                        # Always evaluate binop index to integer value
-                        val = self.eval(idx, env)
-                        if isinstance(val, tuple):
-                            # If eval returns a tuple (dict, value), use value
-                            val = val[1]
-                        remapped_indices.append(val)
+                        # Evaluate binop index to integer value via internal evaluator (not self.eval)
+                        _, v_eval = self._eval_expr(idx, env)
+                        if isinstance(v_eval, tuple):
+                            v_eval = v_eval[1]
+                        remapped_indices.append(v_eval)
                     else:
                         remapped_indices.append(str(idx))
-                # Ensure all indices are int for lookup
                 remapped_indices = [
                     (int(i) if isinstance(i, (int, float)) or (isinstance(i, str) and i.isdigit()) else i)
                     for i in remapped_indices
@@ -1838,20 +1840,78 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _eval_index(self, idx: object, env: dict) -> object:
         """
         Helper to evaluate an index expression in env/data_dict context.
-        Tries to evaluate as Python expression, then as int, else returns as is.
+        Tries to evaluate as safe Python literal/arith, then as int, else returns as is.
         """
-        idx_eval = idx
         if isinstance(idx, str):
-            eval_ctx = dict(env)
-            eval_ctx.update(self.data_dict)
+            import ast
+
+            # 1) Try tuple/number literal safely
             try:
-                idx_eval = eval(idx, {}, eval_ctx)
+                lit = ast.literal_eval(idx)
+                return lit
             except Exception:
+                pass
+
+            # 2) Safe arithmetic: only (+, -, *, //, parentheses) and names from env/data_dict
+            def _safe_eval_arith(expr: str) -> object:
+                node = ast.parse(expr, mode="eval")
+
+                allowed_ops = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+                allowed_nodes = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Name, ast.Tuple, ast.Load, ast.USub, ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+
+                def _eval(n):
+                    if not isinstance(n, allowed_nodes):
+                        raise ValueError("Disallowed expression in index")
+                    if isinstance(n, ast.Expression):
+                        return _eval(n.body)
+                    if isinstance(n, ast.Num):
+                        return int(n.n)
+                    if isinstance(n, ast.Constant):
+                        if isinstance(n.value, (int, float, bool)):
+                            return int(n.value) if isinstance(n.value, bool) or (isinstance(n.value, float) and n.value.is_integer()) else n.value
+                        raise ValueError("Non-numeric constant in index")
+                    if isinstance(n, ast.Name):
+                        name = n.id
+                        if name in env:
+                            v = env[name]
+                        else:
+                            v = self.data_dict.get(name, name)
+                        if isinstance(v, (int, float, bool)):
+                            return int(v) if isinstance(v, bool) or (isinstance(v, float) and v.is_integer()) else v
+                        raise ValueError(f"Name '{name}' not numeric for index")
+                    if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub):
+                        return -_eval(n.operand)
+                    if isinstance(n, ast.BinOp) and isinstance(n.op, allowed_ops):
+                        l = _eval(n.left)
+                        r = _eval(n.right)
+                        if not (isinstance(l, (int, float)) and isinstance(r, (int, float))):
+                            raise ValueError("Non-numeric operands in index arithmetic")
+                        if isinstance(n.op, ast.Add):
+                            return l + r
+                        if isinstance(n.op, ast.Sub):
+                            return l - r
+                        if isinstance(n.op, ast.Mult):
+                            return l * r
+                        if isinstance(n.op, ast.FloorDiv):
+                            return l // r
+                    if isinstance(n, ast.Tuple):
+                        return tuple(_eval(e) for e in n.elts)
+                    raise ValueError("Unsupported node in index")
+                return _eval(node)
+
+            try:
+                v = _safe_eval_arith(idx)
+                # Normalize float-integral to int
+                if isinstance(v, float) and v.is_integer():
+                    return int(v)
+                return v
+            except Exception:
+                # 3) Try int fallthrough
                 try:
-                    idx_eval = int(idx)
+                    return int(idx)
                 except Exception:
-                    pass
-        return idx_eval
+                    return idx
+        return idx
 
     def _resolve_ast_parameter(self, name: str, indices: list | None) -> tuple[bool, object, bool] | None:
         """
@@ -2208,6 +2268,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("import time")
         self._add_code_line("from scipy.optimize import linprog")
         self._add_code_line("from scipy.sparse import csr_matrix")
+        # Ensure results_container exists
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("results_container")
+        self.indent_level -= 1
+        self._add_code_line("except NameError:")
+        self.indent_level += 1
+        self._add_code_line("results_container = {}")
+        self.indent_level -= 1
         # Emit sense variable for use in sign fix
         sense = self.ast.get("objective", {}).get("type", "minimize")
         self._add_code_line(f"sense = '{sense}'")
@@ -2356,7 +2425,70 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _generate_data_declarations(self, data_dict):
         # --- Recursive shape check for multi-dimensional parameters ---
+        # --- Recursive shape check for multi-dimensional parameters ---
         def check_shape(param_data, dims, data_dict, param_name, dim=0):
+            """
+            Minimal shape validation for lists/arrays:
+            - 1D over named_range: length matches end-start+1
+            - 1D over named_set: length matches |set|
+            - 2D over range×range: rectangular with expected sizes
+            - 2D over set×range or set×set: skip here (handled by later normalization)
+            """
+            from .semantic_error import SemanticError
+
+            if not isinstance(dims, list):
+                return
+            if isinstance(param_data, dict):
+                return  # handled elsewhere (dict normalizations)
+            if len(dims) == 1 and isinstance(param_data, list):
+                d0 = dims[0]
+                if d0.get("type") == "named_range_dimension":
+                    # evaluate [start..end]
+                    rng_name = d0["name"]
+                    rng_decl = next(
+                        (d for d in self.ast.get("declarations", []) if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name),
+                        None,
+                    )
+                    if rng_decl:
+                        def eval_bound_local(expr):
+                            if expr["type"] == "number":
+                                return int(expr["value"])
+                            if expr["type"] == "name":
+                                return int(data_dict[expr["value"]])
+                            if expr["type"] == "binop":
+                                op = expr["op"]
+                                l = eval_bound_local(expr["left"])
+                                r = eval_bound_local(expr["right"])
+                                return l + r if op == "+" else l - r if op == "-" else l * r if op == "*" else l // r
+                            raise Exception("Unsupported range bound expr")
+                        start = eval_bound_local(rng_decl["start"])
+                        end = eval_bound_local(rng_decl["end"])
+                        expected = end - start + 1
+                        if len(param_data) != expected:
+                            raise SemanticError(f"Parameter '{param_name}' has {len(param_data)} items but declared range '{rng_name}' expects {expected}.")
+                elif d0.get("type") == "named_set_dimension":
+                    set_name = d0["name"]
+                    elems = data_dict.get(set_name)
+                    if elems is None:
+                        decl = next((d for d in self.ast.get("declarations", []) if d.get("name") == set_name), None)
+                        if decl:
+                            if decl.get("type") == "typed_set":
+                                elems = decl.get("value") or []
+                            elif decl.get("type") == "set_declaration":
+                                elems = decl.get("value") or []
+                    if isinstance(elems, dict) and "elements" in elems:
+                        set_len = len(elems["elements"])
+                    else:
+                        set_len = len(elems or [])
+                    if set_len and len(param_data) != set_len:
+                        raise SemanticError(f"Parameter '{param_name}' has {len(param_data)} items but declared set '{set_name}' has {set_len} elements.")
+            if len(dims) == 2 and isinstance(param_data, list):
+                # Only check “rectangular” rows; deeper semantics handled later
+                if not all(isinstance(row, (list, tuple)) for row in param_data):
+                    return
+                row_len = len(param_data[0]) if param_data else 0
+                if not all(len(row) == row_len for row in param_data):
+                    raise SemanticError(f"Parameter '{param_name}' 2-D data must be rectangular (all rows same length).")
             return
 
         # Track inline tuple-indexed parameters we already emitted as dicts so we don't overwrite them later
@@ -3923,10 +4055,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         )
                         if vname in self.var_indices and left_v in self.var_indices:
                             row = [0.0] * len(self.var_names)
-                            row[v_idx] = 1.0
-                            row[e_idx] = -1.0
                             v_idx = self.var_indices[vname]
                             e_idx = self.var_indices[left_v]
+                            row[v_idx] = 1.0
+                            row[e_idx] = -1.0
                             for i, coef in enumerate(row):
                                 if abs(coef) > 1e-12:
                                     A_eq_rows.append(eq_row_idx)
