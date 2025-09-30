@@ -1791,11 +1791,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # Build composite key from all indices at once
                     rem_evals = [self._eval_index(idx, env) for idx in indices]
                     # If single evaluated index already is a tuple (from tuple_literal), use it directly
-                    tuple_key = (
-                        rem_evals[0]
-                        if len(rem_evals) == 1 and isinstance(rem_evals[0], tuple)
-                        else tuple(rem_evals)
-                    )
+                    tuple_key = rem_evals[0] if len(rem_evals) == 1 and isinstance(rem_evals[0], tuple) else tuple(rem_evals)
                     if tuple_key in v:
                         v = v[tuple_key]
                         # Numeric scalar or structured value

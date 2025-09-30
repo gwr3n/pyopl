@@ -67,12 +67,9 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        
+
         # If both solvers are infeasible, test passes
-        if (
-            results["scipy"]["status"] == "INFEASIBLE"
-            and results["gurobi"]["status"] == "INFEASIBLE"
-        ):
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
             return  # Test passes
 
         # Otherwise, require both to be optimal and compare objectives
