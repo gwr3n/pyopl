@@ -1262,6 +1262,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 key = key.rstrip("]")
                 if key.startswith("(") and key.endswith(")"):
                     import ast
+
                     try:
                         key_tuple = ast.literal_eval(key)
                     except Exception:
@@ -1857,7 +1858,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 node = ast.parse(expr, mode="eval")
 
                 allowed_ops = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
-                allowed_nodes = (ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant, ast.Name, ast.Tuple, ast.Load, ast.USub, ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+                allowed_nodes = (
+                    ast.Expression,
+                    ast.BinOp,
+                    ast.UnaryOp,
+                    ast.Num,
+                    ast.Constant,
+                    ast.Name,
+                    ast.Tuple,
+                    ast.Load,
+                    ast.USub,
+                    ast.Add,
+                    ast.Sub,
+                    ast.Mult,
+                    ast.FloorDiv,
+                )
 
                 def _eval(n):
                     if not isinstance(n, allowed_nodes):
@@ -1868,7 +1883,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         return int(n.n)
                     if isinstance(n, ast.Constant):
                         if isinstance(n.value, (int, float, bool)):
-                            return int(n.value) if isinstance(n.value, bool) or (isinstance(n.value, float) and n.value.is_integer()) else n.value
+                            return (
+                                int(n.value)
+                                if isinstance(n.value, bool) or (isinstance(n.value, float) and n.value.is_integer())
+                                else n.value
+                            )
                         raise ValueError("Non-numeric constant in index")
                     if isinstance(n, ast.Name):
                         name = n.id
@@ -1882,21 +1901,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub):
                         return -_eval(n.operand)
                     if isinstance(n, ast.BinOp) and isinstance(n.op, allowed_ops):
-                        l = _eval(n.left)
-                        r = _eval(n.right)
-                        if not (isinstance(l, (int, float)) and isinstance(r, (int, float))):
+                        left = _eval(n.left)
+                        right = _eval(n.right)
+                        if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
                             raise ValueError("Non-numeric operands in index arithmetic")
                         if isinstance(n.op, ast.Add):
-                            return l + r
+                            return left + right
                         if isinstance(n.op, ast.Sub):
-                            return l - r
+                            return left - right
                         if isinstance(n.op, ast.Mult):
-                            return l * r
+                            return left * right
                         if isinstance(n.op, ast.FloorDiv):
-                            return l // r
+                            return left // right
                     if isinstance(n, ast.Tuple):
                         return tuple(_eval(e) for e in n.elts)
                     raise ValueError("Unsupported node in index")
+
                 return _eval(node)
 
             try:
@@ -2446,10 +2466,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # evaluate [start..end]
                     rng_name = d0["name"]
                     rng_decl = next(
-                        (d for d in self.ast.get("declarations", []) if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name),
+                        (
+                            d
+                            for d in self.ast.get("declarations", [])
+                            if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
+                        ),
                         None,
                     )
                     if rng_decl:
+
                         def eval_bound_local(expr):
                             if expr["type"] == "number":
                                 return int(expr["value"])
@@ -2457,15 +2482,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 return int(data_dict[expr["value"]])
                             if expr["type"] == "binop":
                                 op = expr["op"]
-                                l = eval_bound_local(expr["left"])
-                                r = eval_bound_local(expr["right"])
-                                return l + r if op == "+" else l - r if op == "-" else l * r if op == "*" else l // r
+                                left = eval_bound_local(expr["left"])
+                                right = eval_bound_local(expr["right"])
+                                return left + right if op == "+" else left - right if op == "-" else left * right if op == "*" else left // right
                             raise Exception("Unsupported range bound expr")
+
                         start = eval_bound_local(rng_decl["start"])
                         end = eval_bound_local(rng_decl["end"])
                         expected = end - start + 1
                         if len(param_data) != expected:
-                            raise SemanticError(f"Parameter '{param_name}' has {len(param_data)} items but declared range '{rng_name}' expects {expected}.")
+                            raise SemanticError(
+                                f"Parameter '{param_name}' has {len(param_data)} items but declared range '{rng_name}' expects {expected}."
+                            )
                 elif d0.get("type") == "named_set_dimension":
                     set_name = d0["name"]
                     elems = data_dict.get(set_name)
@@ -2481,7 +2509,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     else:
                         set_len = len(elems or [])
                     if set_len and len(param_data) != set_len:
-                        raise SemanticError(f"Parameter '{param_name}' has {len(param_data)} items but declared set '{set_name}' has {set_len} elements.")
+                        raise SemanticError(
+                            f"Parameter '{param_name}' has {len(param_data)} items but declared set '{set_name}' has {set_len} elements."
+                        )
             if len(dims) == 2 and isinstance(param_data, list):
                 # Only check “rectangular” rows; deeper semantics handled later
                 if not all(isinstance(row, (list, tuple)) for row in param_data):
