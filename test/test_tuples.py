@@ -364,6 +364,137 @@ class TestTupleParsing(unittest.TestCase):
         for solver in solvers:
             self.assertAlmostEqual(obj_values[solver], 4, places=6)
 
+    def test_tuple_arrays_with_decisions(self):
+        """
+        Test tuple arrays and field access.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            tuple Arc { int from; int to; float cost; };
+            {int} Nodes = ...;
+            Arc arcs[Nodes];  // or: Arc arcs[Nodes] = ...;
+
+            dvar float+ x[Nodes];
+
+            minimize sum(i in Nodes) arcs[i].cost * x[i];
+            subject to {
+                // you can access fields like this
+                forall(i in Nodes) (arcs[i].from >= 1);
+                // normalize flow/selection
+                sum(i in Nodes) x[i] == 1;
+            }
+            """
+        data_code = """
+            Nodes = {1,2,3};
+            arcs = [
+            <1,2,10.0>,
+            <2,3,12.5>,
+            <3,1,8.0>
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
+    def test_tuple_arrays(self):
+        """
+        Test tuple arrays and field access.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            tuple Arc { int from; int to; float cost; };
+            {int} Nodes = ...;
+            Arc arcs[Nodes];  // or: Arc arcs[Nodes] = ...;
+            minimize sum(i in Nodes) arcs[i].cost;
+            subject to {
+            // you can access fields like this
+            forall(i in Nodes) (arcs[i].from >= 1);
+            }
+            """
+        data_code = """
+            Nodes = {1,2,3};
+            arcs = [
+            <1,2,10.0>,
+            <2,3,12.5>,
+            <3,1,8.0>
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
 
 class TestNestedTupleParsing(unittest.TestCase):
 
