@@ -2325,6 +2325,35 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._build_variables()
         self._build_objective()
         self._build_constraints()
+
+        # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
+        if len(self.var_names) == 0:
+            # Feasibility: with no variables, equalities require 0 == b_eq[i], inequalities require 0 <= b_ub[i]
+            beq_ok = all(abs(b) <= 1e-9 for b in (self.b_eq or []))
+            bub_ok = all(b >= -1e-9 for b in (self.b_ub or []))
+            feasible = beq_ok and bub_ok
+            # Constant objective value (evaluate at codegen time)
+            try:
+                _, obj_const = self._eval_expr(self.ast["objective"]["expression"], {})
+                obj_val = float(obj_const) if isinstance(obj_const, (int, float)) else 0.0
+            except Exception:
+                obj_val = 0.0
+
+            # Preserve previously emitted data/headers; append short-circuit result without calling linprog
+            self._add_code_line("")
+            self._add_code_line("# No decision variables: short-circuit without linprog")
+            self._add_code_line("results = {}")
+            if feasible:
+                self._add_code_line("results['status'] = 'OPTIMAL'")
+                self._add_code_line(f"results['objective_value'] = {obj_val}")
+            else:
+                self._add_code_line("results['status'] = 'INFEASIBLE'")
+                self._add_code_line("results['objective_value'] = None")
+            self._add_code_line("results['solution'] = {}")
+            self._add_code_line("results_container['scipy_output'] = results")
+            return "\n".join(self.scipy_code_lines)
+        # <<< END NEW >>>
+
         # Patch: Enforce top-level explicit assignments for binary variables
         for constr in self.ast.get("constraints", []):
             if (
