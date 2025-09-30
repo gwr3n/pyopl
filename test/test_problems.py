@@ -31,6 +31,61 @@ except ImportError:
 
 class TestPyOPLProblems(unittest.TestCase):
 
+    @unittest.skip("proprietary model")
+    def test_complex_workforce_planning(self):
+        """
+        Test a complex workforce planning model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            // Workforce Planning DSM - model file (example)
+            """
+        data_code = """
+            // Workforce Planning DSM - data file (example)
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        
+        # If both solvers are infeasible, test passes
+        if (
+            results["scipy"]["status"] == "INFEASIBLE"
+            and results["gurobi"]["status"] == "INFEASIBLE"
+        ):
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
     def test_min_max(self):
         """
         Test minl/maxl model with both solvers.
