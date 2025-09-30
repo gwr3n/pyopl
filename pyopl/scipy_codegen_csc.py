@@ -2483,7 +2483,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 op = expr["op"]
                                 left = eval_bound_local(expr["left"])
                                 right = eval_bound_local(expr["right"])
-                                return left + right if op == "+" else left - right if op == "-" else left * right if op == "*" else left // right
+                                return (
+                                    left + right
+                                    if op == "+"
+                                    else left - right if op == "-" else left * right if op == "*" else left // right
+                                )
                             raise Exception("Unsupported range bound expr")
 
                         start = eval_bound_local(rng_decl["start"])
