@@ -861,13 +861,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _get_tuple_set_names(self, iterators):
         """
-        Given a list of iterator dicts, return the set names for tuple sets used in sum/forall expressions.
+        Given a list of iterator dicts, return the iterator variable names for tuple sets used in sum/forall expressions.
         """
         names = set()
         for it in iterators:
             rng = it.get("range", {})
             if rng.get("type") == "named_set":
-                names.add(rng.get("name"))
+                set_decl = self._find_decl(rng.get("name"))
+                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                    names.add(it.get("iterator"))
         return names
 
     # === Section: Error message helpers ===
@@ -1297,40 +1299,37 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         def tighten_simple_constraint(constr, env):
             left = constr["left"]
             right = constr["right"]
+            rhs_val: Optional[float] = None
             try:
-                coef_dict, val = self._eval_expr(right, env)
-                # Only update bounds if right side is a constant (no variables)
-                if coef_dict and any(abs(v) > 1e-12 for v in coef_dict.values()):
-                    # Right side involves decision variables, skip tightening
-                    return
+                coef_dict, c = self._eval_expr(right, env)
+                # Only update bounds if right side is constant (no decision vars)
+                if not coef_dict and isinstance(c, (int, float)):
+                    rhs_val = float(c)
             except Exception:
-                val = None
+                rhs_val = None
             if left["type"] == "name":
                 idx = var_indices.get(left["value"])
-                update_bounds(idx, constr["op"], val)
+                update_bounds(idx, constr["op"], rhs_val)
+                return
             elif left["type"] == "indexed_name":
-                indices = left["dimensions"]
-                remapped_indices = []
-                for idx in indices:
-                    if idx["type"] == "name_reference_index":
-                        val = env.get(idx["name"])
-                        remapped_indices.append(val)
-                    elif idx["type"] == "number_literal_index":
-                        remapped_indices.append(idx["value"])
-                    elif idx["type"] == "binop":
-                        # Evaluate binop index to integer value via internal evaluator (not self.eval)
-                        _, v_eval = self._eval_expr(idx, env)
-                        if isinstance(v_eval, tuple):
-                            v_eval = v_eval[1]
-                        remapped_indices.append(v_eval)
+                dims = left["dimensions"]
+                remapped: list[Any] = []
+                for d in dims:
+                    if d["type"] == "name_reference_index":
+                        remapped.append(env.get(d["name"]))
+                    elif d["type"] == "number_literal_index":
+                        remapped.append(d["value"])
                     else:
-                        remapped_indices.append(str(idx))
-                remapped_indices = [
-                    (int(i) if isinstance(i, (int, float)) or (isinstance(i, str) and i.isdigit()) else i)
-                    for i in remapped_indices
-                ]
-                is_var, val, is_symbolic = self._lookup_var_or_param(left["name"], indices=remapped_indices, env=env)
-                return is_var, val, is_symbolic
+                        # Evaluate generic index expr safely
+                        _, v_eval = self._eval_index_expr(d, env)
+                        remapped.append(v_eval)
+                # Normalize ints
+                remapped = [int(v) if isinstance(v, float) and v.is_integer() else v for v in remapped]
+                is_var, looked_up, is_symbolic = self._lookup_var_or_param(left["name"], indices=remapped, env=env)
+                if is_var and isinstance(looked_up, str):
+                    idx = var_indices.get(looked_up)
+                    update_bounds(idx, constr["op"], rhs_val)
+                return
 
         def tighten_forall_constraint(constr, env=None):
             if env is None:
@@ -3149,10 +3148,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         tuple_set_names = set()
         for it in iterators:
             rng = it["range"]
-            if rng["type"] == "named_range":
-                for d in self.ast.get("declarations", []):
-                    if d.get("type") == "set_of_tuples" and d["name"] == rng["name"]:
-                        tuple_set_names.add(it["iterator"])
+            if rng["type"] == "named_set":
+                set_decl = self._find_decl(rng["name"])
+                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                    tuple_set_names.add(it["iterator"])
         for idx_tuple in itertools.product(*loop_ranges):
             env2, include = self._should_include_sum_term(
                 loop_vars,
@@ -3278,6 +3277,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if d.get("name") == name and (decl_type is None or d.get("type") == decl_type):
                 return d
         return None
+
+    def _find_decls(self, name: str, decl_type: Optional[str] = None) -> list[dict]:
+        """
+        Return all declarations matching name and optional type.
+        Used by ExpressionEvaluator for tuple-indexed parameter lookup.
+        """
+        return [
+            d
+            for d in self.ast.get("declarations", [])
+            if d.get("name") == name and (decl_type is None or d.get("type") == decl_type)
+        ]
 
     def _is_tuple_indexed(self, decl):
         """
@@ -4919,8 +4929,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if "demand" in self.data_dict and isinstance(self.data_dict["demand"], list):
                                 dem_list = self.data_dict["demand"]
                                 # Use AST to extract index t (OPL 1-based)
-                                if ant_var_pos.get("type") == "indexed_name" and "indices" in ant_var_pos:
-                                    idx_expr = ant_var_pos["indices"][-1]
+                                if ant_var_pos.get("type") == "indexed_name" and ant_var_pos.get("dimensions"):
+                                    idx_expr = ant_var_pos["dimensions"][-1]
                                     _, t_idx = self._eval_index_expr(idx_expr, env)
                                     if isinstance(t_idx, int) and 1 <= t_idx <= len(dem_list):
                                         bigM = sum(dem_list[t_idx - 1 :])
@@ -6977,27 +6987,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if not include:
                 continue
             sum_expr = expr["expression"]
-            # Patch: reify comparison predicates inside sum
+            # If the inner expression is a comparison, defer linearization to specialized handlers in _build_constraints.
             if (
                 isinstance(sum_expr, dict)
                 and sum_expr.get("type") == "binop"
                 and sum_expr.get("op") in (">=", "==", ">", "<", "!=")
             ):
-                # Use _bool_expr_var to get or create the auxiliary boolean variable
-                aux_var = self._bool_expr_var(sum_expr, env2)
-                idx = self.var_indices.get(aux_var)
+                continue
+            cdict, cval = self._eval_expr(sum_expr, env=env2)
+            for vname, coef in cdict.items():
+                idx = self.var_indices.get(vname)
+                if idx is None:
+                    idx = self._resolve_tuple_index_varname(vname)
                 if idx is not None:
-                    coef_dict[idx] += sign * 1.0
-            else:
-                cdict, cval = self._eval_expr(sum_expr, env=env2)
-                for vname, coef in cdict.items():
-                    idx = self.var_indices.get(vname)
-                    if idx is None:
-                        idx = self._resolve_tuple_index_varname(vname)
-                    if idx is not None:
-                        coef_dict[idx] += sign * coef
-                if isinstance(cval, (int, float)):
-                    const_ref[0] += sign * cval
+                    coef_dict[idx] += sign * coef
+            if isinstance(cval, (int, float)):
+                const_ref[0] += sign * cval
 
     def _accumulate_binop_with_sum(self, expr, env, coef_dict, sign, const_ref):
         """Helper for _accumulate_sum_to_dict: handles binop where one/both sides include a sum.
