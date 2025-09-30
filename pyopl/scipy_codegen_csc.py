@@ -1761,8 +1761,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     ):
                         d = {}
                         for k, v2 in zip(keys, vals):
-                            kk = tuple(k) if isinstance(k, (list, tuple)) else k
-                            d[kk] = v2
+                            d[tuple(k) if isinstance(k, (list, tuple)) else k] = v2
                         converted = d
                 # Case 2: list of pairs [[key, val], [key, val], ...]
                 # Apply ONLY if each pair has key as str/tuple/list and value numeric (int/float).
@@ -1775,8 +1774,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if pair_ok:
                         d = {}
                         for k, v2 in val:
-                            kk = tuple(k) if isinstance(k, (list, tuple)) else k
-                            d[kk] = v2
+                            d[tuple(k) if isinstance(k, (list, tuple)) else k] = v2
                         converted = d
                 if converted is not None:
                     val = converted
@@ -1788,7 +1786,32 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if indices is not None and val is not None:
             try:
                 v = val
-                for idx in indices:
+                # NEW: support dicts keyed by composite tuples (e.g., {('RoleA','CoreSite'): 1.0})
+                if isinstance(v, dict) and any(isinstance(k, tuple) for k in v.keys()):
+                    # Build composite key from all indices at once
+                    rem_evals = [self._eval_index(idx, env) for idx in indices]
+                    # If single evaluated index already is a tuple (from tuple_literal), use it directly
+                    tuple_key = (
+                        rem_evals[0]
+                        if len(rem_evals) == 1 and isinstance(rem_evals[0], tuple)
+                        else tuple(rem_evals)
+                    )
+                    if tuple_key in v:
+                        v = v[tuple_key]
+                        # Numeric scalar or structured value
+                        if isinstance(v, (int, float)):
+                            logger.debug(f"[resolve_parameter] Found tuple-keyed numeric param: {v}")
+                            return False, float(v), False
+                        if isinstance(v, dict):
+                            logger.debug(f"[resolve_parameter] Found tuple-keyed dict param: {v}")
+                            return False, v, False
+                        if isinstance(v, (list, tuple)):
+                            logger.debug(f"[resolve_parameter] Found tuple-keyed list/tuple param: {v}")
+                            return False, v, False
+                        # Fallback: return as-is
+                        return False, v, False
+                # Fallback: stepwise lookup for nested dict/list
+                for i, idx in enumerate(indices):
                     idx_eval = self._eval_index(idx, env)
                     logger.debug(f"[resolve_parameter] Index eval: idx={idx}, idx_eval={idx_eval}, v={v}, env={env}")
                     if isinstance(v, dict):
