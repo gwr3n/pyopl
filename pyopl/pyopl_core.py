@@ -3088,7 +3088,29 @@ class OPLCompiler:
                             return int(left / right)
                 raise SemanticError(f"Unsupported bound expr: {expr}")
 
-            # Evaluate general numeric expression for param RHS. Limited support: number, name, indexed_name, binop, uminus, parenthesis, funcall(sqrt)
+            # NEW: resolve a named range from declarations or data
+            def resolve_named_range(rng_name: str):
+                # Try model inline range
+                rng_decl = next(
+                    (
+                        d
+                        for d in (model_ast.get("declarations") or [])
+                        if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
+                    ),
+                    None,
+                )
+                if rng_decl:
+                    s = eval_bound(rng_decl["start"])
+                    e = eval_bound(rng_decl["end"])
+                    return s, e
+                # Try .dat provided range
+                data_rng = working_data.get(rng_name)
+                if isinstance(data_rng, dict) and data_rng.get("type") == "range_data":
+                    return int(data_rng["start"]), int(data_rng["end"])
+                raise SemanticError(f"Named range '{rng_name}' not found for computed parameter.")
+
+            # Evaluate general numeric/boolean/string expression for param RHS. Limited support: number, name,
+            # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum aggregates.
             def eval_expr(expr, env):
                 t = expr.get("type") if isinstance(expr, dict) else None
                 if t == "number":
@@ -3100,10 +3122,11 @@ class OPLCompiler:
                 if t == "name":
                     nm = expr.get("value")
                     if nm in env:
-                        return float(env[nm]) if isinstance(env[nm], (int, float)) else env[nm]
+                        v = env[nm]
+                        return float(v) if isinstance(v, (int, float)) else v
                     if nm in working_data:
                         return working_data[nm]
-                    return working_data.get(nm)
+                    raise SemanticError(f"Unknown name '{nm}' in computed parameter expression.")
                 if t == "indexed_name":
                     base = expr.get("name")
                     dims = expr.get("dimensions", [])
@@ -3114,13 +3137,71 @@ class OPLCompiler:
                     if isinstance(arr, dict):
                         return arr[idx_val]
                     if isinstance(arr, list):
-                        pos = int(idx_val) - 1
-                        return float(arr[pos])
+                        # 1-based integer indices for ranges; string/tuple direct for sets
+                        if isinstance(idx_val, (int, float)):
+                            pos = int(idx_val) - 1
+                            return float(arr[pos])
+                        # string/tuple key into dict is handled above; list with string key is invalid
+                        raise SemanticError(f"Parameter '{base}' requires dict access for non-integer index {idx_val!r}.")
                     raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                if t == "sum":
+                    # Evaluate sum over iterators, respecting optional index_constraint
+                    iters = expr.get("iterators", [])
+                    idxc = expr.get("index_constraint")
+                    body = expr.get("expression")
+
+                    # Build iterator domains
+                    domains = []
+                    for it in iters:
+                        rng = it["range"]
+                        if rng["type"] == "range_specifier":
+                            s = eval_bound(rng["start"])
+                            e = eval_bound(rng["end"])
+                            domains.append(list(range(s, e + 1)))
+                        elif rng["type"] == "named_range":
+                            s, e = resolve_named_range(rng["name"])
+                            domains.append(list(range(s, e + 1)))
+                        elif rng["type"] in ("named_set", "named_set_dimension"):
+                            set_name = rng["name"]
+                            set_obj = working_data.get(set_name, [])
+                            if isinstance(set_obj, dict) and "elements" in set_obj:
+                                elems = set_obj["elements"]
+                            else:
+                                elems = set_obj
+                            domains.append(list(elems or []))
+                        else:
+                            raise SemanticError(f"Unsupported range in sum aggregate: {rng['type']}")
+
+                    # Recursive nested loops
+                    def rec_sum(depth, local_env):
+                        if depth == len(iters):
+                            # index constraint filter
+                            if idxc is not None:
+                                cond_val = eval_expr(idxc, local_env)
+                                # treat nonzero numeric as True
+                                if isinstance(cond_val, (int, float)):
+                                    if not bool(cond_val):
+                                        return 0.0
+                                else:
+                                    if not cond_val:
+                                        return 0.0
+                            v = eval_expr(body, local_env)
+                            return float(v)
+                        it_name = iters[depth]["iterator"]
+                        total = 0.0
+                        for val in domains[depth]:
+                            local_env[it_name] = val
+                            total += rec_sum(depth + 1, local_env)
+                        # clean up for safety
+                        local_env.pop(it_name, None)
+                        return total
+
+                    return rec_sum(0, dict(env))
                 if t == "binop":
                     op = expr.get("op")
                     lv = eval_expr(expr.get("left"), env)
                     rv = eval_expr(expr.get("right"), env)
+                    # numeric arithmetic
                     if op == "+":
                         return float(lv) + float(rv)
                     if op == "-":
@@ -3131,7 +3212,13 @@ class OPLCompiler:
                         return float(lv) / float(rv)
                     if op == "%":
                         return float(lv) % float(rv)
-                    if op in ("==", "!=", ">=", "<=", ">", "<"):
+                    # comparisons: support numeric and equality on general types
+                    if op in ("<", "<=", ">", ">=", "==", "!="):
+                        if op == "==":
+                            return 1.0 if (lv == rv) else 0.0
+                        if op == "!=":
+                            return 1.0 if (lv != rv) else 0.0
+                        # numeric comparisons
                         return 1.0 if eval(f"{float(lv)} {op} {float(rv)}") else 0.0
                     raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
                 if t == "uminus":
@@ -3165,10 +3252,8 @@ class OPLCompiler:
                 if t == "name":
                     return env.get(idx_expr.get("value"), idx_expr.get("value"))
                 if t == "field_access_index" or t == "field_access":
-                    # not needed for this feature; add if required later
                     raise SemanticError("Field access in computed parameter indices not supported.")
                 if t == "binop":
-                    # allow simple integer arithmetic for index positions
                     op = idx_expr.get("op")
                     left = eval_index(idx_expr.get("left"), env)
                     right = eval_index(idx_expr.get("right"), env)
@@ -3246,17 +3331,9 @@ class OPLCompiler:
                     )
                 elif rng["type"] == "named_range":
                     named = rng["name"]
-                    rng_decl = None
-                    for d in model_ast["declarations"]:
-                        if d.get("type") == "range_declaration_inline" and d.get("name") == named:
-                            rng_decl = d
-                            break
-                    if not rng_decl:
-                        raise SemanticError(f"Named range '{named}' not found for computed parameter.")
-                    start = eval_bound(rng_decl["start"])
-                    end = eval_bound(rng_decl["end"])
+                    s, e = resolve_named_range(named)
                     values = []
-                    for v in range(start, end + 1):
+                    for v in range(s, e + 1):
                         env = {it["iterator"]: v}
                         values.append(cast_value(eval_expr(decl["expression"], env), var_type))
                     working_data[name] = values
@@ -3269,8 +3346,32 @@ class OPLCompiler:
                             "value": values,
                         }
                     )
+                elif rng["type"] in ("named_set", "named_set_dimension"):
+                    set_name = rng["name"]
+                    set_obj = working_data.get(set_name, [])
+                    if isinstance(set_obj, dict) and "elements" in set_obj:
+                        elems = set_obj["elements"]
+                    else:
+                        elems = set_obj
+                    if elems is None:
+                        elems = []
+                    values = []
+                    for elem in elems:
+                        env = {it["iterator"]: elem}
+                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
+                    # Store as a list aligned with set order; codegen will remap to dict keyed by set labels
+                    working_data[name] = values
+                    new_decls.append(
+                        {
+                            "type": "parameter_inline_indexed",
+                            "var_type": var_type,
+                            "name": name,
+                            "dimensions": dimensions,
+                            "value": values,
+                        }
+                    )
                 else:
-                    raise SemanticError("Only numeric ranges supported in computed indexed parameter.")
+                    raise SemanticError("Only numeric ranges or named sets supported in computed indexed parameter.")
             # Replace declarations list
             model_ast["declarations"] = new_decls
             # Also update data_dict since generators may consult it directly
