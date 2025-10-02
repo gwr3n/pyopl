@@ -246,10 +246,10 @@ class Solver(Enum):
 
 
 # Selector: set this to one of the Example enum values
-EXAMPLE_SELECTOR = Example.SPARSE_EXAMPLE  # e.g. Example.LOT_SIZING, Example.TSP, etc.
+EXAMPLE_SELECTOR = Example.LOT_SIZING  # e.g. Example.LOT_SIZING, Example.TSP, etc.
 
 # Selector: set this to one of the Solver enum values
-SOLVER_SELECTOR = Solver.SCIPY  # e.g. Solver.SCIPY, Solver.GUROBI
+SOLVER_SELECTOR = Solver.GUROBI  # e.g. Solver.SCIPY, Solver.GUROBI
 
 # Run the selected example
 if __name__ == "__main__":
