@@ -59,8 +59,9 @@ def _coalesce_gemini_text(resp) -> str:
     except Exception:
         return ""
 
-
-def generative_solve(prompt, model_file, data_file):
+# Use Gemini 2.5 Flash model
+# model_name = "gemini-2.5-flash"
+def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-flash", iterations=MAX_ITERATIONS):
     """
     Generate a PyOPL model and data file from a prompt using Gemini, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -78,8 +79,7 @@ def generative_solve(prompt, model_file, data_file):
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable not set.")
     genai.configure(api_key=api_key)
-    # Use Gemini 2.5 Flash model
-    model_name = "gemini-2.5-flash"
+    
     model = genai.GenerativeModel(
         model_name,
         generation_config={
@@ -102,8 +102,8 @@ def generative_solve(prompt, model_file, data_file):
         "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
     )
 
-    for iteration in range(MAX_ITERATIONS):
-        print(f"Iteration {iteration + 1}/{MAX_ITERATIONS}")
+    for iteration in range(iterations):
+        print(f"Iteration {iteration + 1}/{iterations}")
         response = model.generate_content(user_prompt)
         try:
             # When response_mime_type is application/json, response.text is JSON

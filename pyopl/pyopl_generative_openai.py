@@ -63,8 +63,12 @@ def _coalesce_response_text(resp) -> str:
     except Exception:
         return ""
 
-
-def generative_solve(prompt, model_file, data_file):
+# Use GPT-5 model
+# model_name = "gpt-5"
+# model_name = "gpt-5-mini"
+# model_name = "gpt-5-nano"
+# model_name = "gpt-4.1"
+def generative_solve(prompt, model_file, data_file, model_name = "gpt-5-mini", iterations=MAX_ITERATIONS):
     """
     Generate a PyOPL model and data file from a prompt using OpenAI GPT-5, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -82,11 +86,6 @@ def generative_solve(prompt, model_file, data_file):
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
     client = OpenAI(api_key=api_key)
-    # Use GPT-5 model
-    # model_name = "gpt-5"
-    model_name = "gpt-5-mini"
-    # model_name = "gpt-5-nano"
-    # model_name = "gpt-4.1"
 
     user_prompt = (
         "You are an expert in mathematical optimization and PyOPL. "
@@ -102,8 +101,8 @@ def generative_solve(prompt, model_file, data_file):
         "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
     )
 
-    for iteration in range(MAX_ITERATIONS):
-        print(f"Iteration {iteration + 1}/{MAX_ITERATIONS}")
+    for iteration in range(iterations):
+        print(f"Iteration {iteration + 1}/{iterations}")
         response = client.responses.create(model=model_name, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS)
         content = _coalesce_response_text(response)
         if not content:
