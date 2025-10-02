@@ -3307,71 +3307,59 @@ class OPLCompiler:
                 var_type = decl.get("var_type") or ""
                 dimensions = decl.get("dimensions", [])
                 iterators = decl.get("iterators", [])
-                if len(dimensions) != 1 or len(iterators) != 1:
-                    raise SemanticError("Computed indexed params currently support exactly one iterator/dimension.")
-                it = iterators[0]
-                rng = it["range"]
 
-                if rng["type"] == "range_specifier":
-                    start = eval_bound(rng["start"])
-                    end = eval_bound(rng["end"])
-                    values = []
-                    for v in range(start, end + 1):
-                        env = {it["iterator"]: v}
-                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
-                    working_data[name] = values
-                    new_decls.append(
-                        {
-                            "type": "parameter_inline_indexed",
-                            "var_type": var_type,
-                            "name": name,
-                            "dimensions": dimensions,
-                            "value": values,
-                        }
-                    )
-                elif rng["type"] == "named_range":
-                    named = rng["name"]
-                    s, e = resolve_named_range(named)
-                    values = []
-                    for v in range(s, e + 1):
-                        env = {it["iterator"]: v}
-                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
-                    working_data[name] = values
-                    new_decls.append(
-                        {
-                            "type": "parameter_inline_indexed",
-                            "var_type": var_type,
-                            "name": name,
-                            "dimensions": dimensions,
-                            "value": values,
-                        }
-                    )
-                elif rng["type"] in ("named_set", "named_set_dimension"):
-                    set_name = rng["name"]
-                    set_obj = working_data.get(set_name, [])
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        elems = set_obj["elements"]
-                    else:
-                        elems = set_obj
-                    if elems is None:
-                        elems = []
-                    values = []
-                    for elem in elems:
-                        env = {it["iterator"]: elem}
-                        values.append(cast_value(eval_expr(decl["expression"], env), var_type))
-                    # Store as a list aligned with set order; codegen will remap to dict keyed by set labels
-                    working_data[name] = values
-                    new_decls.append(
-                        {
-                            "type": "parameter_inline_indexed",
-                            "var_type": var_type,
-                            "name": name,
-                            "dimensions": dimensions,
-                            "value": values,
-                        }
-                    )
-                else:
-                    raise SemanticError("Only numeric ranges or named sets supported in computed indexed parameter.")
+                # Support N-dimensional computed parameters (build nested lists in iterator order)
+                # Domains for each iterator (respecting ranges and named sets)
+                def _domain_for_range(rng):
+                    if rng["type"] == "range_specifier":
+                        s = eval_bound(rng["start"])
+                        e = eval_bound(rng["end"])
+                        return list(range(s, e + 1))
+                    if rng["type"] == "named_range":
+                        s, e = resolve_named_range(rng["name"])
+                        return list(range(s, e + 1))
+                    if rng["type"] in ("named_set", "named_set_dimension"):
+                        set_name = rng["name"]
+                        set_obj = working_data.get(set_name, [])
+                        if isinstance(set_obj, dict) and "elements" in set_obj:
+                            elems = set_obj["elements"]
+                        else:
+                            elems = set_obj
+                        return list(elems or [])
+                    raise SemanticError(f"Unsupported iterator range type '{rng['type']}' for computed parameter '{name}'.")
+
+                it_names = [it["iterator"] for it in iterators]
+                domains = [_domain_for_range(it["range"]) for it in iterators]
+
+                # Recursively build nested lists in row-major order following iterator sequence
+                def build_nested(depth: int, env_map: dict) -> object:
+                    if depth == len(iterators):
+                        # Ground evaluation at the leaf
+                        val = eval_expr(decl["expression"], env_map)
+                        return cast_value(val, var_type)
+                    acc = []
+                    itn = it_names[depth]
+                    for v in domains[depth]:
+                        env_map[itn] = v
+                        acc.append(build_nested(depth + 1, env_map))
+                    # Clean up to avoid leaking iterator into sibling branches
+                    env_map.pop(itn, None)
+                    return acc
+
+                computed_value = build_nested(0, {})
+
+                # Store nested list in working_data and rewrite declaration to an inline indexed parameter
+                working_data[name] = computed_value
+                new_decls.append(
+                    {
+                        "type": "parameter_inline_indexed",
+                        "var_type": var_type,
+                        "name": name,
+                        "dimensions": dimensions,
+                        "value": computed_value,
+                    }
+                )
+                continue
             # Replace declarations list
             model_ast["declarations"] = new_decls
             # Also update data_dict since generators may consult it directly

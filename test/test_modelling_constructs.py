@@ -22,6 +22,88 @@ class DummyAST:
 
 
 class TestModellingConstructs(unittest.TestCase):
+    def test_computed_indexed_parameters_nd(self):
+        """Computed indexed parameters over multiple iterators should be supported and rewritten to inline indexed params."""
+        from pyopl.pyopl_core import OPLCompiler
+
+        model = """
+            int I = 2;
+            int J = 3;
+            int K = 2;
+
+            // 2D computed indexed parameter
+            float A[i in 1..I, j in 1..J] = i + 2 * j;
+
+            // 3D computed indexed parameter
+            float B[i in 1..I, j in 1..J, k in 1..K] = i * j + k;
+
+            dvar float x;
+
+            // Objective references the computed params to ensure they are emitted and indexable
+            minimize x + sum(i in 1..I, j in 1..J) A[i][j]
+                      + sum(i in 1..I, j in 1..J, k in 1..K) B[i][j][k];
+
+            subject to {
+                x >= 0;
+            }
+        """
+        compiler = OPLCompiler()
+        ast, code, data = compiler.compile_model(model, solver="gurobi")
+
+        # Verify declarations for A and B are rewritten to parameter_inline_indexed with nested list values
+        decls = {d["name"]: d for d in ast["declarations"] if d.get("name") in ("A", "B")}
+        self.assertIn("A", decls)
+        self.assertIn("B", decls)
+        self.assertEqual(decls["A"]["type"], "parameter_inline_indexed")
+        self.assertEqual(decls["B"]["type"], "parameter_inline_indexed")
+
+        A_val = decls["A"]["value"]
+        B_val = decls["B"]["value"]
+
+        # Shape checks: A is 2x3, B is 2x3x2
+        self.assertIsInstance(A_val, list)
+        self.assertEqual(len(A_val), 2)
+        self.assertTrue(all(isinstance(row, list) and len(row) == 3 for row in A_val))
+
+        self.assertIsInstance(B_val, list)
+        self.assertEqual(len(B_val), 2)
+        self.assertTrue(all(isinstance(plane, list) and len(plane) == 3 for plane in B_val))
+        self.assertTrue(all(isinstance(vec, list) and len(vec) == 2 for plane in B_val for vec in plane))
+
+        # Value checks for A: [[3,5,7],[4,6,8]]
+        self.assertEqual(A_val, [[3, 5, 7], [4, 6, 8]])
+
+        # Value checks for B:
+        # [
+        #   [ [2,3], [3,4], [4,5] ],
+        #   [ [3,4], [5,6], [7,8] ]
+        # ]
+        self.assertEqual(
+            B_val,
+            [
+                [[2, 3], [3, 4], [4, 5]],
+                [[3, 4], [5, 6], [7, 8]],
+            ],
+        )
+
+        # Ensure data_dict contains same computed values
+        self.assertIn("A", data)
+        self.assertIn("B", data)
+        self.assertEqual(data["A"], A_val)
+        self.assertEqual(data["B"], B_val)
+
+        # Sanity: sums used in the objective are as expected (A sum = 33, B sum = 54)
+        self.assertEqual(sum(sum(row) for row in A_val), 33)
+        self.assertEqual(sum(sum(sum(vec) for vec in plane) for plane in B_val), 54)
+
+        # Both backends should be able to generate code from the rewritten AST
+        gcode = GurobiCodeGenerator(ast).generate_code()
+        self.assertIn("A", gcode)
+        self.assertIn("B", gcode)
+        scode = SciPyCodeGenerator(ast).generate_code()
+        self.assertIn("A", scode)
+        self.assertIn("B", scode)
+
     def test_scalar_param_expression_in_declaration(self):
         """
         Verify that a scalar parameter declared with a general expression is accepted,
