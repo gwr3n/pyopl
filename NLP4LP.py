@@ -1,0 +1,224 @@
+import argparse
+import json
+import os
+import re
+import sys
+from typing import Any, Optional
+
+from pyopl import solve
+from pyopl.pyopl_generative_openai import generative_solve  
+
+
+def _ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+
+def _extract_number(value: Any) -> Optional[float]:
+    # Try to coerce to float directly
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    # Try to pull first number from a string
+    if isinstance(value, str):
+        m = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", value.strip())
+        if m:
+            try:
+                return float(m.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def _extract_objective(result: Any) -> Optional[float]:
+    # Common dict keys
+    if isinstance(result, dict):
+        for k in ("objective_value", "objective", "obj_value", "objectiveValue", "obj"):
+            if k in result:
+                num = _extract_number(result[k])
+                if num is not None:
+                    return num
+    # Object attributes
+    for attr in ("objective_value", "objective", "obj_value", "objectiveValue", "obj"):
+        if hasattr(result, attr):
+            num = _extract_number(getattr(result, attr))
+            if num is not None:
+                return num
+    # Fallback: try string parsing
+    try:
+        text = str(result)
+        m = re.search(r"(objective|obj(?:ective)?_?value)\s*[:=]\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)", text, re.IGNORECASE)
+        if m:
+            return float(m.group(2))
+    except Exception:
+        pass
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run NLP4LP problem with generative_solve and compare objective.")
+    parser.add_argument("--json", default="gen_ai/NLP4LP.json", help="Path to NLP4LP JSON file.")
+    parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON list.")
+    parser.add_argument("--model", default="tmp/gen_pyopl_model.mod", help="Output path for generated .mod file.")
+    parser.add_argument("--data", default="tmp/gen_pyopl_data.dat", help="Output path for generated .dat file.")
+    parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
+    parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
+    # NEW: batch mode to solve all problems
+    parser.add_argument("--all", action="store_true", help="Solve all problems in NLP4LP.json and save results to --results.")
+    parser.add_argument("--results", default="gen_ai/NLP4LP_results.json", help="Output path for batch results JSON (used with --all).")
+    args = parser.parse_args()
+
+    # Load dataset
+    with open(args.json, "r", encoding="utf-8") as f:
+        dataset = json.load(f)
+
+    if not isinstance(dataset, list) or not dataset:
+        print("Dataset is empty or not a list.", file=sys.stderr)
+        return 2
+
+    # NEW: batch processing branch
+    if args.all:
+        _ensure_parent_dir(args.results)
+        results = []
+        all_ok = True
+
+        for i, item in enumerate(dataset):
+            prompt = item.get("en_question")
+            expected_raw = item.get("en_answer")
+            entry = {
+                "index": i,
+                "solver": args.solver,
+                "tolerance": args.tolerance,
+            }
+
+            if not prompt:
+                entry.update({"error": "Selected item has no 'en_question'."})
+                results.append(entry)
+                all_ok = False
+                continue
+
+            expected = _extract_number(expected_raw)
+            if expected is None:
+                entry.update({"expected_objective": None, "error": f"Could not parse numeric en_answer from: {expected_raw}"})
+                results.append(entry)
+                all_ok = False
+                continue
+
+            entry["expected_objective"] = expected
+
+            # Use per-index files to avoid overwriting
+            model_root, model_ext = os.path.splitext(args.model)
+            data_root, data_ext = os.path.splitext(args.data)
+            model_path = f"{model_root}_{i}{model_ext or ''}"
+            data_path = f"{data_root}_{i}{data_ext or ''}"
+
+            _ensure_parent_dir(model_path)
+            _ensure_parent_dir(data_path)
+
+            # Step 1-2: Generate model and data
+            try:
+                assessment = generative_solve(prompt, model_path, data_path)
+                entry["generation_assessment"] = assessment
+            except Exception as e:
+                entry.update({"error": f"generative_solve failed: {e}"})
+                results.append(entry)
+                all_ok = False
+                continue
+
+            # Step 3: Solve and compare
+            try:
+                result = solve(model_path, data_path, solver=args.solver)
+                obj = _extract_objective(result)
+                if obj is None:
+                    entry.update({"observed_objective": None, "error": f"Could not extract objective_value from result: {result}"})
+                    all_ok = False
+                else:
+                    diff = abs(obj - expected)
+                    ok = diff <= args.tolerance
+                    entry.update(
+                        {
+                            "observed_objective": obj,
+                            "abs_diff": diff,
+                            "pass": ok,
+                        }
+                    )
+                    if not ok:
+                        all_ok = False
+            except Exception as e:
+                entry.update({"observed_objective": None, "error": f"solve failed: {e}"})
+                all_ok = False
+
+            results.append(entry)
+
+            with open(args.results, "w", encoding="utf-8") as f:
+                json.dump(results, f, indent=2)
+            print(f"Wrote results for {len(results)} problems to {args.results}")
+
+        return 0 if all_ok else 1
+
+    # Single problem branch
+    if args.index < 0 or args.index >= len(dataset):
+        print(f"Index {args.index} out of range. Dataset size: {len(dataset)}", file=sys.stderr)
+        return 2
+
+    item = dataset[args.index]
+    prompt = item.get("en_question")
+    expected_raw = item.get("en_answer")
+
+    if not prompt:
+        print("Selected item has no 'en_question'.", file=sys.stderr)
+        return 2
+
+    expected = _extract_number(expected_raw)
+    if expected is None:
+        print(f"Could not parse numeric en_answer from: {expected_raw}", file=sys.stderr)
+        return 2
+
+    # Ensure output dirs exist
+    _ensure_parent_dir(args.model)
+    _ensure_parent_dir(args.data)
+
+    # Step 1-2: Generate model and data
+    try:
+        assessment = generative_solve(prompt, args.model, args.data)
+        print(f"generative_solve completed. Assessment: {assessment}")
+    except Exception as e:
+        print(f"generative_solve failed: {e}", file=sys.stderr)
+        return 3
+
+    # Step 3: Solve and compare
+    try:
+        result = solve(args.model, args.data, solver=args.solver)
+        obj = _extract_objective(result)
+    except Exception as e:
+        print(f"solve failed: {e}", file=sys.stderr)
+        return 4
+
+    if obj is None:
+        print(f"Could not extract objective_value from result: {result}", file=sys.stderr)
+        return 5
+
+    diff = abs(obj - expected)
+    ok = diff <= args.tolerance
+
+    print("Summary:")
+    print(json.dumps(
+        {
+            "index": args.index,
+            "solver": args.solver,
+            "expected_objective": expected,
+            "observed_objective": obj,
+            "abs_diff": diff,
+            "tolerance": args.tolerance,
+            "pass": ok,
+        },
+        indent=2,
+    ))
+
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
