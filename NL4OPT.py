@@ -85,8 +85,6 @@ def main() -> int:
         all_ok = True
 
         for i, item in enumerate(dataset):
-            if i < 64: 
-                continue
             prompt = item.get("en_question")
             expected_raw = item.get("en_answer")
             entry = {
