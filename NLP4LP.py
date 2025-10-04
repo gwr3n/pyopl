@@ -119,8 +119,10 @@ def main() -> int:
 
             # Step 1-2: Generate model and data
             try:
-                assessment = generative_solve(prompt, model_path, data_path)
-                entry["generation_assessment"] = assessment
+                result = generative_solve(prompt, model_path, data_path, return_statistics=True)
+                entry["generation_assessment"] = result["assessment"]
+                entry["generation_iterations"] = result["iterations"]
+                entry["syntax_errors"] = result["syntax_errors"]
             except Exception as e:
                 entry.update({"error": f"generative_solve failed: {e}"})
                 results.append(entry)
