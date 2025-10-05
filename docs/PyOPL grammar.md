@@ -91,9 +91,9 @@ Semantics:
 Types include tuple type names as identifiers.
 
 ```
-// Decision variables
-<declaration> ::= 'dvar' <type> <NAME> ';'
-                | 'dvar' <type> <NAME> <indexed_dimensions> ';'
+// Decision variables (numeric/boolean only; string not allowed)
+<declaration> ::= 'dvar' <dvar_type> <NAME> ';'
+                | 'dvar' <dvar_type> <NAME> <indexed_dimensions> ';'
 
 // Ranges
                 | 'range' <NAME> '=' <range_expr> '..' <range_expr> ';'
@@ -125,6 +125,7 @@ Types include tuple type names as identifiers.
 
 // Types
 <type> ::= 'int' | 'float' | 'int+' | 'float+' | 'boolean' | 'string' | <NAME>  // <NAME> can be a tuple type
+<dvar_type> ::= 'int' | 'float' | 'int+' | 'float+' | 'boolean'                  // string is not permitted for dvar
 ```
 
 Typed scalar sets in models:
@@ -223,6 +224,7 @@ Decision expressions (expanded on use):
 
 <index_specifier> ::= <expression> '..' <expression>    // range index (int-valued bounds)
                     | <expression>                      // general index: number/name/arithmetic/paren/field/string-literal
+                    | <tuple_literal>                   // tuple index into set-of-tuples
 
 <range_expr> ::= <expression>                           // must be integer-valued
 
@@ -430,6 +432,10 @@ From lowest to highest binding power:
 - Untyped sets in model: only set-of-tuples assignments with tuple literals are allowed; scalar sets in model must be typed.
 - Decision expressions (`dexpr`) are expanded on use (scalar and indexed forms).
 - Conditional constraints: `if (cond) { ... } [else { ... }]` — cond must be ground; within `forall`, cond may reference iterators and parameters only.
+- String is not a valid decision variable domain. Use string only for:
+  - tuple fields,
+  - typed scalar sets in models/data,
+  - parameter values. Attempting `dvar string ...` is a semantic error.
 
 ## Example
 

@@ -920,6 +920,12 @@ class OPLParser(Parser):
         # Allow empty tuple literal <>
         return {"type": "tuple_literal", "elements": []}
 
+    # Make tuple literal usable as an expression (e.g., as an index into tuple-set–indexed vars/params)
+    @_("tuple_literal")  # type: ignore
+    def primary(self, p):
+        # Keep original tuple_literal node; sem_type not required for index usage
+        return p.tuple_literal
+
     @_("tuple_element_list ',' tuple_element")  # type: ignore
     def tuple_element_list(self, p):
         return p.tuple_element_list + [p.tuple_element]
@@ -1215,11 +1221,23 @@ class OPLParser(Parser):
 
     @_('DVAR type NAME ";"')  # type: ignore
     def declaration(self, p):
+        # Disallow string decision variables (unsupported in codegen)
+        if p.type == "string":
+            raise SemanticError(
+                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
+                lineno=p.lineno,
+            )
         self.symbol_table.add_symbol(p.NAME, p.type, is_dvar=True, lineno=p.lineno)
         return {"type": "dvar", "var_type": p.type, "name": p.NAME}
 
     @_('DVAR type NAME indexed_dimensions ";"')  # type: ignore
     def declaration(self, p):
+        # Disallow string decision variables (unsupported in codegen)
+        if p.type == "string":
+            raise SemanticError(
+                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
+                lineno=p.lineno,
+            )
         processed_dimensions = []
         for dim_spec in p.indexed_dimensions:
             if dim_spec["type"] == "range_index":
@@ -1840,7 +1858,7 @@ class OPLParser(Parser):
     def index_specifier(self, p):
         # Allow full expressions as index specifiers (e.g., t-1, t)
         expr = p.expression
-        # Accept binop, uminus, parenthesized_expression, field_access, string literal, etc.
+        # Accept binop, uminus, parenthesized_expression, field_access, tuple_literal, string literal, etc.
         if expr["type"] in [
             "binop",
             "uminus",
@@ -1848,6 +1866,7 @@ class OPLParser(Parser):
             "field_access",
             "field_access_index",
             "string_literal",  # <-- allow string literal as an index
+            "tuple_literal",  # <-- allow tuple literal as an index
         ]:
             # If it's a number_literal_index but missing sem_type, set it
             if expr["type"] == "number_literal_index" and "sem_type" not in expr:
@@ -1860,7 +1879,7 @@ class OPLParser(Parser):
                 "type": "field_access_index",
                 "base": expr["base"],
                 "field": expr["field"],
-                "sem_type": expr["sem_type"],
+                "sem_type": expr.get("sem_type", None),
             }
         # Accept plain 'name' as an index (convert to name_reference_index for consistency)
         if expr["type"] == "name":

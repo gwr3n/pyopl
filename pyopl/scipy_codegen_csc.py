@@ -1312,6 +1312,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 update_bounds(idx, constr["op"], rhs_val)
                 return
             elif left["type"] == "indexed_name":
+                # First try canonical var name construction (handles tuple indices and mixed forms)
+                try:
+                    vname = self._multi_indexed_var_name(left, env, self._eval_index_expr)
+                    idx = var_indices.get(vname)
+                    update_bounds(idx, constr["op"], rhs_val)
+                    return
+                except Exception:
+                    pass
+                # Fallback: legacy remapping for simple numeric/string indices
                 dims = left["dimensions"]
                 remapped: list[Any] = []
                 for d in dims:
@@ -3148,6 +3157,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if not hasattr(self, "_expr_evaluator"):
             self._expr_evaluator = ExpressionEvaluator(self)
         return self._expr_evaluator.eval(expr, env)
+
+    # NEW: delegate index-expression evaluation to the ExpressionEvaluator
+    def _eval_index_expr(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> tuple[Dict[str, Any], Any]:
+        if not hasattr(self, "_expr_evaluator"):
+            self._expr_evaluator = ExpressionEvaluator(self)
+        return self._expr_evaluator._eval_index_expr(dim_expr, env)
 
     def _build_objective(self):
         self._add_code_line("# Objective vector c")

@@ -83,6 +83,59 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    def test_tuples_index_specifiers(self):
+        """
+        Test model with tuple index specifiers with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            tuple K { int i; string s; }
+            {K} KS = ...;
+
+            dvar float x[KS];
+
+            maximize x[<1, "A">] + x[<2, "B">];
+
+            subject to {
+              // Make the problem bounded so maximize is well-defined
+              x[<1, "A">] <= 1;
+              x[<2, "B">] <= 1;
+
+              // Non-negativity
+              x[<1, "A">] >= 0;
+              x[<2, "B">] >= 0;
+            }
+            """
+        data_code = """
+            KS = { <1, "A">, <2, "B"> };
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_min_max(self):
         """
         Test minl/maxl model with both solvers.
