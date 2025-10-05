@@ -61,7 +61,7 @@ def _coalesce_gemini_text(resp) -> str:
 
 # Use Gemini 2.5 Flash model
 # model_name = "gemini-2.5-flash"
-def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-flash", iterations=MAX_ITERATIONS):
+def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-flash", iterations=MAX_ITERATIONS, return_statistics=False):
     """
     Generate a PyOPL model and data file from a prompt using Gemini, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -74,6 +74,8 @@ def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-fla
 
     # grammar = _read_pyopl_grammar()
     grammar_implementation = _read_pyopl_code()
+    # grammar_implementation = ""
+
     # Use API key from environment variable
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
@@ -171,6 +173,7 @@ def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-fla
         data_code = f.read()
 
     # Final assessment prompt
+    syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     assessment_prompt = (
         "Given the following prompt and the generated PyOPL model and data, assess how well the model and data align with the original intent. "
         "Be critical and specific. Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
@@ -180,13 +183,21 @@ def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-fla
         f"PROMPT:\n{prompt}\n\n"
         f"MODEL:\n{model_code}\n\n"
         f"DATA:\n{data_code}\n\n"
+        f"{syntax_errors_str}"
         "Provide your assessment as a short textual paragraph."
     )
     assessment_response = model.generate_content(assessment_prompt)
     assessment_text = _coalesce_gemini_text(assessment_response) or getattr(assessment_response, "text", "") or ""
     if not assessment_text:
         raise RuntimeError(f"Empty assessment response. Full response: {assessment_response}")
-    return assessment_text.strip()
+    if return_statistics:
+        return {
+            "iterations": iteration + 1,
+            "assessment": assessment_text.strip(),
+            "syntax_errors": syntax_errors,
+        }
+    else:
+        return assessment_text.strip()
 
 
 def generative_feedback(prompt, model_file, data_file):
