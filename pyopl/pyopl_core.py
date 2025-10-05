@@ -1221,11 +1221,23 @@ class OPLParser(Parser):
 
     @_('DVAR type NAME ";"')  # type: ignore
     def declaration(self, p):
+        # Disallow string decision variables (unsupported in codegen)
+        if p.type == "string":
+            raise SemanticError(
+                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
+                lineno=p.lineno,
+            )
         self.symbol_table.add_symbol(p.NAME, p.type, is_dvar=True, lineno=p.lineno)
         return {"type": "dvar", "var_type": p.type, "name": p.NAME}
 
     @_('DVAR type NAME indexed_dimensions ";"')  # type: ignore
     def declaration(self, p):
+        # Disallow string decision variables (unsupported in codegen)
+        if p.type == "string":
+            raise SemanticError(
+                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
+                lineno=p.lineno,
+            )
         processed_dimensions = []
         for dim_spec in p.indexed_dimensions:
             if dim_spec["type"] == "range_index":
