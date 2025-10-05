@@ -919,7 +919,7 @@ class OPLParser(Parser):
     def tuple_literal(self, p):
         # Allow empty tuple literal <>
         return {"type": "tuple_literal", "elements": []}
-    
+
     # Make tuple literal usable as an expression (e.g., as an index into tuple-set–indexed vars/params)
     @_("tuple_literal")  # type: ignore
     def primary(self, p):
@@ -1853,8 +1853,8 @@ class OPLParser(Parser):
             "parenthesized_expression",
             "field_access",
             "field_access_index",
-            "string_literal",          # <-- allow string literal as an index
-            "tuple_literal",           # <-- allow tuple literal as an index
+            "string_literal",  # <-- allow string literal as an index
+            "tuple_literal",  # <-- allow tuple literal as an index
         ]:
             # If it's a number_literal_index but missing sem_type, set it
             if expr["type"] == "number_literal_index" and "sem_type" not in expr:
