@@ -82,6 +82,76 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    def test_tuple_set_comprehension_pairs(self):
+        """
+        Exercise tuple-set comprehension:
+          {Pair} Pairs =
+            { <i,j,i2,j2> |
+                i in Rows, j in Cols,
+                i2 in Rows, j2 in Cols :
+                ((i-1)*b + j) < ((i2-1)*b + j2) // row-major strict ordering
+            };
+        Verifies that Pairs is materialized with the expected row-major ordering and size.
+        """
+        model_code = """
+            int a = ...;          // rows
+            int b = 3;            // cols
+            range Rows = 1..a;
+            range Cols = 1..b;
+
+            tuple Pair {
+              int i;
+              int j;
+              int i2;
+              int j2;
+            }
+
+            {Pair} Pairs =
+              { <i,j,i2,j2> |
+                  i in Rows, j in Cols,
+                  i2 in Rows, j2 in Cols :
+                  ((i-1)*b + j) < ((i2-1)*b + j2)
+              };
+
+            // Trivial model using Pairs to ensure codegen touches it
+            dvar boolean y[Pairs];
+
+            minimize sum(pr in Pairs) y[pr];
+
+            subject to {
+              forall(pr in Pairs) y[pr] >= 0;
+            }
+            """
+        data_code = """
+            a = 2;
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_param_multi_index_rhs_expression_initialization(self):
         """
         Test model with multi-indexed parameter initialized from expression with both solvers.

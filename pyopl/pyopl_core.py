@@ -187,6 +187,7 @@ class OPLLexer(Lexer):
         ">",
         "?",
         "!",
+        "|",
         # Note: DOT ('.') is now a token, not a literal; added '!' for logical NOT
     }
 
@@ -410,6 +411,43 @@ class OPLParser(Parser):
     def type(self, p):
         # Allow user-defined types (tuple types) as valid types for tuple fields
         return p.NAME
+
+    @_("NAME")  # NEW: allow iterator names inside tuple literals (e.g., <i,j,...>)
+    def tuple_element(self, p):
+        # Do not require sem_type here; it will be resolved during evaluation
+        return {"type": "name", "value": p.NAME}
+
+    # --- Typed set-of-tuples WITH comprehension ---
+    # { Pair } Pairs = { <i,j,i2,j2> | i in Rows, j in Cols, i2 in Rows, j2 in Cols : condition };
+    @_('"{" NAME "}" NAME "=" "{" tuple_comprehension "}" ";"')  # type: ignore
+    def declaration(self, p):
+        tuple_type = p.NAME0
+        set_name = p.NAME1
+        comp = p.tuple_comprehension
+        # Register symbol as a set (typed) so later references resolve
+        self.symbol_table.add_symbol(
+            set_name,
+            "set",
+            value={"tuple_type": tuple_type},
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "set_of_tuples_comprehension",
+            "tuple_type": tuple_type,
+            "name": set_name,
+            "comprehension": comp,
+        }
+
+    # tuple_comprehension: <tuple_elems> | sum_index_list [ : condition ]
+    @_('"<" tuple_element_list ">" "|" sum_index_list opt_index_constraint')  # type: ignore
+    def tuple_comprehension(self, p):
+        return {
+            "type": "tuple_comprehension",
+            "tuple_expr": {"type": "tuple_literal", "elements": p.tuple_element_list},
+            "iterators": p.sum_index_list,
+            "index_constraint": p.opt_index_constraint,
+        }
 
     # --- DEXPR: decision expressions (expand-on-use) ---
 
@@ -3273,20 +3311,39 @@ class OPLCompiler:
                 if t == "indexed_name":
                     base = expr.get("name")
                     dims = expr.get("dimensions", [])
-                    if len(dims) != 1:
-                        raise SemanticError("Only single-dimension indexed parameters supported in eval.")
-                    idx_val = eval_index(dims[0], env)
+                    # Support multi-dimensional indices (range or set based)
                     arr = working_data.get(base)
-                    if isinstance(arr, dict):
-                        return arr[idx_val]
-                    if isinstance(arr, list):
-                        # 1-based integer indices for ranges; string/tuple direct for sets
-                        if isinstance(idx_val, (int, float)):
-                            pos = int(idx_val) - 1
-                            return float(arr[pos])
-                        # string/tuple key into dict is handled above; list with string key is invalid
-                        raise SemanticError(f"Parameter '{base}' requires dict access for non-integer index {idx_val!r}.")
-                    raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                    if arr is None:
+                        raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                    # Evaluate each index and progressively index into arr
+                    cur = arr
+                    for dim in dims:
+                        idx_val = eval_index(dim, env)
+                        # Normalize float-int to int
+                        if isinstance(idx_val, float) and idx_val.is_integer():
+                            idx_val = int(idx_val)
+                        if isinstance(cur, list):
+                            if not isinstance(idx_val, (int, float)):
+                                raise SemanticError(
+                                    f"List parameter '{base}' requires integer indices, got {type(idx_val).__name__}: {idx_val!r}"
+                                )
+                            pos = int(idx_val) - 1  # OPL is 1-based for range-indexed lists
+                            try:
+                                cur = cur[pos]
+                            except Exception as e:
+                                raise SemanticError(f"Index out of bounds for '{base}' at {idx_val}: {e}") from e
+                        elif isinstance(cur, dict):
+                            # dict can be keyed by ints/strings/tuples depending on declaration
+                            try:
+                                cur = cur[idx_val]
+                            except Exception as e:
+                                raise SemanticError(f"Key '{idx_val!r}' not found in parameter '{base}': {e}") from e
+                        else:
+                            raise SemanticError(f"Cannot index into value of type {type(cur).__name__} for '{base}'.")
+                    # At the end, cur is the scalar or structured element
+                    if isinstance(cur, (int, float)):
+                        return float(cur)
+                    return cur
                 if t == "sum":
                     # Evaluate sum over iterators, respecting optional index_constraint
                     iters = expr.get("iterators", [])
@@ -3298,12 +3355,12 @@ class OPLCompiler:
                     for it in iters:
                         rng = it["range"]
                         if rng["type"] == "range_specifier":
-                            s = eval_bound(rng["start"])
-                            e = eval_bound(rng["end"])
-                            domains.append(list(range(s, e + 1)))
+                            st = eval_bound(rng["start"])
+                            en = eval_bound(rng["end"])
+                            domains.append(list(range(st, en + 1)))
                         elif rng["type"] == "named_range":
-                            s, e = resolve_named_range(rng["name"])
-                            domains.append(list(range(s, e + 1)))
+                            st, en = resolve_named_range(rng["name"])
+                            domains.append(list(range(st, en + 1)))
                         elif rng["type"] in ("named_set", "named_set_dimension"):
                             set_name = rng["name"]
                             set_obj = working_data.get(set_name, [])
@@ -3506,6 +3563,101 @@ class OPLCompiler:
             # Replace declarations list
             model_ast["declarations"] = new_decls
             # Also update data_dict since generators may consult it directly
+            data_dict = dict(working_data)
+
+        # NEW: evaluate typed set-of-tuples comprehensions into concrete sets
+        if model_ast and "declarations" in model_ast:
+            new_decls2 = []
+            for decl in model_ast["declarations"]:
+                if decl.get("type") != "set_of_tuples_comprehension":
+                    new_decls2.append(decl)
+                    continue
+
+                comp = decl.get("comprehension") or {}
+                tuple_expr = comp.get("tuple_expr")
+                iterators = comp.get("iterators") or []
+                idxc = comp.get("index_constraint")
+
+                # Domain resolution for each iterator (range, named range, named set)
+                def _domain_for_range(rng):
+                    if rng["type"] == "range_specifier":
+                        s = eval_bound(rng["start"])
+                        e = eval_bound(rng["end"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] == "named_range":
+                        s, e = resolve_named_range(rng["name"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] in ("named_set", "named_set_dimension"):
+                        set_name = rng["name"]
+                        set_obj = working_data.get(set_name, [])
+                        if isinstance(set_obj, dict) and "elements" in set_obj:
+                            elems = set_obj["elements"]
+                        else:
+                            elems = set_obj
+                        return list(elems or [])
+                    raise SemanticError(
+                        f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
+                    )
+
+                it_names = [it["iterator"] for it in iterators]
+                domains = [_domain_for_range(it["range"]) for it in iterators]
+
+                # Evaluate tuple expression into a Python tuple under env
+                def _eval_tuple(expr, env):
+                    if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
+                        out = []
+                        for el in expr.get("elements", []):
+                            out.append(_eval_tuple(el, env))
+                        return tuple(out)
+                    if isinstance(expr, dict):
+                        return eval_expr(expr, env)
+                    return expr
+
+                tuples = []
+
+                # Nested loops over cartesian product of all iterator domains
+                def _recurse(depth, env):
+                    if depth == len(it_names):
+                        # filter
+                        if idxc is not None:
+                            cond_val = eval_expr(idxc, env)
+                            # robust truthiness for numeric/bool/string
+                            if isinstance(cond_val, (int, float, bool)):
+                                if not bool(cond_val):
+                                    return
+                            else:
+                                if not cond_val:
+                                    return
+                        tval = _eval_tuple(tuple_expr, env)
+
+                        # Normalize nested numeric to int when integrals
+                        def _norm(v):
+                            if isinstance(v, float) and v.is_integer():
+                                return int(v)
+                            if isinstance(v, tuple):
+                                return tuple(_norm(x) for x in v)
+                            return v
+
+                        tuples.append(_norm(tval))
+                        return
+                    nm = it_names[depth]
+                    for v in domains[depth]:
+                        env[nm] = v
+                        _recurse(depth + 1, env)
+                    env.pop(nm, None)
+
+                _recurse(0, {})
+                # Mutate working_data and AST: concrete set as list of tuples
+                working_data[decl["name"]] = tuples
+                new_decls2.append(
+                    {
+                        "type": "set_of_tuples",
+                        "tuple_type": decl.get("tuple_type"),
+                        "name": decl.get("name"),
+                        "value": tuples,
+                    }
+                )
+            model_ast["declarations"] = new_decls2
             data_dict = dict(working_data)
 
         # Use working_data for subsequent validation/emission
