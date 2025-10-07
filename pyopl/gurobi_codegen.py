@@ -2279,8 +2279,14 @@ class GurobiCodeGenerator:
             if idx.get("type") in ("name_reference_index", "name"):
                 return f"{base_name}[{idx['name']}]"
             elif idx.get("type") == "tuple_literal":
-                tuple_val = tuple(idx["elements"])
-                return f"{base_name}[{tuple_val}]"
+                # Build a Python tuple expression for the index by traversing each element
+                parts = [self._traverse_expression(el, current_iterators, symbolic) for el in idx.get("elements", [])]
+                # Ensure single-element tuples include the trailing comma
+                if len(parts) == 1:
+                    tuple_expr = f"({parts[0]},)"
+                else:
+                    tuple_expr = f"({', '.join(parts)})"
+                return f"{base_name}[{tuple_expr}]"
             else:
                 idx_expr = emit_index_expr(idx)
                 return f"{base_name}[{idx_expr}]"

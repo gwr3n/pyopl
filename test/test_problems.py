@@ -82,6 +82,74 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    def test_employee_rostering(self):
+        """
+        Test employee rostering model with both solvers.
+        """
+        model_code = """
+            tuple Pair { string e; string s; }
+
+            {string} Employees = ...;
+            {string} Shifts = ...;
+
+            {Pair} Pairs = { <e,s> | e in Employees, s in Shifts };
+
+            int demand[Shifts];
+            int pref[Pairs];
+
+            dvar boolean x[Employees][Shifts];
+
+            maximize sum(e in Employees, s in Shifts) pref[<e,s>] * x[e][s];
+
+            subject to {
+            forall (e in Employees)
+                sum (s in Shifts) x[e][s] == 1;
+
+            forall (s in Shifts)
+                sum (e in Employees) x[e][s] == demand[s];
+            }
+            """
+        data_code = """
+            Employees = { "Alex", "Bri", "Casey", "Drew", "Evan" };
+            Shifts = { "Morning", "Midday", "Evening" };
+
+            demand = [ "Morning" 2, "Midday" 2, "Evening" 1 ];
+
+            pref = [
+            <"Alex","Morning"> 3, <"Alex","Midday"> 1, <"Alex","Evening"> 0,
+            <"Bri","Morning"> 2, <"Bri","Midday"> 3, <"Bri","Evening"> 1,
+            <"Casey","Morning"> 1, <"Casey","Midday"> 2, <"Casey","Evening"> 3,
+            <"Drew","Morning"> 0, <"Drew","Midday"> 3, <"Drew","Evening"> 2,
+            <"Evan","Morning"> 3, <"Evan","Midday"> 0, <"Evan","Evening"> 2
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
     def test_minl_maxl_in_index_constraint(self):
         """
         Exercise minl/maxl inside forall index constraints with boolean AND.
