@@ -92,6 +92,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
             // Multi-indexed parameter initialized from expression
             param float W[i in I][j in J] = i + j;
+            param float X[i in I, j in J] = i + j; // Alternate syntax
 
             // Tie z to sum of W to exercise evaluation
             dvar float z;
@@ -99,6 +100,7 @@ class TestPyOPLProblems(unittest.TestCase):
             maximize z;
             subject to {
             z == sum(i in I, j in J) W[i][j];
+            z == sum(i in I, j in J) X[i][j];
             }
             """
         data_code = """
