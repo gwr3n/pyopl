@@ -83,6 +83,9 @@ class TestPyOPLProblems(unittest.TestCase):
         )
 
     def test_param_multi_index_rhs_expression_initialization(self):
+        """
+        Test model with multi-indexed parameter initialized from expression with both solvers.
+        """
         model_code = """
             {int} I = ...;
             {int} J = {1, 2};
