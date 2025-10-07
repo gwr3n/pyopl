@@ -2175,6 +2175,17 @@ class GurobiCodeGenerator:
             return f"math.sqrt({arg_str})"
         raise NotImplementedError(f"Unsupported function call '{name}' in expression.")
 
+    # NEW: support minl/maxl (elementwise min/max over args) in Python-emitted expressions
+    def _expr_minl(self, expr_node, current_iterators, symbolic):
+        args = expr_node.get("args", [])
+        parts = [self._traverse_expression(a, current_iterators, symbolic) for a in args]
+        return f"min({', '.join(parts)})"
+
+    def _expr_maxl(self, expr_node, current_iterators, symbolic):
+        args = expr_node.get("args", [])
+        parts = [self._traverse_expression(a, current_iterators, symbolic) for a in args]
+        return f"max({', '.join(parts)})"
+
     def _expr_number(self, expr_node, current_iterators, symbolic):
         return expr_node["value"]
 

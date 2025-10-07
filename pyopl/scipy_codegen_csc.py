@@ -61,6 +61,49 @@ class ExpressionEvaluator:
     def __init__(self, parent: "SciPyCSCCodeGenerator") -> None:
         self.parent = parent
 
+    # NEW: minl/maxl
+    def _eval_minl(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
+        vals: list[float] = []
+        for a in expr.get("args", []):
+            coef, v = self.eval(a, env)
+            if coef:
+                raise SemanticError("Non-ground argument in minl()")
+            if isinstance(v, bool):
+                vals.append(1.0 if v else 0.0)
+            elif isinstance(v, (int, float)):
+                vals.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    raise SemanticError(f"Non-numeric argument '{v}' in minl()")
+            else:
+                raise SemanticError(f"Unsupported argument type in minl(): {type(v)}")
+        if not vals:
+            raise SemanticError("minl() requires at least one argument")
+        return {}, min(vals)
+
+    def _eval_maxl(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
+        vals: list[float] = []
+        for a in expr.get("args", []):
+            coef, v = self.eval(a, env)
+            if coef:
+                raise SemanticError("Non-ground argument in maxl()")
+            if isinstance(v, bool):
+                vals.append(1.0 if v else 0.0)
+            elif isinstance(v, (int, float)):
+                vals.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    raise SemanticError(f"Non-numeric argument '{v}' in maxl()")
+            else:
+                raise SemanticError(f"Unsupported argument type in maxl(): {type(v)}")
+        if not vals:
+            raise SemanticError("maxl() requires at least one argument")
+        return {}, max(vals)
+
     def eval(
         self, expr: Dict[str, Any], env: Optional[Dict[str, Any]] = None
     ) -> Tuple[Dict[str, Any], Union[float, str, Tuple[Any, ...]]]:
@@ -424,6 +467,12 @@ class ExpressionEvaluator:
             return {}, -val
         elif tt == "parenthesized_expression":
             return self._eval_index_expr(dim_expr["expression"], env)
+        # NEW: allow minl/maxl in index arithmetic if they appear
+        elif tt in ("minl", "maxl"):
+            _, v = self._eval_minl(dim_expr, env) if tt == "minl" else self._eval_maxl(dim_expr, env)
+            if isinstance(v, float) and v.is_integer():
+                v = int(v)
+            return {}, v
         elif tt == "tuple_literal":
 
             def to_tuple_recursive(e):
@@ -2082,6 +2131,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return -val
             elif t == "parenthesized_expression":
                 return self._eval_bound(expr["expression"])
+            elif t in ("minl", "maxl"):
+                vals = [self._eval_bound(a) for a in expr.get("args", [])]
+                if not vals:
+                    raise self._unsupported_type_error("expr in index bound", t)
+                return min(vals) if t == "minl" else max(vals)
             else:
                 raise self._unsupported_type_error("expr in index bound", t)
         else:
@@ -2134,6 +2188,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             return f"{base}[{idx}]"
             # fallback: legacy string access
             return f"{base}['{field}']"
+        # NEW: emit min/max for symbolic comments
+        elif t in ("minl", "maxl"):
+            args = expr.get("args", [])
+            parts = [self._emit_python_expr(a, env) for a in args]
+            fn = "min" if t == "minl" else "max"
+            return f"{fn}({', '.join(parts)})"
         elif t == "name_reference_index":
             # Use the iterator variable from env
             return env.get(expr["name"], expr["name"])
@@ -2223,6 +2283,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         if t == "string_literal":  # <-- support in symbolic traversal
             return repr(expr.get("value"))
+
+        # NEW: symbolic minl/maxl
+        if t in ("minl", "maxl"):
+            args = expr.get("args", [])
+            parts = [self._traverse_expression(a) for a in args]
+            fn = "min" if t == "minl" else "max"
+            return f"{fn}({', '.join(parts)})"
 
         # Default: return empty string if no known type matched
         return ""

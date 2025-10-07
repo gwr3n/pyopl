@@ -82,6 +82,73 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    def test_minl_maxl_in_index_constraint(self):
+        """
+        Exercise minl/maxl inside forall index constraints with boolean AND.
+
+        Ensures:
+          - minl/maxl(pr.i, pr.i2) and minl/maxl(pr.j, pr.j2) used in the forall index filter
+          - '&&' is parsed/evaluated in index constraints
+        """
+        model_code = """
+            int a = 3;            // rows
+            int b = 3;            // cols
+            range Rows = 1..a;
+            range Cols = 1..b;
+
+            tuple Pair {
+              int i;
+              int j;
+              int i2;
+              int j2;
+            }
+
+            // Positive-area rectangles in row-major order
+            {Pair} Pairs =
+              { <i,j,i2,j2> |
+                  i in Rows, j in Cols,
+                  i2 in Rows, j2 in Cols :
+                  // row-major strict ordering and positive area
+                  ((i < i2) || (i == i2 && j < j2)) && (i != i2) && (j != j2)
+              };
+
+            dvar float+ y[Pairs];
+
+            minimize
+              sum(pr in Pairs) y[pr];
+
+            subject to {
+              // For each pr=(i,j,i2,j2), for each cell (m,n) strictly inside its rectangle,
+              // add a trivial nonnegativity constraint using an index filter with minl/maxl and &&
+              forall(pr in Pairs, m in Rows, n in Cols :
+                (minl(pr.i, pr.i2) < m && m < maxl(pr.i, pr.i2)) &&
+                (minl(pr.j, pr.j2) < n && n < maxl(pr.j, pr.j2))
+              )
+                y[pr] >= 0;
+            }
+        """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                model_file = tmp_mod.name
+            try:
+                result = solve(model_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED", f"{solver} failed: {result.get('message')}")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+        # Objective should be zero for both (y >= 0 and minimized)
+        self.assertAlmostEqual(obj_values["scipy"], 0.0, places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], 0.0, places=6)
+
     def test_tuple_set_comprehension_pairs(self):
         """
         Exercise tuple-set comprehension:
