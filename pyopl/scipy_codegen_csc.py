@@ -827,16 +827,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         If any error occurs, fallback to BIG_M_DEFAULT.
         """
         try:
+            env_eval = env or {}
             lhs = comp.get("left")
             rhs = comp.get("right")
-            coef_lhs, const_lhs = self._eval_expr(lhs, {})
+            coef_lhs, const_lhs = self._eval_expr(lhs, env_eval)
             if isinstance(rhs, dict):
-                coef_rhs, const_rhs = self._eval_expr(rhs, {})
+                coef_rhs, const_rhs = self._eval_expr(rhs, env_eval)
             else:
-                coef_rhs, const_rhs = (
-                    {},
-                    rhs if isinstance(rhs, (int, float)) else 0.0,
-                )
+                coef_rhs, const_rhs = ({}, rhs if isinstance(rhs, (int, float)) else 0.0)
             expr_coef = dict(coef_lhs)
             for vn, cf in coef_rhs.items():
                 expr_coef[vn] = expr_coef.get(vn, 0.0) - cf
@@ -977,10 +975,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.aux_created.append(name)
         return name
 
-    def _linearize_or(self, comparisons: List[Any]) -> None:
+    def _linearize_or(self, comparisons: List[Any], env: Optional[Dict[str, Any]] = None) -> None:
         """Linearize disjunction of linear comparisons using big-M and auxiliary binaries.
         For '!=': split into two comparisons: < and >.
         """
+        env_eval = env or {}
         z_vars = []
         for comp in comparisons:
             op = comp.get("op")
@@ -989,18 +988,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 comp_lt["op"] = "<"
                 comp_gt = dict(comp)
                 comp_gt["op"] = ">"
-                self._linearize_or([comp_lt])
-                self._linearize_or([comp_gt])
+                self._linearize_or([comp_lt], env=env_eval)
+                self._linearize_or([comp_gt], env=env_eval)
             else:
                 z = self._ensure_aux_binary("or_flag")
                 z_vars.append(z)
-                # No local env in this helper; use empty env to allow evaluator fallbacks
-                M = self._big_m_for_comparison(comp, env={})
-                pass
-                coef_lhs, const_lhs = self._eval_expr(comp["left"], {})
+                # Use the bound env so indices are resolved
+                M = self._big_m_for_comparison(comp, env=env_eval)
+                # Evaluate sides under the same env
+                coef_lhs, const_lhs = self._eval_expr(comp["left"], env_eval)
                 rhs_node = comp["right"]
                 coef_rhs, const_rhs = (
-                    self._eval_expr(rhs_node, {})
+                    self._eval_expr(rhs_node, env_eval)
                     if isinstance(rhs_node, dict)
                     else ({}, rhs_node if isinstance(rhs_node, (int, float)) else 0.0)
                 )
@@ -1042,8 +1041,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self.A_ub.append(row)
             self.b_ub.append(-1.0)
 
-    def _expand_and(self, comparisons: List[Any]) -> None:
+    def _expand_and(self, comparisons: List[Any], env: Optional[Dict[str, Any]] = None) -> None:
         """Add each comparison as its own constraint. For '!=', add both < and > as separate constraints."""
+        env_eval = env or {}
         for comp in comparisons:
             op = comp.get("op")
             if op == "!=":
@@ -1051,27 +1051,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 comp_lt["op"] = "<"
                 comp_gt = dict(comp)
                 comp_gt["op"] = ">"
-                self._expand_and([comp_lt])
-                self._expand_and([comp_gt])
+                self._expand_and([comp_lt], env=env_eval)
+                self._expand_and([comp_gt], env=env_eval)
             else:
-                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env={}, sign=1)
+                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
                 rhs_dict, rhs_const = (
-                    self._accumulate_sum_to_dict(comp["right"], env={}, sign=1)
+                    self._accumulate_sum_to_dict(comp["right"], env=env_eval, sign=1)
                     if isinstance(comp["right"], dict)
-                    else (
-                        {},
-                        (comp["right"] if isinstance(comp["right"], (int, float)) else 0.0),
-                    )
+                    else ({}, (comp["right"] if isinstance(comp["right"], (int, float)) else 0.0))
                 )
                 expr_coef = dict(lhs_dict)
                 for v, c in rhs_dict.items():
                     expr_coef[v] = expr_coef.get(v, 0.0) - c
                 expr_const = lhs_const - rhs_const
             if comp["op"] == "==":
-                # equality into A_eq
                 row = [0.0] * len(self.var_names)
                 for v, c in expr_coef.items():
-                    # Coefficient dict from _accumulate_sum_to_dict may use integer indices directly
                     if isinstance(v, int):
                         if v < len(row):
                             row[v] += c
@@ -1094,7 +1089,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self.A_ub.append(row)
                 self.b_ub.append(-expr_const)
             elif comp["op"] == ">=":
-                # - (lhs - rhs) <= 0
                 row = [0.0] * len(self.var_names)
                 for v, c in expr_coef.items():
                     if isinstance(v, int):
@@ -6393,7 +6387,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     "left": comp.get("left"),
                                     "right": comp.get("right"),
                                     "op": comp.get("op"),
-                                }
+                                },
+                                env=env2,
                             )
                             coef_lhs, const_lhs = self._eval_expr(comp.get("left"), env2)
                             rhs_node = comp.get("right")
@@ -6747,10 +6742,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 # Use current env for tighter M
                                 M = self._big_m_for_comparison(comp_node, env=env)
                                 # Build lhs - rhs
-                                coef_lhs, const_lhs = self._eval_expr(comp_node["left"], {})
+                                coef_lhs, const_lhs = self._eval_expr(comp_node["left"], env)
                                 right_node = comp_node["right"]
                                 if isinstance(right_node, dict):
-                                    coef_rhs, const_rhs = self._eval_expr(right_node, {})
+                                    coef_rhs, const_rhs = self._eval_expr(right_node, env)
                                 else:
                                     coef_rhs, const_rhs = (
                                         {},
