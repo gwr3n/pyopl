@@ -30,7 +30,6 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
-
     @unittest.skip("proprietary model")
     def test_complex_workforce_planning(self):
         """
@@ -82,6 +81,52 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
+
+    def test_param_multi_index_rhs_expression_initialization(self):
+        model_code = """
+            {int} I = ...;
+            {int} J = {1, 2};
+
+            // Multi-indexed parameter initialized from expression
+            param float W[i in I, j in J] = i + j;
+
+            // Tie z to sum of W to exercise evaluation
+            dvar float z;
+
+            maximize z;
+            subject to {
+            z == sum(i in I, j in J) W[i][j];
+            }
+            """
+        data_code = """
+            I = {1, 2, 3};
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
 
     def test_tuples_index_specifiers(self):
         """
