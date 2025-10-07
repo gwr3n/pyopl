@@ -3397,6 +3397,12 @@ class OPLCompiler:
                         return total
 
                     return rec_sum(0, dict(env))
+                if t == "and":
+                    return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
+                if t == "or":
+                    return bool(eval_expr(expr.get("left"), env)) or bool(eval_expr(expr.get("right"), env))
+                if t == "not":
+                    return not bool(eval_expr(expr.get("value"), env))
                 if t == "binop":
                     op = expr.get("op")
                     lv = eval_expr(expr.get("left"), env)
