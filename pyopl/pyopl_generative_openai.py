@@ -64,7 +64,12 @@ def _coalesce_response_text(resp) -> str:
         return ""
 
 
-def generative_solve(prompt, model_file, data_file):
+# Use GPT-5 model
+# model_name = "gpt-5"
+# model_name = "gpt-5-mini"
+# model_name = "gpt-5-nano"
+# model_name = "gpt-4.1"
+def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iterations=MAX_ITERATIONS, return_statistics=False):
     """
     Generate a PyOPL model and data file from a prompt using OpenAI GPT-5, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -75,18 +80,15 @@ def generative_solve(prompt, model_file, data_file):
             str: GPT-5's assessment of alignment between model/data and prompt.
     """
 
-    # grammar = _read_pyopl_grammar()
+    # grammar_implementation = _read_pyopl_grammar()
     grammar_implementation = _read_pyopl_code()
+    # grammar_implementation = ""
+
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
     client = OpenAI(api_key=api_key)
-    # Use GPT-5 model
-    # model_name = "gpt-5"
-    model_name = "gpt-5-mini"
-    # model_name = "gpt-5-nano"
-    # model_name = "gpt-4.1"
 
     user_prompt = (
         "You are an expert in mathematical optimization and PyOPL. "
@@ -102,8 +104,8 @@ def generative_solve(prompt, model_file, data_file):
         "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
     )
 
-    for iteration in range(MAX_ITERATIONS):
-        print(f"Iteration {iteration + 1}/{MAX_ITERATIONS}")
+    for iteration in range(iterations):
+        print(f"Iteration {iteration + 1}/{iterations}")
         response = client.responses.create(model=model_name, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS)
         content = _coalesce_response_text(response)
         if not content:
@@ -166,6 +168,7 @@ def generative_solve(prompt, model_file, data_file):
         data_code = f.read()
 
     # Final assessment prompt
+    syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     assessment_prompt = (
         "Given the following prompt and the generated PyOPL model and data, assess how well the model and data align with the original intent. "
         "Be critical and specific. Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
@@ -175,6 +178,7 @@ def generative_solve(prompt, model_file, data_file):
         f"PROMPT:\n{prompt}\n\n"
         f"MODEL:\n{model_code}\n\n"
         f"DATA:\n{data_code}\n\n"
+        f"{syntax_errors_str}"
         "Provide your assessment as a short texual paragraph."
     )
     assessment_response = client.responses.create(
@@ -183,21 +187,28 @@ def generative_solve(prompt, model_file, data_file):
     assessment_text = _coalesce_response_text(assessment_response)
     if not assessment_text:
         raise RuntimeError(f"Empty assessment response. Full response: {assessment_response}")
-    return assessment_text.strip()
+    if return_statistics:
+        return {
+            "iterations": iteration + 1,
+            "assessment": assessment_text.strip(),
+            "syntax_errors": syntax_errors,
+        }
+    else:
+        return assessment_text.strip()
 
 
-def generative_feedback(prompt, model_file, data_file):
+# Use GPT-5 model
+# model_name = "gpt-5"
+# model_name = "gpt-5-mini"
+# model_name = "gpt-5-nano"
+# model_name = "gpt-4.1"
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-5"):
     grammar_implementation = _read_pyopl_code()
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
     client = OpenAI(api_key=api_key)
-    # Use GPT-5 model
-    # model_name = "gpt-5"
-    # model_name = "gpt-5-mini"
-    # model_name = "gpt-5-nano"
-    model_name = "gpt-4.1"
 
     # Read files first (avoid inline open().read())
     with open(model_file, "r", encoding="utf-8") as fh:
