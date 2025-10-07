@@ -419,7 +419,27 @@ class OPLParser(Parser):
         # Open a fresh scope for the iterator(s) used by this header
         self.symbol_table.enter_scope()
         # Iterators already added to current scope by dexpr_index_list/dexpr_index
-        return {"iterators": p.dexpr_index_list}
+        return {"iterators": p.dexpr_index_list, "_iterator_scope_opened": True}
+
+    # --- Strict OPL nested headers support: [i in I][j in J] ... ---
+
+    # Tail of nested headers: zero or more additional [iterators] groups
+    @_('"[" dexpr_index_list "]" dexpr_index_header_tail')  # type: ignore
+    def dexpr_index_header_tail(self, p):
+        # Concatenate this segment with the remainder of the tail
+        return p.dexpr_index_list + p.dexpr_index_header_tail
+
+    @_("")  # type: ignore
+    def dexpr_index_header_tail(self, p):
+        return []
+
+    # Full nested header(s): one or more [iterators] groups, all sharing a single scope
+    @_('"[" dexpr_index_list "]" dexpr_index_header_tail')  # type: ignore
+    def dexpr_index_headers(self, p):
+        # Single shared scope for all nested headers (strict OPL form)
+        self.symbol_table.enter_scope()
+        all_iters = p.dexpr_index_list + p.dexpr_index_header_tail
+        return {"iterators": all_iters, "_iterator_scope_opened": True}
 
     @_("dexpr_index_list ',' dexpr_index")  # type: ignore
     def dexpr_index_list(self, p):
@@ -452,7 +472,10 @@ class OPLParser(Parser):
                     lineno=p.lineno,
                 )
         # Add iterator to current scope so RHS can reference it
-        self.symbol_table.add_symbol(name, iterator_type, is_dvar=False, lineno=p.lineno)
+        # Guard against duplicate insertion when ambiguous productions reduce more than once.
+        current_scope = self.symbol_table.scopes[-1]
+        if name not in current_scope:
+            self.symbol_table.add_symbol(name, iterator_type, is_dvar=False, lineno=p.lineno)
         return {"iterator": name, "range": rng}
 
     # Scalar dexpr: dexpr type Z = expression;
@@ -507,7 +530,15 @@ class OPLParser(Parser):
 
         iterators = p.dexpr_index_header["iterators"]
         dimensions = [to_decl_dim(it["range"]) for it in iterators]
-        # Store dexpr in symbol table
+
+        # Close the iterator scope BEFORE adding the symbol so W persists in the global scope
+        try:
+            if p.dexpr_index_header.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        # Store dexpr in the (now current) outer scope
         self.symbol_table.add_symbol(
             p.NAME,
             "dexpr",
@@ -520,7 +551,62 @@ class OPLParser(Parser):
             dimensions=dimensions,
             lineno=p.lineno,
         )
+
         # Return AST declaration
+        return {
+            "type": "dexpr_indexed",
+            "name": p.NAME,
+            "var_type": p.type,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "expression": p.expression,
+        }
+
+    # NEW: Indexed dexpr with strict OPL nested headers: dexpr type Y[i in I][j in J] = expression;
+    @_('DEXPR type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
+    def declaration(self, p):
+        def to_decl_dim(rng):
+            if rng["type"] == "range_specifier":
+                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+            if rng["type"] == "named_range":
+                try:
+                    sym = self.symbol_table.get_symbol(rng["name"])
+                    if sym.get("type") == "range" and sym.get("value"):
+                        return {
+                            "type": "named_range_dimension",
+                            "name": rng["name"],
+                            "start": sym["value"]["start"],
+                            "end": sym["value"]["end"],
+                        }
+                except SemanticError:
+                    pass
+                return {"type": "named_range_dimension", "name": rng["name"]}
+            if rng["type"] == "named_set":
+                return {"type": "named_set_dimension", "name": rng["name"]}
+            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
+        iterators = p.dexpr_index_headers["iterators"]
+        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+
+        # Close iterator scope before adding symbol
+        try:
+            if p.dexpr_index_headers.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        self.symbol_table.add_symbol(
+            p.NAME,
+            "dexpr",
+            value={
+                "iterators": iterators,
+                "dimensions": dimensions,
+                "expression": p.expression,
+                "var_type": p.type,
+            },
+            dimensions=dimensions,
+            lineno=p.lineno,
+        )
         return {
             "type": "dexpr_indexed",
             "name": p.NAME,
@@ -2441,7 +2527,6 @@ class OPLParser(Parser):
         var_type = p.type
         iterators = p.dexpr_index_header["iterators"]
 
-        # Map the iterator ranges to declaration dimensions
         def to_decl_dim(rng):
             if rng["type"] == "range_specifier":
                 return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
@@ -2453,7 +2538,14 @@ class OPLParser(Parser):
 
         dimensions = [to_decl_dim(it["range"]) for it in iterators]
 
-        # Register symbol so subsequent uses pass semantic checks
+        # Close the iterator scope before adding the parameter symbol
+        try:
+            if p.dexpr_index_header.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        # Register symbol in outer scope
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -2462,7 +2554,7 @@ class OPLParser(Parser):
             lineno=p.lineno,
         )
 
-        decl = {
+        return {
             "type": "parameter_inline_indexed_expr",
             "var_type": var_type,
             "name": name,
@@ -2471,16 +2563,48 @@ class OPLParser(Parser):
             "expression": p.expression,
         }
 
-        # IMPORTANT: close the iterator scope that dexpr_index_header opened
-        # to avoid leaking iterator variables into the next declaration.
+    # NEW: computed indexed parameter with strict OPL nested headers: float W[i in I][j in J] = ...
+    # NEW: float W[i in I][j in J] = ...
+    @_('opt_PARAM type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        iterators = p.dexpr_index_headers["iterators"]
+
+        def to_decl_dim(rng):
+            if rng["type"] == "range_specifier":
+                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+            if rng["type"] == "named_range":
+                return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
+            if rng["type"] == "named_set":
+                return {"type": "named_set_dimension", "name": rng["name"]}
+            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
+        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+
+        # Close iterator scope before adding the symbol
         try:
-            if p.dexpr_index_header.get("_iterator_scope_opened"):
+            if p.dexpr_index_headers.get("_iterator_scope_opened"):
                 self.symbol_table.exit_scope()
         except Exception:
-            # Graceful if header didn't open a scope
             pass
 
-        return decl
+        self.symbol_table.add_symbol(
+            name,
+            var_type,
+            dimensions=dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+
+        return {
+            "type": "parameter_inline_indexed_expr",
+            "var_type": var_type,
+            "name": name,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "expression": p.expression,
+        }
 
     @_('opt_PARAM type NAME indexed_dimensions "=" array_value ";"')  # type: ignore
     def declaration(self, p):

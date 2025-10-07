@@ -88,7 +88,7 @@ class TestPyOPLProblems(unittest.TestCase):
             {int} J = {1, 2};
 
             // Multi-indexed parameter initialized from expression
-            param float W[i in I, j in J] = i + j;
+            param float W[i in I][j in J] = i + j;
 
             // Tie z to sum of W to exercise evaluation
             dvar float z;
