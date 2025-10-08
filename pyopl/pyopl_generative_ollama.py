@@ -37,11 +37,10 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     Call Ollama's generate and return the response text.
     """
     resp = generate(model=model_name, prompt=prompt, options={"num_predict": num_predict})
-    if isinstance(resp, dict):
-        # Prefer 'response' if present; otherwise serialize dict to avoid KeyError
-        return resp.get("response") if isinstance(resp.get("response"), str) else json.dumps(resp)
-    # Fallback if API shape differs
-    return str(resp)
+    try:
+        return resp["response"]
+    except (TypeError, KeyError) as e:
+        raise RuntimeError(f"Failed to retrieve response text from Ollama response: {e}")
 
 
 def generative_solve(
