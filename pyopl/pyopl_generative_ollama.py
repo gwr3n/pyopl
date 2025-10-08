@@ -42,14 +42,14 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     if isinstance(resp, dict) and "response" in resp:
         return resp["response"]
     # Fallback if API shape differs
-    return str(resp)
+    return str(resp['response'])
 
 
 def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="llama2",
+    model_name="gemma3:12b",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
@@ -82,10 +82,6 @@ def generative_solve(
         "'model' (the PyOPL model as a single JSON string) and 'data' (the data file as a single JSON string). "
         "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
     )
-
-    syntax_errors = []
-    last_model_code = ""
-    last_data_code = ""
 
     for iteration in range(iterations):
         print(f"Iteration {iteration + 1}/{iterations}")
@@ -122,9 +118,6 @@ def generative_solve(
             f.write(model_code)
         with open(data_file, "w", encoding="utf-8") as f:
             f.write(data_code)
-
-        last_model_code = model_code
-        last_data_code = data_code
 
         if not syntax_errors:
             break
