@@ -12,14 +12,12 @@ MAX_OUTPUT_TOKENS = 4096 * 2  # used as num_predict for Ollama
 
 def _read_pyopl_grammar():
     grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "PyOPL grammar.md")
-    print(grammar_path)
     with open(grammar_path, "r", encoding="utf-8") as f:
         return f.read()
 
 
 def _read_pyopl_code():
     code_path = os.path.join(os.path.dirname(__file__), "pyopl_core.py")
-    print(code_path)
     with open(code_path, "r", encoding="utf-8") as f:
         return f.read()
 
@@ -39,29 +37,30 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     Call Ollama's generate and return the response text.
     """
     resp = generate(model=model_name, prompt=prompt, options={"num_predict": num_predict})
-    if isinstance(resp, dict) and "response" in resp:
-        return resp["response"]
+    if isinstance(resp, dict):
+        # Prefer 'response' if present; otherwise serialize dict to avoid KeyError
+        return resp.get("response") if isinstance(resp.get("response"), str) else json.dumps(resp)
     # Fallback if API shape differs
-    return str(resp["response"])
+    return str(resp)
 
 
 def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="gemma3:12b",
+    model_name="llama4:scout",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
     """
-    Generate a PyOPL model and data file from a prompt using Ollama (llama2), validate with pyopl,
+    Generate a PyOPL model and data file from a prompt using Ollama, validate with pyopl,
     iterate on errors, and provide an alignment assessment.
 
     Args:
         prompt (str): Textual description of the optimization problem.
         model_file (str): Path to save the generated model file.
         data_file (str): Path to save the generated data file.
-        model_name (str): Ollama model name (default: "llama2").
+        model_name (str): Ollama model name.
         iterations (int): Maximum number of refinement iterations.
         return_statistics (bool): If True, return a dict with stats and assessment.
     Returns:
@@ -173,9 +172,9 @@ def generative_solve(
         return assessment_text
 
 
-def generative_feedback(prompt, model_file, data_file, model_name="llama2"):
+def generative_feedback(prompt, model_file, data_file, model_name="llama4:scout"):
     """
-    Ask questions or request revisions about a given PyOPL model and data using Ollama (llama2).
+    Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
       - 'feedback' (str, mandatory)
       - 'revised_model' (str, optional)

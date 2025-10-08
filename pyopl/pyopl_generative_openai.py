@@ -13,14 +13,12 @@ MAX_OUTPUT_TOKENS = 4096 * 2
 
 def _read_pyopl_grammar():
     grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "PyOPL grammar.md")
-    print(grammar_path)
     with open(grammar_path, "r") as f:
         return f.read()
 
 
 def _read_pyopl_code():
     code_path = os.path.join(os.path.dirname(__file__), "pyopl_core.py")
-    print(code_path)
     with open(code_path, "r") as f:
         return f.read()
 
