@@ -48,7 +48,7 @@ def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="gpt-oss:120b",
+    model_name="gpt-oss:20b",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
@@ -123,6 +123,7 @@ def generative_solve(
 
         # Feedback errors and retry
         user_prompt = (
+            "You are an expert in mathematical optimization and PyOPL. "
             "The following attempt to generate a PyOPL model and data file for the prompt failed due to syntax errors. "
             "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
             "--- PyOPL syntax implementation ---\n"
@@ -147,6 +148,7 @@ def generative_solve(
     # Final assessment
     syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     assessment_prompt = (
+        "You are an expert in mathematical optimization and PyOPL. "
         "Given the following prompt and the generated PyOPL model and data, assess how well the model and data align with the original intent. "
         "Be critical and specific. Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
         "--- PyOPL syntax implementation ---\n"
@@ -173,7 +175,7 @@ def generative_solve(
 
 
 # https://ollama.com/library/gpt-oss
-def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:120b"):
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b"):
     """
     Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
