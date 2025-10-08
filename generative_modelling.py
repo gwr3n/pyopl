@@ -1,8 +1,8 @@
 # Use Gemini
-from pyopl.pyopl_generative_gemini import generative_feedback, generative_solve
+# from pyopl.pyopl_generative_gemini import generative_feedback, generative_solve
 
 # Use OpenAI
-# from pyopl.pyopl_generative_openai import generative_feedback, generative_solve
+from pyopl.pyopl_generative_openai import generative_feedback, generative_solve
 
 # Use Ollama
 # from pyopl.pyopl_generative_ollama import generative_feedback, generative_solve
