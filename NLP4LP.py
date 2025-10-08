@@ -6,7 +6,7 @@ import sys
 from typing import Any, Optional
 
 from pyopl import solve
-from pyopl.pyopl_generative_openai import generative_solve  
+from pyopl.pyopl_generative_openai import generative_solve
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -67,7 +67,9 @@ def main() -> int:
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
     # NEW: batch mode to solve all problems
     parser.add_argument("--all", action="store_true", help="Solve all problems in NLP4LP.json and save results to --results.")
-    parser.add_argument("--results", default="gen_ai/NLP4LP_results.json", help="Output path for batch results JSON (used with --all).")
+    parser.add_argument(
+        "--results", default="gen_ai/NLP4LP_results.json", help="Output path for batch results JSON (used with --all)."
+    )
     args = parser.parse_args()
 
     # Load dataset
@@ -134,7 +136,9 @@ def main() -> int:
                 result = solve(model_path, data_path, solver=args.solver)
                 obj = _extract_objective(result)
                 if obj is None:
-                    entry.update({"observed_objective": None, "error": f"Could not extract objective_value from result: {result}"})
+                    entry.update(
+                        {"observed_objective": None, "error": f"Could not extract objective_value from result: {result}"}
+                    )
                     all_ok = False
                 else:
                     diff = abs(obj - expected)
@@ -206,18 +210,20 @@ def main() -> int:
     ok = diff <= args.tolerance
 
     print("Summary:")
-    print(json.dumps(
-        {
-            "index": args.index,
-            "solver": args.solver,
-            "expected_objective": expected,
-            "observed_objective": obj,
-            "abs_diff": diff,
-            "tolerance": args.tolerance,
-            "pass": ok,
-        },
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            {
+                "index": args.index,
+                "solver": args.solver,
+                "expected_objective": expected,
+                "observed_objective": obj,
+                "abs_diff": diff,
+                "tolerance": args.tolerance,
+                "pass": ok,
+            },
+            indent=2,
+        )
+    )
 
     return 0 if ok else 1
 
