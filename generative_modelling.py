@@ -7,6 +7,7 @@ from pyopl.pyopl_generative_openai import generative_feedback, generative_solve
 # Use Ollama
 # from pyopl.pyopl_generative_ollama import generative_feedback, generative_solve
 
+
 def test_generative_solve():
     prompt = (
         "A small inventory routing problem involves a company that must deliver a single product "
