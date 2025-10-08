@@ -63,12 +63,13 @@ def _coalesce_response_text(resp) -> str:
     except Exception:
         return ""
 
+
 # Use GPT-5 model
 # model_name = "gpt-5"
 # model_name = "gpt-5-mini"
 # model_name = "gpt-5-nano"
 # model_name = "gpt-4.1"
-def generative_solve(prompt, model_file, data_file, model_name = "gpt-5", iterations=MAX_ITERATIONS, return_statistics=False):
+def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iterations=MAX_ITERATIONS, return_statistics=False):
     """
     Generate a PyOPL model and data file from a prompt using OpenAI GPT-5, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -82,7 +83,7 @@ def generative_solve(prompt, model_file, data_file, model_name = "gpt-5", iterat
     # grammar_implementation = _read_pyopl_grammar()
     grammar_implementation = _read_pyopl_code()
     # grammar_implementation = ""
-    
+
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -196,18 +197,18 @@ def generative_solve(prompt, model_file, data_file, model_name = "gpt-5", iterat
         return assessment_text.strip()
 
 
-def generative_feedback(prompt, model_file, data_file):
+# Use GPT-5 model
+# model_name = "gpt-5"
+# model_name = "gpt-5-mini"
+# model_name = "gpt-5-nano"
+# model_name = "gpt-4.1"
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-5"):
     grammar_implementation = _read_pyopl_code()
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
     client = OpenAI(api_key=api_key)
-    # Use GPT-5 model
-    # model_name = "gpt-5"
-    # model_name = "gpt-5-mini"
-    # model_name = "gpt-5-nano"
-    model_name = "gpt-4.1"
 
     # Read files first (avoid inline open().read())
     with open(model_file, "r", encoding="utf-8") as fh:

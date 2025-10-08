@@ -59,9 +59,12 @@ def _coalesce_gemini_text(resp) -> str:
     except Exception:
         return ""
 
+
 # Use Gemini 2.5 Flash model
 # model_name = "gemini-2.5-flash"
-def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-flash", iterations=MAX_ITERATIONS, return_statistics=False):
+def generative_solve(
+    prompt, model_file, data_file, model_name="gemini-2.5-flash", iterations=MAX_ITERATIONS, return_statistics=False
+):
     """
     Generate a PyOPL model and data file from a prompt using Gemini, validate with pyopl, iterate on errors, and assess alignment.
     Args:
@@ -81,7 +84,7 @@ def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-fla
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable not set.")
     genai.configure(api_key=api_key)
-    
+
     model = genai.GenerativeModel(
         model_name,
         generation_config={
@@ -200,15 +203,16 @@ def generative_solve(prompt, model_file, data_file, model_name = "gemini-2.5-fla
         return assessment_text.strip()
 
 
-def generative_feedback(prompt, model_file, data_file):
+# Use Gemini 2.5 Flash model
+# model_name = "gemini-2.5-flash"
+def generative_feedback(prompt, model_file, data_file, model_name="gemini-2.5-flash"):
     grammar_implementation = _read_pyopl_code()
     # Use API key from environment variable
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable not set.")
     genai.configure(api_key=api_key)
-    # Use Gemini 2.5 Flash model
-    model_name = "gemini-2.5-flash"
+
     model = genai.GenerativeModel(
         model_name,
         generation_config={
