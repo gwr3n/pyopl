@@ -996,7 +996,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 z_vars.append(z)
                 # No local env in this helper; use empty env to allow evaluator fallbacks
                 M = self._big_m_for_comparison(comp, env={})
-                pass
                 coef_lhs, const_lhs = self._eval_expr(comp["left"], {})
                 rhs_node = comp["right"]
                 coef_rhs, const_rhs = (
