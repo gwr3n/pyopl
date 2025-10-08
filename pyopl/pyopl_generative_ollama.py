@@ -48,7 +48,7 @@ def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="gpt-oss:20b",
+    model_name="gpt-oss:120b",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
@@ -173,7 +173,7 @@ def generative_solve(
 
 
 # https://ollama.com/library/gpt-oss
-def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b"):
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:120b"):
     """
     Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
