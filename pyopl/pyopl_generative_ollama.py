@@ -42,7 +42,7 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     if isinstance(resp, dict) and "response" in resp:
         return resp["response"]
     # Fallback if API shape differs
-    return str(resp['response'])
+    return str(resp["response"])
 
 
 def generative_solve(
