@@ -12,14 +12,12 @@ MAX_OUTPUT_TOKENS = 4096 * 2  # used as num_predict for Ollama
 
 def _read_pyopl_grammar():
     grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "PyOPL grammar.md")
-    print(grammar_path)
     with open(grammar_path, "r", encoding="utf-8") as f:
         return f.read()
 
 
 def _read_pyopl_code():
     code_path = os.path.join(os.path.dirname(__file__), "pyopl_core.py")
-    print(code_path)
     with open(code_path, "r", encoding="utf-8") as f:
         return f.read()
 
@@ -39,29 +37,30 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     Call Ollama's generate and return the response text.
     """
     resp = generate(model=model_name, prompt=prompt, options={"num_predict": num_predict})
-    if isinstance(resp, dict) and "response" in resp:
+    try:
         return resp["response"]
-    # Fallback if API shape differs
-    return str(resp)
+    except (TypeError, KeyError) as e:
+        raise RuntimeError(f"Failed to retrieve response text from Ollama response: {e}")
 
 
+# https://ollama.com/library/gpt-oss
 def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="llama2",
+    model_name="gpt-oss:20b",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
     """
-    Generate a PyOPL model and data file from a prompt using Ollama (llama2), validate with pyopl,
+    Generate a PyOPL model and data file from a prompt using Ollama, validate with pyopl,
     iterate on errors, and provide an alignment assessment.
 
     Args:
         prompt (str): Textual description of the optimization problem.
         model_file (str): Path to save the generated model file.
         data_file (str): Path to save the generated data file.
-        model_name (str): Ollama model name (default: "llama2").
+        model_name (str): Ollama model name.
         iterations (int): Maximum number of refinement iterations.
         return_statistics (bool): If True, return a dict with stats and assessment.
     Returns:
@@ -82,10 +81,6 @@ def generative_solve(
         "'model' (the PyOPL model as a single JSON string) and 'data' (the data file as a single JSON string). "
         "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
     )
-
-    syntax_errors = []
-    last_model_code = ""
-    last_data_code = ""
 
     for iteration in range(iterations):
         print(f"Iteration {iteration + 1}/{iterations}")
@@ -123,14 +118,12 @@ def generative_solve(
         with open(data_file, "w", encoding="utf-8") as f:
             f.write(data_code)
 
-        last_model_code = model_code
-        last_data_code = data_code
-
         if not syntax_errors:
             break
 
         # Feedback errors and retry
         user_prompt = (
+            "You are an expert in mathematical optimization and PyOPL. "
             "The following attempt to generate a PyOPL model and data file for the prompt failed due to syntax errors. "
             "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
             "--- PyOPL syntax implementation ---\n"
@@ -155,6 +148,7 @@ def generative_solve(
     # Final assessment
     syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     assessment_prompt = (
+        "You are an expert in mathematical optimization and PyOPL. "
         "Given the following prompt and the generated PyOPL model and data, assess how well the model and data align with the original intent. "
         "Be critical and specific. Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
         "--- PyOPL syntax implementation ---\n"
@@ -180,9 +174,10 @@ def generative_solve(
         return assessment_text
 
 
-def generative_feedback(prompt, model_file, data_file, model_name="llama2"):
+# https://ollama.com/library/gpt-oss
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b"):
     """
-    Ask questions or request revisions about a given PyOPL model and data using Ollama (llama2).
+    Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
       - 'feedback' (str, mandatory)
       - 'revised_model' (str, optional)
