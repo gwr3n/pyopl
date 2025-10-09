@@ -1,0 +1,714 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema",
+  "$id": "https://github.com/gwren/pyopl/pyopl_ast.schema.json",
+  "title": "PyOPL AST",
+  "type": "object",
+  "required": ["declarations", "objective", "constraints"],
+  "properties": {
+    "declarations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Declaration" }
+    },
+    "objective": { "$ref": "#/$defs/Objective" },
+    "constraints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ConstraintNode" }
+    }
+  },
+
+  "$defs": {
+    "SemType": {
+      "type": "string",
+      "description": "Semantic type annotation used by parser/typechecker",
+      "enum": ["int", "int+", "float", "float+", "boolean", "string"]
+    },
+
+    "Name": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "name" },
+        "value": { "type": "string" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "Number": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "number" },
+        "value": { "type": ["number", "integer"] },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "BooleanLiteral": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "boolean_literal" },
+        "value": { "type": "boolean" },
+        "sem_type": { "const": "boolean" }
+      },
+      "additionalProperties": true
+    },
+
+    "StringLiteral": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "string_literal" },
+        "value": { "type": "string" },
+        "sem_type": { "const": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "TupleLiteral": {
+      "type": "object",
+      "required": ["type", "elements"],
+      "properties": {
+        "type": { "const": "tuple_literal" },
+        "elements": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              { "type": "number" },
+              { "type": "integer" },
+              { "$ref": "#/$defs/TupleLiteral" },
+              { "$ref": "#/$defs/Expression" }
+            ]
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "Parenthesized": {
+      "type": "object",
+      "required": ["type", "expression"],
+      "properties": {
+        "type": { "const": "parenthesized_expression" },
+        "expression": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "Uminus": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "uminus" },
+        "value": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "Not": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "not" },
+        "value": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "const": "boolean" }
+      },
+      "additionalProperties": true
+    },
+
+    "And": {
+      "type": "object",
+      "required": ["type", "left", "right"],
+      "properties": {
+        "type": { "const": "and" },
+        "left": { "$ref": "#/$defs/Expression" },
+        "right": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "const": "boolean" }
+      },
+      "additionalProperties": true
+    },
+
+    "Or": {
+      "type": "object",
+      "required": ["type", "left", "right"],
+      "properties": {
+        "type": { "const": "or" },
+        "left": { "$ref": "#/$defs/Expression" },
+        "right": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "const": "boolean" }
+      },
+      "additionalProperties": true
+    },
+
+    "Binop": {
+      "type": "object",
+      "required": ["type", "op", "left", "right"],
+      "properties": {
+        "type": { "const": "binop" },
+        "op": {
+          "type": "string",
+          "enum": ["+", "-", "*", "/", "%", "==", "!=", "<", ">", "<=", ">="]
+        },
+        "left": { "$ref": "#/$defs/Expression" },
+        "right": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "Conditional": {
+      "type": "object",
+      "required": ["type", "condition", "then", "else"],
+      "properties": {
+        "type": { "const": "conditional" },
+        "condition": { "$ref": "#/$defs/Expression" },
+        "then": { "$ref": "#/$defs/Expression" },
+        "else": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "FieldAccess": {
+      "type": "object",
+      "required": ["type", "base", "field"],
+      "properties": {
+        "type": { "const": "field_access" },
+        "base": { "$ref": "#/$defs/Expression" },
+        "field": { "type": "string" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "IndexExprNameRef": {
+      "type": "object",
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "const": "name_reference_index" },
+        "name": { "type": "string" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "IndexExprNumber": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "number_literal_index" },
+        "value": { "type": ["number", "integer"] },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "IndexExprString": {
+      "type": "object",
+      "required": ["type", "value"],
+      "properties": {
+        "type": { "const": "string_literal" },
+        "value": { "type": "string" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "IndexExprFieldAccess": {
+      "type": "object",
+      "required": ["type", "base", "field"],
+      "properties": {
+        "type": { "const": "field_access_index" },
+        "base": { "$ref": "#/$defs/Expression" },
+        "field": { "type": "string" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "IndexedName": {
+      "type": "object",
+      "required": ["type", "name", "dimensions"],
+      "properties": {
+        "type": { "const": "indexed_name" },
+        "name": { "type": "string" },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/$defs/IndexExprNameRef" },
+              { "$ref": "#/$defs/IndexExprNumber" },
+              { "$ref": "#/$defs/IndexExprString" },
+              { "$ref": "#/$defs/Binop" },
+              { "$ref": "#/$defs/Uminus" },
+              { "$ref": "#/$defs/Parenthesized" },
+              { "$ref": "#/$defs/FieldAccess" },
+              { "$ref": "#/$defs/IndexExprFieldAccess" },
+              { "$ref": "#/$defs/TupleLiteral" }
+            ]
+          }
+        },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "SumIterator": {
+      "type": "object",
+      "required": ["iterator", "range"],
+      "properties": {
+        "iterator": { "type": "string" },
+        "range": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "enum": ["range_specifier", "named_range", "named_set", "named_set_dimension"] },
+            "start": { "$ref": "#/$defs/Expression" },
+            "end": { "$ref": "#/$defs/Expression" },
+            "name": { "type": "string" }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "Sum": {
+      "type": "object",
+      "required": ["type", "iterators", "expression"],
+      "properties": {
+        "type": { "const": "sum" },
+        "iterators": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SumIterator" }
+        },
+        "index_constraint": { "$ref": "#/$defs/Expression" },
+        "expression": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "MinAgg": {
+      "type": "object",
+      "required": ["type", "iterators", "expression"],
+      "properties": {
+        "type": { "const": "min_agg" },
+        "iterators": { "type": "array", "items": { "$ref": "#/$defs/SumIterator" } },
+        "index_constraint": { "$ref": "#/$defs/Expression" },
+        "expression": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "MaxAgg": {
+      "type": "object",
+      "required": ["type", "iterators", "expression"],
+      "properties": {
+        "type": { "const": "max_agg" },
+        "iterators": { "type": "array", "items": { "$ref": "#/$defs/SumIterator" } },
+        "index_constraint": { "$ref": "#/$defs/Expression" },
+        "expression": { "$ref": "#/$defs/Expression" },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "Funcall": {
+      "type": "object",
+      "required": ["type", "name", "args"],
+      "properties": {
+        "type": { "const": "funcall" },
+        "name": { "type": "string", "enum": ["sqrt"] },
+        "args": { "type": "array", "items": { "$ref": "#/$defs/Expression" }, "minItems": 1 },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "Maxl": {
+      "type": "object",
+      "required": ["type", "args"],
+      "properties": {
+        "type": { "const": "maxl" },
+        "args": { "type": "array", "items": { "$ref": "#/$defs/Expression" }, "minItems": 1 },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "Minl": {
+      "type": "object",
+      "required": ["type", "args"],
+      "properties": {
+        "type": { "const": "minl" },
+        "args": { "type": "array", "items": { "$ref": "#/$defs/Expression" }, "minItems": 1 },
+        "sem_type": { "$ref": "#/$defs/SemType" }
+      },
+      "additionalProperties": true
+    },
+
+    "Expression": {
+      "oneOf": [
+        { "$ref": "#/$defs/Number" },
+        { "$ref": "#/$defs/Name" },
+        { "$ref": "#/$defs/IndexedName" },
+        { "$ref": "#/$defs/BooleanLiteral" },
+        { "$ref": "#/$defs/StringLiteral" },
+        { "$ref": "#/$defs/TupleLiteral" },
+        { "$ref": "#/$defs/Parenthesized" },
+        { "$ref": "#/$defs/Uminus" },
+        { "$ref": "#/$defs/Not" },
+        { "$ref": "#/$defs/And" },
+        { "$ref": "#/$defs/Or" },
+        { "$ref": "#/$defs/Binop" },
+        { "$ref": "#/$defs/Conditional" },
+        { "$ref": "#/$defs/FieldAccess" },
+        { "$ref": "#/$defs/Sum" },
+        { "$ref": "#/$defs/MinAgg" },
+        { "$ref": "#/$defs/MaxAgg" },
+        { "$ref": "#/$defs/Funcall" },
+        { "$ref": "#/$defs/Maxl" },
+        { "$ref": "#/$defs/Minl" }
+      ]
+    },
+
+    "Constraint": {
+      "type": "object",
+      "required": ["type", "op", "left", "right"],
+      "properties": {
+        "type": { "const": "constraint" },
+        "label": { "type": "string" },
+        "op": { "type": "string", "enum": ["==", "!=", "<", ">", "<=", ">="] },
+        "left": { "$ref": "#/$defs/Expression" },
+        "right": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "ForallConstraint": {
+      "type": "object",
+      "required": ["type", "iterators"],
+      "properties": {
+        "type": { "const": "forall_constraint" },
+        "iterators": { "type": "array", "items": { "$ref": "#/$defs/SumIterator" } },
+        "index_constraint": { "$ref": "#/$defs/Expression" },
+        "constraint": { "$ref": "#/$defs/ConstraintNode" },
+        "constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConstraintNode" }
+        }
+      },
+      "additionalProperties": true,
+      "oneOf": [
+        { "required": ["constraint"] },
+        { "required": ["constraints"] }
+      ]
+    },
+
+    "ImplicationConstraint": {
+      "type": "object",
+      "required": ["type", "antecedent", "consequent"],
+      "properties": {
+        "type": { "const": "implication_constraint" },
+        "antecedent": { "$ref": "#/$defs/Constraint" },
+        "consequent": { "$ref": "#/$defs/Constraint" }
+      },
+      "additionalProperties": true
+    },
+
+    "ConstraintNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/Constraint" },
+        { "$ref": "#/$defs/ForallConstraint" },
+        { "$ref": "#/$defs/ImplicationConstraint" }
+      ]
+    },
+
+    "Objective": {
+      "type": "object",
+      "required": ["type", "expression"],
+      "properties": {
+        "type": { "type": "string", "enum": ["minimize", "maximize"] },
+        "expression": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "Dvar": {
+      "type": "object",
+      "required": ["type", "var_type", "name"],
+      "properties": {
+        "type": { "const": "dvar" },
+        "var_type": { "type": "string", "enum": ["int", "float", "int+", "float+", "boolean"] },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "DvarIndexed": {
+      "type": "object",
+      "required": ["type", "var_type", "name", "dimensions"],
+      "properties": {
+        "type": { "const": "dvar_indexed" },
+        "var_type": { "type": "string", "enum": ["int", "float", "int+", "float+", "boolean"] },
+        "name": { "type": "string" },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["range_index", "named_range_dimension", "named_set_dimension"]
+              },
+              "start": { "$ref": "#/$defs/Expression" },
+              "end": { "$ref": "#/$defs/Expression" },
+              "name": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "RangeDeclInline": {
+      "type": "object",
+      "required": ["type", "name", "start", "end"],
+      "properties": {
+        "type": { "const": "range_declaration_inline" },
+        "name": { "type": "string" },
+        "start": { "$ref": "#/$defs/Expression" },
+        "end": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "RangeDeclExternal": {
+      "type": "object",
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "const": "range_declaration_external" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "SetDeclaration": {
+      "type": "object",
+      "required": ["type", "name"],
+      "properties": {
+        "type": { "const": "set_declaration" },
+        "name": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+
+    "TypedSet": {
+      "type": "object",
+      "required": ["type", "name", "base_type"],
+      "properties": {
+        "type": { "enum": ["typed_set", "typed_set_external"] },
+        "name": { "type": "string" },
+        "base_type": { "type": "string", "enum": ["string", "int", "float", "boolean"] },
+        "value": { "type": ["array", "null"] }
+      },
+      "additionalProperties": true
+    },
+
+    "TupleType": {
+      "type": "object",
+      "required": ["type", "name", "fields"],
+      "properties": {
+        "type": { "const": "tuple_type" },
+        "name": { "type": "string" },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "name"],
+            "properties": {
+              "type": { "type": "string" },  
+              "name": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "SetOfTuples": {
+      "type": "object",
+      "required": ["type", "name", "tuple_type"],
+      "properties": {
+        "type": { "enum": ["set_of_tuples", "set_of_tuples_external"] },
+        "name": { "type": "string" },
+        "tuple_type": { "type": "string" },
+        "value": { "type": ["array", "null"] }
+      },
+      "additionalProperties": true
+    },
+
+    "TupleArray": {
+      "type": "object",
+      "required": ["type", "name", "tuple_type", "index_set", "dimensions"],
+      "properties": {
+        "type": { "enum": ["tuple_array", "tuple_array_external"] },
+        "name": { "type": "string" },
+        "tuple_type": { "type": "string" },
+        "index_set": { "type": "string" },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "name"],
+            "properties": {
+              "type": { "const": "named_set_dimension" },
+              "name": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "ParameterScalar": {
+      "type": "object",
+      "required": ["type", "var_type", "name"],
+      "properties": {
+        "type": {
+          "enum": [
+            "parameter_inline",
+            "parameter_external",
+            "parameter_external_explicit"
+          ]
+        },
+        "var_type": { "$ref": "#/$defs/SemType" },
+        "name": { "type": "string" },
+        "value": {}
+      },
+      "additionalProperties": true
+    },
+
+    "ParameterIndexed": {
+      "type": "object",
+      "required": ["type", "var_type", "name", "dimensions"],
+      "properties": {
+        "type": {
+          "enum": [
+            "parameter_inline_indexed",
+            "parameter_external_indexed",
+            "parameter_external_explicit_indexed"
+          ]
+        },
+        "var_type": { "$ref": "#/$defs/SemType" },
+        "name": { "type": "string" },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "enum": ["range_index", "named_range_dimension", "named_set_dimension"]
+              },
+              "start": { "$ref": "#/$defs/Expression" },
+              "end": { "$ref": "#/$defs/Expression" },
+              "name": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "value": {}
+      },
+      "additionalProperties": true
+    },
+
+    "ParameterComputedScalar": {
+      "type": "object",
+      "required": ["type", "var_type", "name", "expression"],
+      "properties": {
+        "type": { "const": "parameter_inline_expr" },
+        "var_type": { "$ref": "#/$defs/SemType" },
+        "name": { "type": "string" },
+        "expression": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "ParameterComputedIndexed": {
+      "type": "object",
+      "required": ["type", "var_type", "name", "iterators", "dimensions", "expression"],
+      "properties": {
+        "type": { "const": "parameter_inline_indexed_expr" },
+        "var_type": { "$ref": "#/$defs/SemType" },
+        "name": { "type": "string" },
+        "iterators": { "type": "array", "items": { "$ref": "#/$defs/SumIterator" } },
+        "dimensions": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "expression": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "DexprScalar": {
+      "type": "object",
+      "required": ["type", "name", "var_type", "expression"],
+      "properties": {
+        "type": { "const": "dexpr" },
+        "name": { "type": "string" },
+        "var_type": { "type": "string" },
+        "iterators": { "type": "array" },
+        "dimensions": { "type": "array" },
+        "expression": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "DexprIndexed": {
+      "type": "object",
+      "required": ["type", "name", "var_type", "iterators", "dimensions", "expression"],
+      "properties": {
+        "type": { "const": "dexpr_indexed" },
+        "name": { "type": "string" },
+        "var_type": { "type": "string" },
+        "iterators": { "type": "array", "items": { "$ref": "#/$defs/SumIterator" } },
+        "dimensions": { "type": "array" },
+        "expression": { "$ref": "#/$defs/Expression" }
+      },
+      "additionalProperties": true
+    },
+
+    "Declaration": {
+      "oneOf": [
+        { "$ref": "#/$defs/Dvar" },
+        { "$ref": "#/$defs/DvarIndexed" },
+        { "$ref": "#/$defs/RangeDeclInline" },
+        { "$ref": "#/$defs/RangeDeclExternal" },
+        { "$ref": "#/$defs/SetDeclaration" },
+        { "$ref": "#/$defs/TypedSet" },
+        { "$ref": "#/$defs/TupleType" },
+        { "$ref": "#/$defs/SetOfTuples" },
+        { "$ref": "#/$defs/TupleArray" },
+        { "$ref": "#/$defs/ParameterScalar" },
+        { "$ref": "#/$defs/ParameterIndexed" },
+        { "$ref": "#/$defs/ParameterComputedScalar" },
+        { "$ref": "#/$defs/ParameterComputedIndexed" },
+        { "$ref": "#/$defs/DexprScalar" },
+        { "$ref": "#/$defs/DexprIndexed" }
+      ]
+    }
+  }
+}

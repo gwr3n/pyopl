@@ -1,0 +1,260 @@
+root ::= _ ( model | data_file ) _
+
+_ ::= ([ \t\r\n])*
+
+
+// --- Tokens and atoms ---
+NAME ::= [A-Za-z_] [A-Za-z0-9_]*
+NUMBER ::= ( [0-9]+ ( "." [0-9]+ )? | "." [0-9]+ ) ( [eE] [+\-]? [0-9]+ )?
+BOOLEAN_LITERAL ::= "true" | "false"
+STRING_LITERAL ::= "\"" ([^"\\])* "\""
+
+// Operators and symbols appear as literals in productions.
+
+// ------------ MODEL GRAMMAR ------------
+model ::= declarations_opt objective_section constraints_section
+
+declarations_opt ::= declaration*
+declaration_list ::= declaration+
+objective_section ::= "minimize" _ expression _ ";" _
+                   | "maximize" _ expression _ ";" _
+
+constraints_section ::= "subject" _ "to" _ "{" _ constraint_list_opt "}" _
+constraint_list_opt ::= constraint*
+constraint_list ::= constraint+
+
+// Constraint forms
+constraint ::=
+      expression _ "=>" _ expression _ ";" _
+    | expression _ ";" _
+    | NAME _ ":" _ expression _ ";" _
+    | "forall" _ forall_index_header _ constraint _
+    | "forall" _ forall_index_header _ constraint_block _
+    | "if" _ "(" _ expression _ ")" _ constraint_block _
+    | "if" _ "(" _ expression _ ")" _ constraint_block _ "else" _ constraint_block _
+
+constraint_block ::= "{" _ constraint_list _ "}" _
+
+// --- Declarations (grouped) ---
+declaration ::=
+      dvar_declaration
+    | range_declaration
+    | untyped_set_declaration
+    | typed_set_declaration
+    | set_of_tuples_declaration
+    | untyped_tuple_set_assignment
+    | tuple_type_declaration
+    | tuple_array_declaration
+    | param_declaration
+    | dexpr_declaration
+
+// --- Types
+dvar_type ::= "int" | "float" | "int+" | "float+" | "boolean"
+type      ::= "int" | "float" | "int+" | "float+" | "boolean" | "string" | NAME
+
+// --- dvar
+dvar_declaration ::=
+      "dvar" _ dvar_type _ NAME _ ";" _
+    | "dvar" _ dvar_type _ NAME _ indexed_dimensions _ ";" _
+
+// --- range
+range_declaration ::=
+      "range" _ NAME _ "=" _ range_expr _ ".." _ range_expr _ ";" _
+    | "range" _ NAME _ ";" _
+
+// --- plain untyped set symbol (no RHS)
+untyped_set_declaration ::= "set" _ NAME _ ";" _
+
+// --- typed scalar sets (strings, ints, floats, booleans)
+typed_set_declaration ::=
+      "{" _ "string" _ "}" _ NAME _ "=" _ "{" _ element_list_string_opt _ "}" _ ";" _
+    | "{" _ "string" _ "}" _ NAME _ ";" _
+    | "{" _ "string" _ "}" _ NAME _ "=" _ "..." _ ";" _
+    | "{" _ "int" _ "}" _ NAME _ "=" _ "{" _ element_list_int_opt _ "}" _ ";" _
+    | "{" _ "int" _ "}" _ NAME _ ";" _
+    | "{" _ "int" _ "}" _ NAME _ "=" _ "..." _ ";" _
+    | "{" _ "float" _ "}" _ NAME _ "=" _ "{" _ element_list_float_opt _ "}" _ ";" _
+    | "{" _ "float" _ "}" _ NAME _ ";" _
+    | "{" _ "float" _ "}" _ NAME _ "=" _ "..." _ ";" _
+    | "{" _ "boolean" _ "}" _ NAME _ "=" _ "{" _ element_list_boolean_opt _ "}" _ ";" _
+    | "{" _ "boolean" _ "}" _ NAME _ ";" _
+    | "{" _ "boolean" _ "}" _ NAME _ "=" _ "..." _ ";" _
+
+element_list_string_opt  ::= (STRING_LITERAL (_ "," _ STRING_LITERAL)*)?
+element_list_int_opt     ::= (NUMBER_INT (_ "," _ NUMBER_INT)*)?
+element_list_float_opt   ::= (NUMBER (_ "," _ NUMBER)*)?
+element_list_boolean_opt ::= (BOOLEAN_LITERAL (_ "," _ BOOLEAN_LITERAL)*)?
+
+// Helpers to constrain ints in {int} element list
+NUMBER_INT ::= [0-9]+
+
+// --- set of tuples (typed by tuple type)
+set_of_tuples_declaration ::=
+      "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+    | "{" _ NAME _ "}" _ NAME _ ";" _
+    | "{" _ NAME _ "}" _ NAME _ "=" _ "..." _ ";" _
+
+// --- untyped set-of-tuples assignment (model; only tuple literals allowed on RHS)
+untyped_tuple_set_assignment ::= NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+
+// --- tuple type
+tuple_type_declaration ::= "tuple" _ NAME _ "{" _ tuple_field_list_opt _ "}" _ opt_semicolon
+tuple_field_list_opt ::= (tuple_field (_ tuple_field)*)?
+tuple_field ::= type _ NAME _ ";" _
+opt_semicolon ::= (";" _)?
+
+
+# --- tuple arrays (model)
+tuple_array_declaration ::=
+      NAME _ NAME _ "[" _ NAME _ "]" _ "=" _ "..." _ ";" _   // TupleType Arr[Set] = ...;
+    | NAME _ NAME _ "[" _ NAME _ "]" _ ";" _                 // TupleType Arr[Set];
+
+// --- param declarations
+param_declaration ::=
+    // scalar or indexed external, optional 'param', optional '= ...'
+      opt_param_kw _ type _ NAME _ opt_indexed _ opt_assign_ellipsis _ ";" _
+    // scalar inline number
+    | opt_param_kw _ type _ NAME _ "=" _ NUMBER _ ";" _
+    // scalar inline general expression
+    | opt_param_kw _ type _ NAME _ "=" _ expression _ ";" _
+    // indexed inline array literal
+    | opt_param_kw _ type _ NAME _ indexed_dimensions _ "=" _ array_value _ ";" _
+    // computed indexed parameter with iterators: float p[i in I, j in J] = expr;
+    | opt_param_kw _ type _ NAME _ dexpr_index_header _ "=" _ expression _ ";" _
+
+opt_param_kw ::= "param" | _
+opt_indexed ::= indexed_dimensions?
+opt_assign_ellipsis ::= ( "=" _ "..." )?
+
+// --- dexpr declarations (decision expressions; expanded on use)
+dexpr_declaration ::=
+      "dexpr" _ type _ NAME _ "=" _ expression _ ";" _
+    | "dexpr" _ type _ NAME _ dexpr_index_header _ "=" _ expression _ ";" _
+
+// dexpr index header: [ i in I, j in J ]
+dexpr_index_header ::= "[" _ dexpr_index_list _ "]" _
+dexpr_index_list ::= dexpr_index (_ "," _ dexpr_index)*
+dexpr_index ::= NAME _ "in" _ IN_RANGE
+
+// --- indexed dimensions and ranges
+indexed_dimensions ::= ( "[" _ index_specifier _ "]" _ )+
+index_specifier ::=
+      expression _ ".." _ expression          // range index
+    | expression                              // general index: name/number/arith/field/string/tuple literal
+    | tuple_literal                           // tuple literal index for tuple-set dims
+
+range_expr ::= expression                     // must be int-valued (semantic)
+
+// Shared in sum/forall/dexpr
+IN_RANGE ::= ( expression _ ".." _ expression ) | NAME
+
+// --- forall/sum headers
+forall_index_header ::= "(" _ sum_index_list _ opt_index_constraint _ ")" _
+sum_index_header    ::= "(" _ sum_index_list _ opt_index_constraint _ ")" _
+
+sum_index_list ::= sum_index (_ "," _ sum_index)*
+sum_index ::= NAME _ "in" _ IN_RANGE
+
+opt_index_constraint ::= ( ":" _ expression )?
+
+
+// --- Expressions (precedence tower; no left recursion) ---
+expression ::= conditional_expr
+
+// conditional ternary – condition must be parenthesized (per spec and parser)
+conditional_expr ::=
+      logic_or_expr
+    | "(" _ expression _ ")" _ "?" _ expression _ ":" _ expression
+
+logic_or_expr  ::= logic_and_expr ( _ "||" _ logic_and_expr )*
+logic_and_expr ::= equality_expr ( _ "&&" _ equality_expr )*
+
+equality_expr ::= relational_expr ( _ ( "==" | "!=" ) _ relational_expr )*
+relational_expr ::= additive_expr ( _ ( "<=" | "<" | ">=" | ">" ) _ additive_expr )*
+
+additive_expr ::= multiplicative_expr ( _ ( "\+" | "-" ) _ multiplicative_expr )*
+multiplicative_expr ::= unary_expr ( _ ( "\*" | "/" | "%" ) _ unary_expr )*
+
+unary_expr ::= ( ( "-" | "!" ) _ )* postfix_expr
+
+// postfix: ONLY field access chaining (no generic call-args)
+// function calls are handled explicitly via function_call primary
+postfix_expr ::= primary ( _ field_access )*
+field_access ::= "." _ NAME
+
+// Primaries, including aggregates and function calls
+primary ::=
+      NUMBER
+    | STRING_LITERAL
+    | BOOLEAN_LITERAL
+    | NAME
+    | NAME _ indexed_dimensions
+    | "(" _ expression _ ")"
+    | tuple_literal
+    | sum_expression
+    | min_aggregate
+    | max_aggregate
+    | function_call
+
+// Function calls: sqrt(arg), maxl(a,...), minl(a,...)
+function_call ::=
+      "sqrt" _ "(" _ expression _ ")"
+    | "maxl" _ "(" _ arg_list _ ")"     // require non-empty
+    | "minl" _ "(" _ arg_list _ ")"     // require non-empty
+
+arg_list ::= expression ( _ "," _ expression )*
+
+// --- Tuple literals (nested allowed; <> form) ---
+tuple_literal_list_opt ::= (tuple_literal (_ "," _ tuple_literal)*)?
+tuple_literal ::=
+      "<" _ tuple_element_list_opt _ ">"
+tuple_element_list_opt ::= (tuple_element (_ "," _ tuple_element)*)?
+tuple_element ::= STRING_LITERAL | NUMBER | tuple_literal
+
+
+// --- Arrays (nested) for inline params (.mod) ---
+array_value ::= "[" _ row_list _ "]"
+row_list ::=
+      row_list _ "," _ scalar_value
+    | scalar_value
+    | row_list _ "," _ array_value
+    | array_value
+
+scalar_value ::= NUMBER | STRING_LITERAL | BOOLEAN_LITERAL
+
+
+// ------------ DATA FILE (.dat) GRAMMAR ------------
+data_file ::= data_declaration_list
+data_declaration_list ::= data_declaration*
+
+data_declaration ::=
+      "param" _ NAME _ "=" _ scalar_value _ ";" _
+    | "set" _ NAME _ "=" _ set_value _ ";" _
+    | "param" _ NAME _ "=" _ array_value _ ";" _
+    | NAME _ "=" _ scalar_value _ ";" _
+    | NAME _ "=" _ set_value _ ";" _
+    | NAME _ "=" _ array_value _ ";" _
+    | NAME _ "=" _ key_value_array _ ";" _
+    | NAME _ "=" _ "param" _ key_value_array _ ";" _
+    | NAME _ "=" _ "set" _ key_value_array _ ";" _
+    | NAME _ "=" _ NUMBER _ ".." _ NUMBER _ ";" _
+    | set_of_tuples_data_assignment
+
+// Set-of-tuples in .dat (untyped or typed)
+set_of_tuples_data_assignment ::=
+      NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+    | NAME _ "=" _ "[" _ tuple_literal_list_opt _ "]" _ ";" _
+    | "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+
+// set values for .dat scalar sets
+set_value ::= "{" _ element_list_scalar_opt _ "}"
+element_list_scalar_opt ::= (scalar_value (_ "," _ scalar_value)*)?
+
+// Key-value arrays (string/tuple keys -> scalar or array)
+key_value_array ::= "[" _ key_value_row_list_opt _ "]"
+key_value_row_list_opt ::= (key_value_row (_ "," _ key_value_row)* _ ("," _)? )?
+key_value_row ::=
+      STRING_LITERAL _ scalar_value
+    | tuple_literal _ scalar_value
+    | STRING_LITERAL _ array_value
+    | tuple_literal _ array_value
