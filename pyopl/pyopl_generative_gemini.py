@@ -92,17 +92,46 @@ def generative_solve(
     )
 
     user_prompt = (
-        "You are an expert in mathematical optimization and PyOPL. "
-        "Given the following prompt, generate a PyOPL model (.mod) and a matching data file (.dat). "
-        "If the prompt does not specify data, create a plausible mock instance. "
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
-        "--- PyOPL syntax implementation ---\n"
+        "<role>\n"
+        "You are an expert in mathematical optimization and PyOPL.\n"
+        "</role>\n\n"
+        "<task>\n"
+        "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem.\n"
+        "If data are missing, create a small, plausible mock instance consistent with the model.\n"
+        "Validate all syntax against the provided PyOPL implementation reference only.\n"
+        "</task>\n\n"
+        "<grammar_reference>\n"
+        "--- BEGIN REFERENCE ---\n"
         f"{grammar_implementation}\n"
-        "--- END OF PyOPL syntax implementation ---\n\n"
-        f"PROMPT:\n{prompt}\n"
-        "Return ONLY a strict JSON object with two fields: "
-        "'model' (the PyOPL model as a single JSON string) and 'data' (the data file as a single JSON string). "
-        "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
+        "--- END REFERENCE ---\n"
+        "</grammar_reference>\n\n"
+        "<problem_prompt>\n"
+        f"{prompt}\n"
+        "</problem_prompt>\n\n"
+        "<output_requirements>\n"
+        '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+        "- The values must be single JSON strings (no arrays/objects inside them).\n"
+        "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
+        "- No trailing commas. No additional keys. No commentary.\n"
+        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        "</output_requirements>\n\n"
+        "<json_schema>\n"
+        "{\n"
+        '  "type": "object",\n'
+        '  "additionalProperties": false,\n'
+        '  "required": ["model", "data"],\n'
+        '  "properties": {\n'
+        '    "model": {"type": "string"},\n'
+        '    "data":  {"type": "string"}\n'
+        "  }\n"
+        "}\n"
+        "</json_schema>\n\n"
+        "<example_output>\n"
+        "{\n"
+        '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
+        '  "data":  "a = 10;\\nb= 5;"\n'
+        "}\n"
+        "</example_output>\n"
     )
 
     for iteration in range(iterations):
@@ -152,20 +181,64 @@ def generative_solve(
         else:
             # Feedback errors to Gemini and retry
             user_prompt = (
-                "You are an expert in mathematical optimization and PyOPL. "
-                "The following attempt to generate a PyOPL model and data file for the prompt failed due to syntax errors. "
-                "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
-                "--- PyOPL syntax implementation ---\n"
+                "<role>\n"
+                "You are an expert in mathematical optimization and PyOPL.\n"
+                "</role>\n\n"
+                "<task>\n"
+                "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
+                "Revise the model and data to fix the errors while retaining alignment with the original intent.\n"
+                "Validate all syntax against the provided PyOPL implementation reference only.\n"
+                "Change only what is necessary to fix the errors.\n"
+                "</task>\n\n"
+                "<grammar_reference>\n"
+                "--- BEGIN REFERENCE ---\n"
                 f"{grammar_implementation}\n"
-                "--- END OF PyOPL syntax implementation ---\n\n"
-                f"PROMPT:\n{prompt}\n\n"
-                f"PREVIOUS MODEL:\n{model_code}\n\n"
-                f"PREVIOUS DATA:\n{data_code}\n\n"
-                f"SYNTAX ERRORS:\n{syntax_errors}\n\n"
-                "Please revise the model and data to fix the errors while retaining alignment with the original intent. Return only a JSON object with 'model' and 'data'."
-                "Return ONLY a strict JSON object with two fields: "
-                "'model' (the PyOPL model as a single JSON string) and 'data' (the data file as a single JSON string). "
-                "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
+                "--- END REFERENCE ---\n"
+                "</grammar_reference>\n\n"
+                "<problem_prompt>\n"
+                f"{prompt}\n"
+                "</problem_prompt>\n\n"
+                "<previous_attempt>\n"
+                "<model>\n"
+                f"{model_code}\n"
+                "</model>\n\n"
+                "<data>\n"
+                f"{data_code}\n"
+                "</data>\n"
+                "</previous_attempt>\n\n"
+                "<errors>\n"
+                f"{syntax_errors}\n"
+                "</errors>\n\n"
+                "<revision_guidelines>\n"
+                "- Fix the listed syntax/semantic errors.\n"
+                "- Preserve the original modeling intent and structure when possible.\n"
+                "- Ensure the model compiles with the data under the given implementation.\n"
+                "- Return complete model and data strings; do not return diffs.\n"
+                "</revision_guidelines>\n\n"
+                "<output_requirements>\n"
+                '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+                "- The values must be single JSON strings (no arrays/objects inside them).\n"
+                "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
+                "- No trailing commas. No additional keys. No commentary.\n"
+                "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+                "</output_requirements>\n\n"
+                "<json_schema>\n"
+                "{\n"
+                '  "type": "object",\n'
+                '  "additionalProperties": false,\n'
+                '  "required": ["model", "data"],\n'
+                '  "properties": {\n'
+                '    "model": {"type": "string"},\n'
+                '    "data":  {"type": "string"}\n'
+                "  }\n"
+                "}\n"
+                "</json_schema>\n\n"
+                "<example_output>\n"
+                "{\n"
+                '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
+                '  "data":  "a = 10;\\nb= 5;"\n'
+                "}\n"
+                "</example_output>\n"
             )
 
     # Load latest version of the model and data files
@@ -177,17 +250,44 @@ def generative_solve(
     # Final assessment prompt
     syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     assessment_prompt = (
-        "You are an expert in mathematical optimization and PyOPL. "
-        "Given the following prompt and the generated PyOPL model and data, assess how well the model and data align with the original intent. "
-        "Be critical and specific. Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
-        "--- PyOPL syntax implementation ---\n"
+        "<role>\n"
+        "You are an expert in mathematical optimization and PyOPL.\n"
+        "</role>\n\n"
+        "<task>\n"
+        "Assess how well the generated PyOPL model and data align with the original problem intent.\n"
+        "Be critical and specific about modeling choices, feasibility, and consistency.\n"
+        "Reference only the provided PyOPL implementation for syntax validity.\n"
+        "</task>\n\n"
+        "<grammar_reference>\n"
+        "--- BEGIN REFERENCE ---\n"
         f"{grammar_implementation}\n"
-        "--- END OF PyOPL syntax implementation ---\n\n"
-        f"PROMPT:\n{prompt}\n\n"
-        f"MODEL:\n{model_code}\n\n"
-        f"DATA:\n{data_code}\n\n"
+        "--- END REFERENCE ---\n"
+        "</grammar_reference>\n\n"
+        "<inputs>\n"
+        "<problem_prompt>\n"
+        f"{prompt}\n"
+        "</problem_prompt>\n\n"
+        "<model>\n"
+        f"{model_code}\n"
+        "</model>\n\n"
+        "<data>\n"
+        f"{data_code}\n"
+        "</data>\n\n"
         f"{syntax_errors_str}"
-        "Provide your assessment as a short textual paragraph."
+        "</inputs>\n\n"
+        "<assessment_focus>\n"
+        "- Objective and constraints reflect the prompt intent.\n"
+        "- Decision variables have correct domains and indices.\n"
+        "- Data is consistent with sets/parameters used by the model.\n"
+        "- Signs, units, and indexing are correct; no missing links.\n"
+        "- Any syntax/semantic issues relative to the implementation reference.\n"
+        "- Most impactful improvements if misaligned.\n"
+        "</assessment_focus>\n\n"
+        "<output_requirements>\n"
+        "- Return a single short paragraph (3–6 sentences) of plain text.\n"
+        "- No Markdown, no bullet lists, no code fences.\n"
+        "- If issues exist, mention the most critical fixes.\n"
+        "</output_requirements>\n"
     )
     assessment_response = model.generate_content(assessment_prompt)
     assessment_text = _coalesce_gemini_text(assessment_response) or getattr(assessment_response, "text", "") or ""
@@ -228,12 +328,21 @@ def generative_feedback(prompt, model_file, data_file, model_name="gemini-2.5-fl
         data_code = fh.read()
 
     user_prompt = (
-        "You are an expert in mathematical optimization and PyOPL. "
-        "Answer the following question about the given PyOPL model and data file."
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax:\n\n"
-        "--- PyOPL syntax implementation ---\n"
+        "<role>\n"
+        "You are an expert in mathematical optimization and PyOPL.\n"
+        "</role>\n\n"
+        "<task>\n"
+        "Answer the user's question about the provided PyOPL model and data.\n"
+        "Provide critical, specific feedback. If revisions are necessary for correctness,\n"
+        "semantics, or consistency with the grammar reference, propose minimal changes.\n"
+        "Only change what is necessary.\n"
+        "</task>\n\n"
+        "<grammar_reference>\n"
+        "--- BEGIN REFERENCE ---\n"
         f"{grammar_implementation}\n"
-        "--- END OF PyOPL syntax implementation ---\n\n"
+        "--- END REFERENCE ---\n"
+        "</grammar_reference>\n\n"
+        "<inputs>\n"
         "<prompt>\n"
         f"{prompt}\n"
         "</prompt>\n\n"
@@ -242,13 +351,37 @@ def generative_feedback(prompt, model_file, data_file, model_name="gemini-2.5-fl
         "</model>\n\n"
         "<data>\n"
         f"{data_code}\n"
-        "</data>\n\n"
-        "Return ONLY a strict JSON object with three fields, of which two are optional: "
-        "'feedback' (your textual feedback), "
-        "'revised_model' (the revised PyOPL model as a single JSON string), "
-        "'revised_data' (the revised data file as a single JSON string). "
-        "Feedback is mandatory, while revised_model and revised_data are optional and can be omitted if no changes are needed. "
-        "Do not include Markdown or code fences. Escape all double quotes and backslashes inside the strings."
+        "</data>\n"
+        "</inputs>\n\n"
+        "<output_requirements>\n"
+        "- Return ONLY a JSON object with 1 required key and up to 2 optional keys:\n"
+        '  "feedback" (required), "revised_model" (optional), "revised_data" (optional).\n'
+        "- Each value must be a single JSON string. Escape all double quotes and backslashes;\n"
+        "  encode newlines as \\n.\n"
+        '- If no changes are needed, omit "revised_model" and "revised_data".\n'
+        "- If changes are needed, return complete model and data strings; do not return diffs.\n"
+        "- No trailing commas. No additional keys. No commentary.\n"
+        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        "</output_requirements>\n\n"
+        "<json_schema>\n"
+        "{\n"
+        '  "type": "object",\n'
+        '  "additionalProperties": false,\n'
+        '  "required": ["feedback"],\n'
+        '  "properties": {\n'
+        '    "feedback": {"type": "string"},\n'
+        '    "revised_model": {"type": "string"},\n'
+        '    "revised_data": {"type": "string"}\n'
+        "  }\n"
+        "}\n"
+        "</json_schema>\n\n"
+        "<example_output>\n"
+        "{\n"
+        '  "feedback": "The model was missing coefficients a and b.",\n'
+        '  "revised_model": "// minimal fix\\nfloat a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
+        '  "revised_data":  "a = 10;\\nb= 5;"\n'
+        "}\n"
+        "</example_output>\n"
     )
 
     response = model.generate_content(user_prompt)
