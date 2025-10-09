@@ -108,7 +108,7 @@ def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iteratio
         f"{prompt}\n"
         "</problem_prompt>\n\n"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
         "- The values must be single JSON strings (no arrays/objects inside them).\n"
         "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
         "- No trailing commas. No additional keys. No commentary.\n"
@@ -210,7 +210,7 @@ def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iteratio
                 "- Return complete model and data strings; do not return diffs.\n"
                 "</revision_guidelines>\n\n"
                 "<output_requirements>\n"
-                '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+                '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
                 "- The values must be single JSON strings (no arrays/objects inside them).\n"
                 "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
                 "- No trailing commas. No additional keys. No commentary.\n"
