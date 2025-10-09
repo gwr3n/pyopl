@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from enum import Enum, auto
 
 # import google.generativeai as genai
 from openai import OpenAI
@@ -9,6 +10,12 @@ from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = 4096 * 2
+
+
+class Grammar(Enum):
+    NONE = auto()
+    BNF = auto()
+    CODE = auto()
 
 
 def _read_pyopl_grammar():
@@ -67,20 +74,36 @@ def _coalesce_response_text(resp) -> str:
 # model_name = "gpt-5-mini"
 # model_name = "gpt-5-nano"
 # model_name = "gpt-4.1"
-def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iterations=MAX_ITERATIONS, return_statistics=False):
+def generative_solve(
+    prompt, model_file, data_file, model_name="gpt-5", mode=Grammar.CODE, iterations=MAX_ITERATIONS, return_statistics=False
+):
     """
     Generate a PyOPL model and data file from a prompt using OpenAI GPT-5, validate with pyopl, iterate on errors, and assess alignment.
     Args:
             prompt (str): Textual description of the optimization problem.
             model_file (str): Path to save the generated model file.
             data_file (str): Path to save the generated data file.
+            model_name (str): OpenAI GPT model to use (e.g., "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1").
+            mode (Grammar): Grammar mode for generation (NONE, BNF, CODE).
+            iterations (int): Maximum number of iterations to attempt generation and correction.
+            return_statistics (bool): If True, return detailed statistics including assessment and syntax errors.
     Returns:
             str: GPT-5's assessment of alignment between model/data and prompt.
     """
 
-    # grammar_implementation = _read_pyopl_grammar()
-    grammar_implementation = _read_pyopl_code()
-    # grammar_implementation = ""
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
+    
+    try:
+        iterations = max(1, int(iterations))
+    except Exception:
+        iterations = MAX_ITERATIONS
 
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
@@ -302,13 +325,21 @@ def generative_solve(prompt, model_file, data_file, model_name="gpt-5", iteratio
 # model_name = "gpt-5-mini"
 # model_name = "gpt-5-nano"
 # model_name = "gpt-4.1"
-def generative_feedback(prompt, model_file, data_file, model_name="gpt-5"):
-    grammar_implementation = _read_pyopl_code()
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-5", mode=Grammar.CODE):
     # Use API key from environment variable
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
     client = OpenAI(api_key=api_key)
+
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
 
     # Read files first (avoid inline open().read())
     with open(model_file, "r", encoding="utf-8") as fh:

@@ -1,12 +1,19 @@
 import json
 import os
 import re
+from enum import Enum, auto
 
 import google.generativeai as genai
 
 from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
+
+
+class Grammar(Enum):
+    NONE = auto()
+    BNF = auto()
+    CODE = auto()
 
 
 def _read_pyopl_grammar():
@@ -61,7 +68,13 @@ def _coalesce_gemini_text(resp) -> str:
 # Use Gemini 2.5 Flash model
 # model_name = "gemini-2.5-flash"
 def generative_solve(
-    prompt, model_file, data_file, model_name="gemini-2.5-flash", iterations=MAX_ITERATIONS, return_statistics=False
+    prompt,
+    model_file,
+    data_file,
+    model_name="gemini-2.5-flash",
+    mode=Grammar.CODE,
+    iterations=MAX_ITERATIONS,
+    return_statistics=False,
 ):
     """
     Generate a PyOPL model and data file from a prompt using Gemini, validate with pyopl, iterate on errors, and assess alignment.
@@ -69,13 +82,27 @@ def generative_solve(
             prompt (str): Textual description of the optimization problem.
             model_file (str): Path to save the generated model file.
             data_file (str): Path to save the generated data file.
+            model_name (str): Gemini model to use (e.g., "gemini-2.5-flash").
+            mode (Grammar): Grammar mode for generation (NONE, BNF, CODE).
+            iterations (int): Maximum number of iterations to attempt generation and correction.
+            return_statistics (bool): If True, return detailed statistics including assessment and syntax errors.
     Returns:
             str: Gemini's assessment of alignment between model/data and prompt.
     """
 
-    # grammar = _read_pyopl_grammar()
-    grammar_implementation = _read_pyopl_code()
-    # grammar_implementation = ""
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
+    
+    try:
+        iterations = max(1, int(iterations))
+    except Exception:
+        iterations = MAX_ITERATIONS
 
     # Use API key from environment variable
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -305,13 +332,21 @@ def generative_solve(
 
 # Use Gemini 2.5 Flash model
 # model_name = "gemini-2.5-flash"
-def generative_feedback(prompt, model_file, data_file, model_name="gemini-2.5-flash"):
-    grammar_implementation = _read_pyopl_code()
+def generative_feedback(prompt, model_file, data_file, model_name="gemini-2.5-flash", mode=Grammar.CODE):
     # Use API key from environment variable
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY environment variable not set.")
     genai.configure(api_key=api_key)
+
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
 
     model = genai.GenerativeModel(
         model_name,
