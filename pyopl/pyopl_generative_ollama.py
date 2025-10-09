@@ -48,7 +48,7 @@ def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name="gpt-oss:120b",
+    model_name="gpt-oss:20b",
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
@@ -86,7 +86,7 @@ def generative_solve(
         f"{prompt}\n"
         "</problem_prompt>\n\n"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
         "- The values must be single JSON strings (no arrays/objects inside them).\n"
         "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
         "- No trailing commas. No additional keys. No commentary.\n"
@@ -187,7 +187,7 @@ def generative_solve(
                 "- Return complete model and data strings; do not return diffs.\n"
                 "</revision_guidelines>\n\n"
                 "<output_requirements>\n"
-                '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+                '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
                 "- The values must be single JSON strings (no arrays/objects inside them).\n"
                 "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
                 "- No trailing commas. No additional keys. No commentary.\n"
@@ -275,7 +275,7 @@ def generative_solve(
 
 
 # https://ollama.com/library/gpt-oss
-def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:120b"):
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b"):
     """
     Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
