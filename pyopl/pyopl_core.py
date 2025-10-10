@@ -2206,6 +2206,7 @@ class OPLParser(Parser):
                 if isinstance(n, list):
                     return any(rec(x) for x in n)
                 return False
+
             return rec(expr)
 
         # Do NOT sink addition/subtraction into aggregates by default (changes semantics).
@@ -2221,7 +2222,7 @@ class OPLParser(Parser):
                 new_body = {
                     "type": "binop",
                     "op": op,
-                    "left": sum_side["expression"] if left_is_sum else other_side,   # fixed below
+                    "left": sum_side["expression"] if left_is_sum else other_side,  # fixed below
                     "right": other_side if left_is_sum else sum_side["expression"],
                     "sem_type": None,
                 }
@@ -2230,7 +2231,7 @@ class OPLParser(Parser):
                 lifted["expression"] = new_body
                 return lifted
             # Otherwise, keep as a plain binop outside the sum
-            result_type = (left_expr.get("sem_type") or right_expr.get("sem_type") or "int")
+            result_type = left_expr.get("sem_type") or right_expr.get("sem_type") or "int"
             logger.debug("[BINOP] Avoid sinking +/- into sum/forall; keeping as plain binop")
             return {
                 "type": "binop",
