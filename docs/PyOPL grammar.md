@@ -180,6 +180,25 @@ Tuple arrays (model declarations):
                             | <NAME> <NAME> '[' <NAME> ']' ';'             // TupleType Arr[Set];
 ```
 
+Decision expressions (expanded on use):
+
+```
+// Scalar dexpr:
+<dexpr_declaration> ::= 'dexpr' <type> <NAME> '=' <expression> ';'
+
+// Indexed dexpr with flat header:
+                     | 'dexpr' <type> <NAME> <dexpr_index_header> '=' <expression> ';'
+
+// Indexed dexpr with strict nested headers:
+                     | 'dexpr' <type> <NAME> <dexpr_index_headers> '=' <expression> ';'
+
+// dexpr index headers:
+<dexpr_index_header>  ::= '[' <dexpr_index_list> ']'
+<dexpr_index_headers> ::= '[' <dexpr_index_list> ']' ( '[' <dexpr_index_list> ']' )*
+<dexpr_index_list>    ::= <dexpr_index_list> ',' <dexpr_index> | <dexpr_index>
+<dexpr_index>         ::= <NAME> 'in' <IN_RANGE>
+```
+
 Parameters (param keyword optional; external or inline; arrays or expressions):
 
 ```
@@ -195,25 +214,13 @@ Parameters (param keyword optional; external or inline; arrays or expressions):
 // Inline indexed from array literal (nested lists):
                       | [ 'param' ] <type> <NAME> <indexed_dimensions> '=' <array_value> ';'
 
-// Computed indexed parameter with iterators (evaluated at compile-time):
+// Computed indexed parameter with flat header:
                       | [ 'param' ] <type> <NAME> <dexpr_index_header> '=' <expression> ';'
 
+// Computed indexed parameter with strict nested headers:
+                      | [ 'param' ] <type> <NAME> <dexpr_index_headers> '=' <expression> ';'
+
 <opt_assign_ellipsis> ::= '=' '...' | ε
-```
-
-Decision expressions (expanded on use):
-
-```
-// Scalar dexpr:
-<dexpr_declaration> ::= 'dexpr' <type> <NAME> '=' <expression> ';'
-
-// Indexed dexpr with iterators:
-                     | 'dexpr' <type> <NAME> <dexpr_index_header> '=' <expression> ';'
-
-// dexpr index header:
-<dexpr_index_header> ::= '[' <dexpr_index_list> ']'
-<dexpr_index_list> ::= <dexpr_index_list> ',' <dexpr_index> | <dexpr_index>
-<dexpr_index> ::= <NAME> 'in' <IN_RANGE>
 ```
 
 ### Indexed dimensions and ranges
