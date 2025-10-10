@@ -72,9 +72,7 @@ def _get_direction_from_model(model_file: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
-    parser.add_argument(
-        "--dataset", default="NL4OPT", help="The dataset to be used. Supported: NL4OPT (default), NLP4LP, IndustryOR."
-    )
+    parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR.")
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--gpt", default="gpt-5", help="GPT model to use for generation.")
@@ -112,10 +110,10 @@ def main() -> int:
         return 2
 
     # Compute segregated output directories:
-    # gen_ai/NL4OPT/{grammar}/{gpt}/{iterations}/ and a subfolder models/
-    base_dir = os.path.join("gen_ai", "NL4OPT", args.grammar, args.gpt, str(args.iterations))
+    # gen_ai/{dataset}/{grammar}/{gpt}/{iterations}/ and a subfolder models/
+    base_dir = os.path.join("gen_ai", args.dataset, args.grammar, args.gpt, str(args.iterations))
     models_dir = os.path.join(base_dir, "models")
-    results_json_path = os.path.join(base_dir, "NL4OPT_results.json")
+    results_json_path = os.path.join(base_dir, f"{args.dataset}_results.json")
 
     _ensure_parent_dir(results_json_path)
     os.makedirs(models_dir, exist_ok=True)
