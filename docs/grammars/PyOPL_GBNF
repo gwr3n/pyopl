@@ -121,18 +121,18 @@ param_declaration ::=
     | opt_param_kw _ type _ NAME _ indexed_dimensions _ "=" _ array_value _ ";" _
     // computed indexed parameter with iterators: float p[i in I, j in J] = expr;
     | opt_param_kw _ type _ NAME _ dexpr_index_header _ "=" _ expression _ ";" _
-
-opt_param_kw ::= "param" | _
-opt_indexed ::= indexed_dimensions?
-opt_assign_ellipsis ::= ( "=" _ "..." )?
+    // computed indexed parameter with strict nested headers: float p[i in I][j in J] = expr;
+    | opt_param_kw _ type _ NAME _ dexpr_index_headers _ "=" _ expression _ ";" _
 
 // --- dexpr declarations (decision expressions; expanded on use)
 dexpr_declaration ::=
       "dexpr" _ type _ NAME _ "=" _ expression _ ";" _
     | "dexpr" _ type _ NAME _ dexpr_index_header _ "=" _ expression _ ";" _
+    | "dexpr" _ type _ NAME _ dexpr_index_headers _ "=" _ expression _ ";" _
 
 // dexpr index header: [ i in I, j in J ]
 dexpr_index_header ::= "[" _ dexpr_index_list _ "]" _
+dexpr_index_headers ::= "[" _ dexpr_index_list _ "]" _ ( "[" _ dexpr_index_list _ "]" _ )*
 dexpr_index_list ::= dexpr_index (_ "," _ dexpr_index)*
 dexpr_index ::= NAME _ "in" _ IN_RANGE
 
