@@ -68,7 +68,7 @@ def _coalesce_response_text(resp) -> str:
                         chunks.append(block["text"])
         return "".join(chunks)
     except Exception:
-        return ""
+        pass
     # Last-resort fallbacks
     try:
         first = getattr(resp, "output", [])[0]
