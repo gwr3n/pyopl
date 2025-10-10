@@ -422,12 +422,31 @@
       },
       "additionalProperties": true
     },
+    
+    "IfConstraint": {
+      "type": "object",
+      "required": ["type", "condition", "then_constraints"],
+      "properties": {
+        "type": { "const": "if_constraint" },
+        "condition": { "$ref": "#/$defs/Expression" },
+        "then_constraints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ConstraintNode" }
+        },
+        "else_constraints": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/ConstraintNode" }
+        }
+      },
+      "additionalProperties": true
+    },
 
     "ConstraintNode": {
       "oneOf": [
         { "$ref": "#/$defs/Constraint" },
         { "$ref": "#/$defs/ForallConstraint" },
-        { "$ref": "#/$defs/ImplicationConstraint" }
+        { "$ref": "#/$defs/ImplicationConstraint" },
+        { "$ref": "#/$defs/IfConstraint" }
       ]
     },
 
