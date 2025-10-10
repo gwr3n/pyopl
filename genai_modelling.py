@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 def test_generative_solve():
     prompt = (
         "A small inventory routing problem involves a company that must deliver a single product "
@@ -24,10 +25,12 @@ def test_generative_feedback():
     print("Revised Model:\n", feedback_result.get("revised_model", ""))
     print("Revised Data:\n", feedback_result.get("revised_data", ""))
 
+
 class GenerativeProvider(Enum):
-        OPENAI = "openai"
-        GEMINI = "gemini"
-        OLLAMA = "ollama"
+    OPENAI = "openai"
+    GEMINI = "gemini"
+    OLLAMA = "ollama"
+
 
 if __name__ == "__main__":
 

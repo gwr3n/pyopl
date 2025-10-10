@@ -72,11 +72,11 @@ def _get_direction_from_model(model_file: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
-    parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used. Supported: NL4OPT (default), NLP4LP, IndustryOR.")
-    parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument(
-        "--iterations", type=int, default=5, help="Number of iterations for generative_solve."
+        "--dataset", default="NL4OPT", help="The dataset to be used. Supported: NL4OPT (default), NLP4LP, IndustryOR."
     )
+    parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
+    parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--gpt", default="gpt-5", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="code", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
