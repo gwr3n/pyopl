@@ -20,7 +20,7 @@ jobs:
       - name: Install tools
         run: |
           python -m pip install --upgrade pip
-          pip install black "flake8>=7.0.0" mypy ruff scipy-stubs openai google-generativeai
+          pip install black "flake8>=7.0.0" mypy ruff scipy-stubs openai google-generativeai ollama
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
       - name: Black (check)
         run: black --check .
