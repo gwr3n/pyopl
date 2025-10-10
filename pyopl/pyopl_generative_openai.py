@@ -34,7 +34,7 @@ def extract_json_from_markdown(text):
     """
     Extract JSON object from a Markdown code block if present.
     """
-    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)
     return text
@@ -116,18 +116,19 @@ def generative_solve(
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem.\n"
+        "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
+        "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
-        "Validate all syntax against the provided PyOPL implementation reference only.\n"
+        "Validate all syntax against the provided PyOPL grammar implementation reference only.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN REFERENCE ---\n"
         f"{grammar_implementation}\n"
         "--- END REFERENCE ---\n"
         "</grammar_reference>\n\n"
-        "<problem_prompt>\n"
+        "<problem_description>\n"
         f"{prompt}\n"
-        "</problem_prompt>\n\n"
+        "</problem_description>\n\n"
         "<output_requirements>\n"
         '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
         "- The values must be single JSON strings (no arrays/objects inside them).\n"
@@ -192,7 +193,120 @@ def generative_solve(
             f.write(data_code)
 
         if not syntax_errors:
-            break
+            # Alignment check with original intent
+            alignment_prompt = (
+                "<role>\n"
+                "You are an expert in mathematical optimization and PyOPL.\n"
+                "</role>\n\n"
+                "<task>\n"
+                "Assess whether the generated PyOPL model and data fully align with the original problem description.\n"
+                "Alignment means the objective, constraints, decision variables, and data fully capture the user's specifications.\n"
+                "Use the provided PyOPL grammar implementation reference to support your analysis.\n"
+                "</task>\n\n"
+                "<grammar_reference>\n"
+                "--- BEGIN REFERENCE ---\n"
+                f"{grammar_implementation}\n"
+                "--- END REFERENCE ---\n"
+                "</grammar_reference>\n\n"
+                "<inputs>\n"
+                "<problem_description>\n"
+                f"{prompt}\n"
+                "</problem_description>\n\n"
+                "<model>\n"
+                f"{model_code}\n"
+                "</model>\n\n"
+                "<data>\n"
+                f"{data_code}\n"
+                "</data>\n"
+                "</inputs>\n\n"
+                "<output_requirements>\n"
+                '- Return ONLY a JSON object with exactly one key: "aligned" (boolean).\n'
+                "- No commentary. No additional keys. No trailing commas.\n"
+                "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+                "</output_requirements>\n\n"
+                "<json_schema>\n"
+                "{\n"
+                '  "type": "object",\n'
+                '  "additionalProperties": false,\n'
+                '  "required": ["aligned"],\n'
+                '  "properties": { "aligned": {"type": "boolean"} }\n'
+                "}\n"
+                "</json_schema>\n\n"
+                "<example_output>\n"
+                '{ "aligned": true }\n'
+                "</example_output>\n"
+            )
+            
+            alignment_response = client.responses.create(
+                model=model_name, input=alignment_prompt, max_output_tokens=256
+            )
+            alignment_content = _coalesce_response_text(alignment_response)
+            if not alignment_content:
+                raise RuntimeError(f"Empty alignment response. Full response: {alignment_response}")
+            alignment_obj = json.loads(extract_json_from_markdown(alignment_content))
+            if isinstance(alignment_obj, dict) and isinstance(alignment_obj.get("aligned"), bool):
+                if alignment_obj["aligned"]:
+                    break
+                else:
+                    # Not aligned; continue iterating for potential revisions
+                    user_prompt = (
+                        "<role>\n"
+                        "You are an expert in mathematical optimization and PyOPL.\n"
+                        "</role>\n\n"
+                        "<task>\n"
+                        "The previous attempt produced a syntactically valid PyOPL model and data, but they are NOT fully aligned with the problem description.\n"
+                        "Revise the model and data so that they fully align with the user's specifications while preserving syntactic validity under the provided PyOPL grammar implementation reference.\n"
+                        "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
+                        "</task>\n\n"
+                        "<grammar_reference>\n"
+                        "--- BEGIN REFERENCE ---\n"
+                        f"{grammar_implementation}\n"
+                        "--- END REFERENCE ---\n"
+                        "</grammar_reference>\n\n"
+                        "<problem_description>\n"
+                        f"{prompt}\n"
+                        "</problem_description>\n\n"
+                        "<previous_attempt>\n"
+                        "<model>\n"
+                        f"{model_code}\n"
+                        "</model>\n\n"
+                        "<data>\n"
+                        f"{data_code}\n"
+                        "</data>\n"
+                        "</previous_attempt>\n\n"
+                        "<revision_guidelines>\n"
+                        "- Ensure the objective, constraints, indices, and variable domains reflect the problem description.\n"
+                        "- Make the minimal set of changes necessary to correct misalignment.\n"
+                        "- Keep syntax strictly valid per the provided implementation reference.\n"
+                        "- Return complete model and data strings; do not return diffs.\n"
+                        "</revision_guidelines>\n\n"
+                        "<output_requirements>\n"
+                        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
+                        "- The values must be single JSON strings (no arrays/objects inside them).\n"
+                        "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
+                        "- No trailing commas. No additional keys. No commentary.\n"
+                        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+                        "</output_requirements>\n\n"
+                        "<json_schema>\n"
+                        "{\n"
+                        '  "type": "object",\n'
+                        '  "additionalProperties": false,\n'
+                        '  "required": ["model", "data"],\n'
+                        '  "properties": {\n'
+                        '    "model": {"type": "string"},\n'
+                        '    "data":  {"type": "string"}\n'
+                        "  }\n"
+                        "}\n"
+                        "</json_schema>\n\n"
+                        "<example_output>\n"
+                        "{\n"
+                        '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
+                        '  "data":  "a = 10;\\nb= 5;"\n'
+                        "}\n"
+                        "</example_output>\n"
+                    )
+            else:
+                raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
             # Feedback errors to GPT-5 and retry
             user_prompt = (
@@ -202,7 +316,7 @@ def generative_solve(
                 "<task>\n"
                 "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
                 "Revise the model and data to fix the errors while retaining alignment with the original intent.\n"
-                "Validate all syntax against the provided PyOPL implementation reference only.\n"
+                "Validate all syntax against the provided PyOPL grammar implementation reference only.\n"
                 "Change only what is necessary to fix the errors.\n"
                 "</task>\n\n"
                 "<grammar_reference>\n"
@@ -210,9 +324,9 @@ def generative_solve(
                 f"{grammar_implementation}\n"
                 "--- END REFERENCE ---\n"
                 "</grammar_reference>\n\n"
-                "<problem_prompt>\n"
+                "<problem_description>\n"
                 f"{prompt}\n"
-                "</problem_prompt>\n\n"
+                "</problem_description>\n\n"
                 "<previous_attempt>\n"
                 "<model>\n"
                 f"{model_code}\n"
@@ -269,9 +383,9 @@ def generative_solve(
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Assess how well the generated PyOPL model and data align with the original problem intent.\n"
+        "Assess how well the generated PyOPL model and data align with the original problem description.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
-        "Reference only the provided PyOPL implementation for syntax validity.\n"
+        "Reference only the provided PyOPL grammar implementation for syntax validity.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN REFERENCE ---\n"
@@ -279,9 +393,9 @@ def generative_solve(
         "--- END REFERENCE ---\n"
         "</grammar_reference>\n\n"
         "<inputs>\n"
-        "<problem_prompt>\n"
+        "<problem_description>\n"
         f"{prompt}\n"
-        "</problem_prompt>\n\n"
+        "</problem_description>\n\n"
         "<model>\n"
         f"{model_code}\n"
         "</model>\n\n"
@@ -342,9 +456,9 @@ def generative_feedback(prompt, model_file, data_file, model_name="gpt-5", mode=
         raise ValueError(f"Invalid mode: {mode}")
 
     # Read files first (avoid inline open().read())
-    with open(model_file, "r", encoding="utf-8") as fh:
+    with open(model_file, "r") as fh:
         model_code = fh.read()
-    with open(data_file, "r", encoding="utf-8") as fh:
+    with open(data_file, "r") as fh:
         data_code = fh.read()
 
     user_prompt = (
