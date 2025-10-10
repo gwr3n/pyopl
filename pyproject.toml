@@ -17,17 +17,17 @@ classifiers = [
 ]
 license = { text = "MIT" }
 dependencies = [
-  "sly",
-  "numpy>=1.20",
-  "scipy>=1.11",
-  "gurobipy",
-  "highspy",
-  "Pillow",
-  "ttkbootstrap",
-  "platformdirs",
-  "openai",
-  "google-generativeai",
-  "ollama"
+  "sly>=0.5",
+  "numpy>=1.26",
+  "scipy>=1.16",
+  "gurobipy>=11.0",
+  "highspy>=1.11",
+  "Pillow>=10",
+  "ttkbootstrap>=1.14",
+  "platformdirs>=4.1",
+  "openai>=1.99",
+  "google-generativeai>=0.8.5",
+  "ollama>=0.6.0"
 ]
 
 [project.urls]
