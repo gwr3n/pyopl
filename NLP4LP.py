@@ -6,8 +6,7 @@ import sys
 from typing import Any, Optional
 
 from pyopl import solve
-from pyopl.pyopl_generative_openai import generative_solve
-from pyopl.pyopl_generative_openai import Grammar
+from pyopl.pyopl_generative_openai import Grammar, generative_solve
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -64,14 +63,16 @@ def main() -> int:
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON list.")
     parser.add_argument("--model", default="tmp/gen_pyopl_model.mod", help="Output path for generated .mod file.")
     parser.add_argument("--data", default="tmp/gen_pyopl_data.dat", help="Output path for generated .dat file.")
-    parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve (used with --all).")
+    parser.add_argument(
+        "--iterations", type=int, default=5, help="Number of iterations for generative_solve (used with --all)."
+    )
     parser.add_argument("--gpt", default="gpt-5-mini", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="code", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
     # NEW: batch mode to solve all problems
     parser.add_argument("--all", action="store_true", help="Solve all problems in NLP4LP.json and save results to --results.")
-    
+
     parser.add_argument(
         "--results", default="gen_ai/NLP4LP_results.json", help="Output path for batch results JSON (used with --all)."
     )
@@ -80,14 +81,14 @@ def main() -> int:
     print("Arguments:")
     for k, v in vars(args).items():
         print(f"  {k}: {v}")
-    
+
     if args.grammar == "none":
         mode = Grammar.NONE
     elif args.grammar == "code":
         mode = Grammar.CODE
     elif args.grammar == "bnf":
         mode = Grammar.BNF
-    else:   
+    else:
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {[g.name.lower() for g in Grammar]}")
 
     # Load dataset
@@ -139,7 +140,15 @@ def main() -> int:
 
             # Step 1-2: Generate model and data
             try:
-                result = generative_solve(prompt, model_path, data_path, model_name=args.gpt, mode=mode, iterations=args.iterations, return_statistics=True)
+                result = generative_solve(
+                    prompt,
+                    model_path,
+                    data_path,
+                    model_name=args.gpt,
+                    mode=mode,
+                    iterations=args.iterations,
+                    return_statistics=True,
+                )
                 entry["generation_assessment"] = result["assessment"]
                 entry["generation_iterations"] = result["iterations"]
                 entry["syntax_errors"] = result["syntax_errors"]
@@ -206,7 +215,9 @@ def main() -> int:
 
     # Step 1-2: Generate model and data
     try:
-        result = generative_solve(prompt, args.model, args.data, model_name=args.gpt, mode=mode, iterations=args.iterations, return_statistics=True)
+        result = generative_solve(
+            prompt, args.model, args.data, model_name=args.gpt, mode=mode, iterations=args.iterations, return_statistics=True
+        )
         assessment = result["assessment"]
         print(f"generative_solve completed. Assessment: {assessment}")
     except Exception as e:

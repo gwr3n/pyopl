@@ -99,7 +99,7 @@ def generative_solve(
         grammar_implementation = _read_pyopl_code()
     else:
         raise ValueError(f"Invalid mode: {mode}")
-    
+
     try:
         iterations = max(1, int(iterations))
     except Exception:
