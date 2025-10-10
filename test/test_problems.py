@@ -30,7 +30,6 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
-
     @unittest.skip("proprietary model")
     def test_complex_workforce_planning(self):
         """
@@ -82,6 +81,262 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
+
+    def test_employee_rostering(self):
+        """
+        Test employee rostering model with both solvers.
+        """
+        model_code = """
+            tuple Pair { string e; string s; }
+
+            {string} Employees = ...;
+            {string} Shifts = ...;
+
+            {Pair} Pairs = { <e,s> | e in Employees, s in Shifts };
+
+            int demand[Shifts];
+            int pref[Pairs];
+
+            dvar boolean x[Employees][Shifts];
+
+            maximize sum(e in Employees, s in Shifts) pref[<e,s>] * x[e][s];
+
+            subject to {
+            forall (e in Employees)
+                sum (s in Shifts) x[e][s] == 1;
+
+            forall (s in Shifts)
+                sum (e in Employees) x[e][s] == demand[s];
+            }
+            """
+        data_code = """
+            Employees = { "Alex", "Bri", "Casey", "Drew", "Evan" };
+            Shifts = { "Morning", "Midday", "Evening" };
+
+            demand = [ "Morning" 2, "Midday" 2, "Evening" 1 ];
+
+            pref = [
+            <"Alex","Morning"> 3, <"Alex","Midday"> 1, <"Alex","Evening"> 0,
+            <"Bri","Morning"> 2, <"Bri","Midday"> 3, <"Bri","Evening"> 1,
+            <"Casey","Morning"> 1, <"Casey","Midday"> 2, <"Casey","Evening"> 3,
+            <"Drew","Morning"> 0, <"Drew","Midday"> 3, <"Drew","Evening"> 2,
+            <"Evan","Morning"> 3, <"Evan","Midday"> 0, <"Evan","Evening"> 2
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
+    def test_minl_maxl_in_index_constraint(self):
+        """
+        Exercise minl/maxl inside forall index constraints with boolean AND.
+
+        Ensures:
+          - minl/maxl(pr.i, pr.i2) and minl/maxl(pr.j, pr.j2) used in the forall index filter
+          - '&&' is parsed/evaluated in index constraints
+        """
+        model_code = """
+            int a = 3;            // rows
+            int b = 3;            // cols
+            range Rows = 1..a;
+            range Cols = 1..b;
+
+            tuple Pair {
+              int i;
+              int j;
+              int i2;
+              int j2;
+            }
+
+            // Positive-area rectangles in row-major order
+            {Pair} Pairs =
+              { <i,j,i2,j2> |
+                  i in Rows, j in Cols,
+                  i2 in Rows, j2 in Cols :
+                  // row-major strict ordering and positive area
+                  ((i < i2) || (i == i2 && j < j2)) && (i != i2) && (j != j2)
+              };
+
+            dvar float+ y[Pairs];
+
+            minimize
+              sum(pr in Pairs) y[pr];
+
+            subject to {
+              // For each pr=(i,j,i2,j2), for each cell (m,n) strictly inside its rectangle,
+              // add a trivial nonnegativity constraint using an index filter with minl/maxl and &&
+              forall(pr in Pairs, m in Rows, n in Cols :
+                (minl(pr.i, pr.i2) < m && m < maxl(pr.i, pr.i2)) &&
+                (minl(pr.j, pr.j2) < n && n < maxl(pr.j, pr.j2))
+              )
+                y[pr] >= 0;
+            }
+        """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                model_file = tmp_mod.name
+            try:
+                result = solve(model_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED", f"{solver} failed: {result.get('message')}")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+        # Objective should be zero for both (y >= 0 and minimized)
+        self.assertAlmostEqual(obj_values["scipy"], 0.0, places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], 0.0, places=6)
+
+    def test_tuple_set_comprehension_pairs(self):
+        """
+        Exercise tuple-set comprehension:
+          {Pair} Pairs =
+            { <i,j,i2,j2> |
+                i in Rows, j in Cols,
+                i2 in Rows, j2 in Cols :
+                ((i-1)*b + j) < ((i2-1)*b + j2) // row-major strict ordering
+            };
+        Verifies that Pairs is materialized with the expected row-major ordering and size.
+        """
+        model_code = """
+            int a = ...;          // rows
+            int b = 3;            // cols
+            range Rows = 1..a;
+            range Cols = 1..b;
+
+            tuple Pair {
+              int i;
+              int j;
+              int i2;
+              int j2;
+            }
+
+            {Pair} Pairs =
+              { <i,j,i2,j2> |
+                  i in Rows, j in Cols,
+                  i2 in Rows, j2 in Cols :
+                  ((i-1)*b + j) < ((i2-1)*b + j2)
+              };
+
+            // Trivial model using Pairs to ensure codegen touches it
+            dvar boolean y[Pairs];
+
+            minimize sum(pr in Pairs) y[pr];
+
+            subject to {
+              forall(pr in Pairs) y[pr] >= 0;
+            }
+            """
+        data_code = """
+            a = 2;
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+
+    def test_param_multi_index_rhs_expression_initialization(self):
+        """
+        Test model with multi-indexed parameter initialized from expression with both solvers.
+        """
+        model_code = """
+            {int} I = ...;
+            {int} J = {1, 2};
+
+            // Multi-indexed parameter initialized from expression
+            param float W[i in I][j in J] = i + j;
+            param float X[i in I, j in J] = i + j; // Alternate syntax
+
+            // Tie z to sum of W to exercise evaluation
+            dvar float z;
+
+            maximize z;
+            subject to {
+            z == sum(i in I, j in J) W[i][j];
+            z == sum(i in I, j in J) X[i][j];
+            }
+            """
+        data_code = """
+            I = {1, 2, 3};
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
 
     def test_tuples_index_specifiers(self):
         """

@@ -61,6 +61,49 @@ class ExpressionEvaluator:
     def __init__(self, parent: "SciPyCSCCodeGenerator") -> None:
         self.parent = parent
 
+    # NEW: minl/maxl
+    def _eval_minl(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
+        vals: list[float] = []
+        for a in expr.get("args", []):
+            coef, v = self.eval(a, env)
+            if coef:
+                raise SemanticError("Non-ground argument in minl()")
+            if isinstance(v, bool):
+                vals.append(1.0 if v else 0.0)
+            elif isinstance(v, (int, float)):
+                vals.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    raise SemanticError(f"Non-numeric argument '{v}' in minl()")
+            else:
+                raise SemanticError(f"Unsupported argument type in minl(): {type(v)}")
+        if not vals:
+            raise SemanticError("minl() requires at least one argument")
+        return {}, min(vals)
+
+    def _eval_maxl(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
+        vals: list[float] = []
+        for a in expr.get("args", []):
+            coef, v = self.eval(a, env)
+            if coef:
+                raise SemanticError("Non-ground argument in maxl()")
+            if isinstance(v, bool):
+                vals.append(1.0 if v else 0.0)
+            elif isinstance(v, (int, float)):
+                vals.append(float(v))
+            elif isinstance(v, str):
+                try:
+                    vals.append(float(v))
+                except Exception:
+                    raise SemanticError(f"Non-numeric argument '{v}' in maxl()")
+            else:
+                raise SemanticError(f"Unsupported argument type in maxl(): {type(v)}")
+        if not vals:
+            raise SemanticError("maxl() requires at least one argument")
+        return {}, max(vals)
+
     def eval(
         self, expr: Dict[str, Any], env: Optional[Dict[str, Any]] = None
     ) -> Tuple[Dict[str, Any], Union[float, str, Tuple[Any, ...]]]:
@@ -424,6 +467,12 @@ class ExpressionEvaluator:
             return {}, -val
         elif tt == "parenthesized_expression":
             return self._eval_index_expr(dim_expr["expression"], env)
+        # NEW: allow minl/maxl in index arithmetic if they appear
+        elif tt in ("minl", "maxl"):
+            _, v = self._eval_minl(dim_expr, env) if tt == "minl" else self._eval_maxl(dim_expr, env)
+            if isinstance(v, float) and v.is_integer():
+                v = int(v)
+            return {}, v
         elif tt == "tuple_literal":
 
             def to_tuple_recursive(e):
@@ -827,16 +876,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         If any error occurs, fallback to BIG_M_DEFAULT.
         """
         try:
+            env_eval = env or {}
             lhs = comp.get("left")
             rhs = comp.get("right")
-            coef_lhs, const_lhs = self._eval_expr(lhs, {})
+            coef_lhs, const_lhs = self._eval_expr(lhs, env_eval)
             if isinstance(rhs, dict):
-                coef_rhs, const_rhs = self._eval_expr(rhs, {})
+                coef_rhs, const_rhs = self._eval_expr(rhs, env_eval)
             else:
-                coef_rhs, const_rhs = (
-                    {},
-                    rhs if isinstance(rhs, (int, float)) else 0.0,
-                )
+                coef_rhs, const_rhs = ({}, rhs if isinstance(rhs, (int, float)) else 0.0)
             expr_coef = dict(coef_lhs)
             for vn, cf in coef_rhs.items():
                 expr_coef[vn] = expr_coef.get(vn, 0.0) - cf
@@ -977,10 +1024,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.aux_created.append(name)
         return name
 
-    def _linearize_or(self, comparisons: List[Any]) -> None:
+    def _linearize_or(self, comparisons: List[Any], env: Optional[Dict[str, Any]] = None) -> None:
         """Linearize disjunction of linear comparisons using big-M and auxiliary binaries.
         For '!=': split into two comparisons: < and >.
         """
+        env_eval = env or {}
         z_vars = []
         for comp in comparisons:
             op = comp.get("op")
@@ -989,17 +1037,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 comp_lt["op"] = "<"
                 comp_gt = dict(comp)
                 comp_gt["op"] = ">"
-                self._linearize_or([comp_lt])
-                self._linearize_or([comp_gt])
+                self._linearize_or([comp_lt], env=env_eval)
+                self._linearize_or([comp_gt], env=env_eval)
             else:
                 z = self._ensure_aux_binary("or_flag")
                 z_vars.append(z)
-                # No local env in this helper; use empty env to allow evaluator fallbacks
-                M = self._big_m_for_comparison(comp, env={})
-                coef_lhs, const_lhs = self._eval_expr(comp["left"], {})
+                # Use the bound env so indices are resolved
+                M = self._big_m_for_comparison(comp, env=env_eval)
+                # Evaluate sides under the same env
+                coef_lhs, const_lhs = self._eval_expr(comp["left"], env_eval)
                 rhs_node = comp["right"]
                 coef_rhs, const_rhs = (
-                    self._eval_expr(rhs_node, {})
+                    self._eval_expr(rhs_node, env_eval)
                     if isinstance(rhs_node, dict)
                     else ({}, rhs_node if isinstance(rhs_node, (int, float)) else 0.0)
                 )
@@ -1041,8 +1090,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self.A_ub.append(row)
             self.b_ub.append(-1.0)
 
-    def _expand_and(self, comparisons: List[Any]) -> None:
+    def _expand_and(self, comparisons: List[Any], env: Optional[Dict[str, Any]] = None) -> None:
         """Add each comparison as its own constraint. For '!=', add both < and > as separate constraints."""
+        env_eval = env or {}
         for comp in comparisons:
             op = comp.get("op")
             if op == "!=":
@@ -1050,27 +1100,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 comp_lt["op"] = "<"
                 comp_gt = dict(comp)
                 comp_gt["op"] = ">"
-                self._expand_and([comp_lt])
-                self._expand_and([comp_gt])
+                self._expand_and([comp_lt], env=env_eval)
+                self._expand_and([comp_gt], env=env_eval)
             else:
-                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env={}, sign=1)
+                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
                 rhs_dict, rhs_const = (
-                    self._accumulate_sum_to_dict(comp["right"], env={}, sign=1)
+                    self._accumulate_sum_to_dict(comp["right"], env=env_eval, sign=1)
                     if isinstance(comp["right"], dict)
-                    else (
-                        {},
-                        (comp["right"] if isinstance(comp["right"], (int, float)) else 0.0),
-                    )
+                    else ({}, (comp["right"] if isinstance(comp["right"], (int, float)) else 0.0))
                 )
                 expr_coef = dict(lhs_dict)
                 for v, c in rhs_dict.items():
                     expr_coef[v] = expr_coef.get(v, 0.0) - c
                 expr_const = lhs_const - rhs_const
             if comp["op"] == "==":
-                # equality into A_eq
                 row = [0.0] * len(self.var_names)
                 for v, c in expr_coef.items():
-                    # Coefficient dict from _accumulate_sum_to_dict may use integer indices directly
                     if isinstance(v, int):
                         if v < len(row):
                             row[v] += c
@@ -1093,7 +1138,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self.A_ub.append(row)
                 self.b_ub.append(-expr_const)
             elif comp["op"] == ">=":
-                # - (lhs - rhs) <= 0
                 row = [0.0] * len(self.var_names)
                 for v, c in expr_coef.items():
                     if isinstance(v, int):
@@ -2087,6 +2131,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return -val
             elif t == "parenthesized_expression":
                 return self._eval_bound(expr["expression"])
+            elif t in ("minl", "maxl"):
+                vals = [self._eval_bound(a) for a in expr.get("args", [])]
+                if not vals:
+                    raise self._unsupported_type_error("expr in index bound", t)
+                return min(vals) if t == "minl" else max(vals)
             else:
                 raise self._unsupported_type_error("expr in index bound", t)
         else:
@@ -2139,6 +2188,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             return f"{base}[{idx}]"
             # fallback: legacy string access
             return f"{base}['{field}']"
+        # NEW: emit min/max for symbolic comments
+        elif t in ("minl", "maxl"):
+            args = expr.get("args", [])
+            parts = [self._emit_python_expr(a, env) for a in args]
+            fn = "min" if t == "minl" else "max"
+            return f"{fn}({', '.join(parts)})"
         elif t == "name_reference_index":
             # Use the iterator variable from env
             return env.get(expr["name"], expr["name"])
@@ -2228,6 +2283,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         if t == "string_literal":  # <-- support in symbolic traversal
             return repr(expr.get("value"))
+
+        # NEW: symbolic minl/maxl
+        if t in ("minl", "maxl"):
+            args = expr.get("args", [])
+            parts = [self._traverse_expression(a) for a in args]
+            fn = "min" if t == "minl" else "max"
+            return f"{fn}({', '.join(parts)})"
 
         # Default: return empty string if no known type matched
         return ""
@@ -6392,7 +6454,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     "left": comp.get("left"),
                                     "right": comp.get("right"),
                                     "op": comp.get("op"),
-                                }
+                                },
+                                env=env2,
                             )
                             coef_lhs, const_lhs = self._eval_expr(comp.get("left"), env2)
                             rhs_node = comp.get("right")
@@ -6746,10 +6809,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 # Use current env for tighter M
                                 M = self._big_m_for_comparison(comp_node, env=env)
                                 # Build lhs - rhs
-                                coef_lhs, const_lhs = self._eval_expr(comp_node["left"], {})
+                                coef_lhs, const_lhs = self._eval_expr(comp_node["left"], env)
                                 right_node = comp_node["right"]
                                 if isinstance(right_node, dict):
-                                    coef_rhs, const_rhs = self._eval_expr(right_node, {})
+                                    coef_rhs, const_rhs = self._eval_expr(right_node, env)
                                 else:
                                     coef_rhs, const_rhs = (
                                         {},

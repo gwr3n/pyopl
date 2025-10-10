@@ -2175,6 +2175,17 @@ class GurobiCodeGenerator:
             return f"math.sqrt({arg_str})"
         raise NotImplementedError(f"Unsupported function call '{name}' in expression.")
 
+    # NEW: support minl/maxl (elementwise min/max over args) in Python-emitted expressions
+    def _expr_minl(self, expr_node, current_iterators, symbolic):
+        args = expr_node.get("args", [])
+        parts = [self._traverse_expression(a, current_iterators, symbolic) for a in args]
+        return f"min({', '.join(parts)})"
+
+    def _expr_maxl(self, expr_node, current_iterators, symbolic):
+        args = expr_node.get("args", [])
+        parts = [self._traverse_expression(a, current_iterators, symbolic) for a in args]
+        return f"max({', '.join(parts)})"
+
     def _expr_number(self, expr_node, current_iterators, symbolic):
         return expr_node["value"]
 
@@ -2268,8 +2279,19 @@ class GurobiCodeGenerator:
             if idx.get("type") in ("name_reference_index", "name"):
                 return f"{base_name}[{idx['name']}]"
             elif idx.get("type") == "tuple_literal":
-                tuple_val = tuple(idx["elements"])
-                return f"{base_name}[{tuple_val}]"
+                # Build a Python tuple expression for the index, handling raw literals
+                parts = []
+                for el in idx.get("elements", []):
+                    if isinstance(el, dict):
+                        parts.append(self._traverse_expression(el, current_iterators, symbolic))
+                    else:
+                        parts.append(repr(el))
+                # Ensure single-element tuples include the trailing comma
+                if len(parts) == 1:
+                    tuple_expr = f"({parts[0]},)"
+                else:
+                    tuple_expr = f"({', '.join(parts)})"
+                return f"{base_name}[{tuple_expr}]"
             else:
                 idx_expr = emit_index_expr(idx)
                 return f"{base_name}[{idx_expr}]"

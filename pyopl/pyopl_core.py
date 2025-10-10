@@ -187,6 +187,7 @@ class OPLLexer(Lexer):
         ">",
         "?",
         "!",
+        "|",
         # Note: DOT ('.') is now a token, not a literal; added '!' for logical NOT
     }
 
@@ -411,6 +412,43 @@ class OPLParser(Parser):
         # Allow user-defined types (tuple types) as valid types for tuple fields
         return p.NAME
 
+    @_("NAME")  # NEW: allow iterator names inside tuple literals (e.g., <i,j,...>)
+    def tuple_element(self, p):
+        # Do not require sem_type here; it will be resolved during evaluation
+        return {"type": "name", "value": p.NAME}
+
+    # --- Typed set-of-tuples WITH comprehension ---
+    # { Pair } Pairs = { <i,j,i2,j2> | i in Rows, j in Cols, i2 in Rows, j2 in Cols : condition };
+    @_('"{" NAME "}" NAME "=" "{" tuple_comprehension "}" ";"')  # type: ignore
+    def declaration(self, p):
+        tuple_type = p.NAME0
+        set_name = p.NAME1
+        comp = p.tuple_comprehension
+        # Register symbol as a set (typed) so later references resolve
+        self.symbol_table.add_symbol(
+            set_name,
+            "set",
+            value={"tuple_type": tuple_type},
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "set_of_tuples_comprehension",
+            "tuple_type": tuple_type,
+            "name": set_name,
+            "comprehension": comp,
+        }
+
+    # tuple_comprehension: <tuple_elems> | sum_index_list [ : condition ]
+    @_('"<" tuple_element_list ">" "|" sum_index_list opt_index_constraint')  # type: ignore
+    def tuple_comprehension(self, p):
+        return {
+            "type": "tuple_comprehension",
+            "tuple_expr": {"type": "tuple_literal", "elements": p.tuple_element_list},
+            "iterators": p.sum_index_list,
+            "index_constraint": p.opt_index_constraint,
+        }
+
     # --- DEXPR: decision expressions (expand-on-use) ---
 
     # Header: [ i in I, j in J ] — keep iterators in scope until RHS parsed
@@ -419,7 +457,27 @@ class OPLParser(Parser):
         # Open a fresh scope for the iterator(s) used by this header
         self.symbol_table.enter_scope()
         # Iterators already added to current scope by dexpr_index_list/dexpr_index
-        return {"iterators": p.dexpr_index_list}
+        return {"iterators": p.dexpr_index_list, "_iterator_scope_opened": True}
+
+    # --- Strict OPL nested headers support: [i in I][j in J] ... ---
+
+    # Tail of nested headers: zero or more additional [iterators] groups
+    @_('"[" dexpr_index_list "]" dexpr_index_header_tail')  # type: ignore
+    def dexpr_index_header_tail(self, p):
+        # Concatenate this segment with the remainder of the tail
+        return p.dexpr_index_list + p.dexpr_index_header_tail
+
+    @_("")  # type: ignore
+    def dexpr_index_header_tail(self, p):
+        return []
+
+    # Full nested header(s): one or more [iterators] groups, all sharing a single scope
+    @_('"[" dexpr_index_list "]" dexpr_index_header_tail')  # type: ignore
+    def dexpr_index_headers(self, p):
+        # Single shared scope for all nested headers (strict OPL form)
+        self.symbol_table.enter_scope()
+        all_iters = p.dexpr_index_list + p.dexpr_index_header_tail
+        return {"iterators": all_iters, "_iterator_scope_opened": True}
 
     @_("dexpr_index_list ',' dexpr_index")  # type: ignore
     def dexpr_index_list(self, p):
@@ -452,7 +510,10 @@ class OPLParser(Parser):
                     lineno=p.lineno,
                 )
         # Add iterator to current scope so RHS can reference it
-        self.symbol_table.add_symbol(name, iterator_type, is_dvar=False, lineno=p.lineno)
+        # Guard against duplicate insertion when ambiguous productions reduce more than once.
+        current_scope = self.symbol_table.scopes[-1]
+        if name not in current_scope:
+            self.symbol_table.add_symbol(name, iterator_type, is_dvar=False, lineno=p.lineno)
         return {"iterator": name, "range": rng}
 
     # Scalar dexpr: dexpr type Z = expression;
@@ -507,7 +568,15 @@ class OPLParser(Parser):
 
         iterators = p.dexpr_index_header["iterators"]
         dimensions = [to_decl_dim(it["range"]) for it in iterators]
-        # Store dexpr in symbol table
+
+        # Close the iterator scope BEFORE adding the symbol so W persists in the global scope
+        try:
+            if p.dexpr_index_header.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        # Store dexpr in the (now current) outer scope
         self.symbol_table.add_symbol(
             p.NAME,
             "dexpr",
@@ -520,7 +589,62 @@ class OPLParser(Parser):
             dimensions=dimensions,
             lineno=p.lineno,
         )
+
         # Return AST declaration
+        return {
+            "type": "dexpr_indexed",
+            "name": p.NAME,
+            "var_type": p.type,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "expression": p.expression,
+        }
+
+    # NEW: Indexed dexpr with strict OPL nested headers: dexpr type Y[i in I][j in J] = expression;
+    @_('DEXPR type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
+    def declaration(self, p):
+        def to_decl_dim(rng):
+            if rng["type"] == "range_specifier":
+                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+            if rng["type"] == "named_range":
+                try:
+                    sym = self.symbol_table.get_symbol(rng["name"])
+                    if sym.get("type") == "range" and sym.get("value"):
+                        return {
+                            "type": "named_range_dimension",
+                            "name": rng["name"],
+                            "start": sym["value"]["start"],
+                            "end": sym["value"]["end"],
+                        }
+                except SemanticError:
+                    pass
+                return {"type": "named_range_dimension", "name": rng["name"]}
+            if rng["type"] == "named_set":
+                return {"type": "named_set_dimension", "name": rng["name"]}
+            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
+        iterators = p.dexpr_index_headers["iterators"]
+        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+
+        # Close iterator scope before adding symbol
+        try:
+            if p.dexpr_index_headers.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        self.symbol_table.add_symbol(
+            p.NAME,
+            "dexpr",
+            value={
+                "iterators": iterators,
+                "dimensions": dimensions,
+                "expression": p.expression,
+                "var_type": p.type,
+            },
+            dimensions=dimensions,
+            lineno=p.lineno,
+        )
         return {
             "type": "dexpr_indexed",
             "name": p.NAME,
@@ -2478,7 +2602,6 @@ class OPLParser(Parser):
         var_type = p.type
         iterators = p.dexpr_index_header["iterators"]
 
-        # Map the iterator ranges to declaration dimensions
         def to_decl_dim(rng):
             if rng["type"] == "range_specifier":
                 return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
@@ -2490,7 +2613,14 @@ class OPLParser(Parser):
 
         dimensions = [to_decl_dim(it["range"]) for it in iterators]
 
-        # Register symbol so subsequent uses pass semantic checks
+        # Close the iterator scope before adding the parameter symbol
+        try:
+            if p.dexpr_index_header.get("_iterator_scope_opened"):
+                self.symbol_table.exit_scope()
+        except Exception:
+            pass
+
+        # Register symbol in outer scope
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -2499,7 +2629,7 @@ class OPLParser(Parser):
             lineno=p.lineno,
         )
 
-        decl = {
+        return {
             "type": "parameter_inline_indexed_expr",
             "var_type": var_type,
             "name": name,
@@ -2508,16 +2638,48 @@ class OPLParser(Parser):
             "expression": p.expression,
         }
 
-        # IMPORTANT: close the iterator scope that dexpr_index_header opened
-        # to avoid leaking iterator variables into the next declaration.
+    # NEW: computed indexed parameter with strict OPL nested headers: float W[i in I][j in J] = ...
+    # NEW: float W[i in I][j in J] = ...
+    @_('opt_PARAM type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        iterators = p.dexpr_index_headers["iterators"]
+
+        def to_decl_dim(rng):
+            if rng["type"] == "range_specifier":
+                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+            if rng["type"] == "named_range":
+                return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
+            if rng["type"] == "named_set":
+                return {"type": "named_set_dimension", "name": rng["name"]}
+            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
+        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+
+        # Close iterator scope before adding the symbol
         try:
-            if p.dexpr_index_header.get("_iterator_scope_opened"):
+            if p.dexpr_index_headers.get("_iterator_scope_opened"):
                 self.symbol_table.exit_scope()
         except Exception:
-            # Graceful if header didn't open a scope
             pass
 
-        return decl
+        self.symbol_table.add_symbol(
+            name,
+            var_type,
+            dimensions=dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+
+        return {
+            "type": "parameter_inline_indexed_expr",
+            "var_type": var_type,
+            "name": name,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "expression": p.expression,
+        }
 
     @_('opt_PARAM type NAME indexed_dimensions "=" array_value ";"')  # type: ignore
     def declaration(self, p):
@@ -3186,20 +3348,39 @@ class OPLCompiler:
                 if t == "indexed_name":
                     base = expr.get("name")
                     dims = expr.get("dimensions", [])
-                    if len(dims) != 1:
-                        raise SemanticError("Only single-dimension indexed parameters supported in eval.")
-                    idx_val = eval_index(dims[0], env)
+                    # Support multi-dimensional indices (range or set based)
                     arr = working_data.get(base)
-                    if isinstance(arr, dict):
-                        return arr[idx_val]
-                    if isinstance(arr, list):
-                        # 1-based integer indices for ranges; string/tuple direct for sets
-                        if isinstance(idx_val, (int, float)):
-                            pos = int(idx_val) - 1
-                            return float(arr[pos])
-                        # string/tuple key into dict is handled above; list with string key is invalid
-                        raise SemanticError(f"Parameter '{base}' requires dict access for non-integer index {idx_val!r}.")
-                    raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                    if arr is None:
+                        raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                    # Evaluate each index and progressively index into arr
+                    cur = arr
+                    for dim in dims:
+                        idx_val = eval_index(dim, env)
+                        # Normalize float-int to int
+                        if isinstance(idx_val, float) and idx_val.is_integer():
+                            idx_val = int(idx_val)
+                        if isinstance(cur, list):
+                            if not isinstance(idx_val, (int, float)):
+                                raise SemanticError(
+                                    f"List parameter '{base}' requires integer indices, got {type(idx_val).__name__}: {idx_val!r}"
+                                )
+                            pos = int(idx_val) - 1  # OPL is 1-based for range-indexed lists
+                            try:
+                                cur = cur[pos]
+                            except Exception as e:
+                                raise SemanticError(f"Index out of bounds for '{base}' at {idx_val}: {e}") from e
+                        elif isinstance(cur, dict):
+                            # dict can be keyed by ints/strings/tuples depending on declaration
+                            try:
+                                cur = cur[idx_val]
+                            except Exception as e:
+                                raise SemanticError(f"Key '{idx_val!r}' not found in parameter '{base}': {e}") from e
+                        else:
+                            raise SemanticError(f"Cannot index into value of type {type(cur).__name__} for '{base}'.")
+                    # At the end, cur is the scalar or structured element
+                    if isinstance(cur, (int, float)):
+                        return float(cur)
+                    return cur
                 if t == "sum":
                     # Evaluate sum over iterators, respecting optional index_constraint
                     iters = expr.get("iterators", [])
@@ -3211,12 +3392,12 @@ class OPLCompiler:
                     for it in iters:
                         rng = it["range"]
                         if rng["type"] == "range_specifier":
-                            s = eval_bound(rng["start"])
-                            e = eval_bound(rng["end"])
-                            domains.append(list(range(s, e + 1)))
+                            st = eval_bound(rng["start"])
+                            en = eval_bound(rng["end"])
+                            domains.append(list(range(st, en + 1)))
                         elif rng["type"] == "named_range":
-                            s, e = resolve_named_range(rng["name"])
-                            domains.append(list(range(s, e + 1)))
+                            st, en = resolve_named_range(rng["name"])
+                            domains.append(list(range(st, en + 1)))
                         elif rng["type"] in ("named_set", "named_set_dimension"):
                             set_name = rng["name"]
                             set_obj = working_data.get(set_name, [])
@@ -3253,6 +3434,12 @@ class OPLCompiler:
                         return total
 
                     return rec_sum(0, dict(env))
+                if t == "and":
+                    return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
+                if t == "or":
+                    return bool(eval_expr(expr.get("left"), env)) or bool(eval_expr(expr.get("right"), env))
+                if t == "not":
+                    return not bool(eval_expr(expr.get("value"), env))
                 if t == "binop":
                     op = expr.get("op")
                     lv = eval_expr(expr.get("left"), env)
@@ -3419,6 +3606,101 @@ class OPLCompiler:
             # Replace declarations list
             model_ast["declarations"] = new_decls
             # Also update data_dict since generators may consult it directly
+            data_dict = dict(working_data)
+
+        # NEW: evaluate typed set-of-tuples comprehensions into concrete sets
+        if model_ast and "declarations" in model_ast:
+            new_decls2 = []
+            for decl in model_ast["declarations"]:
+                if decl.get("type") != "set_of_tuples_comprehension":
+                    new_decls2.append(decl)
+                    continue
+
+                comp = decl.get("comprehension") or {}
+                tuple_expr = comp.get("tuple_expr")
+                iterators = comp.get("iterators") or []
+                idxc = comp.get("index_constraint")
+
+                # Domain resolution for each iterator (range, named range, named set)
+                def _domain_for_range(rng):
+                    if rng["type"] == "range_specifier":
+                        s = eval_bound(rng["start"])
+                        e = eval_bound(rng["end"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] == "named_range":
+                        s, e = resolve_named_range(rng["name"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] in ("named_set", "named_set_dimension"):
+                        set_name = rng["name"]
+                        set_obj = working_data.get(set_name, [])
+                        if isinstance(set_obj, dict) and "elements" in set_obj:
+                            elems = set_obj["elements"]
+                        else:
+                            elems = set_obj
+                        return list(elems or [])
+                    raise SemanticError(
+                        f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
+                    )
+
+                it_names = [it["iterator"] for it in iterators]
+                domains = [_domain_for_range(it["range"]) for it in iterators]
+
+                # Evaluate tuple expression into a Python tuple under env
+                def _eval_tuple(expr, env):
+                    if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
+                        out = []
+                        for el in expr.get("elements", []):
+                            out.append(_eval_tuple(el, env))
+                        return tuple(out)
+                    if isinstance(expr, dict):
+                        return eval_expr(expr, env)
+                    return expr
+
+                tuples = []
+
+                # Nested loops over cartesian product of all iterator domains
+                def _recurse(depth, env):
+                    if depth == len(it_names):
+                        # filter
+                        if idxc is not None:
+                            cond_val = eval_expr(idxc, env)
+                            # robust truthiness for numeric/bool/string
+                            if isinstance(cond_val, (int, float, bool)):
+                                if not bool(cond_val):
+                                    return
+                            else:
+                                if not cond_val:
+                                    return
+                        tval = _eval_tuple(tuple_expr, env)
+
+                        # Normalize nested numeric to int when integrals
+                        def _norm(v):
+                            if isinstance(v, float) and v.is_integer():
+                                return int(v)
+                            if isinstance(v, tuple):
+                                return tuple(_norm(x) for x in v)
+                            return v
+
+                        tuples.append(_norm(tval))
+                        return
+                    nm = it_names[depth]
+                    for v in domains[depth]:
+                        env[nm] = v
+                        _recurse(depth + 1, env)
+                    env.pop(nm, None)
+
+                _recurse(0, {})
+                # Mutate working_data and AST: concrete set as list of tuples
+                working_data[decl["name"]] = tuples
+                new_decls2.append(
+                    {
+                        "type": "set_of_tuples",
+                        "tuple_type": decl.get("tuple_type"),
+                        "name": decl.get("name"),
+                        "value": tuples,
+                    }
+                )
+            model_ast["declarations"] = new_decls2
             data_dict = dict(working_data)
 
         # Use working_data for subsequent validation/emission
