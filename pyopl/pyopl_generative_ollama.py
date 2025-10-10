@@ -18,7 +18,7 @@ class Grammar(Enum):
 
 
 def _read_pyopl_grammar():
-    grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "PyOPL grammar.md")
+    grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "grammars", "PyOPL grammar.md")
     with open(grammar_path, "r", encoding="utf-8") as f:
         return f.read()
 
