@@ -204,12 +204,12 @@ function_call ::=
 
 arg_list ::= expression ( _ "," _ expression )*
 
-// --- Tuple literals (nested allowed; <> form) ---
-tuple_literal_list_opt ::= (tuple_literal (_ "," _ tuple_literal)*)?
-tuple_literal ::=
-      "<" _ tuple_element_list_opt _ ">"
+// --- Tuple literals (ensure iterator/name elements are allowed)
+tuple_literal ::= "<" _ tuple_element_list_opt _ ">" _
 tuple_element_list_opt ::= (tuple_element (_ "," _ tuple_element)*)?
-tuple_element ::= STRING_LITERAL | NUMBER | tuple_literal
+
+// Allow NAME inside tuple elements to support uses like <i, j>
+tuple_element ::= NAME | STRING_LITERAL | NUMBER | tuple_literal
 
 
 // --- Arrays (nested) for inline params (.mod) ---
@@ -258,3 +258,15 @@ key_value_row ::=
     | tuple_literal _ scalar_value
     | STRING_LITERAL _ array_value
     | tuple_literal _ array_value
+
+// --- Aggregates: min/max over indexed domains (aligns with parser min/max_expression) ---
+min_aggregate ::= "min" _ sum_index_header _ expression
+max_aggregate ::= "max" _ sum_index_header _ expression
+
+// --- sum aggregates (used as primary) ---
+sum_expression ::= "sum" _ sum_index_header _ expression
+
+// --- helpers used in param_declaration ---
+opt_param_kw        ::= ("param" _)?                   // optional 'param' keyword
+opt_indexed         ::= ( indexed_dimensions _ )?      // optional indexed dims
+opt_assign_ellipsis ::= ( "=" _ "..." _ )?             // optional '= ...'
