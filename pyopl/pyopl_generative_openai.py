@@ -10,6 +10,8 @@ from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = 4096 * 2
+REASONING_EFFORT = "medium"  # "low", "medium", "high"
+ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
 
 class Grammar(Enum):
@@ -34,7 +36,7 @@ def extract_json_from_markdown(text):
     """
     Extract JSON object from a Markdown code block if present.
     """
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)
     return text
@@ -67,6 +69,15 @@ def _coalesce_response_text(resp) -> str:
         return "".join(chunks)
     except Exception:
         return ""
+    # Last-resort fallbacks
+    try:
+        first = getattr(resp, "output", [])[0]
+        first_content = getattr(first, "content", [])[0]
+        if hasattr(first_content, "text"):
+            return first_content.text or ""
+    except Exception:
+        pass
+    return ""
 
 
 # Use GPT-5 model
@@ -157,7 +168,15 @@ def generative_solve(
 
     for iteration in range(iterations):
         print(f"Iteration {iteration + 1}/{iterations}")
-        response = client.responses.create(model=model_name, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS)
+        print("Prompting model...")
+        create_params = {
+            "model": model_name,
+            "input": user_prompt,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+        }
+        if "gpt-5" in model_name:
+            create_params["reasoning"] = {"effort": REASONING_EFFORT}
+        response = client.responses.create(**create_params)
         content = _coalesce_response_text(response)
         if not content:
             raise RuntimeError(f"Empty model response. Full response: {response}")
@@ -165,6 +184,7 @@ def generative_solve(
             result = json.loads(extract_json_from_markdown(content))
             model_code = result["model"]
             data_code = result["data"]
+            print("Model and data generated.")
         except Exception as e:
             raise RuntimeError(f"Failed to parse GPT-5 response as JSON: {e}\nResponse: {content}")
 
@@ -193,6 +213,9 @@ def generative_solve(
             f.write(data_code)
 
         if not syntax_errors:
+            if not ALIGNMENT_CHECK:
+                break  # Success: the model is syntactically correct; exit loop
+
             # Alignment check with original intent
             alignment_prompt = (
                 "<role>\n"
@@ -201,7 +224,7 @@ def generative_solve(
                 "<task>\n"
                 "Assess whether the generated PyOPL model and data fully align with the original problem description.\n"
                 "Alignment means the objective, constraints, decision variables, and data fully capture the user's specifications.\n"
-                "Use the provided PyOPL grammar implementation reference to support your analysis.\n"
+                "Use the provided PyOPL grammar implementation to support your analysis.\n"
                 "</task>\n\n"
                 "<grammar_reference>\n"
                 "--- BEGIN REFERENCE ---\n"
@@ -219,35 +242,66 @@ def generative_solve(
                 f"{data_code}\n"
                 "</data>\n"
                 "</inputs>\n\n"
+                "<assessment_focus>\n"
+                "- Objective and constraints reflect the prompt intent.\n"
+                "- Decision variables have correct domains and indices.\n"
+                "- Data is consistent with sets/parameters used by the model.\n"
+                "- Signs, units, and indexing are correct; no missing links.\n"
+                "- Any syntax/semantic issues relative to the implementation reference.\n"
+                "- Most impactful improvements if misaligned.\n"
+                "</assessment_focus>\n\n"
                 "<output_requirements>\n"
-                '- Return ONLY a JSON object with exactly one key: "aligned" (boolean).\n'
-                "- No commentary. No additional keys. No trailing commas.\n"
+                '- Return ONLY a JSON object with exactly two keys: "aligned" (boolean) and "assessment" (string).\n'
+                '- If issues exist, mention the most critical fixes in "assessment", a single short paragraph (3–6 sentences) of plain text.\n'
+                "- No Markdown. No bullet lists. No commentary. No additional keys. No trailing commas.\n"
                 "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
                 "</output_requirements>\n\n"
                 "<json_schema>\n"
                 "{\n"
                 '  "type": "object",\n'
                 '  "additionalProperties": false,\n'
-                '  "required": ["aligned"],\n'
-                '  "properties": { "aligned": {"type": "boolean"} }\n'
+                '  "required": ["aligned", "assessment"],\n'
+                '  "properties": {\n'
+                '    "aligned": {"type": "boolean"},\n'
+                '    "assessment": {"type": "string"}\n'
+                "  }\n"
                 "}\n"
                 "</json_schema>\n\n"
                 "<example_output>\n"
-                '{ "aligned": true }\n'
+                '{ "aligned": false, "assessment": "The model objective function does not include fixed costs." }\n'
                 "</example_output>\n"
             )
-            
-            alignment_response = client.responses.create(
-                model=model_name, input=alignment_prompt, max_output_tokens=MAX_OUTPUT_TOKENS
-            )
+
+            print("Checking alignment with original prompt...")
+
+            create_params = {
+                "model": model_name,
+                "input": alignment_prompt,
+                "max_output_tokens": MAX_OUTPUT_TOKENS,
+            }
+            if "gpt-5" in model_name:
+                create_params["reasoning"] = {"effort": REASONING_EFFORT}
+            alignment_response = client.responses.create(**create_params)
             alignment_content = _coalesce_response_text(alignment_response)
             if not alignment_content:
                 raise RuntimeError(f"Empty alignment response. Full response: {alignment_response}")
-            alignment_obj = json.loads(extract_json_from_markdown(alignment_content))
-            if isinstance(alignment_obj, dict) and isinstance(alignment_obj.get("aligned"), bool):
+            try:
+                alignment_obj = json.loads(extract_json_from_markdown(alignment_content))
+            except Exception as e:
+                raise RuntimeError(f"Failed to parse alignment response JSON: {e}\nResponse: {alignment_content}")
+            if (
+                isinstance(alignment_obj, dict)
+                and isinstance(alignment_obj.get("aligned"), bool)
+                and isinstance(alignment_obj.get("assessment"), str)
+            ):
                 if alignment_obj["aligned"]:
+                    print("Model and data are syntactically valid and aligned with the prompt.")
                     break
                 else:
+                    assessment_text = alignment_obj.get("assessment", "").strip()
+                    print(
+                        f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
+                    )
                     # Not aligned; continue iterating for potential revisions
                     user_prompt = (
                         "<role>\n"
@@ -255,6 +309,9 @@ def generative_solve(
                         "</role>\n\n"
                         "<task>\n"
                         "The previous attempt produced a syntactically valid PyOPL model and data, but they are NOT fully aligned with the problem description.\n"
+                        "<assessment>\n"
+                        f"{assessment_text}\n"
+                        "</assessment>\n"
                         "Revise the model and data so that they fully align with the user's specifications while preserving syntactic validity under the provided PyOPL grammar implementation reference.\n"
                         "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
                         "</task>\n\n"
@@ -308,6 +365,7 @@ def generative_solve(
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
+            print("Model or data has syntax errors; revising...")
             # Feedback errors to GPT-5 and retry
             user_prompt = (
                 "<role>\n"
@@ -418,9 +476,15 @@ def generative_solve(
         "- If issues exist, mention the most critical fixes.\n"
         "</output_requirements>\n"
     )
-    assessment_response = client.responses.create(
-        model=model_name, input=assessment_prompt, max_output_tokens=MAX_OUTPUT_TOKENS
-    )
+    print("Final assessment of model and data alignment...")
+    create_params = {
+        "model": model_name,
+        "input": assessment_prompt,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
+    if "gpt-5" in model_name:
+        create_params["reasoning"] = {"effort": REASONING_EFFORT}
+    assessment_response = client.responses.create(**create_params)
     assessment_text = _coalesce_response_text(assessment_response)
     if not assessment_text:
         raise RuntimeError(f"Empty assessment response. Full response: {assessment_response}")
@@ -518,7 +582,14 @@ def generative_feedback(prompt, model_file, data_file, model_name="gpt-5", mode=
         "</example_output>\n"
     )
 
-    response = client.responses.create(model=model_name, input=user_prompt, max_output_tokens=MAX_OUTPUT_TOKENS)
+    create_params = {
+        "model": model_name,
+        "input": user_prompt,
+        "max_output_tokens": MAX_OUTPUT_TOKENS,
+    }
+    if "gpt-5" in model_name:
+        create_params["reasoning"] = {"effort": REASONING_EFFORT}
+    response = client.responses.create(**create_params)
     content = _coalesce_response_text(response)
     if not content:
         raise RuntimeError(f"Empty model response. Full response: {response}")
