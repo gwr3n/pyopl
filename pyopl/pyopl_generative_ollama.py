@@ -1,6 +1,7 @@
 import json
 import os
 import re
+from enum import Enum, auto
 
 from ollama import generate
 
@@ -8,6 +9,12 @@ from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = 4096 * 2  # used as num_predict for Ollama
+
+
+class Grammar(Enum):
+    NONE = auto()
+    BNF = auto()
+    CODE = auto()
 
 
 def _read_pyopl_grammar():
@@ -49,6 +56,7 @@ def generative_solve(
     model_file,
     data_file,
     model_name="gpt-oss:20b",
+    mode=Grammar.CODE,
     iterations=MAX_ITERATIONS,
     return_statistics=False,
 ):
@@ -61,12 +69,25 @@ def generative_solve(
         model_file (str): Path to save the generated model file.
         data_file (str): Path to save the generated data file.
         model_name (str): Ollama model name.
+        mode (Grammar): Grammar mode for generation (NONE, BNF, CODE).
         iterations (int): Maximum number of refinement iterations.
         return_statistics (bool): If True, return a dict with stats and assessment.
     Returns:
         str | dict: Assessment text or dict with iterations, assessment, and syntax_errors.
     """
-    grammar_implementation = _read_pyopl_code()
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
+
+    try:
+        iterations = max(1, int(iterations))
+    except Exception:
+        iterations = MAX_ITERATIONS
 
     user_prompt = (
         "<role>\n"
@@ -275,7 +296,7 @@ def generative_solve(
 
 
 # https://ollama.com/library/gpt-oss
-def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b"):
+def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b", mode=Grammar.CODE):
     """
     Ask questions or request revisions about a given PyOPL model and data using Ollama.
     Returns a JSON object with:
@@ -283,7 +304,14 @@ def generative_feedback(prompt, model_file, data_file, model_name="gpt-oss:20b")
       - 'revised_model' (str, optional)
       - 'revised_data' (str, optional)
     """
-    grammar_implementation = _read_pyopl_code()
+    if mode == Grammar.NONE:
+        grammar_implementation = ""
+    elif mode == Grammar.BNF:
+        grammar_implementation = _read_pyopl_grammar()
+    elif mode == Grammar.CODE:
+        grammar_implementation = _read_pyopl_code()
+    else:
+        raise ValueError(f"Invalid mode: {mode}")
 
     with open(model_file, "r", encoding="utf-8") as fh:
         model_code = fh.read()
