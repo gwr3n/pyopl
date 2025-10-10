@@ -2,6 +2,8 @@ import json
 import os
 import re
 from enum import Enum, auto
+from time import sleep
+from typing import Any, Dict, Optional, Tuple
 
 # import google.generativeai as genai
 from openai import OpenAI
@@ -10,8 +12,8 @@ from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = 4096 * 2
-MODEL_NAME = "gpt-4.1"  # "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"
-REASONING_EFFORT = "high"  # "low", "medium", "high"
+MODEL_NAME = "gpt-5"  # "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"
+REASONING_EFFORT = "medium"  # "low", "medium", "high"
 ALIGNMENT_CHECK = False  # Whether to check alignment with original prompt
 
 
@@ -21,55 +23,93 @@ class Grammar(Enum):
     CODE = auto()
 
 
-def _read_pyopl_grammar():
+# ---------- Utilities ----------
+
+def _read_file(path: str) -> str:
+    with open(path, "r") as f:
+        return f.read()
+
+
+def _read_pyopl_grammar() -> str:
     grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "grammars", "PyOPL grammar.md")
-    with open(grammar_path, "r") as f:
-        return f.read()
+    return _read_file(grammar_path)
 
 
-def _read_pyopl_code():
+def _read_pyopl_code() -> str:
     code_path = os.path.join(os.path.dirname(__file__), "pyopl_core.py")
-    with open(code_path, "r") as f:
-        return f.read()
+    return _read_file(code_path)
 
 
-def extract_json_from_markdown(text):
+def _get_grammar_implementation(mode: Grammar) -> str:
+    if mode == Grammar.NONE:
+        return ""
+    if mode == Grammar.BNF:
+        return _read_pyopl_grammar()
+    if mode == Grammar.CODE:
+        return _read_pyopl_code()
+    raise ValueError(f"Invalid mode: {mode}")
+
+
+def extract_json_from_markdown(text: str) -> str:
     """
     Extract JSON object from a Markdown code block if present.
+    Fallback: find the first balanced {...} JSON object.
     """
+    # First try fenced block
     match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if match:
         return match.group(1)
+
+    # Fallback: balanced brace scan
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth = 0
+    for i in range(start, len(text)):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
     return text
+
+
+def _json_loads_relaxed(text: str) -> Dict[str, Any]:
+    """
+    Try to parse as JSON; if it fails, attempt fenced JSON extraction first.
+    """
+    try:
+        return json.loads(text)
+    except Exception:
+        return json.loads(extract_json_from_markdown(text))
 
 
 def _coalesce_response_text(resp) -> str:
     # Prefer SDK convenience if present
     if getattr(resp, "output_text", None):
-        return resp.output_text
+        return resp.output_text or ""
 
-    # Structured fallback: response.output -> items -> item.content -> blocks
+    # Responses API: try common shapes
     try:
         chunks = []
         for item in getattr(resp, "output", []) or []:
-            # item may have .content (list of blocks) or be text-like itself
             content_blocks = getattr(item, "content", None)
             if content_blocks is None:
-                # Try common attributes
                 if hasattr(item, "text"):
                     chunks.append(getattr(item, "text") or "")
                 continue
             for block in content_blocks:
-                # Blocks often have .text; be permissive
                 if hasattr(block, "text"):
                     chunks.append(getattr(block, "text") or "")
-                elif isinstance(block, dict):
-                    # Some SDKs use dict-like blocks
-                    if "text" in block and isinstance(block["text"], str):
-                        chunks.append(block["text"])
-        return "".join(chunks)
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    chunks.append(block["text"])
+        if chunks:
+            return "".join(chunks)
     except Exception:
         pass
+
     # Last-resort fallbacks
     try:
         first = getattr(resp, "output", [])[0]
@@ -81,7 +121,86 @@ def _coalesce_response_text(resp) -> str:
     return ""
 
 
-# ---- Prompt builders (refactor: encapsulate prompts) ----
+def _openai_client() -> OpenAI:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable not set.")
+    return OpenAI(api_key=api_key)
+
+
+def _build_create_params(
+    model_name: str,
+    input_text: str,
+    max_tokens: int = MAX_OUTPUT_TOKENS,
+    temperature: Optional[float] = None,
+    seed: Optional[int] = 7,
+    stop: Optional[list[str]] = None,
+    use_reasoning: bool = True,
+) -> Dict[str, Any]:
+    params: Dict[str, Any] = {
+        "model": model_name,
+        "input": input_text,
+        "max_output_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    if temperature is not None:
+        params["temperature"] = temperature
+    if seed is not None:
+        params["seed"] = seed
+    if stop:
+        params["stop"] = stop
+    if use_reasoning and "gpt-5" in model_name:
+        params["reasoning"] = {"effort": REASONING_EFFORT}
+    return params
+
+
+def _call_openai_with_retry(
+    client: OpenAI,
+    create_params: Dict[str, Any],
+    retries: int = 3,
+    backoff_sec: float = 1.5,
+) -> Any:
+    """
+    Call Responses API with simple exponential backoff.
+    Falls back by stripping newer/unsupported kwargs not supported by older SDKs/servers/models.
+    """
+    last_err: Optional[Exception] = None
+    fallback_keys = ["response_format", "seed", "stop", "reasoning", "temperature"]
+    params = dict(create_params)  # work on a copy
+
+    def _strip_param_from_error_message(msg: str) -> bool:
+        removed = False
+        low = msg.lower()
+        for key in list(fallback_keys):
+            if key in params and (
+                f"unexpected keyword argument '{key}'" in low
+                or f"unsupported parameter: '{key}'" in low
+                or key in low
+            ):
+                params.pop(key, None)
+                removed = True
+        m = re.search(r"unsupported parameter:\s*'([^']+)'", msg, re.IGNORECASE)
+        if m and m.group(1) in params:
+            params.pop(m.group(1), None)
+            removed = True
+        m2 = re.search(r"parameter\s*'([^']+)'\s*is not supported", msg, re.IGNORECASE)
+        if m2 and m2.group(1) in params:
+            params.pop(m2.group(1), None)
+            removed = True
+        return removed
+
+    for attempt in range(retries):
+        try:
+            return client.responses.create(**params)
+        except Exception as e:
+            last_err = e
+            if _strip_param_from_error_message(str(e) if e else ""):
+                continue
+            sleep(backoff_sec * (2 ** attempt))
+    raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
+
+
+# ---------- Prompt builders ----------
 
 def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
     return (
@@ -92,12 +211,12 @@ def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
         "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
         "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
-        "Validate all syntax against the provided PyOPL grammar implementation reference only.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<problem_description>\n"
         f"{prompt}\n"
@@ -138,12 +257,12 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         "Assess whether the generated PyOPL model and data fully align with the original problem description.\n"
         "Alignment means the objective, constraints, decision variables, and data fully capture the user's specifications.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
-        "Use the provided PyOPL grammar implementation to support your analysis.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<inputs>\n"
         "<problem_description>\n"
@@ -161,7 +280,7 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         "- Decision variables have correct domains and indices.\n"
         "- Data is consistent with sets/parameters used by the model.\n"
         "- Signs, units, and indexing are correct; no missing links.\n"
-        "- Any syntax/semantic issues relative to the implementation reference.\n"
+        "- Any syntax error raised by the compiler.\n"
         "- Most impactful improvements if misaligned.\n"
         "</assessment_focus>\n\n"
         "<output_requirements>\n"
@@ -197,13 +316,14 @@ def _build_revision_prompt_alignment(prompt: str, grammar_implementation: str, a
         "<assessment>\n"
         f"{assessment_text}\n"
         "</assessment>\n"
-        "Revise the model and data so that they fully align with the user's specifications while preserving syntactic validity under the provided PyOPL grammar implementation reference.\n"
+        "Revise the model and data so that they fully align with the user's specifications while preserving syntactic validity.\n"
         "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<problem_description>\n"
         f"{prompt}\n"
@@ -219,7 +339,7 @@ def _build_revision_prompt_alignment(prompt: str, grammar_implementation: str, a
         "<revision_guidelines>\n"
         "- Ensure the objective, constraints, indices, and variable domains reflect the problem description.\n"
         "- Make the minimal set of changes necessary to correct misalignment.\n"
-        "- Keep syntax strictly valid per the provided implementation reference.\n"
+        "- Keep syntax strictly valid.\n"
         "- Return complete model and data strings; do not return diffs.\n"
         "</revision_guidelines>\n\n"
         "<output_requirements>\n"
@@ -257,13 +377,13 @@ def _build_revision_prompt_syntax(prompt: str, grammar_implementation: str, mode
         "<task>\n"
         "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
         "Revise the model and data to fix the errors while retaining alignment with the original intent.\n"
-        "Validate all syntax against the provided PyOPL grammar implementation reference only.\n"
         "Change only what is necessary to fix the errors.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<problem_description>\n"
         f"{prompt}\n"
@@ -321,12 +441,12 @@ def _build_final_assessment_prompt(prompt: str, grammar_implementation: str, mod
         "<task>\n"
         "Assess how well the generated PyOPL model and data align with the original problem description.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
-        "Reference only the provided PyOPL grammar implementation for syntax validity.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<inputs>\n"
         "<problem_description>\n"
@@ -345,7 +465,7 @@ def _build_final_assessment_prompt(prompt: str, grammar_implementation: str, mod
         "- Decision variables have correct domains and indices.\n"
         "- Data is consistent with sets/parameters used by the model.\n"
         "- Signs, units, and indexing are correct; no missing links.\n"
-        "- Any syntax/semantic issues relative to the implementation reference.\n"
+        "- Any syntax error raised by the compiler.\n"
         "- Most impactful improvements if misaligned.\n"
         "</assessment_focus>\n\n"
         "<output_requirements>\n"
@@ -366,11 +486,12 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "Provide critical, specific feedback. If revisions are necessary for correctness,\n"
         "semantics, or consistency with the grammar reference, propose minimal changes.\n"
         "Only change what is necessary.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
-        "--- BEGIN REFERENCE ---\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END REFERENCE ---\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<inputs>\n"
         "<prompt>\n"
@@ -415,121 +536,122 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
     )
 
 
+# ---------- Public API ----------
+
 def generative_solve(
-    prompt, 
-    model_file, 
-    data_file, 
-    model_name=MODEL_NAME, 
-    mode=Grammar.CODE, 
-    iterations=MAX_ITERATIONS, 
-    return_statistics=False
+    prompt,
+    model_file,
+    data_file,
+    model_name=MODEL_NAME,
+    mode=Grammar.CODE,
+    iterations=MAX_ITERATIONS,
+    return_statistics=False,
+    alignment_check: Optional[bool] = None,
+    temperature: float = None,
+    seed: Optional[int] = 7,
+    stop: Optional[list[str]] = None,
 ):
     """
-    Generate a PyOPL model and data file from a prompt using OpenAI GPT-5, validate with pyopl, iterate on errors, and assess alignment.
+    Generate a PyOPL model and data file from a prompt using OpenAI GPT, validate with pyopl, iterate on errors, and assess alignment.
     Args:
             prompt (str): Textual description of the optimization problem.
             model_file (str): Path to save the generated model file.
             data_file (str): Path to save the generated data file.
-            model_name (str): OpenAI GPT model to use (e.g., "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1").
+            model_name (str): OpenAI GPT model to use.
             mode (Grammar): Grammar mode for generation (NONE, BNF, CODE).
             iterations (int): Maximum number of iterations to attempt generation and correction.
             return_statistics (bool): If True, return detailed statistics including assessment and syntax errors.
+            alignment_check (bool|None): Override module default ALIGNMENT_CHECK when set.
+            temperature (float): Sampling temperature for generation.
+            seed (int|None): Randomness seed for determinism if supported.
+            stop (list[str]|None): Optional stop sequences.
     Returns:
-            str: GPT-5's assessment of alignment between model/data and prompt.
+            str|dict: Assessment string or statistics dict when return_statistics=True.
     """
-
-    if mode == Grammar.NONE:
-        grammar_implementation = ""
-    elif mode == Grammar.BNF:
-        grammar_implementation = _read_pyopl_grammar()
-    elif mode == Grammar.CODE:
-        grammar_implementation = _read_pyopl_code()
-    else:
-        raise ValueError(f"Invalid mode: {mode}")
+    grammar_implementation = _get_grammar_implementation(mode)
 
     try:
         iterations = max(1, int(iterations))
     except Exception:
         iterations = MAX_ITERATIONS
 
-    # Use API key from environment variable
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable not set.")
-    client = OpenAI(api_key=api_key)
+    do_alignment = ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)
+    client = _openai_client()
 
     user_prompt = _build_generation_prompt(prompt, grammar_implementation)
+    assessment_text = ""
+    syntax_errors = []
+    model_code = ""
+    data_code = ""
 
     for iteration in range(iterations):
         print(f"Iteration {iteration + 1}/{iterations}")
         print("Prompting model...")
-        create_params = {
-            "model": model_name,
-            "input": user_prompt,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-        }
-        if "gpt-5" in model_name:
-            create_params["reasoning"] = {"effort": REASONING_EFFORT}
-        response = client.responses.create(**create_params)
+        create_params = _build_create_params(
+            model_name=model_name,
+            input_text=user_prompt,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=temperature,
+            seed=seed,
+            stop=stop,
+            use_reasoning=True,
+        )
+        response = _call_openai_with_retry(client, create_params)
         content = _coalesce_response_text(response)
         if not content:
             raise RuntimeError(f"Empty model response. Full response: {response}")
+
         try:
-            result = json.loads(extract_json_from_markdown(content))
+            result = _json_loads_relaxed(content)
             model_code = result["model"]
             data_code = result["data"]
             print("Model and data generated.")
         except Exception as e:
-            raise RuntimeError(f"Failed to parse GPT-5 response as JSON: {e}\nResponse: {content}")
+            raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
 
         compiler = OPLCompiler()
         syntax_errors = []
-        # Validate model
         try:
             compiler.compile_model(model_code, data_code)
         except SemanticError as e:
             syntax_errors.append(str(e))
             print(f"Semantic error in model: {e}")
         except Exception as e:
-            syntax_errors.append(f"Unexpected error: {e}")
+            syntax_errors.append(f"{type(e).__name__}: {e}")
 
-        # Ensure output folder exists
+        # Ensure output folder exists and write files
         model_dir = os.path.dirname(model_file)
         if model_dir:
             os.makedirs(model_dir, exist_ok=True)
         data_dir = os.path.dirname(data_file)
         if data_dir:
             os.makedirs(data_dir, exist_ok=True)
-        # Write files
         with open(model_file, "w") as f:
             f.write(model_code)
         with open(data_file, "w") as f:
             f.write(data_code)
 
         if not syntax_errors:
-            if not ALIGNMENT_CHECK:
-                break  # Success: the model is syntactically correct; exit loop
-
-            # Alignment check with original intent
-            alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
+            if not do_alignment:
+                break
 
             print("Checking alignment with original prompt...")
-
-            create_params = {
-                "model": model_name,
-                "input": alignment_prompt,
-                "max_output_tokens": MAX_OUTPUT_TOKENS,
-            }
-            if "gpt-5" in model_name:
-                create_params["reasoning"] = {"effort": REASONING_EFFORT}
-            alignment_response = client.responses.create(**create_params)
+            alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
+            alignment_params = _build_create_params(
+                model_name=model_name,
+                input_text=alignment_prompt,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=0.0 if temperature is not None else None,
+                seed=seed,
+                stop=stop,
+                use_reasoning=True,
+            )
+            alignment_response = _call_openai_with_retry(client, alignment_params)
             alignment_content = _coalesce_response_text(alignment_response)
             if not alignment_content:
                 raise RuntimeError(f"Empty alignment response. Full response: {alignment_response}")
-            try:
-                alignment_obj = json.loads(extract_json_from_markdown(alignment_content))
-            except Exception as e:
-                raise RuntimeError(f"Failed to parse alignment response JSON: {e}\nResponse: {alignment_content}")
+
+            alignment_obj = _json_loads_relaxed(alignment_content)
             if (
                 isinstance(alignment_obj, dict)
                 and isinstance(alignment_obj.get("aligned"), bool)
@@ -543,7 +665,6 @@ def generative_solve(
                     print(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
-                    # Not aligned; continue iterating for potential revisions
                     user_prompt = _build_revision_prompt_alignment(
                         prompt, grammar_implementation, assessment_text, model_code, data_code
                     )
@@ -551,7 +672,6 @@ def generative_solve(
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
             print("Model or data has syntax errors; revising...")
-            # Feedback errors to GPT-5 and retry
             user_prompt = _build_revision_prompt_syntax(
                 prompt, grammar_implementation, model_code, data_code, syntax_errors
             )
@@ -562,24 +682,23 @@ def generative_solve(
     with open(data_file, "r") as f:
         data_code = f.read()
 
-    if syntax_errors or not ALIGNMENT_CHECK:
-        # Final assessment prompt
+    if syntax_errors or not do_alignment:
+        print("Final assessment of model and data alignment...")
         assessment_prompt = _build_final_assessment_prompt(
             prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
-        print("Final assessment of model and data alignment...")
-        create_params = {
-            "model": model_name,
-            "input": assessment_prompt,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
-        }
-        if "gpt-5" in model_name:
-            create_params["reasoning"] = {"effort": REASONING_EFFORT}
-        assessment_response = client.responses.create(**create_params)
-        assessment_text = _coalesce_response_text(assessment_response)
-        if not assessment_text:
-            raise RuntimeError(f"Empty assessment response. Full response: {assessment_response}")
-    
+        assessment_params = _build_create_params(
+            model_name=model_name,
+            input_text=assessment_prompt,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=0.2 if temperature is not None else None,
+            seed=seed,
+            stop=stop,
+            use_reasoning=True,
+        )
+        assessment_response = _call_openai_with_retry(client, assessment_params)
+        assessment_text = _coalesce_response_text(assessment_response) or ""
+
     if return_statistics:
         return {
             "iterations": iteration + 1,
@@ -591,28 +710,18 @@ def generative_solve(
 
 
 def generative_feedback(
-        prompt, 
-        model_file, 
-        data_file, 
-        model_name=MODEL_NAME, 
-        mode=Grammar.CODE
-    ):
-    # Use API key from environment variable
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable not set.")
-    client = OpenAI(api_key=api_key)
+    prompt,
+    model_file,
+    data_file,
+    model_name=MODEL_NAME,
+    mode=Grammar.CODE,
+    temperature: float = None,
+    seed: Optional[int] = 7,
+    stop: Optional[list[str]] = None,
+):
+    client = _openai_client()
+    grammar_implementation = _get_grammar_implementation(mode)
 
-    if mode == Grammar.NONE:
-        grammar_implementation = ""
-    elif mode == Grammar.BNF:
-        grammar_implementation = _read_pyopl_grammar()
-    elif mode == Grammar.CODE:
-        grammar_implementation = _read_pyopl_code()
-    else:
-        raise ValueError(f"Invalid mode: {mode}")
-
-    # Read files first (avoid inline open().read())
     with open(model_file, "r") as fh:
         model_code = fh.read()
     with open(data_file, "r") as fh:
@@ -620,19 +729,20 @@ def generative_feedback(
 
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
-    create_params = {
-        "model": model_name,
-        "input": user_prompt,
-        "max_output_tokens": MAX_OUTPUT_TOKENS,
-    }
-    if "gpt-5" in model_name:
-        create_params["reasoning"] = {"effort": REASONING_EFFORT}
-    response = client.responses.create(**create_params)
+    create_params = _build_create_params(
+        model_name=model_name,
+        input_text=user_prompt,
+        max_tokens=MAX_OUTPUT_TOKENS,
+        temperature=0.0 if temperature is not None else None,
+        seed=seed,
+        stop=stop,
+        use_reasoning=True,
+    )
+    response = _call_openai_with_retry(client, create_params)
     content = _coalesce_response_text(response)
     if not content:
         raise RuntimeError(f"Empty model response. Full response: {response}")
     try:
-        result = json.loads(extract_json_from_markdown(content))
-        return result
+        return _json_loads_relaxed(content)
     except Exception as e:
-        raise RuntimeError(f"Failed to parse GPT-5 response as JSON: {e}\nResponse: {content}")
+        raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
