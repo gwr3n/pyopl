@@ -419,7 +419,7 @@ From lowest to highest binding power:
 
 - Arithmetic and comparisons:
   - Mix of int, float, and boolean is allowed (booleans treated numerically where needed).
-  - `%` (modulo) is supported on numeric expressions.
+  - `%` (modulo) is supported in expressions for data and parameter evaluation (including inline/externally loaded parameters and .dat computations). It is not supported inside linear model parts (objectives or constraints). Using `%` in those contexts will be rejected or fail code generation.
 - Boolean expressions:
   - `==`/`!=` are allowed on booleans and numbers/strings; boolean equality to `true` is used to normalize.
   - Logical `&&`, `||`, `!` are available; boolean objectives allowed.
@@ -443,6 +443,22 @@ From lowest to highest binding power:
   - tuple fields,
   - typed scalar sets in models/data,
   - parameter values. Attempting `dvar string ...` is a semantic error.
+
+### Notes on cardinality and reification patterns
+
+The implementation supports common linear encodings involving booleanized comparisons:
+
+- Sums of comparisons (cardinality):
+  - Example: `sum(i in I) (x[i] >= 0) >= k`
+  - Comparisons inside sums are treated as 0/1 and linearized via standard big-M bounds when necessary.
+
+- Reified comparisons:
+  - Example: `b == (x - y >= c)`
+  - The boolean `b` is automatically linked to the comparison with big-M constraints based on available bounds.
+
+Notes:
+- These encodings are accepted wherever linearization is applicable. Quality of big-M depends on variable bounds; provide tight bounds in declarations to improve relaxations.
+- Non-convex placements (equality to minl/maxl or unrestricted boolean arithmetic beyond supported patterns) are rejected.
 
 ## Example
 
