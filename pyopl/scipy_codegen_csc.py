@@ -579,6 +579,9 @@ class ExpressionEvaluator:
             return self._handle_binop_sub(left, right, env)
         elif op == "*":
             return self._handle_binop_mul(left, right, env)
+        elif op == "/":
+            # Support (linear)/constant by scaling coefficients with reciprocal of constant
+            return self._handle_binop_div(left, right, env)
         if op in ("!=", "<", ">", "<=", ">="):
             return self._handle_binop_cmp(left, right, op, env)
         raise self.parent._unsupported_operator_error("binop", expr["op"])
@@ -648,6 +651,52 @@ class ExpressionEvaluator:
             return {}, float(cast(Union[int, float], lconst)) * float(cast(Union[int, float], rconst))
         else:
             raise self.parent._unsupported_type_error("nonlinear term", "variable * variable")
+
+    def _handle_binop_div(
+        self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Union[float, str]]:
+        """Division handler for binop /. Supports linear pattern: (linear expr) / constant.
+        Nonlinear forms like constant/variable or variable/variable are rejected.
+        """
+        l_result = self.eval(left, env)
+        r_result = self.eval(right, env)
+        if l_result is None or r_result is None:
+            raise SemanticError(f"_handle_binop_div: left or right is None: left={l_result}, right={r_result}")
+        if not isinstance(l_result, tuple) or not isinstance(r_result, tuple):
+            raise SemanticError(f"_handle_binop_div: left or right did not return a tuple: left={l_result}, right={r_result}")
+        ldict, lconst = l_result
+        rdict, rconst = r_result
+
+        # Symbolic division: if any side is symbolic string/tuple, keep symbolic
+        if isinstance(lconst, (str, tuple)) or isinstance(rconst, (str, tuple)):
+            return {}, f"({lconst}) / ({rconst})"
+
+        # Denominator must be constant numeric (no decision vars)
+        if rdict:
+            # variable in denominator => nonlinear
+            raise self.parent._unsupported_type_error("nonlinear term", "division by variable")
+
+        # Numeric constant divisor
+        try:
+            rc = float(cast(Union[int, float], rconst))
+        except Exception:
+            raise self.parent._unsupported_type_error("division", "non-numeric divisor")
+        if abs(rc) < 1e-12:
+            raise SemanticError("Division by zero")
+
+        inv = 1.0 / rc
+
+        # If numerator is linear expression (coef dict), scale coefficients and constant
+        if ldict:
+            out_coef = {k: v * inv for k, v in ldict.items()}
+            lc = float(cast(Union[int, float], lconst))
+            return out_coef, lc * inv
+        # Pure numeric division
+        if not ldict:
+            return {}, float(cast(Union[int, float], lconst)) * inv
+
+        # Fallback (shouldn’t reach)
+        return {}, float(cast(Union[int, float], lconst)) * inv
 
     def _handle_binop_cmp(
         self,

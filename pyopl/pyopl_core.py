@@ -758,6 +758,7 @@ class OPLParser(Parser):
     # --- Primary expressions (atomic) ---
     # Ensure BOOLEAN_LITERAL is matched before NAME
 
+    # --- NAME primary: consult iterator-context before symbol table ---
     @_("BOOLEAN_LITERAL", "STRING_LITERAL", "NAME")
     def primary(self, p):
         if hasattr(p, "BOOLEAN_LITERAL"):
@@ -767,14 +768,20 @@ class OPLParser(Parser):
                 "sem_type": "boolean",
             }
         elif hasattr(p, "STRING_LITERAL"):
-            # Remove surrounding quotes from the string literal
             return {
                 "type": "string_literal",
                 "value": p.STRING_LITERAL[1:-1],
                 "sem_type": "string",
             }
         elif hasattr(p, "NAME"):
-            symbol_info = self.symbol_table.get_symbol(p.NAME)
+            name = p.NAME
+            # NEW: check current iterator context first (only active inside sum/forall bodies)
+            if self._iterator_context_stack:
+                top = self._iterator_context_stack[-1]
+                if name in top:
+                    return {"type": "name", "value": name, "sem_type": top[name]}
+            # Fallback: regular symbol table lookup
+            symbol_info = self.symbol_table.get_symbol(name)
             # Inline scalar dexpr on use
             if symbol_info.get("type") == "dexpr":
                 val = symbol_info.get("value") or {}
@@ -782,17 +789,16 @@ class OPLParser(Parser):
                 dims = val.get("dimensions") or []
                 if iters or dims:
                     raise SemanticError(
-                        f"Expected indexed dexpr, but '{p.NAME}' is declared with indices. Missing dimensions.",
+                        f"Expected indexed dexpr, but '{name}' is declared with indices. Missing dimensions.",
                         lineno=p.lineno,
                     )
-                # Return a deep copy of the stored expression
                 return self._subst_iterators(val.get("expression"), {})
             if symbol_info.get("dimensions"):
                 raise SemanticError(
-                    f"Expected scalar variable, but '{p.NAME}' is an indexed variable. Missing dimensions.",
+                    f"Expected scalar variable, but '{name}' is an indexed variable. Missing dimensions.",
                     lineno=p.lineno,
                 )
-            return {"type": "name", "value": p.NAME, "sem_type": symbol_info["type"]}
+            return {"type": "name", "value": name, "sem_type": symbol_info["type"]}
 
     # --- sum_expression and forall_expression nonterminals ---
 
@@ -802,14 +808,16 @@ class OPLParser(Parser):
         logger.debug(f"[PARSER] Enter sum_expression (juxtaposition): SUM {p.sum_index_header} {p.nonparen_expression}")
         iterators = p.sum_index_header["iterators"]
         index_constraint = p.sum_index_header.get("index_constraint")
-        self.symbol_table.enter_scope()
         sum_body = p.nonparen_expression
         expr_type = sum_body["sem_type"]
-        # Previous restriction disallowed boolean bodies without parentheses. We now coerce boolean
-        # decision variables / expressions to integer (0/1) so they can be summed directly.
         if expr_type == "boolean":
             expr_type = "int"
-        self.symbol_table.exit_scope()
+        # Close iterator scope if opened (legacy behavior)
+        if p.sum_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        # Pop iterator context if pushed
+        if p.sum_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
         logger.debug(
             f"[PARSER] Exit sum_expression (juxtaposition): iterators={iterators}, index_constraint={index_constraint}, expr_type={expr_type}"
         )
@@ -827,12 +835,13 @@ class OPLParser(Parser):
         logger.debug(f"[PARSER] Enter sum_expression (parenthesized): SUM {p.sum_index_header} {p.parenthesized_expression}")
         iterators = p.sum_index_header["iterators"]
         index_constraint = p.sum_index_header.get("index_constraint")
-        self.symbol_table.enter_scope()
         parsed_expression = p.parenthesized_expression
         expr_type = parsed_expression["sem_type"]
-        # Allow boolean sum body (sum over booleans)
         result_type = "int" if expr_type == "boolean" else expr_type
-        self.symbol_table.exit_scope()
+        if p.sum_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        if p.sum_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
         logger.debug(
             f"[PARSER] Exit sum_expression (parenthesized): iterators={iterators}, index_constraint={index_constraint}, expr_type={expr_type}"
         )
@@ -1284,6 +1293,38 @@ class OPLParser(Parser):
         self.symbol_table = SymbolTable()
         # Track last-seen token line for EOF errors
         self._last_lineno = 1
+        # NEW: stack of dicts mapping iterator name -> sem_type (e.g., tuple type or base type)
+        # Activated while parsing bodies of sum(...) and forall(...)
+        self._iterator_context_stack: list[dict[str, str]] = []
+    
+    # Helper: build iterator type mapping from sum_index_list entries
+    def _iter_types_from_sum_index_list(self, sum_index_list: list[dict]) -> dict[str, str]:
+        it_types: dict[str, str] = {}
+        for it in sum_index_list or []:
+            nm = it.get("iterator")
+            rng = it.get("range") or {}
+            sem_type = "int"  # default
+            if rng.get("type") in ("named_range",):
+                # ranges iterate ints
+                sem_type = "int"
+            elif rng.get("type") in ("named_set", "named_set_dimension"):
+                try:
+                    sym = self.symbol_table.get_symbol(rng.get("name"))
+                    val = sym.get("value")
+                    if sym.get("type") == "set" and isinstance(val, dict) and "tuple_type" in val:
+                        sem_type = val["tuple_type"]
+                    elif sym.get("type") == "set" and isinstance(val, dict) and "base_type" in val:
+                        sem_type = val["base_type"]
+                    else:
+                        # Unknown set details -> treat as string by default for scalar sets
+                        sem_type = "string"
+                except SemanticError:
+                    # Forward-declared sets: keep a conservative default for parser-time typing
+                    sem_type = "string"
+            elif rng.get("type") == "range_specifier":
+                sem_type = "int"
+            it_types[str(nm)] = sem_type
+        return it_types
 
     def parse(self, tokens):
         # Materialize tokens so we can track the last line for EOF diagnostics
@@ -1857,42 +1898,16 @@ class OPLParser(Parser):
         return
 
     def _build_forall_constraint(self, forall_index_header, constraint_or_block, lineno):
+        # Scope is already open (iter_header_open), and iterators are already added by sum_index.
         iterators = forall_index_header["iterators"]
         index_constraint = forall_index_header.get("index_constraint")
-        self.symbol_table.enter_scope()
-        for iterator in iterators:
-            name = iterator["iterator"]
-            rng = iterator["range"]
-            iterator_type = "int"
-            # Handle both named_set and named_range
-            if rng["type"] in ("named_range", "named_set"):
-                try:
-                    symbol_info = self.symbol_table.get_symbol(rng["name"])
-                except SemanticError:
-                    raise SemanticError(
-                        f"Symbol '{rng['name']}' used in 'in' clause is not declared.",
-                        lineno=lineno,
-                    )
-                val = symbol_info.get("value")
-                if symbol_info.get("type") == "set" and isinstance(val, dict) and "tuple_type" in val:
-                    iterator_type = val["tuple_type"]
-                elif symbol_info.get("type") == "set" and isinstance(val, dict) and "base_type" in val:
-                    iterator_type = val["base_type"]
-                elif symbol_info.get("type") not in ("range", "set"):
-                    raise SemanticError(
-                        f"Symbol '{rng['name']}' used in 'in' clause is not a declared range or set.",
-                        lineno=lineno,
-                    )
-            self.symbol_table.add_symbol(name, iterator_type, is_dvar=False, lineno=lineno)
         result = {
             "type": "forall_constraint",
             "iterators": iterators,
             "index_constraint": index_constraint,
         }
 
-        # Distinguish between single constraint and block (list)
         def wrap_implication_if_needed(c):
-            # Accept implication_constraint, constraint, or list of constraints
             if isinstance(c, dict) and c.get("type") == "implication_constraint":
                 return c
             if isinstance(c, dict) and c.get("type") == "constraint":
@@ -1905,22 +1920,28 @@ class OPLParser(Parser):
             result["constraints"] = [wrap_implication_if_needed(x) for x in constraint_or_block]
         else:
             result["constraint"] = wrap_implication_if_needed(constraint_or_block)
-        self.symbol_table.exit_scope()
         return result
 
+    # --- Forall constraints: pop iterator context after parsing inner constraint/block ---
     @_("FORALL forall_index_header constraint")  # type: ignore
     def constraint(self, p):
-        # Accept implication_constraint as valid child
-        if isinstance(p.constraint, dict) and p.constraint.get("type") == "implication_constraint":
-            return self._build_forall_constraint(p.forall_index_header, p.constraint, getattr(p, "lineno", None))
-        # Accept constraint_block containing implication_constraint(s)
-        if isinstance(p.constraint, list):
-            return self._build_forall_constraint(p.forall_index_header, p.constraint, getattr(p, "lineno", None))
-        return self._build_forall_constraint(p.forall_index_header, p.constraint, getattr(p, "lineno", None))
+        node = self._build_forall_constraint(p.forall_index_header, p.constraint, getattr(p, "lineno", None))
+        # Close parser iterator-context scope
+        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
+        # Legacy: close symbol-table scope if it was opened
+        if p.forall_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        return node
 
     @_("FORALL forall_index_header constraint_block")  # type: ignore
     def constraint(self, p):
-        return self._build_forall_constraint(p.forall_index_header, p.constraint_block, getattr(p, "lineno", None))
+        node = self._build_forall_constraint(p.forall_index_header, p.constraint_block, getattr(p, "lineno", None))
+        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
+        if p.forall_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        return node
 
     @_('"{" constraint_list "}"')  # type: ignore
     def constraint_block(self, p):
@@ -1930,9 +1951,12 @@ class OPLParser(Parser):
     # Support: (i in Cities, j in Cities: i != j)
     @_('"(" sum_index_list opt_index_constraint ")"')  # type: ignore
     def forall_index_header(self, p):
-        # Do not enter/exit scope here; handled in constraint rule
         iterators = p.sum_index_list
         result = {"iterators": iterators, "index_constraint": p.opt_index_constraint}
+        # Push iterator context for body parsing
+        iter_types = self._iter_types_from_sum_index_list(iterators)
+        self._iterator_context_stack.append(iter_types)
+        result["_iter_ctx_pushed"] = True
         return result
 
     @_("expression DOTDOT expression")  # type: ignore
@@ -2070,17 +2094,53 @@ class OPLParser(Parser):
     # def forall_expression(self, p):
     #     return self._build_forall_expression(p.forall_index_header, p.expression, getattr(p, 'lineno', None), debug_prefix="(parens) ")
 
-    # Support: (i in Cities, j in Cities: i != j)
-    @_('"(" sum_index_list opt_index_constraint ")"')  # type: ignore
+    # --- New: open a scope as soon as we see '(' starting an iterator header ---
+    @_('"("')
+    def iter_header_open(self, p):
+        # Open a scope for iterators used by sum/forall header
+        self.symbol_table.enter_scope()
+        # Tag that a scope is open; the iterator additions will go into this scope
+        return {"_iterator_scope_opened": True}
+
+    # --- sum_index_header: push iterator context for the upcoming body parse ---
+    @_("iter_header_open sum_index_list opt_index_constraint ')'")  # type: ignore
     def sum_index_header(self, p):
         logger.debug(
             f"[PARSER] Enter sum_index_header: sum_index_list={p.sum_index_list}, opt_index_constraint={p.opt_index_constraint}"
         )
-        self.symbol_table.enter_scope()
-        iterators = p.sum_index_list
-        result = {"iterators": iterators, "index_constraint": p.opt_index_constraint}
-        self.symbol_table.exit_scope()
+        result = {"iterators": p.sum_index_list, "index_constraint": p.opt_index_constraint}
+        # Iterator types for context (do NOT change symbol-table scoping)
+        iter_types = self._iter_types_from_sum_index_list(p.sum_index_list)
+        self._iterator_context_stack.append(iter_types)
+        result["_iter_ctx_pushed"] = True
+        # Preserve flag if separate scope was opened via iter_header_open
+        result["_iterator_scope_opened"] = True
         logger.debug(f"[PARSER] Exit sum_index_header: result={result}")
+        return result
+
+     # --- forall_index_header: push iterator context similarly (no scope changes) ---
+    @_("iter_header_open sum_index_list opt_index_constraint ')'")  # type: ignore
+    def forall_index_header(self, p):
+        iterators = p.sum_index_list
+        result = {"iterators": iterators, "index_constraint": p.opt_index_constraint, "_iterator_scope_opened": True}
+        # Push iterator context for body parsing
+        iter_types = self._iter_types_from_sum_index_list(iterators)
+        self._iterator_context_stack.append(iter_types)
+        result["_iter_ctx_pushed"] = True
+        return result
+
+    # Support: legacy header without iter_header_open
+    @_('"(" sum_index_list opt_index_constraint ")"')  # type: ignore
+    def sum_index_header(self, p):
+        logger.debug(
+            f"[PARSER] Enter sum_index_header (alt): sum_index_list={p.sum_index_list}, opt_index_constraint={p.opt_index_constraint}"
+        )
+        result = {"iterators": p.sum_index_list, "index_constraint": p.opt_index_constraint}
+        # Push iterator types for body parsing even if no scope was opened
+        iter_types = self._iter_types_from_sum_index_list(p.sum_index_list)
+        self._iterator_context_stack.append(iter_types)
+        result["_iter_ctx_pushed"] = True
+        logger.debug(f"[PARSER] Exit sum_index_header (alt): result={result}")
         return result
 
     # Multi-index: all iterators are in the same scope
