@@ -238,7 +238,7 @@ def generative_solve(
             )
             
             alignment_response = client.responses.create(
-                model=model_name, input=alignment_prompt, max_output_tokens=256
+                model=model_name, input=alignment_prompt, max_output_tokens=MAX_OUTPUT_TOKENS
             )
             alignment_content = _coalesce_response_text(alignment_response)
             if not alignment_content:
