@@ -6,3 +6,6 @@ highspy
 Pillow
 ttkbootstrap
 platformdirs
+openai
+google-generativeai
+ollama

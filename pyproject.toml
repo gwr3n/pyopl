@@ -25,6 +25,9 @@ dependencies = [
   "Pillow",
   "ttkbootstrap",
   "platformdirs",
+  "openai",
+  "google-generativeai,"
+  "ollama"
 ]
 
 [project.urls]
