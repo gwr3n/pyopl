@@ -77,7 +77,7 @@ def main() -> int:
     parser.add_argument(
         "--iterations", type=int, default=5, help="Number of iterations for generative_solve."
     )
-    parser.add_argument("--gpt", default="gpt-5-mini", help="GPT model to use for generation.")
+    parser.add_argument("--gpt", default="gpt-5", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="code", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
