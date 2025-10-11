@@ -554,7 +554,7 @@ def generative_solve(
     iterations=MAX_ITERATIONS,
     return_statistics=False,
     alignment_check: Optional[bool] = None,
-    temperature: float = None,
+    temperature: Optional[float] = None,
     seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
 ):
@@ -587,7 +587,7 @@ def generative_solve(
 
     user_prompt = _build_generation_prompt(prompt, grammar_implementation)
     assessment_text = ""
-    syntax_errors = []
+    syntax_errors: list[str] = []
     model_code = ""
     data_code = ""
 
@@ -720,7 +720,7 @@ def generative_feedback(
     data_file,
     model_name=MODEL_NAME,
     mode=Grammar.CODE,
-    temperature: float = None,
+    temperature: Optional[float] = None,
     seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
 ):
