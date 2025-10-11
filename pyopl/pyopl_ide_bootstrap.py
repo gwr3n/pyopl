@@ -424,7 +424,7 @@ class OPLIDE(tk.Tk):
     # --- File Operations ---
     def open_model(self):
         """Open a model file and load its contents into the model editor."""
-        fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod *.opl"), ("All files", "*.*")])
+        fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
             with open(fname, "r") as f:
                 self.model_text.delete(1.0, tk.END)
@@ -459,7 +459,7 @@ class OPLIDE(tk.Tk):
         if not self.model_file:
             fname = filedialog.asksaveasfilename(
                 defaultextension=".mod",
-                filetypes=[("Model files", "*.mod *.opl"), ("All files", "*.*")],
+                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
             )
             if not fname:
                 return
@@ -496,7 +496,7 @@ class OPLIDE(tk.Tk):
         """Save the model to a new file and update the tab title."""
         fname = filedialog.asksaveasfilename(
             defaultextension=".mod",
-            filetypes=[("Model files", "*.mod *.opl"), ("All files", "*.*")],
+            filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
         )
         if not fname:
             return
@@ -1165,12 +1165,19 @@ class OPLIDE(tk.Tk):
 
     # NEW: bind Ctrl/Cmd shortcuts
     def _bind_shortcuts(self):
-        # Save current buffer
-        self.bind_all("<Control-s>", self.save_current_buffer)
-        self.bind_all("<Command-s>", self.save_current_buffer)
-        # New model
-        self.bind_all("<Control-n>", lambda e: (self.new_model(), "break"))
-        self.bind_all("<Command-n>", lambda e: (self.new_model(), "break"))
+        # # Save current buffer
+        # self.bind_all("<Control-s>", self.save_current_buffer)
+        # self.bind_all("<Command-s>", self.save_current_buffer)
+        # # New model
+        # self.bind_all("<Control-n>", lambda e: (self.new_model(), "break"))
+        # self.bind_all("<Command-n>", lambda e: (self.new_model(), "break"))
+
+         # Bind only to main editors
+        for w in (self.model_text, self.data_text):
+            w.bind("<Control-s>", self.save_current_buffer)
+            w.bind("<Command-s>", self.save_current_buffer)
+            w.bind("<Control-n>", lambda e: (self.new_model(), "break"))
+            w.bind("<Command-n>", lambda e: (self.new_model(), "break"))
 
     # NEW: save current tab (model or data)
     def save_current_buffer(self, event=None):
