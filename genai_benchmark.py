@@ -80,7 +80,7 @@ def main() -> int:
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
     parser.add_argument("--all", action="store_true", help="Solve all problems in the dataset and save results.")
-
+    ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
     args = parser.parse_args()
 
     print("Arguments:")
@@ -172,6 +172,7 @@ def main() -> int:
                     mode=mode,
                     iterations=args.iterations,
                     return_statistics=True,
+                    alignment_check=ALIGNMENT_CHECK
                 )
                 entry["generation_assessment"] = result.get("assessment")
                 entry["generation_iterations"] = result.get("iterations")
@@ -255,7 +256,14 @@ def main() -> int:
     # Step 1-2: Generate model and data
     try:
         result = generative_solve(
-            prompt, model_path, data_path, model_name=args.gpt, mode=mode, iterations=args.iterations, return_statistics=True
+            prompt, 
+            model_path, 
+            data_path, 
+            model_name=args.gpt, 
+            mode=mode, 
+            iterations=args.iterations, 
+            return_statistics=True,
+            alignment_check=ALIGNMENT_CHECK
         )
         assessment = result["assessment"]
         print(f"generative_solve completed. Assessment: {assessment}")
