@@ -1,4 +1,4 @@
-from enum import Enum
+from pyopl.pyopl_generative import generative_feedback, generative_solve
 
 
 def test_generative_solve():
@@ -26,26 +26,7 @@ def test_generative_feedback():
     print("Revised Data:\n", feedback_result.get("revised_data", ""))
 
 
-class GenerativeProvider(Enum):
-    OPENAI = "openai"
-    GEMINI = "gemini"
-    OLLAMA = "ollama"
-
-
 if __name__ == "__main__":
-
-    genai = GenerativeProvider.OPENAI
-
-    if genai == GenerativeProvider.GEMINI:
-        # Use Gemini
-        from pyopl.pyopl_generative_gemini import generative_feedback, generative_solve
-    elif genai == GenerativeProvider.OPENAI:
-        # Use OpenAI
-        from pyopl.pyopl_generative_openai import generative_feedback, generative_solve
-    elif genai == GenerativeProvider.OLLAMA:
-        # Use Ollama
-        from pyopl.pyopl_generative_ollama import generative_feedback, generative_solve
-
     test_solve = True
     test_feedback = False
     if test_solve:

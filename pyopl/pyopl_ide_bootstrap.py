@@ -946,7 +946,7 @@ class OPLIDE(tk.Tk):
 
         def run():
             try:
-                from .pyopl_generative_openai import generative_solve
+                from .pyopl_generative import generative_solve
 
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
@@ -1022,7 +1022,7 @@ class OPLIDE(tk.Tk):
 
         def run():
             try:
-                from .pyopl_generative_openai import generative_feedback
+                from .pyopl_generative import generative_feedback
 
                 result = generative_feedback(question, model_path, data_path)
                 feedback = result.get("feedback", "No feedback returned.")

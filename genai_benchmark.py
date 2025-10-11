@@ -6,7 +6,7 @@ import sys
 from typing import Any, Optional
 
 from pyopl import solve
-from pyopl.pyopl_generative_openai import Grammar, generative_solve
+from pyopl.pyopl_generative import Grammar, generative_solve
 
 
 def _ensure_parent_dir(path: str) -> None:
