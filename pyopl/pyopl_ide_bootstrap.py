@@ -9,13 +9,20 @@ import tkinter as tk
 import webbrowser  # FIX: needed for Help menu links
 from pathlib import Path  # NEW
 from tkinter import filedialog, messagebox, scrolledtext, ttk  # NEW: dialogs for GenAI prompts
-from typing import Any, Optional  # add typing for optional Pillow modules
+from typing import Any, Callable, Optional  # add typing for optional Pillow modules
 
 import ttkbootstrap as tb  # NEW: use ttkbootstrap flatly light theme
 from platformdirs import user_config_dir  # NEW
 
 # --- Local Imports ---
 from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, solve
+
+# NEW: model discovery (provider-specific)
+from .pyopl_generative import (
+    list_gemini_models,
+    list_ollama_models,
+    list_openai_models,
+)
 
 # NEW: settings storage constants (match sample.py strategy)
 APP_NAME = "rhetor"
@@ -85,6 +92,12 @@ class OPLIDE(tk.Tk):
         self.solver = tk.StringVar(value="gurobi")  # Solver selection: 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")  # NEW: current ttkbootstrap theme
 
+        # NEW: GenAI selection state
+        self.genai_selection_var = tk.StringVar(value="")  # stores "provider|model"
+        self.genai_provider: Optional[str] = None
+        self.genai_model: Optional[str] = None
+        self._genai_provider_models: dict[str, list[str]] = {}
+
         # NEW: init settings storage and load persisted settings
         self._init_settings_storage()
         loaded_settings = self._load_settings()
@@ -103,6 +116,8 @@ class OPLIDE(tk.Tk):
 
         self._set_icon()
         self._setup_menu()
+        # NEW: build GenAI model menus dynamically
+        self._build_genai_model_menus()
         self._setup_panes()
         self._setup_status_bar()
         self._setup_tag_configs()
@@ -153,6 +168,8 @@ class OPLIDE(tk.Tk):
         """Create the application menu bar."""
 
         menubar = tk.Menu(self)
+        self.menubar = menubar  # NEW: keep reference
+
         # File Menu
         filemenu = tk.Menu(menubar, tearoff=0)
         # CHANGED: add accelerator to New Model
@@ -177,11 +194,9 @@ class OPLIDE(tk.Tk):
         runmenu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Run", menu=runmenu)
 
-        # NEW: GenAI Menu
-        genai_menu = tk.Menu(menubar, tearoff=0)
-        genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
-        genai_menu.add_command(label="Ask for Feedback...", command=self.genai_feedback)
-        menubar.add_cascade(label="GenAI", menu=genai_menu)
+        # NEW: GenAI Menu (populated later by _build_genai_model_menus)
+        self.genai_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="GenAI", menu=self.genai_menu)
 
         # Settings Menu (renamed from View to avoid macOS system items)
         settings_menu = tk.Menu(menubar, tearoff=0)
@@ -933,6 +948,11 @@ class OPLIDE(tk.Tk):
 
     def genai_generate(self):
         """Prompt user for a problem description and generate model & data via GenAI."""
+        # Guard: ensure a model is selected
+        if not self.genai_provider or not self.genai_model:
+            messagebox.showwarning("GenAI", "No GenAI model selected.")
+            return
+
         prompt = self._ask_multiline(
             "GenAI: Generate Model & Data",
             "Describe the optimization problem:",
@@ -941,7 +961,7 @@ class OPLIDE(tk.Tk):
         if not prompt:
             return
 
-        self.status_var.set("GenAI: generating model and data...")
+        self.status_var.set(f"GenAI: generating with {self.genai_provider} • {self.genai_model} ...")
         self._clear_output("GenAI: Generating model and data...")
 
         def run():
@@ -953,7 +973,14 @@ class OPLIDE(tk.Tk):
                 model_path = os.path.join(tmp_dir, "gen_pyopl_model.mod")
                 data_path = os.path.join(tmp_dir, "gen_pyopl_data.dat")
 
-                assessment = generative_solve(prompt, model_path, data_path)
+                # Pass selected provider/model
+                assessment = generative_solve(
+                    prompt,
+                    model_path,
+                    data_path,
+                    model_name=self.genai_model,
+                    llm_provider=self.genai_provider,
+                )
 
                 with open(model_path, "r") as f:
                     model_code = f.read()
@@ -995,6 +1022,11 @@ class OPLIDE(tk.Tk):
 
     def genai_feedback(self):
         """Prompt for a question and request feedback/revisions from GenAI for the current model/data."""
+        # Guard: ensure a model is selected
+        if not self.genai_provider or not self.genai_model:
+            messagebox.showwarning("GenAI", "No GenAI model selected.")
+            return
+
         question = self._ask_multiline(
             "GenAI: Ask for Feedback",
             "Enter your question about the current model/data (e.g., improvements, changes):",
@@ -1024,7 +1056,13 @@ class OPLIDE(tk.Tk):
             try:
                 from .pyopl_generative import generative_feedback
 
-                result = generative_feedback(question, model_path, data_path)
+                result = generative_feedback(
+                    question,
+                    model_path,
+                    data_path,
+                    model_name=self.genai_model,
+                    llm_provider=self.genai_provider,
+                )
                 feedback = result.get("feedback", "No feedback returned.")
                 revised_model = result.get("revised_model", "")
                 revised_data = result.get("revised_data", "")
@@ -1166,18 +1204,11 @@ class OPLIDE(tk.Tk):
     # NEW: bind Ctrl/Cmd shortcuts
     def _bind_shortcuts(self):
         # # Save current buffer
-        # self.bind_all("<Control-s>", self.save_current_buffer)
-        # self.bind_all("<Command-s>", self.save_current_buffer)
-        # # New model
-        # self.bind_all("<Control-n>", lambda e: (self.new_model(), "break"))
-        # self.bind_all("<Command-n>", lambda e: (self.new_model(), "break"))
-
-         # Bind only to main editors
-        for w in (self.model_text, self.data_text):
-            w.bind("<Control-s>", self.save_current_buffer)
-            w.bind("<Command-s>", self.save_current_buffer)
-            w.bind("<Control-n>", lambda e: (self.new_model(), "break"))
-            w.bind("<Command-n>", lambda e: (self.new_model(), "break"))
+        self.bind_all("<Control-s>", self.save_current_buffer)
+        self.bind_all("<Command-s>", self.save_current_buffer)
+        # New model
+        self.bind_all("<Control-n>", lambda e: (self.new_model(), "break"))
+        self.bind_all("<Command-n>", lambda e: (self.new_model(), "break"))
 
     # NEW: save current tab (model or data)
     def save_current_buffer(self, event=None):
@@ -1211,6 +1242,109 @@ class OPLIDE(tk.Tk):
             "About Rhetor",
             "Rhetor: Reasoning Engine\n - \na Tool for High-level Operations Research\n - \n© 2025 Roberto Rossi",
         )
+
+    # NEW: discover available models and populate the GenAI menu
+    def _build_genai_model_menus(self):
+        """Populate the GenAI menu with provider submenus and radio items per model."""
+        # Ensure the GenAI menu exists
+        if not hasattr(self, "genai_menu"):
+            self.genai_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="GenAI", menu=self.genai_menu)
+
+        # Clear existing GenAI menu
+        try:
+            self.genai_menu.delete(0, tk.END)
+        except Exception:
+            pass
+
+        # Discover models per provider (ignore failures)
+        provider_models: dict[str, list[str]] = {"openai": [], "google": [], "ollama": []}
+        try:
+            provider_models["openai"] = list_openai_models()
+        except Exception:
+            provider_models["openai"] = []
+        try:
+            provider_models["google"] = list_gemini_models()
+        except Exception:
+            provider_models["google"] = []
+        try:
+            provider_models["ollama"] = list_ollama_models()
+        except Exception:
+            provider_models["ollama"] = []
+
+        self._genai_provider_models = provider_models
+
+        any_models = any(len(v) > 0 for v in provider_models.values())
+        self._genai_provider_submenus: dict[str, tk.Menu] = {}
+
+        if any_models:
+            # Add provider submenus with radio selections
+            def add_provider_menu(provider_label: str, provider_key: str, models: list[str]):
+                sub = tk.Menu(self.genai_menu, tearoff=0)
+                self._genai_provider_submenus[provider_key] = sub
+                for m in sorted(models):
+                    value = f"{provider_key}|{m}"
+                    sub.add_radiobutton(
+                        label=m,
+                        variable=self.genai_selection_var,
+                        value=value,
+                        command=self._make_select_model_cmd(provider_key, m),  # mypy-safe
+                    )
+                self.genai_menu.add_cascade(label=provider_label, menu=sub)
+
+            if provider_models["openai"]:
+                add_provider_menu("OpenAI", "openai", provider_models["openai"])
+            if provider_models["google"]:
+                add_provider_menu("Gemini", "google", provider_models["google"])
+            if provider_models["ollama"]:
+                add_provider_menu("Ollama", "ollama", provider_models["ollama"])
+
+            # Actions
+            self.genai_menu.add_separator()
+            self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
+            self.genai_menu.add_command(label="Ask for Feedback...", command=self.genai_feedback)
+            self.genai_menu.add_separator()
+            self.genai_menu.add_command(label="Refresh Models", command=self._build_genai_model_menus)
+
+            # Enable GenAI cascade
+            try:
+                self.menubar.entryconfig("GenAI", state="normal")
+            except Exception:
+                pass
+
+            # Preselect the first available model once
+            if not (self.genai_provider and self.genai_model):
+                for pk in ("openai", "google", "ollama"):
+                    if provider_models[pk]:
+                        first = provider_models[pk][0]
+                        self.genai_selection_var.set(f"{pk}|{first}")
+                        self._on_select_genai_model(pk, first)
+                        break
+        else:
+            # No models available
+            self.genai_menu.add_command(label="No models available", state="disabled")
+            self.genai_menu.add_separator()
+            self.genai_menu.add_command(label="Refresh Models", command=self._build_genai_model_menus)
+            try:
+                self.menubar.entryconfig("GenAI", state="disabled")
+            except Exception:
+                pass
+
+    # NEW: factory to build typed callbacks for menu commands (avoids lambda mypy issue)
+    def _make_select_model_cmd(self, provider_key: str, model_name: str) -> Callable[[], None]:
+        def _cmd() -> None:
+            self._on_select_genai_model(provider_key, model_name)
+
+        return _cmd
+
+    # NEW: selection handler for GenAI model choice
+    def _on_select_genai_model(self, provider_key: str, model_name: str):
+        self.genai_provider = provider_key
+        self.genai_model = model_name
+        try:
+            self.status_var.set(f"GenAI selected: {provider_key} • {model_name}")
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
