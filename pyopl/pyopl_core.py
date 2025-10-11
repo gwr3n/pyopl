@@ -1296,7 +1296,7 @@ class OPLParser(Parser):
         # NEW: stack of dicts mapping iterator name -> sem_type (e.g., tuple type or base type)
         # Activated while parsing bodies of sum(...) and forall(...)
         self._iterator_context_stack: list[dict[str, str]] = []
-    
+
     # Helper: build iterator type mapping from sum_index_list entries
     def _iter_types_from_sum_index_list(self, sum_index_list: list[dict]) -> dict[str, str]:
         it_types: dict[str, str] = {}
@@ -2118,7 +2118,7 @@ class OPLParser(Parser):
         logger.debug(f"[PARSER] Exit sum_index_header: result={result}")
         return result
 
-     # --- forall_index_header: push iterator context similarly (no scope changes) ---
+    # --- forall_index_header: push iterator context similarly (no scope changes) ---
     @_("iter_header_open sum_index_list opt_index_constraint ')'")  # type: ignore
     def forall_index_header(self, p):
         iterators = p.sum_index_list
