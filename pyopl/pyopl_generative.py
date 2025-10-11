@@ -948,8 +948,8 @@ def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
     models: list[str] = []
     try:
         resp = ollama_list()
-        
-        for model in resp['models']:
+
+        for model in resp["models"]:
             models.append(model.model)
 
     except Exception as e:
