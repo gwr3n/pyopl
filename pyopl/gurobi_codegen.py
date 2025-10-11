@@ -2346,8 +2346,8 @@ class GurobiCodeGenerator:
             return out
 
     def _expr_binop(self, expr_node, current_iterators, symbolic):
-        left_str = self._traverse_expression(expr_node["left"], current_iterators)
-        right_str = self._traverse_expression(expr_node["right"], current_iterators)
+        left_str = self._traverse_expression(expr_node["left"], current_iterators, symbolic)
+        right_str = self._traverse_expression(expr_node["right"], current_iterators, symbolic)
         op = expr_node["op"]
         return f"({left_str} {op} {right_str})"
 
@@ -2427,17 +2427,19 @@ class GurobiCodeGenerator:
         logger.debug(
             f"[GurobiCodeGen] SUM: iterators={iterators}, index_constraint={index_constraint}, inner_expression={inner_expression}"
         )
+        # Build loop ranges left-to-right, allowing later bounds to reference earlier iterator names
+        temp_iter_map = current_iterators.copy()
         for it in iterators:
             name = it["iterator"]
             rng = it["range"]
             logger.debug(f"[GurobiCodeGen] SUM iterator: {it}")
             if rng["type"] == "range_specifier":
-                start = self._traverse_expression(rng["start"], current_iterators, symbolic=True)
-                end = self._traverse_expression(rng["end"], current_iterators, symbolic=True)
+                start = self._traverse_expression(rng["start"], temp_iter_map, symbolic=True)
+                end = self._traverse_expression(rng["end"], temp_iter_map, symbolic=True)
                 loop_ranges.append(f"range({start}, {end} + 1)")
             elif rng["type"] == "named_range":
                 try:
-                    loop_ranges.append(self._emit_range_from_declaration(rng["name"], current_iterators, True))
+                    loop_ranges.append(self._emit_range_from_declaration(rng["name"], temp_iter_map, True))
                 except SemanticError:
                     set_name = self._emit_set_name_if_declared(rng["name"])
                     if set_name:
@@ -2453,9 +2455,10 @@ class GurobiCodeGenerator:
             else:
                 raise ValueError(f"Unsupported range type for sum: {rng['type']}")
             loop_vars.append(name)
-        new_iterators = current_iterators.copy()
-        for v in loop_vars:
-            new_iterators[v] = v
+            # Make this iterator available to subsequent range bounds
+            temp_iter_map[name] = name
+        # Iterator map for inner expression and optional index constraint
+        new_iterators = temp_iter_map.copy()
         logger.debug(f"[GurobiCodeGen] SUM loop_vars={loop_vars}, loop_ranges={loop_ranges}")
 
         # --- Stage 2 enhancement: detect simple comparison term (boolean) needing reification ---
@@ -2537,13 +2540,12 @@ class GurobiCodeGenerator:
             meta_entry["len_var"] = len_var
             return f"gp.quicksum({list_name})"
 
-        # Fallback: original behavior
+        # Fallback: original behavior but with nested generators (no product), so later ranges can use earlier iterators
         inner_expr_str = self._traverse_expression(inner_expression, new_iterators)
         logger.debug(f"[GurobiCodeGen] SUM inner_expr_str: {inner_expr_str}")
-        if len(loop_vars) > 1:
-            gen = f"{inner_expr_str} for {', '.join(loop_vars)} in itertools.product({', '.join(loop_ranges)})"
-        else:
-            gen = f"{inner_expr_str} for {loop_vars[0]} in {loop_ranges[0]}"
+        # Emit nested generator: for v1 in R1 for v2 in R2 ... (avoids NameError for dependent ranges)
+        gens = " ".join([f"for {v} in {r}" for v, r in zip(loop_vars, loop_ranges)])
+        gen = f"{inner_expr_str} {gens}"
         if index_constraint is not None:
             cond_str = self._traverse_expression(index_constraint, new_iterators)
             logger.debug(f"[GurobiCodeGen] SUM cond_str: {cond_str}")
