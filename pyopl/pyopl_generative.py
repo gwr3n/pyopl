@@ -945,26 +945,15 @@ def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
     except Exception as e:
         raise RuntimeError("ollama package is not installed. pip install ollama") from e
 
+    models: list[str] = []
     try:
         resp = ollama_list()
+        
+        for model in resp['models']:
+            models.append(model.model)
+
     except Exception as e:
         raise RuntimeError(f"Failed to list Ollama models: {e}")
-
-    models: list[str] = []
-    # Expected shape: {'models': [ {'model': 'xxx', 'name': 'xxx', ...}, ... ]}
-    if isinstance(resp, dict) and isinstance(resp.get("models"), list):
-        for m in resp["models"]:
-            tag = None
-            if isinstance(m, dict):
-                # Prefer the tagged identifier
-                tag = m.get("model") or m.get("name")
-            if isinstance(tag, str):
-                models.append(tag)
-    elif isinstance(resp, list):
-        for m in resp:
-            tag = m.get("model") if isinstance(m, dict) else None
-            if isinstance(tag, str):
-                models.append(tag)
 
     if prefix:
         models = [n for n in models if n.startswith(prefix)]
