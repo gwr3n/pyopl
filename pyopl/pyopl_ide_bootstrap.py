@@ -1302,9 +1302,7 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
-            self.genai_menu.add_command(label="Ask for Feedback...", command=self.genai_feedback)
-            self.genai_menu.add_separator()
-            self.genai_menu.add_command(label="Refresh Models", command=self._build_genai_model_menus)
+            self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
 
             # Enable GenAI cascade
             try:
