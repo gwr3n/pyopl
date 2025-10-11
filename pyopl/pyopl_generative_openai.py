@@ -3,7 +3,7 @@ import os
 import re
 from enum import Enum, auto
 from time import sleep
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 # import google.generativeai as genai
 from openai import OpenAI
@@ -24,6 +24,7 @@ class Grammar(Enum):
 
 
 # ---------- Utilities ----------
+
 
 def _read_file(path: str) -> str:
     with open(path, "r") as f:
@@ -173,9 +174,7 @@ def _call_openai_with_retry(
         low = msg.lower()
         for key in list(fallback_keys):
             if key in params and (
-                f"unexpected keyword argument '{key}'" in low
-                or f"unsupported parameter: '{key}'" in low
-                or key in low
+                f"unexpected keyword argument '{key}'" in low or f"unsupported parameter: '{key}'" in low or key in low
             ):
                 params.pop(key, None)
                 removed = True
@@ -196,11 +195,12 @@ def _call_openai_with_retry(
             last_err = e
             if _strip_param_from_error_message(str(e) if e else ""):
                 continue
-            sleep(backoff_sec * (2 ** attempt))
+            sleep(backoff_sec * (2**attempt))
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
 
 
 # ---------- Prompt builders ----------
+
 
 def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
     return (
@@ -306,7 +306,9 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
     )
 
 
-def _build_revision_prompt_alignment(prompt: str, grammar_implementation: str, assessment_text: str, model_code: str, data_code: str) -> str:
+def _build_revision_prompt_alignment(
+    prompt: str, grammar_implementation: str, assessment_text: str, model_code: str, data_code: str
+) -> str:
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -369,7 +371,9 @@ def _build_revision_prompt_alignment(prompt: str, grammar_implementation: str, a
     )
 
 
-def _build_revision_prompt_syntax(prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors) -> str:
+def _build_revision_prompt_syntax(
+    prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors
+) -> str:
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -432,7 +436,9 @@ def _build_revision_prompt_syntax(prompt: str, grammar_implementation: str, mode
     )
 
 
-def _build_final_assessment_prompt(prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors) -> str:
+def _build_final_assessment_prompt(
+    prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors
+) -> str:
     syntax_errors_str = f"SYNTAX ERRORS:\n{syntax_errors}\n\n" if syntax_errors else ""
     return (
         "<role>\n"
@@ -537,6 +543,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
 
 
 # ---------- Public API ----------
+
 
 def generative_solve(
     prompt,
@@ -672,9 +679,7 @@ def generative_solve(
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
             print("Model or data has syntax errors; revising...")
-            user_prompt = _build_revision_prompt_syntax(
-                prompt, grammar_implementation, model_code, data_code, syntax_errors
-            )
+            user_prompt = _build_revision_prompt_syntax(prompt, grammar_implementation, model_code, data_code, syntax_errors)
 
     # Load latest version of the model and data files
     with open(model_file, "r") as f:
