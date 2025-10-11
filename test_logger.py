@@ -6,36 +6,24 @@ from pathlib import Path
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(
-        description="Run unittest test suite. Run all discovered tests or a single test by name."
-    )
+    parser = argparse.ArgumentParser(description="Run unittest test suite. Run all discovered tests or a single test by name.")
     # Run a single test (e.g., 'test.test_problems.TestPyOPLProblems.test_complex_workforce_planning')
     parser.add_argument(
-        "-t", "--test", 
+        "-t",
+        "--test",
         help="Dotted test name to run a single test (module.Class.test or module.Class or module)",
     )
     # Discovery options (used when --test is not provided)
+    parser.add_argument("--start-dir", default="test", help="Directory to start discovery from (default: %(default)s)")
     parser.add_argument(
-        "--start-dir", default="test",
-        help="Directory to start discovery from (default: %(default)s)"
+        "--pattern", default="test*.py", help="Pattern to match test files during discovery (default: %(default)s)"
     )
-    parser.add_argument(
-        "--pattern", default="test*.py",
-        help="Pattern to match test files during discovery (default: %(default)s)"
-    )
-    parser.add_argument(
-        "--top-level-dir", default=None,
-        help="Top level directory of project (optional)"
-    )
+    parser.add_argument("--top-level-dir", default=None, help="Top level directory of project (optional)")
     # Output and verbosity
     parser.add_argument(
-        "-o", "--output", default="unittest_results.txt",
-        help="Write test output to this file instead of stdout"
+        "-o", "--output", default="unittest_results.txt", help="Write test output to this file instead of stdout"
     )
-    parser.add_argument(
-        "-v", "--verbosity", type=int, default=2,
-        help="Verbosity level for unittest (default: %(default)s)"
-    )
+    parser.add_argument("-v", "--verbosity", type=int, default=2, help="Verbosity level for unittest (default: %(default)s)")
     return parser.parse_args(argv)
 
 
@@ -45,14 +33,11 @@ def build_suite(args: argparse.Namespace) -> unittest.TestSuite:
         return unittest.defaultTestLoader.loadTestsFromName(args.test)
     # Discover the full test suite
     return unittest.defaultTestLoader.discover(
-        start_dir=args.start_dir,
-        pattern=args.pattern,
-        top_level_dir=args.top_level_dir
+        start_dir=args.start_dir, pattern=args.pattern, top_level_dir=args.top_level_dir
     )
 
 
 def run_tests(suite: unittest.TestSuite, verbosity: int, output: str | None) -> bool:
-    stream = None
     result = None
 
     if output:
