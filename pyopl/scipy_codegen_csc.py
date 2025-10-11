@@ -2190,6 +2190,113 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         else:
             raise self._unsupported_type_error("expr in index bound", type(expr))
 
+    # NEW: evaluate integer bound with env support (iterators first, then data)
+    def _eval_bound_dynamic(self, expr: dict, env: dict) -> int:
+        if not isinstance(expr, dict):
+            raise self._unsupported_type_error("expr in index bound", type(expr))
+        t = expr.get("type")
+        if t == "number":
+            return int(expr.get("value"))
+        if t == "name":
+            name = expr.get("value")
+            if name in env:
+                return int(env[name])
+            # fallback to merged data_dict (handles named ranges/scalars)
+            val = self.data_dict.get(name)
+            if isinstance(val, (int, float)):
+                return int(val)
+            # For named ranges, prefer declaration
+            decl = self._find_decl(name, "range_declaration_inline")
+            if decl:
+                return int(self._eval_bound(decl["end"]))  # typical usage for upper bound shortcuts
+            raise self._unsupported_type_error("name in index bound", name)
+        if t == "binop":
+            op = expr.get("op")
+            left = self._eval_bound_dynamic(expr.get("left"), env)
+            right = self._eval_bound_dynamic(expr.get("right"), env)
+            if op == "+":
+                return int(left + right)
+            if op == "-":
+                return int(left - right)
+            if op == "*":
+                return int(left * right)
+            if op == "/":
+                return int(left // right)
+            raise self._unsupported_operator_error("index bound binop", op)
+        if t == "uminus":
+            v = self._eval_bound_dynamic(expr.get("value"), env)
+            return int(-v)
+        if t == "parenthesized_expression":
+            return self._eval_bound_dynamic(expr.get("expression"), env)
+        if t in ("minl", "maxl"):
+            vals = [self._eval_bound_dynamic(a, env) for a in expr.get("args", [])]
+            if not vals:
+                raise self._unsupported_type_error("expr in index bound", t)
+            return min(vals) if t == "minl" else max(vals)
+        raise self._unsupported_type_error("expr in index bound", t)
+
+    # NEW: build dynamic iterator domains honoring dependencies between bounds
+    def _iterate_iterators_dynamic(self, iterators: list[dict], outer_env: dict) -> list[tuple[dict, tuple]]:
+        """
+        Returns a list of (env_snapshot, idx_tuple) pairs for all combinations,
+        evaluating each iterator's range with access to previously bound iterator values.
+        """
+        results: list[tuple[dict, tuple]] = []
+
+        def domain_for_iterator(it: dict, env: dict) -> list:
+            rng = it.get("range") or {}
+            rt = rng.get("type")
+            if rt == "range_specifier":
+                start = self._eval_bound_dynamic(rng["start"], env)
+                end = self._eval_bound_dynamic(rng["end"], env)
+                # Safe guard: empty if start > end
+                if end < start:
+                    return []
+                return list(range(int(start), int(end) + 1))
+            if rt == "named_range":
+                # Use declaration
+                decl = self._find_decl(rng.get("name"), "range_declaration_inline")
+                if decl is None:
+                    return []
+                start = self._eval_bound(decl["start"])
+                end = self._eval_bound(decl["end"])
+                return list(range(int(start), int(end) + 1))
+            if rt in ("named_set", "named_set_dimension"):
+                set_name = rng.get("name")
+                # Prefer data_dict override
+                set_vals = self.data_dict.get(set_name)
+                if isinstance(set_vals, dict) and "elements" in set_vals:
+                    set_vals = set_vals["elements"]
+                if set_vals is None:
+                    # fallback to AST typed set or set-of-tuples
+                    set_decl = self._find_decl(set_name)
+                    if set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+                        set_vals = set_decl.get("value") or []
+                    elif set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                        set_vals = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+                    else:
+                        set_vals = []
+                return list(set_vals)
+            raise self._unsupported_type_error("iterator range type", rt)
+
+        def rec(idx: int, env: dict, acc: list):
+            if idx == len(iterators):
+                # snapshot env to avoid mutation
+                results.append((dict(env), tuple(acc)))
+                return
+            it = iterators[idx]
+            it_name = it.get("iterator")
+            dom = domain_for_iterator(it, env)
+            for v in dom:
+                env[it_name] = v
+                acc.append(v)
+                rec(idx + 1, env, acc)
+                acc.pop()
+                env.pop(it_name, None)
+
+        rec(0, dict(outer_env or {}), [])
+        return results
+
     def _emit_python_expr(self, expr: dict, env: dict | None = None) -> str:
         """
         Emit a valid Python expression from an AST node, using env for index variables.
@@ -3305,50 +3412,48 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _accumulate_objective_sum(self, expr, c):
         """
         Helper to accumulate coefficients for the objective vector c for a sum expression.
-        Handles iterator unrolling, index constraints, and tuple-indexed variables.
+        Handles iterator unrolling with dependent bounds, index constraints, and tuple-indexed variables.
         """
         iterators = expr["iterators"]
-        loop_vars, loop_ranges = self._unroll_iterators(iterators)
+        # Symbolic comment emission (unchanged)
+        loop_vars = [it["iterator"] for it in iterators]
         symbolic_ranges = ", ".join(
             [
                 (
                     f"{v} in range({self._emit_symbolic_expr(it['range'].get('start', ''))}, {self._emit_symbolic_expr(it['range'].get('end', ''))} + 1)"
                     if it["range"]["type"] == "range_specifier"
                     else f"{v} in {it['range']['name']}"
-                )  # named_range, set_of_tuples, or typed_set
+                )
                 for v, it in zip(loop_vars, iterators)
             ]
         )
         self._add_code_line(
             f"# Symbolic objective: sum({self._emit_python_expr(expr['expression'], {v: v for v in loop_vars})} for {symbolic_ranges})"
         )
-        tuple_set_names = set()
-        for it in iterators:
-            rng = it["range"]
-            if rng["type"] == "named_set":
-                set_decl = self._find_decl(rng["name"])
-                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    tuple_set_names.add(it["iterator"])
-        for idx_tuple in itertools.product(*loop_ranges):
-            env2, include = self._should_include_sum_term(
-                loop_vars,
-                idx_tuple,
-                tuple_set_names,
-                {},
-                expr.get("index_constraint"),
-                expr,
-            )
-            if not include:
-                continue
+
+        # Dynamic nested iteration with dependent bounds
+        for env2, _idx_tuple in self._iterate_iterators_dynamic(iterators, {}):
+            # Apply optional index constraint if present
+            index_constraint = expr.get("index_constraint")
+            if index_constraint is not None:
+                try:
+                    _, cond_val = self._eval_expr(index_constraint, env2)
+                    if not bool(cond_val):
+                        continue
+                except Exception:
+                    # conservative: include if cannot evaluate
+                    pass
             coef_dict, const = self._eval_expr(expr["expression"], env=env2)
             if coef_dict:
-                logger.debug(f"[SciPyCSCCodeGenerator] Objective term env={env2} coefs={coef_dict}")
-            for vname, coef in coef_dict.items():
-                idx = self.var_indices.get(vname)
-                if idx is None:
-                    idx = self._resolve_tuple_index_varname(vname)
-                if idx is not None:
-                    c[idx] += coef
+                for vname, coef in coef_dict.items():
+                    idx = self.var_indices.get(vname)
+                    if idx is None:
+                        try:
+                            idx = self._resolve_tuple_index_varname(vname)
+                        except Exception:
+                            idx = None
+                    if idx is not None:
+                        c[idx] += coef
 
     def _accumulate_objective_binop(self, expr, c):
         """
@@ -7143,18 +7248,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _accumulate_sum_expr(self, expr, env, coef_dict, sign, const_ref):
         """
-        Helper for _accumulate_sum_to_dict: handles 'sum' expressions.
+        Helper for _accumulate_sum_to_dict: handles 'sum' expressions with dependent bounds.
         """
         iterators = expr["iterators"]
-        loop_vars, loop_ranges = self._unroll_iterators(iterators)
-        tuple_set_names = self._get_tuple_set_names(iterators)
-        for idx_tuple in itertools.product(*loop_ranges):
-            env2 = dict(env or {})
-            for v, val in zip(loop_vars, idx_tuple):
-                if v in tuple_set_names and not isinstance(val, tuple):
-                    val = tuple(val)
-                env2[v] = val
-            index_constraint = expr.get("index_constraint")
+        index_constraint = expr.get("index_constraint")
+
+        # Iterate dynamically honoring dependent bounds
+        for env2, _idx_tuple in self._iterate_iterators_dynamic(iterators, env or {}):
             include = True
             if index_constraint is not None:
                 try:
@@ -7165,7 +7265,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if not include:
                 continue
             sum_expr = expr["expression"]
-            # If the inner expression is a comparison, defer linearization to specialized handlers in _build_constraints.
+            # If the inner expression is a comparison, defer to constraints builder
             if (
                 isinstance(sum_expr, dict)
                 and sum_expr.get("type") == "binop"
@@ -7173,12 +7273,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             ):
                 continue
             cdict, cval = self._eval_expr(sum_expr, env=env2)
-            for vname, coef in cdict.items():
+            for vname, vcoef in cdict.items():
                 idx = self.var_indices.get(vname)
                 if idx is None:
-                    idx = self._resolve_tuple_index_varname(vname)
+                    try:
+                        idx = self._resolve_tuple_index_varname(vname)
+                    except Exception:
+                        idx = None
                 if idx is not None:
-                    coef_dict[idx] += sign * coef
+                    coef_dict[vname] += sign * vcoef
             if isinstance(cval, (int, float)):
                 const_ref[0] += sign * cval
 
