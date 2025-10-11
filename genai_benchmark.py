@@ -172,7 +172,7 @@ def main() -> int:
                     mode=mode,
                     iterations=args.iterations,
                     return_statistics=True,
-                    alignment_check=ALIGNMENT_CHECK
+                    alignment_check=ALIGNMENT_CHECK,
                 )
                 entry["generation_assessment"] = result.get("assessment")
                 entry["generation_iterations"] = result.get("iterations")
@@ -256,14 +256,14 @@ def main() -> int:
     # Step 1-2: Generate model and data
     try:
         result = generative_solve(
-            prompt, 
-            model_path, 
-            data_path, 
-            model_name=args.gpt, 
-            mode=mode, 
-            iterations=args.iterations, 
+            prompt,
+            model_path,
+            data_path,
+            model_name=args.gpt,
+            mode=mode,
+            iterations=args.iterations,
             return_statistics=True,
-            alignment_check=ALIGNMENT_CHECK
+            alignment_check=ALIGNMENT_CHECK,
         )
         assessment = result["assessment"]
         print(f"generative_solve completed. Assessment: {assessment}")
