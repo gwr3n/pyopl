@@ -884,3 +884,103 @@ def generative_feedback(
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
+
+
+# ---------- Model discovery ----------
+
+
+def list_openai_models(prefix: Optional[str] = "gpt") -> list[str]:
+    """
+    Return available OpenAI model IDs visible to the API key.
+    Optionally filter by prefix.
+    """
+    client = _openai_client()
+    try:
+        resp = client.models.list()
+    except Exception as e:
+        raise RuntimeError(f"Failed to list OpenAI models: {e}")
+
+    names: list[str] = []
+    # Support both SDK return shapes
+    data = getattr(resp, "data", None)
+    items = data if isinstance(data, list) else (list(resp) if resp is not None else [])
+    for m in items:
+        mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+        if isinstance(mid, str):
+            names.append(mid)
+    if prefix:
+        names = [n for n in names if n.startswith(prefix)]
+    return sorted(set(names))
+
+
+def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:
+    """
+    Return available Google Generative AI model names.
+    By default, returns models starting with 'gemini' and supporting generateContent.
+    """
+    genai = _google_client()
+    try:
+        models = genai.list_models()
+    except Exception as e:
+        raise RuntimeError(f"Failed to list Gemini models: {e}")
+
+    names: list[str] = []
+    for m in models or []:
+        if "generateContent" in m.supported_generation_methods:
+            name = m.name
+            if isinstance(name, str) and name.startswith("models/"):
+                name = name[len("models/") :]
+                if prefix and name.startswith(prefix):
+                    names.append(name)
+
+    return sorted(set(names))
+
+
+def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
+    """
+    Return available local Ollama model tags (e.g., 'llama3:8b-instruct').
+    """
+    try:
+        from ollama import list as ollama_list
+    except Exception as e:
+        raise RuntimeError("ollama package is not installed. pip install ollama") from e
+
+    try:
+        resp = ollama_list()
+    except Exception as e:
+        raise RuntimeError(f"Failed to list Ollama models: {e}")
+
+    models: list[str] = []
+    # Expected shape: {'models': [ {'model': 'xxx', 'name': 'xxx', ...}, ... ]}
+    if isinstance(resp, dict) and isinstance(resp.get("models"), list):
+        for m in resp["models"]:
+            tag = None
+            if isinstance(m, dict):
+                # Prefer the tagged identifier
+                tag = m.get("model") or m.get("name")
+            if isinstance(tag, str):
+                models.append(tag)
+    elif isinstance(resp, list):
+        for m in resp:
+            tag = m.get("model") if isinstance(m, dict) else None
+            if isinstance(tag, str):
+                models.append(tag)
+
+    if prefix:
+        models = [n for n in models if n.startswith(prefix)]
+    return sorted(set(models))
+
+
+def list_models(llm_provider: Optional[str] = None, model_name: str = MODEL_NAME) -> list[str]:
+    """
+    Unified helper: returns models for the inferred provider.
+    llm_provider: 'openai', 'google', or 'ollama' (None -> inferred from model_name).
+    """
+    provider = _infer_provider(llm_provider, model_name)
+    if provider == LLMProvider.OPENAI:
+        return list_openai_models()
+    if provider == LLMProvider.GOOGLE:
+        return list_gemini_models()
+    if provider == LLMProvider.OLLAMA:
+        return list_ollama_models()
+    raise ValueError(f"Unsupported LLM provider: {provider}")
