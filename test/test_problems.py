@@ -30,7 +30,6 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
-    @unittest.skip("proprietary model")
     def test_complex_workforce_planning(self):
         """
         Test a complex workforce planning model with both solvers.
@@ -38,9 +37,97 @@ class TestPyOPLProblems(unittest.TestCase):
         """
         model_code = """
             // Workforce Planning DSM - model file (example)
+            range Weeks = 1..8;
+            {string} Food = {"I","II"};
+
+            // Parameters
+            float rate[Food] = [10, 6];
+            int    Hn = 40;
+            int    Ho = 60;
+            float  wageS = 360;
+            float  wageTrainee = 120;
+            float  wageTrained = 240;
+            float  wageOT = 540;
+            int    S = 50;                 // legacy skilled (constant)
+            int    target = 50;            // need 50 trained by end of week 8
+            int    maxPerTrainer = 3;      // 3 trainees per trainer over 2 weeks
+            float  pen[Food] = [0.5, 0.6];
+            int    demand[Food][Weeks];    // fill with Table 1-11
+
+            // Decision variables (per week)
+            dvar int+ x[Weeks];            // new trainees starting in week t (force x[7]=x[8]=0)
+            dvar int+ T1[Weeks];           // trainees in week-1 of training
+            dvar int+ T2[Weeks];           // trainees in week-2 of training
+            dvar int+ Z[Weeks];            // trainers (legacy skilled) engaged this week
+            dvar int+ R[Weeks];            // trained workers available
+
+            dvar int+ nS[Weeks];           // skilled working normal
+            dvar int+ oS[Weeks];           // skilled working overtime
+            dvar int+ trS[Weeks];          // skilled training (trainers)
+            dvar int+ nR[Weeks];           // trained working normal
+            dvar int+ oR[Weeks];           // trained working overtime
+
+            dvar float+ prod[Food][Weeks];
+            dvar float+ y[Food][Weeks][Weeks];  // allocation to order w in week t (t>=w)
+            dvar float+ hours[Weeks];
+
+            // Objective
+            minimize
+            // Labor costs (exactly once)
+            sum(t in Weeks) (
+                wageS*(nS[t] + trS[t]) + wageOT*oS[t]
+            + wageTrained*nR[t]     + wageOT*oR[t]
+            + wageTrainee*(T1[t] + T2[t])
+            )
+            // Late penalties with (t - w) factor
+            + sum(f in Food, w in Weeks, t in w+1..8) ((t - w) * pen[f] * y[f][w][t]);
+
+            // Workforce flow
+            subject to{
+            // Training pipeline
+            forall(t in Weeks) {
+                T1[t] == x[t];
+                T2[t] == ((t>=2) ? x[t-1] : 0);
+                R[t]  == ((t>=2) ? R[t-1] + ((t>=3) ? x[t-2] : 0) : 0);
+            }
+            // Trainer requirement
+            forall(t in Weeks) {
+                trS[t] >= Z[t];
+                maxPerTrainer * Z[t] >= T1[t] + T2[t];
+            }
+            // Skilled balance by role
+            forall(t in Weeks) nS[t] + oS[t] + trS[t] == S;
+            // Trained balance by role
+            forall(t in Weeks) nR[t] + oR[t] == R[t];
+
+            // Training finish by week 8
+            sum(t in 1..6) x[t] == target;   // last starts at week 6
+            x[7] == 0; x[8] == 0;
+
+            // Capacity
+
+            forall(t in Weeks) {
+                hours[t] == Hn*(nS[t]+nR[t]) + Ho*(oS[t]+oR[t]);
+                sum(f in Food) prod[f][t] / rate[f] <= hours[t];
+            }
+
+
+            // Delivery flow and demand satisfaction
+            // No early shipment and production link
+            forall(f in Food, t in Weeks)
+                (sum(w in 1..t) y[f][w][t]) <= prod[f][t];
+
+            // Exact demand fulfillment (on time or late)
+            forall(f in Food, w in Weeks)
+                sum(t in w..8) y[f][w][t] == demand[f][w];
+            }
             """
         data_code = """
             // Workforce Planning DSM - data file (example)
+            demand = [
+            [10000, 10000, 12000, 12000, 16000, 16000, 20000, 20000],
+            [6000, 7200, 8400, 10800, 10800, 12000, 12000, 12000]
+            ];
             """
         import os
         import tempfile
@@ -81,6 +168,64 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
+
+    def test_iterator_scoping_sum_and_forall(self):
+        """
+        Iterator scoping: ensure iterators introduced by sum(...) and forall(...) are
+        in scope while parsing their bodies, including tuple-field index usage.
+
+        Model constructs:
+          - 3D boolean decision var x[I][J][K]
+          - tuple T { int i; int j; int k; }
+          - {T} Triples = { <i,j,k> | i in I, j in J, k in K };
+          - Objective: maximize sum(c in Triples) x[c.i][c.j][c.k];
+          - Constraint with nested iterators: forall(i in I, j in J) sum(k in K) x[i][j][k] >= 0;
+
+        This test primarily validates parsing (no "Undeclared symbol" errors for i,j,k or c.i).
+        """
+        model_code = """
+            int a = 2;
+            int b = 2;
+            int c = 2;
+            range I = 1..a;
+            range J = 1..b;
+            range K = 1..c;
+
+            tuple T { int i; int j; int k; }
+            {T} Triples =
+              { <i,j,k> | i in I, j in J, k in K };
+
+            dvar boolean x[I][J][K];
+
+            maximize sum(c in Triples) x[c.i][c.j][c.k];
+
+            subject to {
+              // Trivial feasibility constraint using forall with two iterators
+              forall(i in I, j in J)
+                sum(k in K) x[i][j][k] >= 0;
+            }
+        """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        obj_values = {}
+        for solver in ("scipy", "gurobi"):
+            with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                model_file = tmp_mod.name
+            try:
+                result = solve(model_file, solver=solver)
+                self.assertNotEqual(result.get("status"), "FAILED", f"{solver} failed: {result.get('message')}")
+                self.assertIn("objective_value", result)
+                obj_values[solver] = result["objective_value"]
+            finally:
+                if os.path.exists(model_file):
+                    os.remove(model_file)
+        # Cross-solver objective agreement
+        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
 
     def test_employee_rostering(self):
         """
