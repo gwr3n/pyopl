@@ -2196,14 +2196,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise self._unsupported_type_error("expr in index bound", type(expr))
         t = expr.get("type")
         if t == "number":
-            return int(expr.get("value"))
+            # mypy: value can be Any|None; coerce safely
+            v_any = expr.get("value", 0)
+            if isinstance(v_any, bool):
+                return int(v_any)
+            if isinstance(v_any, (int, float)):
+                return int(v_any)
+            raise self._unsupported_type_error("number literal in index bound", type(v_any))
         if t == "name":
             name = expr.get("value")
             if name in env:
                 return int(env[name])
             # fallback to merged data_dict (handles named ranges/scalars)
             val = self.data_dict.get(name)
-            if isinstance(val, (int, float)):
+            if isinstance(val, (int, float, bool)):
                 return int(val)
             # For named ranges, prefer declaration
             decl = self._find_decl(name, "range_declaration_inline")
@@ -2212,8 +2218,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise self._unsupported_type_error("name in index bound", name)
         if t == "binop":
             op = expr.get("op")
-            left = self._eval_bound_dynamic(expr.get("left"), env)
-            right = self._eval_bound_dynamic(expr.get("right"), env)
+            left = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("left")), env)
+            right = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("right")), env)
             if op == "+":
                 return int(left + right)
             if op == "-":
@@ -2224,12 +2230,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return int(left // right)
             raise self._unsupported_operator_error("index bound binop", op)
         if t == "uminus":
-            v = self._eval_bound_dynamic(expr.get("value"), env)
+            v = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("value")), env)
             return int(-v)
         if t == "parenthesized_expression":
-            return self._eval_bound_dynamic(expr.get("expression"), env)
+            return self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("expression")), env)
         if t in ("minl", "maxl"):
-            vals = [self._eval_bound_dynamic(a, env) for a in expr.get("args", [])]
+            args = expr.get("args", []) or []
+            vals = [self._eval_bound_dynamic(cast(Dict[str, Any], a), env) for a in args]
             if not vals:
                 raise self._unsupported_type_error("expr in index bound", t)
             return min(vals) if t == "minl" else max(vals)
@@ -2247,22 +2254,25 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             rng = it.get("range") or {}
             rt = rng.get("type")
             if rt == "range_specifier":
-                start = self._eval_bound_dynamic(rng["start"], env)
-                end = self._eval_bound_dynamic(rng["end"], env)
+                start_expr = cast(Dict[str, Any], rng.get("start"))
+                end_expr = cast(Dict[str, Any], rng.get("end"))
+                start = self._eval_bound_dynamic(start_expr, env)
+                end = self._eval_bound_dynamic(end_expr, env)
                 # Safe guard: empty if start > end
                 if end < start:
                     return []
                 return list(range(int(start), int(end) + 1))
             if rt == "named_range":
                 # Use declaration
-                decl = self._find_decl(rng.get("name"), "range_declaration_inline")
+                decl = self._find_decl(cast(str, rng.get("name")), "range_declaration_inline")
                 if decl is None:
                     return []
-                start = self._eval_bound(decl["start"])
-                end = self._eval_bound(decl["end"])
-                return list(range(int(start), int(end) + 1))
+                # _eval_bound returns float | int; coerce to int for range
+                start = int(self._eval_bound(decl["start"]))
+                end = int(self._eval_bound(decl["end"]))
+                return list(range(start, end + 1))
             if rt in ("named_set", "named_set_dimension"):
-                set_name = rng.get("name")
+                set_name = cast(str, rng.get("name"))
                 # Prefer data_dict override
                 set_vals = self.data_dict.get(set_name)
                 if isinstance(set_vals, dict) and "elements" in set_vals:
