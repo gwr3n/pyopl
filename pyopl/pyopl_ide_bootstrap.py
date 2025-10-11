@@ -182,7 +182,7 @@ class OPLIDE(tk.Tk):
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
         filemenu.add_separator()
-        filemenu.add_command(label="Exit", command=self.quit)
+        filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
 
         # Run Menu
@@ -1201,8 +1201,17 @@ class OPLIDE(tk.Tk):
 
     def _on_close(self):
         """Persist settings and close the app."""
+        # Flag to refuse further UI updates from background threads
+        setattr(self, "_shutting_down", True)
         self._save_settings()
-        self.destroy()
+        try:
+            self.destroy()
+        finally:
+            # Ensure mainloop breaks even if destroy raised
+            try:
+                self.quit()
+            except Exception:
+                pass
 
     # NEW: bind Ctrl/Cmd shortcuts
     def _bind_shortcuts(self):
@@ -1291,6 +1300,8 @@ class OPLIDE(tk.Tk):
     # NEW: populate GenAI menu given discovered models (UI-thread only)
     def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]):
         """Populate the GenAI menu with provider submenus and radio items per model."""
+        if getattr(self, "_shutting_down", False):
+            return
         # Ensure the GenAI menu exists
         if not hasattr(self, "genai_menu"):
             self.genai_menu = tk.Menu(self.menubar, tearoff=0)
@@ -1364,6 +1375,8 @@ class OPLIDE(tk.Tk):
 
     # NEW: selection handler for GenAI model choice
     def _on_select_genai_model(self, provider_key: str, model_name: str):
+        if getattr(self, "_shutting_down", False):
+            return
         self.genai_provider = provider_key
         self.genai_model = model_name
         try:
