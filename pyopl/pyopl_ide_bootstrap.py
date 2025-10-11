@@ -97,6 +97,7 @@ class OPLIDE(tk.Tk):
         self.genai_provider: Optional[str] = None
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
+        self._genai_loading: bool = False  # NEW: avoid concurrent loads
 
         # NEW: init settings storage and load persisted settings
         self._init_settings_storage()
@@ -116,8 +117,8 @@ class OPLIDE(tk.Tk):
 
         self._set_icon()
         self._setup_menu()
-        # NEW: build GenAI model menus dynamically
-        self._build_genai_model_menus()
+        # NEW: build GenAI model menus asynchronously to avoid blocking UI
+        self._build_genai_model_menus_async()
         self._setup_panes()
         self._setup_status_bar()
         self._setup_tag_configs()
@@ -194,8 +195,10 @@ class OPLIDE(tk.Tk):
         runmenu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Run", menu=runmenu)
 
-        # NEW: GenAI Menu (populated later by _build_genai_model_menus)
+        # NEW: GenAI Menu placeholder (populated later)
         self.genai_menu = tk.Menu(menubar, tearoff=0)
+        # Initial non-blocking placeholder UI
+        self.genai_menu.add_command(label="Loading models...", state="disabled")
         menubar.add_cascade(label="GenAI", menu=self.genai_menu)
 
         # Settings Menu (renamed from View to avoid macOS system items)
@@ -1243,8 +1246,50 @@ class OPLIDE(tk.Tk):
             "Rhetor: Reasoning Engine\n - \na Tool for High-level Operations Research\n - \n© 2025 Roberto Rossi",
         )
 
-    # NEW: discover available models and populate the GenAI menu
-    def _build_genai_model_menus(self):
+    # NEW: async discovery wrapper to avoid blocking UI at startup and on refresh
+    def _build_genai_model_menus_async(self):
+        """Discover models in a background thread and populate the GenAI menu on completion."""
+        if self._genai_loading:
+            return  # avoid concurrent discovery
+        self._genai_loading = True
+
+        # Update placeholder UI
+        try:
+            self.genai_menu.delete(0, tk.END)
+        except Exception:
+            pass
+        self.genai_menu.add_command(label="Loading models...", state="disabled")
+        try:
+            self.menubar.entryconfig("GenAI", state="normal")
+        except Exception:
+            pass
+
+        def discover():
+            provider_models: dict[str, list[str]] = {"openai": [], "google": [], "ollama": []}
+            try:
+                provider_models["openai"] = list_openai_models()
+            except Exception:
+                provider_models["openai"] = []
+            try:
+                provider_models["google"] = list_gemini_models()
+            except Exception:
+                provider_models["google"] = []
+            try:
+                provider_models["ollama"] = list_ollama_models()
+            except Exception:
+                provider_models["ollama"] = []
+
+            def on_done():
+                self._genai_loading = False
+                self._populate_genai_model_menus(provider_models)
+
+            # Ensure UI updates happen on the main thread
+            self.after(0, on_done)
+
+        threading.Thread(target=discover, daemon=True).start()
+
+    # NEW: populate GenAI menu given discovered models (UI-thread only)
+    def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]):
         """Populate the GenAI menu with provider submenus and radio items per model."""
         # Ensure the GenAI menu exists
         if not hasattr(self, "genai_menu"):
@@ -1257,23 +1302,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        # Discover models per provider (ignore failures)
-        provider_models: dict[str, list[str]] = {"openai": [], "google": [], "ollama": []}
-        try:
-            provider_models["openai"] = list_openai_models()
-        except Exception:
-            provider_models["openai"] = []
-        try:
-            provider_models["google"] = list_gemini_models()
-        except Exception:
-            provider_models["google"] = []
-        try:
-            provider_models["ollama"] = list_ollama_models()
-        except Exception:
-            provider_models["ollama"] = []
-
         self._genai_provider_models = provider_models
-
         any_models = any(len(v) > 0 for v in provider_models.values())
         self._genai_provider_submenus: dict[str, tk.Menu] = {}
 
@@ -1288,22 +1317,22 @@ class OPLIDE(tk.Tk):
                         label=m,
                         variable=self.genai_selection_var,
                         value=value,
-                        command=self._make_select_model_cmd(provider_key, m),  # mypy-safe
+                        command=self._make_select_model_cmd(provider_key, m),
                     )
                 self.genai_menu.add_cascade(label=provider_label, menu=sub)
 
-            if provider_models["openai"]:
+            if provider_models.get("openai"):
                 add_provider_menu("OpenAI", "openai", provider_models["openai"])
-            if provider_models["google"]:
+            if provider_models.get("google"):
                 add_provider_menu("Gemini", "google", provider_models["google"])
-            if provider_models["ollama"]:
+            if provider_models.get("ollama"):
                 add_provider_menu("Ollama", "ollama", provider_models["ollama"])
 
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
-
+            
             # Enable GenAI cascade
             try:
                 self.menubar.entryconfig("GenAI", state="normal")
@@ -1313,7 +1342,7 @@ class OPLIDE(tk.Tk):
             # Preselect the first available model once
             if not (self.genai_provider and self.genai_model):
                 for pk in ("openai", "google", "ollama"):
-                    if provider_models[pk]:
+                    if provider_models.get(pk):
                         first = provider_models[pk][0]
                         self.genai_selection_var.set(f"{pk}|{first}")
                         self._on_select_genai_model(pk, first)
@@ -1321,8 +1350,6 @@ class OPLIDE(tk.Tk):
         else:
             # No models available
             self.genai_menu.add_command(label="No models available", state="disabled")
-            self.genai_menu.add_separator()
-            self.genai_menu.add_command(label="Refresh Models", command=self._build_genai_model_menus)
             try:
                 self.menubar.entryconfig("GenAI", state="disabled")
             except Exception:
