@@ -165,7 +165,7 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
     except Exception as e:
         raise RuntimeError("ollama package is not installed. pip install ollama") from e
     resp = ollama_generate(
-        model=model_name, prompt=prompt, options={"num_predict": num_predict, "grammar": _read_pyopl_GBNF()}
+        model=model_name, prompt=prompt, options={"num_predict": num_predict, "format": "json"}
     )
     try:
         return resp["response"] or ""
