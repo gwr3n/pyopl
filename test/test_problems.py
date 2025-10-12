@@ -30,7 +30,151 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
-    def test_complex_workforce_planning(self):
+    def test_complex_workforce_planning_2(self):
+        """
+        Test a complex workforce planning model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            // Workforce Planning DSM - model file (example)
+            range T = 1..8;
+            range TS = 1..7;
+
+            param int S0 = ...;
+            param float D1[T] = ...;  // demand for product I (kg)
+            param float D2[T] = ...;  // demand for product II (kg)
+
+            param float r1 = 10;      // kg per hour for product I
+            param float r2 = 6;       // kg per hour for product II
+            param int   h40 = 40;     // regular weekly hours
+            param int   h60 = 60;     // overtime weekly hours
+
+            param float w_s  = 360;   // weekly wage skilled (40h)
+            param float w_new = 240;  // weekly wage new trained (40h)
+            param float w_tr = 120;   // weekly wage trainee during training
+            param float w_ot = 540;   // weekly wage overtime (60h) for any worker at 60h
+
+            param float pen1 = 0.5;   // backlog penalty per kg per week for I
+            param float pen2 = 0.6;   // backlog penalty per kg per week for II
+
+            // Decisions
+            // Training starts (cohorts start week s and last for two weeks: s and s+1)
+            dvar int+ train[TS];      // number of trainees starting in week s
+            dvar int+ trainer[TS];    // number of skilled trainers assigned to start in week s (each trains up to 3)
+
+            // Workforce deployment per week
+            dvar int+ xs[T];          // skilled producing at 40h in week t
+            dvar int+ xso[T];         // skilled producing at 60h in week t
+            dvar int+ xn[T];          // new trained producing at 40h in week t
+            dvar int+ xno[T];         // new trained producing at 60h in week t
+
+            // Production hour allocations and resulting production
+            dvar float+ hI[T];
+            dvar float+ hII[T];
+            dvar float+ pI[T];
+            dvar float+ pII[T];
+
+            // Inventory and backlog
+            dvar float+ sI[T];
+            dvar float+ sII[T];
+            dvar float+ bI[T];
+            dvar float+ bII[T];
+
+            // Derived expressions per week
+            dexpr int trainersBusy[t in T] = sum(s in TS : (s == t) || (s + 1 == t)) trainer[s];
+            dexpr int traineesBusy[t in T] = sum(s in TS : (s == t) || (s + 1 == t)) train[s];
+            dexpr int newAvail[t in T]     = sum(s in TS : (s + 2) <= t) train[s];
+
+            minimize totalCost:
+            sum(t in T) (
+                // wages for skilled (producing 40h or 60h) and trainers
+                w_s * xs[t] + w_ot * xso[t] + w_s * trainersBusy[t]
+                // wages for newly trained (40h or 60h)
+                + w_new * xn[t] + w_ot * xno[t]
+                // trainees during training (two weeks per start)
+                + w_tr * traineesBusy[t]
+                // backlog penalties
+                + pen1 * bI[t] + pen2 * bII[t]
+            );
+
+            subject to {
+            // Training capacity: each trainer handles up to 3 trainees per start (over 2 weeks)
+            forall(s in TS) 3 * trainer[s] >= train[s];
+
+            // Training goal: 50 new workers finished by end of week 8 (last start is week 7)
+            sum(s in TS) train[s] == 50;
+
+            // All initial skilled are either producing (40h or 60h) or training each week
+            forall(t in T) xs[t] + xso[t] + trainersBusy[t] == S0;
+
+            // All trained workers (available by week t) are assigned (40h or 60h)
+            forall(t in T) xn[t] + xno[t] == newAvail[t];
+
+            // Weekly production-hour capacity from assigned workers (skilled and trained)
+            forall(t in T) hI[t] + hII[t] <= h40 * (xs[t] + xn[t]) + h60 * (xso[t] + xno[t]);
+
+            // Production rates linking hours to output
+            forall(t in T) {
+                pI[t] == r1 * hI[t];
+                pII[t] == r2 * hII[t];
+            }
+
+            // Inventory/backlog balance for product I
+            (sI[1] - bI[1]) == 0 + pI[1] - D1[1];
+            forall(t in 2..8) (sI[t] - bI[t]) == (sI[t-1] - bI[t-1]) + pI[t] - D1[t];
+
+            // Inventory/backlog balance for product II
+            (sII[1] - bII[1]) == 0 + pII[1] - D2[1];
+            forall(t in 2..8) (sII[t] - bII[t]) == (sII[t-1] - bII[t-1]) + pII[t] - D2[t];
+            }
+            """
+        data_code = """
+            // Workforce Planning DSM - data file (example)
+            S0 = 50;
+            D1 = [10000, 10000, 12000, 12000, 16000, 16000, 20000, 20000];
+            D2 = [6000, 7200, 8400, 10800, 10800, 12000, 12000, 12000];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
+    def test_complex_workforce_planning_1(self):
         """
         Test a complex workforce planning model with both solvers.
         Checks that both solvers produce the same objective value for the given data.
@@ -3579,7 +3723,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dvar int I[Stores][Periods];
         dvar int Q[Stores][Periods];
 
-        minimize sum(s in Stores, p in Periods) OrderingCost[p] * Q[s][p] + HoldingCost * I[s][p];
+        minimize sum(s in Stores, p in Periods) (OrderingCost[p] * Q[s][p] + HoldingCost * I[s][p]);
 
         subject to {
             forall(s in Stores)
@@ -3596,8 +3740,6 @@ class TestPyOPLProblems(unittest.TestCase):
             forall(s in Stores, p in Periods)
                 Q[s][p] >= 0;
         }
-
-
         """
         data_code = """
         // Data for the inventory problem
@@ -3673,7 +3815,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dvar int Inventory[Stores][Periods];
         dvar int Shipments[Stores][Periods];
 
-        minimize sum(s in Stores, p in Periods) TransportCost[s][p] * Shipments[s][p] + HoldingCost * Inventory[s][p];
+        minimize sum(s in Stores, p in Periods) (TransportCost[s][p] * Shipments[s][p] + HoldingCost * Inventory[s][p]);
 
         subject to {
         forall(s in Stores)
