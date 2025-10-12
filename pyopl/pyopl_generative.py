@@ -18,7 +18,7 @@ LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
 # ollama: "gpt-oss:120b"
 MODEL_NAME = "gpt-5"
 REASONING_EFFORT = "medium"  # "low", "medium", "high"
-ALIGNMENT_CHECK = False  # Whether to check alignment with original prompt
+ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
 
 class LLMProvider(Enum):
@@ -39,6 +39,11 @@ class Grammar(Enum):
 def _read_file(path: str) -> str:
     with open(path, "r") as f:
         return f.read()
+
+
+def _read_pyopl_GBNF() -> str:
+    grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "grammars", "PyOPL_GBNF")
+    return _read_file(grammar_path)
 
 
 def _read_pyopl_grammar() -> str:
@@ -159,7 +164,9 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
         from ollama import generate as ollama_generate
     except Exception as e:
         raise RuntimeError("ollama package is not installed. pip install ollama") from e
-    resp = ollama_generate(model=model_name, prompt=prompt, options={"num_predict": num_predict})
+    resp = ollama_generate(
+        model=model_name, prompt=prompt, options={"num_predict": num_predict, "grammar": _read_pyopl_GBNF()}
+    )
     try:
         return resp["response"] or ""
     except (TypeError, KeyError) as e:
