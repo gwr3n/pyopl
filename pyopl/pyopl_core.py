@@ -1289,7 +1289,7 @@ class OPLParser(Parser):
     def expression(self, p):
         return p.conditional
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.symbol_table = SymbolTable()
         # Track last-seen token line for EOF errors
         self._last_lineno = 1
