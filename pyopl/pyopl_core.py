@@ -1683,6 +1683,24 @@ class OPLParser(Parser):
         # OPL semantics: allow boolean objectives
         return {"type": "maximize", "expression": p.expression}
 
+    # NEW: Objective with label using colon: minimize z: expr;
+    @_('MINIMIZE NAME ":" expression ";"')  # type: ignore
+    def objective_section(self, p):
+        return {"type": "minimize", "label": p.NAME, "expression": p.expression}
+
+    @_('MAXIMIZE NAME ":" expression ";"')  # type: ignore
+    def objective_section(self, p):
+        return {"type": "maximize", "label": p.NAME, "expression": p.expression}
+
+    # NEW: Objective with label using equals: minimize z = expr;
+    @_('MINIMIZE NAME "=" expression ";"')  # type: ignore
+    def objective_section(self, p):
+        return {"type": "minimize", "label": p.NAME, "expression": p.expression}
+
+    @_('MAXIMIZE NAME "=" expression ";"')  # type: ignore
+    def objective_section(self, p):
+        return {"type": "maximize", "label": p.NAME, "expression": p.expression}
+
     # --- Constraints section ---
     @_('SUBJECT_TO "{" constraint_list "}"')  # type: ignore
     def constraints_section(self, p):
