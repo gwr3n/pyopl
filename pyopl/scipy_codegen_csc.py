@@ -1388,7 +1388,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 elif op == "==":
                     lower_bounds[idx] = upper_bounds[idx] = val
 
-        def tighten_simple_constraint(constr, env):
+        def tighten_simple_constraint(constr, env) -> None:
             left = constr["left"]
             right = constr["right"]
             rhs_val: Optional[float] = None
