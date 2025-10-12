@@ -18,6 +18,10 @@ declarations_opt ::= declaration*
 declaration_list ::= declaration+
 objective_section ::= "minimize" _ expression _ ";" _
                    | "maximize" _ expression _ ";" _
+                   | "minimize" _ NAME _ ":" _ expression _ ";" _
+                   | "maximize" _ NAME _ ":" _ expression _ ";" _
+                   | "minimize" _ NAME _ "=" _ expression _ ";" _
+                   | "maximize" _ NAME _ "=" _ expression _ ";" _
 
 constraints_section ::= "subject" _ "to" _ "{" _ constraint_list_opt "}" _
 constraint_list_opt ::= constraint*
