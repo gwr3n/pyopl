@@ -1343,7 +1343,7 @@ class OPLIDE(tk.Tk):
             self.genai_menu.add_separator()
             self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
-            
+
             # Enable GenAI cascade
             try:
                 self.menubar.entryconfig("GenAI", state="normal")
