@@ -455,7 +455,8 @@
       "required": ["type", "expression"],
       "properties": {
         "type": { "type": "string", "enum": ["minimize", "maximize"] },
-        "expression": { "$ref": "#/$defs/Expression" }
+        "expression": { "$ref": "#/$defs/Expression" },
+        "label": { "type": "string" }  
       },
       "additionalProperties": true
     },
