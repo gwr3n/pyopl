@@ -8,14 +8,13 @@ from typing import Any, Dict, Optional
 from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
-MAX_OUTPUT_TOKENS = 4096 * 2
+MAX_OUTPUT_TOKENS = None
 LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
 # Example model names:
 # openai: "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"
 # google: "gemini-2.5-flash"
 # ollama: "gpt-oss:120b"
 MODEL_NAME = "gpt-5"
-REASONING_EFFORT = "medium"  # "low", "medium", "high"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
 
@@ -158,7 +157,7 @@ def _google_client():
     return genai
 
 
-def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_OUTPUT_TOKENS) -> str:
+def _ollama_generate_text(model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS) -> str:
     """
     Call Ollama's Python client and return the response text.
     """
@@ -166,7 +165,10 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
         from ollama import generate as ollama_generate
     except Exception as e:
         raise RuntimeError("ollama package is not installed. pip install ollama") from e
-    resp = ollama_generate(model=model_name, prompt=prompt, options={"num_predict": num_predict})
+    options: Dict[str, Any] = {}
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    resp = ollama_generate(model=model_name, prompt=prompt, options=options)
     try:
         return resp["response"] or ""
     except (TypeError, KeyError) as e:
@@ -176,26 +178,24 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: int = MAX_O
 def _build_create_params(
     model_name: str,
     input_text: str,
-    max_tokens: int = MAX_OUTPUT_TOKENS,
+    max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
-    use_reasoning: bool = True,
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "model": model_name,
         "input": input_text,
-        "max_output_tokens": max_tokens,
         "response_format": {"type": "json_object"},
     }
+    if max_tokens is not None:
+        params["max_output_tokens"] = max_tokens
     if temperature is not None:
         params["temperature"] = temperature
     if seed is not None:
         params["seed"] = seed
     if stop:
         params["stop"] = stop
-    if use_reasoning and "gpt-5" in model_name:
-        params["reasoning"] = {"effort": REASONING_EFFORT}
     return params
 
 
@@ -220,11 +220,10 @@ def _llm_generate_text(
     provider: LLMProvider,
     model_name: str,
     input_text: str,
-    max_tokens: int = MAX_OUTPUT_TOKENS,
+    max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
-    use_reasoning: bool = True,
 ) -> str:
     if provider == LLMProvider.OPENAI:
         client = _openai_client()
@@ -235,15 +234,19 @@ def _llm_generate_text(
             temperature=temperature,
             seed=seed,
             stop=stop,
-            use_reasoning=use_reasoning,
         )
         response = _call_openai_with_retry(client, create_params)
-        return _coalesce_response_text(response)
+        response_text = _coalesce_response_text(response)
+        if not response_text:
+            raise RuntimeError(f"Empty OpenAI response: {response}.")
+        return response_text
 
     if provider == LLMProvider.GOOGLE:
         genai = _google_client()
         model = genai.GenerativeModel(model_name)
-        generation_config: Dict[str, Any] = {"max_output_tokens": max_tokens}
+        generation_config: Dict[str, Any] = {}
+        if max_tokens is not None:
+            generation_config["max_output_tokens"] = max_tokens
         if temperature is not None:
             generation_config["temperature"] = temperature
         resp = model.generate_content(input_text, generation_config=generation_config)
@@ -320,6 +323,7 @@ def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
         "<task>\n"
         "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
         "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
+        "Infer from the problem context whether decision variables should be integer, binary, or continuous.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
@@ -364,8 +368,8 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Assess whether the generated PyOPL model and data fully align with the original problem description.\n"
-        "Alignment means the objective, constraints, decision variables, and data fully capture the user's specifications.\n"
+        "Assess whether the generated PyOPL model and data fully align with the problem description.\n"
+        "Alignment means the objective, constraints, decision variables, and data match the problem description.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
@@ -428,7 +432,7 @@ def _build_revision_prompt_alignment(
         "<assessment>\n"
         f"{assessment_text}\n"
         "</assessment>\n"
-        "Revise the model and data so that they fully align with the user's specifications while preserving syntactic validity.\n"
+        "Revise the model and data so that they fully align with the problem description while preserving syntactic validity.\n"
         "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
@@ -490,7 +494,7 @@ def _build_revision_prompt_syntax(
         "</role>\n\n"
         "<task>\n"
         "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
-        "Revise the model and data to fix the errors while retaining alignment with the original intent.\n"
+        "Revise the model and data to fix the errors while retaining alignment with the problem description.\n"
         "Change only what is necessary to fix the errors.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
@@ -555,7 +559,7 @@ def _build_final_assessment_prompt(
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Assess how well the generated PyOPL model and data align with the original problem description.\n"
+        "Assess how well the generated PyOPL model and data align with the problem description.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
@@ -721,7 +725,6 @@ def generative_solve(
             temperature=temperature,
             seed=seed,
             stop=stop,
-            use_reasoning=True,
         )
         if not content:
             raise RuntimeError("Empty model response.")
@@ -769,7 +772,6 @@ def generative_solve(
                 temperature=0.0 if temperature is not None else None,
                 seed=seed,
                 stop=stop,
-                use_reasoning=True,
             )
             if not alignment_content:
                 raise RuntimeError("Empty alignment response.")
@@ -817,7 +819,6 @@ def generative_solve(
                 temperature=0.2 if temperature is not None else None,
                 seed=seed,
                 stop=stop,
-                use_reasoning=True,
             )
             or ""
         )
@@ -883,7 +884,6 @@ def generative_feedback(
         temperature=0.0 if temperature is not None else None,
         seed=seed,
         stop=stop,
-        use_reasoning=True,
     )
     if not content:
         raise RuntimeError("Empty model response.")
