@@ -2266,61 +2266,11 @@ class OPLParser(Parser):
                 "sem_type": result_type,
             }
 
-        # Helper: does expr reference any of these iterator names?
-        def expr_refs_any_iter(expr, iter_names: set[str]) -> bool:
-            def rec(n):
-                if isinstance(n, dict):
-                    t = n.get("type")
-                    if t == "name":
-                        v = n.get("value")
-                        if isinstance(v, str) and v in iter_names:
-                            return True
-                    if t in ("name_reference_index",):
-                        v = n.get("name")
-                        if isinstance(v, str) and v in iter_names:
-                            return True
-                    # Recurse children
-                    return any(rec(v) for v in n.values())
-                if isinstance(n, list):
-                    return any(rec(x) for x in n)
-                return False
-
-            return rec(expr)
-
-        # Do NOT sink addition/subtraction into aggregates by default (changes semantics).
-        # Exception: if the non-sum side references the sum's iterators, wrap it into the sum and combine inside.
-        if op in ("+", "-") and (left_is_sum or right_is_sum):
-            sum_side = left_expr if left_is_sum else right_expr
-            other_side = right_expr if left_is_sum else left_expr
-            iters = sum_side.get("iterators") or []
-            iter_names = {it.get("iterator") for it in iters if isinstance(it, dict) and "iterator" in it}
-            if iter_names and expr_refs_any_iter(other_side, iter_names):
-                logger.debug("[BINOP] Lifting other side into sum due to iterator reference in +/-.")
-                # Build new body: (sum_body) op (other_side)
-                new_body = {
-                    "type": "binop",
-                    "op": op,
-                    "left": sum_side["expression"] if left_is_sum else other_side,  # fixed below
-                    "right": other_side if left_is_sum else sum_side["expression"],
-                    "sem_type": None,
-                }
-                # Reconstruct sum node with new body
-                lifted = dict(sum_side)
-                lifted["expression"] = new_body
-                return lifted
-            # Otherwise, keep as a plain binop outside the sum
-            result_type = left_expr.get("sem_type") or right_expr.get("sem_type") or "int"
-            logger.debug("[BINOP] Avoid sinking +/- into sum/forall; keeping as plain binop")
-            return {
-                "type": "binop",
-                "op": op,
-                "left": left_expr,
-                "right": right_expr,
-                "sem_type": result_type,
-            }
+        # DO NOT lift +/- into sum (prevents accidental duplication of unrelated terms)
+        # Only allow pushing into sums for multiplicative contexts handled below.
 
         # If only left is sum/forall, push binop inside left sum/forall (for *, /, % only)
-        if left_is_sum:
+        if left_is_sum and op in ("*", "/", "%"):
             new_body = {"type": "binop", "op": op, "left": left_expr["expression"], "right": right_expr, "sem_type": None}
             sum_node = dict(left_expr)
             sum_node["expression"] = new_body
@@ -2328,7 +2278,7 @@ class OPLParser(Parser):
             return sum_node
 
         # If only right is sum/forall, push binop inside right sum/forall (for *, /, % only)
-        if right_is_sum:
+        if right_is_sum and op in ("*", "/", "%"):
             new_body = {"type": "binop", "op": op, "left": left_expr, "right": right_expr["expression"], "sem_type": None}
             sum_node = dict(right_expr)
             sum_node["expression"] = new_body
@@ -3879,7 +3829,7 @@ class OPLCompiler:
 
         # --- Generate code for the model ---
 
-        # --- Validate types of typed scalar sets (OPL semantics) ---
+        # --- Validate types of typed scalar sets ---
         def _is_int(x):
             return isinstance(x, int) and not isinstance(x, bool)
 
