@@ -18,7 +18,7 @@ The grammar supports:
   - tuple arrays (`TupleType Arr[Set]`)
   - untyped set-of-tuples assignment in model (tuple literals only)
   - decision expressions (`dexpr`) – scalar and indexed, expanded in-place on use
-- Objectives: `minimize` or `maximize` any numeric or boolean expression
+- Objectives: `minimize` or `maximize` any numeric or boolean expression, with optional label (`minimize z: expr;` or `minimize z = expr;`)
 - Constraints:
   - standard comparisons
   - labelled constraints
@@ -61,6 +61,10 @@ BNF is simplified for readability. Optional elements are in [brackets]. Alternat
 
 <objective_section> ::= 'minimize' <expression> ';'
                       | 'maximize' <expression> ';'
+                      | 'minimize' <NAME> ':' <expression> ';'
+                      | 'maximize' <NAME> ':' <expression> ';'
+                      | 'minimize' <NAME> '=' <expression> ';'
+                      | 'maximize' <NAME> '=' <expression> ';'
 
 <constraints_section> ::= 'subject to' '{' <constraint_list_opt> '}'
 <constraint_list_opt> ::= <constraint_list> | ε
