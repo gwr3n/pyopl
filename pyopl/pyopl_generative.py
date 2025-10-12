@@ -5,9 +5,6 @@ from enum import Enum, auto
 from time import sleep
 from typing import Any, Dict, Optional
 
-# import google.generativeai as genai
-from openai import OpenAI
-
 from .pyopl_core import OPLCompiler, SemanticError
 
 MAX_ITERATIONS = 5
@@ -138,7 +135,11 @@ def _coalesce_response_text(resp) -> str:
     return ""
 
 
-def _openai_client() -> OpenAI:
+def _openai_client():
+    try:
+        from openai import OpenAI
+    except Exception as e:
+        raise RuntimeError("openai is not installed. pip install openai") from e
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY environment variable not set.")
@@ -265,7 +266,7 @@ def _llm_generate_text(
 
 
 def _call_openai_with_retry(
-    client: OpenAI,
+    client,
     create_params: Dict[str, Any],
     retries: int = 3,
     backoff_sec: float = 1.5,
