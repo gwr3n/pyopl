@@ -13,6 +13,7 @@ from .pyopl_core import OPLCompiler, SemanticError
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = 4096 * 2
 LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
+# Example model names:
 # openai: "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"
 # google: "gemini-2.5-flash"
 # ollama: "gpt-oss:120b"
