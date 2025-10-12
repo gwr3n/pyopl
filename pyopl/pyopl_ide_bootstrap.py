@@ -81,7 +81,7 @@ class OPLIDE(tk.Tk):
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.title("Rhetor")
         self.geometry("1000x700")
@@ -139,7 +139,7 @@ class OPLIDE(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # --- UI Setup Methods ---
-    def _set_icon(self):
+    def _set_icon(self) -> None:
         """Set the application window icon if Pillow is available and icon is present."""
         if PILImage and PILImageTk:
             try:
@@ -165,7 +165,7 @@ class OPLIDE(tk.Tk):
         else:
             print("Pillow not installed. Cannot set application icon.")
 
-    def _setup_menu(self):
+    def _setup_menu(self) -> None:
         """Create the application menu bar."""
 
         menubar = tk.Menu(self)
@@ -204,7 +204,7 @@ class OPLIDE(tk.Tk):
         # Settings Menu (renamed from View to avoid macOS system items)
         settings_menu = tk.Menu(menubar, tearoff=0)
 
-        # CHANGED: Font Size submenu uses radiobuttons to reflect current selection
+        # CHANGED: Font Size submenu uses radiobuttons with typed callbacks
         font_size_menu = tk.Menu(settings_menu, tearoff=0)
         for size, label in zip(
             [10, 12, 14, 16],
@@ -214,43 +214,41 @@ class OPLIDE(tk.Tk):
                 label=label,
                 variable=self.font_size_var,
                 value=size,
-                command=lambda s=size: self._change_font_size(s),
+                command=self._make_change_font_cmd(size),
             )
         settings_menu.add_cascade(label="Font Size", menu=font_size_menu)
 
-        # Theme submenu (already radiobuttons with theme_var)
+        # Theme submenu (typed callbacks)
         theme_menu = tk.Menu(settings_menu, tearoff=0)
         theme_menu.add_radiobutton(
             label="Light (Flatly)",
             variable=self.theme_var,
             value="flatly",
-            command=lambda: self.set_theme("flatly"),
+            command=self._make_theme_cmd("flatly"),
         )
         theme_menu.add_radiobutton(
             label="Dark (Darkly)",
             variable=self.theme_var,
             value="darkly",
-            command=lambda: self.set_theme("darkly"),
+            command=self._make_theme_cmd("darkly"),
         )
         settings_menu.add_cascade(label="Theme", menu=theme_menu)
 
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
-        # Help Menu
+        # Help Menu (typed URL openers)
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(
             label="User Guide",
-            command=lambda: webbrowser.open_new("https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20user%20guide.md"),
+            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20user%20guide.md"),
         )
         help_menu.add_command(
             label="Examples",
-            command=lambda: webbrowser.open_new(
-                "https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20examples%20overview.md"
-            ),
+            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20examples%20overview.md"),
         )
         help_menu.add_command(
             label="GitHub",
-            command=lambda: webbrowser.open_new("https://github.com/gwr3n/PyOPL"),
+            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL"),
         )
         # NEW: About dialog
         help_menu.add_separator()
@@ -263,7 +261,7 @@ class OPLIDE(tk.Tk):
     def _accel(self, key: str) -> str:
         return f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+{key}"
 
-    def new_model(self):
+    def new_model(self) -> None:
         """Clear the model and data editors, reset file paths, and update UI for a new model."""
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
@@ -285,7 +283,7 @@ class OPLIDE(tk.Tk):
         self.output_text.insert(tk.END, "New model created. Ready.\n")
         self.output_text.config(state="disabled")
 
-    def _setup_panes(self):
+    def _setup_panes(self) -> None:
         """Set up the main paned window and all subframes/editors/output, using tabs for Model/Data."""
         # Replace left file tree with a single vertical paned layout (Editors over Output)
         editor_output_paned = tk.PanedWindow(
@@ -300,7 +298,7 @@ class OPLIDE(tk.Tk):
         self._setup_editors(editor_output_paned)
         self._setup_output(editor_output_paned)
 
-    def _setup_editors(self, parent):
+    def _setup_editors(self, parent: tk.PanedWindow) -> None:
         """Create model and data editor frames inside a Notebook (tabs)."""
         editor_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
         parent.add(editor_frame, stretch="always")
@@ -317,15 +315,23 @@ class OPLIDE(tk.Tk):
             wrap=tk.NONE,
             undo=True,
             font=(self.editor_font_family, self.current_font_size),
-            bg="#ffffff",  # CHANGED: light editor background
-            fg="#212529",  # CHANGED: dark text
-            insertbackground="#212529",  # CHANGED: caret color for light bg
+            bg="#ffffff",
+            fg="#212529",
+            insertbackground="#212529",
             relief=tk.FLAT,
             bd=0,
         )
         self.model_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
-        self.model_text.bind("<KeyRelease>", lambda e: self._on_text_change(self.model_text, False))
-        self.model_text.bind("<ButtonRelease-1>", lambda e: self._on_text_change(self.model_text, False))
+
+        # Typed event handlers to avoid mypy lambda inference issue
+        def _on_model_changed(event: tk.Event) -> None:
+            self._on_text_change(self.model_text, False)
+
+        def _on_data_changed(event: tk.Event) -> None:
+            self._on_text_change(self.data_text, True)
+
+        self.model_text.bind("<KeyRelease>", _on_model_changed)
+        self.model_text.bind("<ButtonRelease-1>", _on_model_changed)
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
         # Data Editor tab
@@ -336,15 +342,15 @@ class OPLIDE(tk.Tk):
             wrap=tk.NONE,
             undo=True,
             font=(self.editor_font_family, self.current_font_size),
-            bg="#ffffff",  # CHANGED: light editor background
-            fg="#212529",  # CHANGED: dark text
-            insertbackground="#212529",  # CHANGED: caret color for light bg
+            bg="#ffffff",
+            fg="#212529",
+            insertbackground="#212529",
             relief=tk.FLAT,
             bd=0,
         )
         self.data_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
-        self.data_text.bind("<KeyRelease>", lambda e: self._on_text_change(self.data_text, True))
-        self.data_text.bind("<ButtonRelease-1>", lambda e: self._on_text_change(self.data_text, True))
+        self.data_text.bind("<KeyRelease>", _on_data_changed)
+        self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
         # Add tabs
@@ -356,7 +362,7 @@ class OPLIDE(tk.Tk):
 
         self.editor_frame = editor_frame
 
-    def _setup_output(self, parent):
+    def _setup_output(self, parent: tk.PanedWindow) -> None:
         """Create the output panel."""
         output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
         ttk.Label(output_frame, text="Output").pack(anchor="nw", padx=5, pady=5)  # CHANGED: use ttk.Label
@@ -374,7 +380,7 @@ class OPLIDE(tk.Tk):
         self.output_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
         parent.add(output_frame, minsize=150)
 
-    def _setup_status_bar(self):
+    def _setup_status_bar(self) -> None:
         """Create the status bar at the bottom of the window."""
         self.status_var = tk.StringVar()
         self.status_var.set("Ready")
@@ -388,7 +394,7 @@ class OPLIDE(tk.Tk):
         )
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def _setup_tag_configs(self):
+    def _setup_tag_configs(self) -> None:
         """Configure syntax highlighting tags for editors."""
         for token, color in TOKEN_COLORS.items():
             self.model_text.tag_configure(token, foreground=color)
@@ -400,34 +406,19 @@ class OPLIDE(tk.Tk):
         self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
 
     # --- Event Handlers and Core Logic ---
-    def _on_text_change(self, text_widget, is_data=False):
+    def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
         self.highlight(text_widget, is_data)
         self._update_caret_position(text_widget)
 
-    def on_tree_select(self, event):
-        """Switch between model and data editors based on tree selection."""
-        selected = self.file_tree.selection()
-        if not selected:
-            return
-        sel_id = selected[0]
-        # Hide both editors first
-        self.model_frame.pack_forget()
-        self.data_frame.pack_forget()
-        if sel_id == self.model_tree_id:
-            self.model_frame.pack(fill=tk.BOTH, expand=1)
-            self.model_text.focus_set()
-            # Ensure highlighting and status are current when switching
-            self.highlight(self.model_text, is_data=False)
-            self._update_caret_position(self.model_text)  # Update caret on view switch
-        elif sel_id == self.data_tree_id:
-            self.data_frame.pack(fill=tk.BOTH, expand=1)
-            self.data_text.focus_set()
-            # Ensure highlighting and status are current when switching
-            self.highlight(self.data_text, is_data=True)
-            self._update_caret_position(self.data_text)  # Update caret on view switch
+    def on_tree_select(self, event: Optional[tk.Event]) -> None:
+        """Compatibility handler: no file tree in current UI; focus Model editor."""
+        self.editor_notebook.select(self.model_frame)
+        self.model_text.focus_set()
+        self.highlight(self.model_text, is_data=False)
+        self._update_caret_position(self.model_text)
 
-    def on_tab_changed(self, event=None):
+    def on_tab_changed(self, event: Optional[tk.Event] = None) -> None:
         """Switch focus and update status/highlighting when the active tab changes."""
         idx = self.editor_notebook.index(self.editor_notebook.select())
         if idx == 0:
@@ -440,7 +431,7 @@ class OPLIDE(tk.Tk):
             self._update_caret_position(self.data_text)
 
     # --- File Operations ---
-    def open_model(self):
+    def open_model(self) -> None:
         """Open a model file and load its contents into the model editor."""
         fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
@@ -456,7 +447,7 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.select(self.model_frame)
             self.on_tab_changed(None)
 
-    def open_data(self):
+    def open_data(self) -> None:
         """Open a data file and load its contents into the data editor."""
         fname = filedialog.askopenfilename(filetypes=[("Data files", "*.dat"), ("All files", "*.*")])
         if fname:
@@ -472,7 +463,7 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.select(self.data_frame)
             self.on_tab_changed(None)
 
-    def save_model(self):
+    def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
         if not self.model_file:
             fname = filedialog.asksaveasfilename(
@@ -491,7 +482,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-    def save_data(self):
+    def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
         if not self.data_file:
             fname = filedialog.asksaveasfilename(
@@ -510,7 +501,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-    def save_model_as(self):
+    def save_model_as(self) -> None:
         """Save the model to a new file and update the tab title."""
         fname = filedialog.asksaveasfilename(
             defaultextension=".mod",
@@ -524,7 +515,7 @@ class OPLIDE(tk.Tk):
             f.write(content)
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
 
-    def save_data_as(self):
+    def save_data_as(self) -> None:
         """Save the data to a new file and update the tab title."""
         fname = filedialog.asksaveasfilename(
             defaultextension=".dat",
@@ -539,11 +530,11 @@ class OPLIDE(tk.Tk):
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
 
     # --- Syntax Highlighting ---
-    def highlight(self, text_widget, is_data=False):
+    def highlight(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Apply syntax highlighting to the given text widget, using both lexer and parser for model and data files."""
         # Remove previous tags
-        for tag in TOKEN_COLORS.keys():
-            text_widget.tag_remove(tag, "1.0", tk.END)
+        for previous_tag in TOKEN_COLORS.keys():
+            text_widget.tag_remove(previous_tag, "1.0", tk.END)
         text_widget.tag_remove("ERROR", "1.0", tk.END)
 
         code = text_widget.get("1.0", tk.END)
@@ -626,7 +617,7 @@ class OPLIDE(tk.Tk):
                 end = self._index_from_pos(code, m.end())
                 text_widget.tag_add("NUMBER", start, end)
 
-    def _index_from_pos(self, text, pos):
+    def _index_from_pos(self, text: str, pos: int) -> str:
         """
         Converts a character offset (pos) in a string to a Tkinter Text widget index (line.char).
 
@@ -644,7 +635,7 @@ class OPLIDE(tk.Tk):
         return f"{line}.{col}"
 
     # --- Font Size ---
-    def _change_font_size(self, size):
+    def _change_font_size(self, size: int) -> None:
         """
         Changes the font size of the text editors and output console.
         """
@@ -671,7 +662,7 @@ class OPLIDE(tk.Tk):
         self._save_settings()
 
     # --- Status Bar ---
-    def _update_caret_position(self, text_widget):
+    def _update_caret_position(self, text_widget: tk.Text) -> None:
         """
         Updates the status bar with the current caret position (line and column).
         Also, displays the most recent syntax error (if any) alongside caret position.
@@ -735,14 +726,14 @@ class OPLIDE(tk.Tk):
             self.status_var.set("Ready")
 
     # --- Editor Shortcuts ---
-    def _select_all_model(self, event=None):
+    def _select_all_model(self, event: Optional[tk.Event] = None) -> str:
         """Select all text in the model editor."""
         self.model_text.tag_add("sel", "1.0", tk.END)
         self.model_text.mark_set(tk.INSERT, "1.0")
         self.model_text.see(tk.INSERT)
         return "break"  # Prevent default Tkinter behavior
 
-    def _select_all_data(self, event=None):
+    def _select_all_data(self, event: Optional[tk.Event] = None) -> str:
         """Select all text in the data editor."""
         self.data_text.tag_add("sel", "1.0", tk.END)
         self.data_text.mark_set(tk.INSERT, "1.0")
@@ -750,7 +741,7 @@ class OPLIDE(tk.Tk):
         return "break"  # Prevent default Tkinter behavior
 
     # --- Model Execution ---
-    def run_model(self):
+    def run_model(self) -> None:
         """Run the model using the current editor contents, with data file checks and error reporting."""
         import re
 
@@ -873,7 +864,7 @@ class OPLIDE(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     # --- GenAI actions ---
-    def _clear_output(self, header: str = ""):
+    def _clear_output(self, header: str = "") -> None:
         """Clear the Output panel and optionally write a header line."""
         self.output_text.config(state="normal")
         self.output_text.delete("1.0", tk.END)
@@ -881,7 +872,7 @@ class OPLIDE(tk.Tk):
             self.output_text.insert(tk.END, header + "\n")
         self.output_text.config(state="disabled")
 
-    def _append_output(self, text: str):
+    def _append_output(self, text: str) -> None:
         """Append text to the Output panel safely."""
         self.output_text.config(state="normal")
         self.output_text.insert(tk.END, text)
@@ -949,7 +940,7 @@ class OPLIDE(tk.Tk):
         dlg.wait_window()
         return result["text"]
 
-    def genai_generate(self):
+    def genai_generate(self) -> None:
         """Prompt user for a problem description and generate model & data via GenAI."""
         # Guard: ensure a model is selected
         if not self.genai_provider or not self.genai_model:
@@ -1023,7 +1014,7 @@ class OPLIDE(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def genai_feedback(self):
+    def genai_feedback(self) -> None:
         """Prompt for a question and request feedback/revisions from GenAI for the current model/data."""
         # Guard: ensure a model is selected
         if not self.genai_provider or not self.genai_model:
@@ -1117,7 +1108,7 @@ class OPLIDE(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     # NEW: theme switching
-    def set_theme(self, theme_name: str):
+    def set_theme(self, theme_name: str) -> None:
         """Switch ttkbootstrap theme and reapply widget colors."""
         if theme_name not in ("flatly", "darkly"):
             return
@@ -1135,7 +1126,7 @@ class OPLIDE(tk.Tk):
         self._save_settings()
 
     # NEW: apply text widget colors based on theme
-    def _apply_theme_colors(self):
+    def _apply_theme_colors(self) -> None:
         theme = self.theme_var.get()
         if theme == "darkly":
             editor_bg = "#2b3035"
@@ -1167,7 +1158,7 @@ class OPLIDE(tk.Tk):
             self.data_text.tag_configure("ERROR", background="#e06c75", foreground=error_fg)
 
     # NEW: settings helpers (sample.py strategy)
-    def _init_settings_storage(self):
+    def _init_settings_storage(self) -> None:
         """Initialize settings storage path."""
         try:
             config_dir = Path(user_config_dir(APP_NAME))
@@ -1177,7 +1168,7 @@ class OPLIDE(tk.Tk):
             # Fallback to current working directory if platformdirs fails
             self._config_path = Path(os.getcwd()) / CONFIG_FILENAME
 
-    def _load_settings(self):
+    def _load_settings(self) -> dict[str, Any]:
         """Load settings from disk."""
         try:
             if hasattr(self, "_config_path") and self._config_path.exists():
@@ -1187,7 +1178,7 @@ class OPLIDE(tk.Tk):
             print(f"Warning: failed to load settings: {e}")
         return {}
 
-    def _save_settings(self):
+    def _save_settings(self) -> None:
         """Save current settings to disk."""
         try:
             payload = {
@@ -1199,7 +1190,7 @@ class OPLIDE(tk.Tk):
         except Exception as e:
             print(f"Warning: failed to save settings: {e}")
 
-    def _on_close(self):
+    def _on_close(self) -> None:
         """Persist settings and close the app."""
         # Flag to refuse further UI updates from background threads
         setattr(self, "_shutting_down", True)
@@ -1214,16 +1205,21 @@ class OPLIDE(tk.Tk):
                 pass
 
     # NEW: bind Ctrl/Cmd shortcuts
-    def _bind_shortcuts(self):
+    def _bind_shortcuts(self) -> None:
         # # Save current buffer
         self.bind_all("<Control-s>", self.save_current_buffer)
         self.bind_all("<Command-s>", self.save_current_buffer)
         # New model
-        self.bind_all("<Control-n>", lambda e: (self.new_model(), "break"))
-        self.bind_all("<Command-n>", lambda e: (self.new_model(), "break"))
+        self.bind_all("<Control-n>", self._new_model_shortcut)
+        self.bind_all("<Command-n>", self._new_model_shortcut)
+
+    def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        """Keyboard shortcut handler for creating a new model."""
+        self.new_model()
+        return "break"
 
     # NEW: save current tab (model or data)
-    def save_current_buffer(self, event=None):
+    def save_current_buffer(self, event: Optional[tk.Event] = None) -> str:
         try:
             idx = self.editor_notebook.index(self.editor_notebook.select())
             if idx == 0:
@@ -1237,7 +1233,7 @@ class OPLIDE(tk.Tk):
         return "break"
 
     # NEW: save-as for current tab (model or data)
-    def save_current_buffer_as(self, event=None):
+    def save_current_buffer_as(self, event: Optional[tk.Event] = None) -> str:
         try:
             idx = self.editor_notebook.index(self.editor_notebook.select())
             if idx == 0:
@@ -1249,14 +1245,14 @@ class OPLIDE(tk.Tk):
         return "break"
 
     # NEW: About dialog handler
-    def show_about(self):
+    def show_about(self) -> None:
         messagebox.showinfo(
             "About Rhetor",
             "Rhetor: Reasoning Engine\n - \na Tool for High-level Operations Research\n - \n© 2025 Roberto Rossi",
         )
 
     # NEW: async discovery wrapper to avoid blocking UI at startup and on refresh
-    def _build_genai_model_menus_async(self):
+    def _build_genai_model_menus_async(self) -> None:
         """Discover models in a background thread and populate the GenAI menu on completion."""
         if self._genai_loading:
             return  # avoid concurrent discovery
@@ -1273,7 +1269,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        def discover():
+        def discover() -> None:
             provider_models: dict[str, list[str]] = {"openai": [], "google": [], "ollama": []}
             try:
                 provider_models["openai"] = list_openai_models()
@@ -1298,7 +1294,7 @@ class OPLIDE(tk.Tk):
         threading.Thread(target=discover, daemon=True).start()
 
     # NEW: populate GenAI menu given discovered models (UI-thread only)
-    def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]):
+    def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]) -> None:
         """Populate the GenAI menu with provider submenus and radio items per model."""
         if getattr(self, "_shutting_down", False):
             return
@@ -1373,8 +1369,24 @@ class OPLIDE(tk.Tk):
 
         return _cmd
 
+    # NEW: typed helpers to replace lambdas in menus
+    def _make_change_font_cmd(self, size: int) -> Callable[[], None]:
+        def _cmd() -> None:
+            self._change_font_size(size)
+
+        return _cmd
+
+    def _make_theme_cmd(self, theme: str) -> Callable[[], None]:
+        def _cmd() -> None:
+            self.set_theme(theme)
+
+        return _cmd
+
+    def _open_url(self, url: str) -> None:
+        webbrowser.open_new(url)
+
     # NEW: selection handler for GenAI model choice
-    def _on_select_genai_model(self, provider_key: str, model_name: str):
+    def _on_select_genai_model(self, provider_key: str, model_name: str) -> None:
         if getattr(self, "_shutting_down", False):
             return
         self.genai_provider = provider_key
