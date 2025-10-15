@@ -3062,15 +3062,10 @@ class OPLDataParser(Parser):
         return [p.data_declaration]
 
     @_(
-        'PARAM NAME "=" scalar_value ";"',
-        'SET NAME "=" set_value ";"',
-        'PARAM NAME "=" array_value ";"',
         'NAME "=" scalar_value ";"',
         'NAME "=" set_value ";"',
         'NAME "=" array_value ";"',
         'NAME "=" key_value_array ";"',
-        'NAME "=" PARAM key_value_array ";"',
-        'NAME "=" SET key_value_array ";"',
     )  # type: ignore
     def data_declaration(self, p):
         # Handle all scalar, set, array, and key_value_array assignments
