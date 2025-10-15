@@ -2875,8 +2875,6 @@ class OPLDataLexer(Lexer):
     """
 
     tokens = {
-        "PARAM",
-        "SET",
         "BOOLEAN_LITERAL",
         "STRING_LITERAL",
         "NAME",
@@ -2890,11 +2888,6 @@ class OPLDataLexer(Lexer):
 
     def __init__(self):
         self.lineno = 1
-
-    # Define keywords
-
-    PARAM = r"\bparam\b"
-    SET = r"\bset\b"
 
     # --- Token rules ---
 
