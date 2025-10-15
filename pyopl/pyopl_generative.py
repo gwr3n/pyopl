@@ -1,11 +1,18 @@
+# === Standard library imports ===
 import json
+import logging
 import os
 import re
 from enum import Enum, auto
 from time import sleep
 from typing import Any, Dict, Optional
 
+# === Local imports ===
 from .pyopl_core import OPLCompiler, SemanticError
+
+# --- Logging Setup ---
+# Use module-level logger, and set DEBUG level for development
+logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = None
@@ -715,8 +722,8 @@ def generative_solve(
     data_code = ""
 
     for iteration in range(iterations):
-        print(f"Iteration {iteration + 1}/{iterations}")
-        print("Prompting model...")
+        logger.debug(f"Iteration {iteration + 1}/{iterations}")
+        logger.debug("Prompting model...")
         content = _llm_generate_text(
             provider=provider,
             model_name=model_name,
@@ -732,7 +739,7 @@ def generative_solve(
             result = _json_loads_relaxed(content)
             model_code = result["model"]
             data_code = result["data"]
-            print("Model and data generated.")
+            logger.debug("Model and data generated.")
         except Exception as e:
             raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
 
@@ -742,7 +749,7 @@ def generative_solve(
             compiler.compile_model(model_code, data_code)
         except SemanticError as e:
             syntax_errors.append(str(e))
-            print(f"Semantic error in model: {e}")
+            logger.debug(f"Semantic error in model: {e}")
         except Exception as e:
             syntax_errors.append(f"{type(e).__name__}: {e}")
 
@@ -762,7 +769,7 @@ def generative_solve(
             if not do_alignment:
                 break
 
-            print("Checking alignment with original prompt...")
+            logger.debug("Checking alignment with original prompt...")
             alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
             alignment_content = _llm_generate_text(
                 provider=provider,
@@ -784,10 +791,10 @@ def generative_solve(
             ):
                 assessment_text = alignment_obj.get("assessment", "").strip()
                 if alignment_obj["aligned"]:
-                    print("Model and data are syntactically valid and aligned with the prompt.")
+                    logger.debug("Model and data are syntactically valid and aligned with the prompt.")
                     break
                 else:
-                    print(
+                    logger.debug(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
                     user_prompt = _build_revision_prompt_alignment(
@@ -796,7 +803,7 @@ def generative_solve(
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
-            print("Model or data has syntax errors; revising...")
+            logger.debug("Model or data has syntax errors; revising...")
             user_prompt = _build_revision_prompt_syntax(prompt, grammar_implementation, model_code, data_code, syntax_errors)
 
     # Load latest version of the model and data files
@@ -806,7 +813,7 @@ def generative_solve(
         data_code = f.read()
 
     if syntax_errors or not do_alignment:
-        print("Final assessment of model and data alignment...")
+        logger.debug("Final assessment of model and data alignment...")
         assessment_prompt = _build_final_assessment_prompt(
             prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
