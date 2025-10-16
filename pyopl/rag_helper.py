@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+from functools import lru_cache
 
-def _load_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
+
+@lru_cache(maxsize=None)
+def _load_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> Any:
     """
     Lazily load and memoize the sentence transformer model.
     """
-    # Local function attribute for memoization
-    if not hasattr(_load_model, "_model"):
-        from sentence_transformers import SentenceTransformer
-        _load_model._model = SentenceTransformer(model_name)
-    return _load_model._model
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(model_name)
 
 
 def _iter_description_files(models_dir: Path) -> List[Path]:
@@ -62,13 +61,13 @@ def rank_problem_descriptions(
     if not models_dir.exists():
         raise FileNotFoundError(f"Models directory not found: {models_dir}")
 
-    files = _iter_description_files(models_dir)
-    if not files:
+    files_t = _iter_description_files(models_dir)
+    if not files_t:
         return []
 
-    texts = [_read_text(p) for p in files]
+    texts_t = [_read_text(p) for p in files_t]
     # Filter out empty files while maintaining mapping
-    nonempty = [(p, t) for p, t in zip(files, texts) if t]
+    nonempty = [(p, t) for p, t in zip(files_t, texts_t) if t]
     if not nonempty:
         return []
 
@@ -120,7 +119,7 @@ if __name__ == "__main__":
     #   python rag.py "your problem description here"
     query = " ".join(sys.argv[1:]).strip()
     if not query:
-        print("Usage: python rag.py \"your problem description here\"")
+        print('Usage: python rag.py "your problem description here"')
         sys.exit(1)
 
     results = rank_problem_descriptions(query=query, top_k=10)
