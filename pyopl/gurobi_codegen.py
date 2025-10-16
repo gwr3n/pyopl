@@ -596,6 +596,123 @@ class GurobiCodeGenerator:
             if name in already_emitted:
                 continue
             pdecl = param_decl_map.get(name)
+            # --- NEW: N-D param from nested dict/list keyed along declared dimensions (generalization) ---
+            # Accept nested dictionaries keyed by set/range labels and/or lists (row-major) for any dimensionality >= 2.
+            if pdecl is not None and isinstance(value, dict) and len(pdecl.get("dimensions", [])) >= 2:
+                dims = pdecl.get("dimensions", [])
+
+                # Resolve expected labels per dimension when possible (set elements or explicit range)
+                def _resolve_set_elems(set_name):
+                    # Prefer working_data (.dat), then AST-declared values
+                    set_obj = working_data.get(set_name)
+                    if set_obj is None:
+                        set_decl = self._find_declaration_by_name(
+                            set_name,
+                            types=[
+                                "typed_set",
+                                "typed_set_external",
+                                "set_declaration",
+                                "set_of_tuples",
+                                "set_of_tuples_external",
+                            ],
+                        )
+                        if set_decl is not None:
+                            set_obj = set_decl.get("value")
+                    return _normalize_set_elems(set_obj) if set_obj is not None else None
+
+                def _dim_labels(dim_spec):
+                    dt = dim_spec.get("type")
+                    if dt == "named_set_dimension":
+                        lbls = _resolve_set_elems(dim_spec["name"])
+                        return list(lbls) if lbls is not None else None
+                    if dt == "named_range_dimension":
+                        s = _eval_expr_bound(dim_spec["start"])
+                        e = _eval_expr_bound(dim_spec["end"])
+                        return list(range(s, e + 1))
+                    if dt == "range_index":
+                        s = _eval_expr_bound(dim_spec["start"])
+                        e = _eval_expr_bound(dim_spec["end"])
+                        return list(range(s, e + 1))
+                    return None
+
+                # Precompute labels per dimension when available; None means "unknown, use positional fallback"
+                labels_per_dim = [_dim_labels(d) for d in dims]
+
+                # For range dims, also cache their numeric starts for positional fallback
+                def _dim_start(dim_spec):
+                    dt = dim_spec.get("type")
+                    if dt in ("named_range_dimension", "range_index"):
+                        return _eval_expr_bound(dim_spec["start"])
+                    return None
+
+                starts_per_dim = [_dim_start(d) for d in dims]
+
+                # Normalize keys (lists -> tuples recursively, keep scalars)
+                def _to_key(x):
+                    if isinstance(x, (list, tuple)):
+                        return tuple(_to_key(e) for e in x)
+                    return x
+
+                dict_val = {}
+
+                # Helper: map position index j (0-based) to label for a dimension
+                def _pos_to_label(dim_idx, j, provided_len=None):
+                    lbls = labels_per_dim[dim_idx]
+                    if lbls is not None:
+                        # Only use labels when lengths appear consistent or we intentionally map up to min length
+                        if provided_len is None or len(lbls) == provided_len:
+                            return lbls[j] if j < len(lbls) else j + 1
+                        # length mismatch: be conservative and fallback to positional
+                    # For ranges, use start + j; otherwise 1-based index
+                    start = starts_per_dim[dim_idx]
+                    return (start + j) if isinstance(start, int) else (j + 1)
+
+                # Recursive flatten
+                def _flatten(node, dim_idx, prefix):
+                    # If we reached the last dimension, emit values
+                    if dim_idx == len(dims) - 1:
+                        # node can be dict mapping label -> val, or list/tuple of vals
+                        if isinstance(node, dict):
+                            for k, v in node.items():
+                                key = _to_key(k)
+                                dict_val[prefix + (key,)] = v
+                        elif isinstance(node, (list, tuple)):
+                            L = len(node)
+                            for j, v in enumerate(node):
+                                lab = _pos_to_label(dim_idx, j, provided_len=L)
+                                dict_val[prefix + (lab,)] = v
+                        else:
+                            # Scalar provided at last dim (degenerate): use positional fallback label
+                            lab = _pos_to_label(dim_idx, 0, provided_len=1)
+                            dict_val[prefix + (lab,)] = node
+                        return
+
+                    # Intermediate dimension: node may be dict (labeled children) or list/tuple (positional)
+                    if isinstance(node, dict):
+                        for k, child in node.items():
+                            key = _to_key(k)
+                            _flatten(child, dim_idx + 1, prefix + (key,))
+                    elif isinstance(node, (list, tuple)):
+                        L = len(node)
+                        for j, child in enumerate(node):
+                            lab = _pos_to_label(dim_idx, j, provided_len=L)
+                            _flatten(child, dim_idx + 1, prefix + (lab,))
+                    else:
+                        # Degenerate: non-iterable at intermediate level, treat as single-child sequence
+                        lab = _pos_to_label(dim_idx, 0, provided_len=1)
+                        _flatten(node, dim_idx + 1, prefix + (lab,))
+
+                try:
+                    _flatten(value, 0, tuple())
+                    if dict_val:
+                        self._add_code_line(f"{name} = {repr(dict_val)}")
+                        self.dict_params.add(name)
+                        already_emitted.add(name)
+                        continue
+                except Exception:
+                    # Fall through to other handlers or shape checks
+                    pass
+
             if value is not None and isinstance(value, (list, tuple)) and pdecl is not None:
                 check_shape(value, pdecl.get("dimensions", []), working_data, name)
 
