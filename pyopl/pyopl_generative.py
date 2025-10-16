@@ -336,7 +336,7 @@ def _call_openai_with_retry(
         except Exception as e:
             last_err = e
             msg = str(e) if e else "unknown error"
-            _notify(progress, msg)
+            _notify(progress, f"[LLM] OpenAI: {msg}")
             if _strip_param_from_error_message(msg):
                 _notify(progress, "[LLM] OpenAI: retrying without unsupported parameters")  # NEW
                 continue
