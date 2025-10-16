@@ -1,5 +1,6 @@
 # --- Standard Library Imports ---
 import json  # NEW
+import logging  # NEW
 import os
 import sys  # NEW
 import threading
@@ -109,6 +110,8 @@ class OPLIDE(tk.Tk):
                 desired_theme = loaded_settings.get("theme")
         except Exception:
             pass
+        # NEW: verbose LLM logs setting (defaults True)
+        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))  # NEW
         # NEW: track font size selection for menu highlighting
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
@@ -962,19 +965,50 @@ class OPLIDE(tk.Tk):
             try:
                 from .pyopl_generative import generative_solve
 
+                # Thread-safe progress hook -> Output panel (always show essential progress)
+                def progress(msg: str) -> None:
+                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
+
+                # Optional: bridge module logger to progress (controlled by setting)
+                class _ProgressLogHandler(logging.Handler):
+                    def emit(self, record: logging.LogRecord) -> None:
+                        try:
+                            text = self.format(record)
+                        except Exception:
+                            text = record.getMessage()
+                        progress(text)
+
+                log = logging.getLogger("pyopl.pyopl_generative")
+                handler = None
+                old_level = log.level
+                if self.verbose_llm_var.get():  # NEW: only attach when verbose enabled
+                    handler = _ProgressLogHandler()
+                    handler.setLevel(logging.DEBUG)
+                    log.addHandler(handler)
+                    log.setLevel(logging.DEBUG)
+
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 model_path = os.path.join(tmp_dir, "gen_pyopl_model.mod")
                 data_path = os.path.join(tmp_dir, "gen_pyopl_data.dat")
 
-                # Pass selected provider/model
-                assessment = generative_solve(
-                    prompt,
-                    model_path,
-                    data_path,
-                    model_name=self.genai_model,
-                    llm_provider=self.genai_provider,
-                )
+                try:
+                    # Pass selected provider/model and progress callback
+                    assessment = generative_solve(
+                        prompt,
+                        model_path,
+                        data_path,
+                        model_name=self.genai_model,
+                        llm_provider=self.genai_provider,
+                        progress=progress,
+                    )
+                finally:
+                    if handler is not None:  # NEW
+                        try:
+                            log.removeHandler(handler)
+                            log.setLevel(old_level)
+                        except Exception:
+                            pass
 
                 with open(model_path, "r") as f:
                     model_code = f.read()
@@ -1050,13 +1084,45 @@ class OPLIDE(tk.Tk):
             try:
                 from .pyopl_generative import generative_feedback
 
-                result = generative_feedback(
-                    question,
-                    model_path,
-                    data_path,
-                    model_name=self.genai_model,
-                    llm_provider=self.genai_provider,
-                )
+                # Thread-safe progress hook -> Output panel (always show essential progress)
+                def progress(msg: str) -> None:
+                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
+
+                # Optional: bridge module logger to progress (controlled by setting)
+                class _ProgressLogHandler(logging.Handler):
+                    def emit(self, record: logging.LogRecord) -> None:
+                        try:
+                            text = self.format(record)
+                        except Exception:
+                            text = record.getMessage()
+                        progress(text)
+
+                log = logging.getLogger("pyopl.pyopl_generative")
+                handler = None
+                old_level = log.level
+                if self.verbose_llm_var.get():  # NEW: only attach when verbose enabled
+                    handler = _ProgressLogHandler()
+                    handler.setLevel(logging.DEBUG)
+                    log.addHandler(handler)
+                    log.setLevel(logging.DEBUG)
+
+                try:
+                    result = generative_feedback(
+                        question,
+                        model_path,
+                        data_path,
+                        model_name=self.genai_model,
+                        llm_provider=self.genai_provider,
+                        progress=progress,
+                    )
+                finally:
+                    if handler is not None:  # NEW
+                        try:
+                            log.removeHandler(handler)
+                            log.setLevel(old_level)
+                        except Exception:
+                            pass
+
                 feedback = result.get("feedback", "No feedback returned.")
                 revised_model = result.get("revised_model", "")
                 revised_data = result.get("revised_data", "")
@@ -1184,6 +1250,7 @@ class OPLIDE(tk.Tk):
             payload = {
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
+                "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else True,  # NEW
             }
             with open(self._config_path, "w") as f:
                 json.dump(payload, f, indent=4)
@@ -1339,6 +1406,16 @@ class OPLIDE(tk.Tk):
             self.genai_menu.add_separator()
             self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
+
+            # NEW: toggle for verbose LLM progress logs
+            self.genai_menu.add_separator()  # NEW
+            self.genai_menu.add_checkbutton(  # NEW
+                label="Verbose LLM progress logs",
+                onvalue=True,
+                offvalue=False,
+                variable=self.verbose_llm_var,
+                command=self._save_settings,
+            )
 
             # Enable GenAI cascade
             try:
