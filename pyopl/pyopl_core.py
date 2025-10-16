@@ -924,6 +924,31 @@ class OPLParser(Parser):
             "sem_type": p.expression["sem_type"],
         }
 
+    # Helper: detect negative numeric literals (either number < 0 or uminus of a number)
+    def _is_negative_literal(self, expr) -> bool:
+        try:
+            if isinstance(expr, dict):
+                t = expr.get("type")
+                if t == "number":
+                    v = expr.get("value")
+                    return isinstance(v, (int, float)) and v < 0
+                if t == "uminus":
+                    inner = expr.get("value")
+                    return isinstance(inner, dict) and inner.get("type") == "number"
+        except Exception:
+            pass
+        return False
+
+    # Signed numeric literal for non-expression contexts (arrays, tuple elements, typed sets, direct param values)
+    @_("NUMBER")  # type: ignore
+    def signed_number(self, p):
+        return p.NUMBER
+
+    @_('"-" NUMBER')  # type: ignore
+    def signed_number(self, p):
+        n = p.NUMBER
+        return -n
+
     # --- Field access: primary DOT NAME (right-associative, allows chaining) ---
     @_("primary DOT NAME")  # type: ignore
     def primary(self, p):
@@ -998,31 +1023,35 @@ class OPLParser(Parser):
         return p.element_list
 
     # NEW: int_element_list for {int} sets
-    @_("NUMBER")  # type: ignore
+    @_("signed_number")  # type: ignore
     def int_element_list(self, p):
-        if not isinstance(p.NUMBER, int) or isinstance(p.NUMBER, bool):
-            raise SemanticError(f"Expected integer literal in {{int}} set, got '{p.NUMBER}'.")
-        return [p.NUMBER]
+        v = p.signed_number
+        if not (isinstance(v, int) and not isinstance(v, bool)):
+            raise SemanticError(f"Expected integer literal in {{int}} set, got '{v}'.")
+        return [v]
 
-    @_('int_element_list "," NUMBER')  # type: ignore
+    @_('int_element_list "," signed_number')  # type: ignore
     def int_element_list(self, p):
-        if not isinstance(p.NUMBER, int) or isinstance(p.NUMBER, bool):
-            raise SemanticError(f"Expected integer literal in {{int}} set, got '{p.NUMBER}'.")
-        p.int_element_list.append(p.NUMBER)
+        v = p.signed_number
+        if not (isinstance(v, int) and not isinstance(v, bool)):
+            raise SemanticError(f"Expected integer literal in {{int}} set, got '{v}'.")
+        p.int_element_list.append(v)
         return p.int_element_list
 
     # NEW: float_element_list for {float} sets (allow ints; coerce to float)
-    @_("NUMBER")  # type: ignore
+    @_("signed_number")  # type: ignore
     def float_element_list(self, p):
-        if isinstance(p.NUMBER, bool):
-            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{p.NUMBER}'.")
-        return [float(p.NUMBER)]
+        v = p.signed_number
+        if isinstance(v, bool):
+            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{v}'.")
+        return [float(v)]
 
-    @_('float_element_list "," NUMBER')  # type: ignore
+    @_('float_element_list "," signed_number')  # type: ignore
     def float_element_list(self, p):
-        if isinstance(p.NUMBER, bool):
-            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{p.NUMBER}'.")
-        p.float_element_list.append(float(p.NUMBER))
+        v = p.signed_number
+        if isinstance(v, bool):
+            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{v}'.")
+        p.float_element_list.append(float(v))
         return p.float_element_list
 
     # NEW: boolean_element_list for {boolean} sets
@@ -1067,13 +1096,14 @@ class OPLParser(Parser):
     def tuple_element_list(self, p):
         return [p.tuple_element]
 
+    # Tuple elements: allow negative numbers via signed_number
     @_("STRING_LITERAL")  # type: ignore
     def tuple_element(self, p):
         return p.STRING_LITERAL.strip('"')
 
-    @_("NUMBER")  # type: ignore
+    @_("signed_number")  # type: ignore
     def tuple_element(self, p):
-        return float(p.NUMBER) if "." in str(p.NUMBER) or "e" in str(p.NUMBER).lower() else int(p.NUMBER)
+        return p.signed_number
 
     @_("tuple_literal")  # type: ignore
     def tuple_element(self, p):
@@ -1471,10 +1501,14 @@ class OPLParser(Parser):
     # --- Range declaration with general integer expressions as bounds ---
     @_('RANGE NAME "=" range_expr DOTDOT range_expr ";"')  # type: ignore
     def declaration(self, p):
-        # Accepts: range Items = 1..nbItems; or range Items = start..end; or range Items = (T-1)..(T+1);
         start_node = p.range_expr0
         end_node = p.range_expr1
-        # Patch: If both bounds are constant numbers, check and error if start > end
+
+        # Disallow negative literal bounds (e.g., -3 .. 5 or 3 .. -5)
+        if self._is_negative_literal(start_node) or self._is_negative_literal(end_node):
+            raise SemanticError("Range bounds must be non-negative literals.", lineno=p.lineno)
+
+        # Existing check: if both constant numbers, ensure start <= end
         start_is_int = (
             isinstance(start_node, dict) and start_node.get("type") == "number" and isinstance(start_node.get("value"), int)
         )
@@ -1981,11 +2015,11 @@ class OPLParser(Parser):
     def IN_RANGE(self, p):
         start_val = p.expression0
         end_val = p.expression1
-        if start_val["sem_type"] not in ["int", "int+"] or end_val["sem_type"] not in [
-            "int",
-            "int+",
-        ]:
+        if start_val["sem_type"] not in ["int", "int+"] or end_val["sem_type"] not in ["int", "int+"]:
             raise SemanticError("Range bounds must be integer-valued.", lineno=p.lineno)
+        # Disallow negative literal bounds
+        if self._is_negative_literal(start_val) or self._is_negative_literal(end_val):
+            raise SemanticError("Range bounds must be non-negative literals.", lineno=p.lineno)
         return {"type": "range_specifier", "start": start_val, "end": end_val}
 
     @_("NAME")  # type: ignore
@@ -2005,11 +2039,11 @@ class OPLParser(Parser):
     def index_specifier(self, p):
         start_val = p.expression0
         end_val = p.expression1
-        if start_val["sem_type"] not in ["int", "int+"] or end_val["sem_type"] not in [
-            "int",
-            "int+",
-        ]:
+        if start_val["sem_type"] not in ["int", "int+"] or end_val["sem_type"] not in ["int", "int+"]:
             raise SemanticError("Index range bounds must be integer-valued.", lineno=p.lineno)
+        # Disallow negative literal bounds
+        if self._is_negative_literal(start_val) or self._is_negative_literal(end_val):
+            raise SemanticError("Index range bounds must be non-negative literals.", lineno=p.lineno)
         return {"type": "range_index", "start": start_val, "end": end_val}
 
     # Accept any int-valued expression as a range bound
@@ -2018,49 +2052,52 @@ class OPLParser(Parser):
         expr = p.expression
         if expr["sem_type"] not in ["int", "int+"]:
             raise SemanticError(f"Range bound must be integer-valued, got type '{expr['sem_type']}'.")
+        # Disallow negative literal bound
+        if self._is_negative_literal(expr):
+            raise SemanticError("Range bounds must be non-negative literals.", lineno=p.lineno)
         return expr
 
     @_("expression")  # type: ignore
     def index_specifier(self, p):
-        # Allow full expressions as index specifiers (e.g., t-1, t)
         expr = p.expression
-        # Accept binop, uminus, parenthesized_expression, field_access, tuple_literal, string literal, etc.
+        # If it's a number literal, convert to number_literal_index; reject negative literal indices
+        if expr["type"] == "number":
+            if isinstance(expr.get("value"), (int, float)) and expr["value"] < 0:
+                raise SemanticError("Negative literal indices are not allowed.")
+            return {
+                "type": "number_literal_index",
+                "value": expr["value"],
+                "sem_type": expr.get("sem_type", "int"),
+            }
+        # Reject uminus of a number literal as index
+        if expr["type"] == "uminus" and isinstance(expr.get("value"), dict) and expr["value"].get("type") == "number":
+            raise SemanticError("Negative literal indices are not allowed.")
+        # Existing acceptance logic (binop, uminus of non-literal, etc.)
         if expr["type"] in [
             "binop",
             "uminus",
             "parenthesized_expression",
             "field_access",
             "field_access_index",
-            "string_literal",  # <-- allow string literal as an index
-            "tuple_literal",  # <-- allow tuple literal as an index
+            "string_literal",
+            "tuple_literal",
         ]:
-            # If it's a number_literal_index but missing sem_type, set it
             if expr["type"] == "number_literal_index" and "sem_type" not in expr:
                 expr["sem_type"] = "int"
             return expr
-        # Accept field_access as an index if its sem_type is int or int+
         if expr["type"] == "field_access" and expr.get("sem_type") in ["int", "int+"]:
-            # normalize to field_access_index for clarity (use 'base' not 'object')
             return {
                 "type": "field_access_index",
                 "base": expr["base"],
                 "field": expr["field"],
                 "sem_type": expr.get("sem_type", None),
             }
-        # Accept plain 'name' as an index (convert to name_reference_index for consistency)
         if expr["type"] == "name":
             symbol_info = self.symbol_table.get_symbol(expr["value"])
             return {
                 "type": "name_reference_index",
                 "name": expr["value"],
                 "sem_type": symbol_info["type"],
-            }
-        # Accept plain 'number' as an index (convert to number_literal_index for consistency)
-        if expr["type"] == "number":
-            return {
-                "type": "number_literal_index",
-                "value": expr["value"],
-                "sem_type": expr.get("sem_type", "int"),
             }
         raise SemanticError(f"Unsupported index expression type: {expr['type']}.", lineno=p.lineno)
 
@@ -2593,12 +2630,12 @@ class OPLParser(Parser):
         }
 
     # --- Support for parameter declarations with direct value assignment ---
-    @_('opt_PARAM type NAME "=" NUMBER ";"')  # type: ignore
+    @_('opt_PARAM type NAME "=" signed_number ";"')  # type: ignore
     def declaration(self, p):
-        # Scalar parameter with direct value assignment
+        # Scalar parameter with direct value assignment (allow negatives)
         name = p.NAME
         var_type = p.type
-        value = p.NUMBER
+        value = p.signed_number
         self.symbol_table.add_symbol(name, var_type, value=value, is_dvar=False, lineno=p.lineno)
         return {
             "type": "parameter_inline",
@@ -2608,12 +2645,22 @@ class OPLParser(Parser):
         }
 
     # NEW: scalar parameter with general expression on RHS (e.g., float C = 5 / 6;)
-    @_('opt_PARAM type NAME "=" expression ";"')
+    @_('opt_PARAM type NAME "=" expression ";"')  # type: ignore
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
         expr = p.expression
-        # Don't evaluate here; compile_model will evaluate and rewrite to parameter_inline
+        # Downcast literal RHS to parameter_inline for codegen/test compatibility
+        if isinstance(expr, dict) and expr.get("type") == "number":
+            val = expr.get("value")
+            self.symbol_table.add_symbol(name, var_type, value=val, is_dvar=False, lineno=p.lineno)
+            return {
+                "type": "parameter_inline",
+                "var_type": var_type,
+                "name": name,
+                "value": val,
+            }
+        # Otherwise, keep as expression (handled later in compile pipeline)
         self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
         return {
             "type": "parameter_inline_expr",
@@ -2855,9 +2902,9 @@ class OPLParser(Parser):
         return [p.array_value]
 
     # General scalar values usable in inline model arrays
-    @_("NUMBER")
+    @_("signed_number")
     def scalar_value(self, p):
-        return p.NUMBER
+        return p.signed_number
 
     @_("STRING_LITERAL")
     def scalar_value(self, p):
@@ -2905,9 +2952,10 @@ class OPLDataLexer(Lexer):
     # Identifiers (variable names, etc.)
     NAME = r"[a-zA-Z_][a-zA-Z0-9_]*"
 
-    @_(r"\d+\.\d+(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+)?")  # type: ignore
+    # Signed numbers (integers or floats)
+    @_(r"[+-]?(?:\d+\.\d+(?:[eE][+-]?\d+)?|\.\d+(?:[eE][+-]?\d+)?|\d+(?:[eE][+-]?\d+)?)")  # type: ignore
     def NUMBER(self, t):
-        if "." in t.value or "e" in t.value.lower():
+        if "." in str(t.value) or "e" in str(t.value).lower():
             t.value = float(t.value)
         else:
             t.value = int(t.value)
@@ -3085,9 +3133,15 @@ class OPLDataParser(Parser):
     def data_declaration(self, p):
         start_val = p.NUMBER0
         end_val = p.NUMBER1
+        # Disallow negative range bounds in .dat files
         if not isinstance(start_val, int) or not isinstance(end_val, int):
             raise SemanticError(
                 f"Range bounds in .dat file must be integers, got {type(start_val).__name__} and {type(end_val).__name__}.",
+                lineno=self.lexer.lineno,
+            )
+        if start_val < 0 or end_val < 0:
+            raise SemanticError(
+                f"Range bounds in .dat file must be non-negative, got {start_val}..{end_val}.",
                 lineno=self.lexer.lineno,
             )
         if start_val > end_val:
