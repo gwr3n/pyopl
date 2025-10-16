@@ -1,18 +1,25 @@
 from __future__ import annotations
 
+import logging
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from functools import lru_cache
+
+# --- Logging Setup ---
+# Use module-level logger, and set DEBUG level for development
+logger = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=None)
-def _load_model(model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> Any:
-    """
-    Lazily load and memoize the sentence transformer model.
-    """
-    from sentence_transformers import SentenceTransformer
-    return SentenceTransformer(model_name)
+def _load_model(model_name: str):
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        return SentenceTransformer(model_name)
+    except Exception as e:
+        logging.warning("RAG disabled (embedding model load failed): %s", e)
+        return None
 
 
 def _iter_description_files(models_dir: Path) -> List[Path]:
