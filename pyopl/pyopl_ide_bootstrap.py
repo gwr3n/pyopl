@@ -115,6 +115,31 @@ class OPLIDE(tk.Tk):
         # NEW: track font size selection for menu highlighting
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
+        # NEW: desired GenAI selection from settings (used after model discovery)
+        self._desired_genai_provider: Optional[str] = None
+        self._desired_genai_model: Optional[str] = None
+        try:
+            saved_sel = loaded_settings.get("genai-selection")
+            if isinstance(saved_sel, str) and "|" in saved_sel:
+                p_str, m_str = saved_sel.split("|", 1)
+                if p_str and m_str:
+                    self._desired_genai_provider = p_str
+                    self._desired_genai_model = m_str
+                    self.genai_selection_var.set(saved_sel)
+            elif isinstance(saved_sel, dict):
+                p_dict = saved_sel.get("provider")
+                m_dict = saved_sel.get("model")
+                if p_dict and m_dict:
+                    self._desired_genai_provider = str(p_dict)
+                    self._desired_genai_model = str(m_dict)
+                    self.genai_selection_var.set(f"{p_dict}|{m_dict}")
+        except Exception:
+            pass
+        # NEW: verbose LLM logs setting (defaults True)
+        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))  # NEW
+        # NEW: track font size selection for menu highlighting
+        self.font_size_var = tk.IntVar(value=self.current_font_size)
+
         # --- General Styling (ttkbootstrap 'flatly' light theme) ---
         self.style = tb.Style(theme="flatly")
 
@@ -1251,6 +1276,12 @@ class OPLIDE(tk.Tk):
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
                 "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else True,  # NEW
+                # NEW: persist last selected GenAI model
+                "genai-selection": (
+                    f"{self.genai_provider}|{self.genai_model}"
+                    if getattr(self, "genai_provider", None) and getattr(self, "genai_model", None)
+                    else ""
+                ),
             }
             with open(self._config_path, "w") as f:
                 json.dump(payload, f, indent=4)
@@ -1423,8 +1454,19 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
-            # Preselect the first available model once
-            if not (self.genai_provider and self.genai_model):
+            # NEW: Prefer saved selection if available and present; otherwise, first available
+            preselected = False
+            try:
+                if self._desired_genai_provider and self._desired_genai_model:
+                    models = provider_models.get(self._desired_genai_provider) or []
+                    if self._desired_genai_model in models:
+                        self.genai_selection_var.set(f"{self._desired_genai_provider}|{self._desired_genai_model}")
+                        self._on_select_genai_model(self._desired_genai_provider, self._desired_genai_model)
+                        preselected = True
+            except Exception:
+                pass
+
+            if not preselected and not (self.genai_provider and self.genai_model):
                 for pk in ("openai", "google", "ollama"):
                     if provider_models.get(pk):
                         first = provider_models[pk][0]
@@ -1469,9 +1511,13 @@ class OPLIDE(tk.Tk):
         self.genai_provider = provider_key
         self.genai_model = model_name
         try:
+            # Ensure the variable reflects the current selection
+            self.genai_selection_var.set(f"{provider_key}|{model_name}")
             self.status_var.set(f"GenAI selected: {provider_key} • {model_name}")
         except Exception:
             pass
+        # NEW: persist selection immediately
+        self._save_settings()
 
 
 if __name__ == "__main__":
