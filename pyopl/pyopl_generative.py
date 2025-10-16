@@ -10,15 +10,18 @@ from typing import (
     Callable,  # NEW
     Dict,
     Optional,
+    List,       # NEW
+    Tuple,      # NEW
 )
+from pathlib import Path  # NEW
 
 # === Local imports ===
 from .pyopl_core import OPLCompiler, SemanticError
+from .rag_helper import rank_problem_descriptions as rag_rank  # NEW
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
-
 
 # NEW: progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
@@ -35,13 +38,12 @@ def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = None
 LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
-# Example model names:
-# openai: "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4.1"
-# google: "gemini-2.5-flash"
-# ollama: "gpt-oss:120b"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
+# NEW: Few-shot configuration
+FEW_SHOT_TOP_K = 3
+FEW_SHOT_MAX_CHARS = float('inf')  # soft cap per file to keep prompts manageable
 
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
@@ -56,7 +58,6 @@ class Grammar(Enum):
 
 
 # ---------- Utilities ----------
-
 
 def _read_file(path: str) -> str:
     with open(path, "r") as f:
@@ -86,6 +87,88 @@ def _get_grammar_implementation(mode: Grammar) -> str:
     if mode == Grammar.CODE:
         return _read_pyopl_code()
     raise ValueError(f"Invalid mode: {mode}")
+
+
+# NEW: RAG few-shot helpers
+def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if len(text) > max_chars:
+            text = text[:max_chars]
+        return text.strip()
+    except Exception:
+        return ""
+
+
+def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    """
+    Given a description .txt path, locate associated .mod and .dat in the same folder.
+    Preference order:
+      1) Same stem: <stem>.mod and <stem>.dat
+      2) First *.mod and first *.dat in folder (sorted)
+    """
+    folder = desc_path.parent
+    stem = desc_path.stem
+
+    mod = folder / f"{stem}.mod"
+    dat = folder / f"{stem}.dat"
+
+    if not mod.exists() or not mod.is_file():
+        mods = sorted(folder.glob("*.mod"))
+        mod = mods[0] if mods else None
+
+    if not dat.exists() or not dat.is_file():
+        dats = sorted(folder.glob("*.dat"))
+        dat = dats[0] if dats else None
+
+    return (mod if mod and mod.exists() else None, dat if dat and dat.exists() else None)
+
+
+def _gather_few_shots(problem_description: str, k: int = FEW_SHOT_TOP_K, models_dir: Optional[str | Path] = None,
+                      progress: Optional[Callable[[str], None]] = None) -> List[Dict[str, str]]:
+    """
+    Use rag_helper to find top-k relevant examples and return a list of dicts with keys:
+      - description (str)
+      - model (str)
+      - data (str)
+      - desc_path / model_path / data_path (optional metadata)
+    """
+    examples: List[Dict[str, str]] = []
+    try:
+        _notify(progress, f"Retrieving few-shot examples (k={k})")
+        hits = rag_rank(query=problem_description, models_dir=models_dir, top_k=k)
+    except Exception as e:
+        logger.debug(f"Few-shot retrieval skipped: {e}")
+        _notify(progress, "Few-shot retrieval failed; continuing without examples")
+        return examples
+
+    for hit in hits:
+        try:
+            desc_path = Path(hit["path"])
+            desc_text = _safe_read_text(desc_path)
+            mod_path, dat_path = _find_pair_in_folder(desc_path)
+            if not desc_text or not mod_path or not dat_path:
+                continue
+            mod_text = _safe_read_text(mod_path)
+            dat_text = _safe_read_text(dat_path)
+            if not mod_text or not dat_text:
+                continue
+            examples.append(
+                {
+                    "description": desc_text,
+                    "model": mod_text,
+                    "data": dat_text,
+                    "desc_path": str(desc_path),
+                    "model_path": str(mod_path),
+                    "data_path": str(dat_path),
+                }
+            )
+            if len(examples) >= k:
+                break
+        except Exception as e:
+            logger.debug(f"Skipping example due to error: {e}")
+            continue
+    return examples
 
 
 def extract_json_from_markdown(text: str) -> str:
@@ -349,7 +432,29 @@ def _call_openai_with_retry(
 # ---------- Prompt builders ----------
 
 
-def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
+def _build_generation_prompt(prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None) -> str:  # CHANGED
+    few_shots_section = ""
+    if few_shots:
+        blocks = []
+        for i, ex in enumerate(few_shots, 1):
+            # Include file paths as metadata to provide provenance (optional for the model)
+            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
+            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
+            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
+            blocks.append(
+                f"<example index=\"{i}\">\n"
+                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
+                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
+                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
+                f"</example>\n"
+            )
+        few_shots_section = (
+            "<few_shot_examples>\n"
+            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
+            + "".join(blocks)
+            + "</few_shot_examples>\n\n"
+        )
+
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -360,12 +465,14 @@ def _build_generation_prompt(prompt: str, grammar_implementation: str) -> str:
         "Infer from the problem context whether decision variables should be integer, binary, or continuous.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
+        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
         "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
+        f"{few_shots_section}"
         "<problem_description>\n"
         f"{prompt}\n"
         "</problem_description>\n\n"
@@ -455,8 +562,30 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
 
 
 def _build_revision_prompt_alignment(
-    prompt: str, grammar_implementation: str, assessment_text: str, model_code: str, data_code: str
+    prompt: str, grammar_implementation: str, assessment_text: str, model_code: str, data_code: str,  # CHANGED
+    few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
 ) -> str:
+    few_shots_section = ""
+    if few_shots:
+        blocks = []
+        for i, ex in enumerate(few_shots, 1):
+            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
+            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
+            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
+            blocks.append(
+                f"<example index=\"{i}\">\n"
+                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
+                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
+                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
+                f"</example>\n"
+            )
+        few_shots_section = (
+            "<few_shot_examples>\n"
+            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
+            + "".join(blocks)
+            + "</few_shot_examples>\n\n"
+        )
+
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -469,12 +598,14 @@ def _build_revision_prompt_alignment(
         "Revise the model and data so that they fully align with the problem description while preserving syntactic validity.\n"
         "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
+        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
         "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
+        f"{few_shots_section}"  # NEW
         "<problem_description>\n"
         f"{prompt}\n"
         "</problem_description>\n\n"
@@ -520,8 +651,30 @@ def _build_revision_prompt_alignment(
 
 
 def _build_revision_prompt_syntax(
-    prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors
+    prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors,  # CHANGED
+    few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
 ) -> str:
+    few_shots_section = ""
+    if few_shots:
+        blocks = []
+        for i, ex in enumerate(few_shots, 1):
+            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
+            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
+            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
+            blocks.append(
+                f"<example index=\"{i}\">\n"
+                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
+                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
+                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
+                f"</example>\n"
+            )
+        few_shots_section = (
+            "<few_shot_examples>\n"
+            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
+            + "".join(blocks)
+            + "</few_shot_examples>\n\n"
+        )
+
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -531,12 +684,14 @@ def _build_revision_prompt_syntax(
         "Revise the model and data to fix the errors while retaining alignment with the problem description.\n"
         "Change only what is necessary to fix the errors.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
+        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
         "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
+        f"{few_shots_section}"  # NEW
         "<problem_description>\n"
         f"{prompt}\n"
         "</problem_description>\n\n"
@@ -705,7 +860,8 @@ def generative_solve(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
+    few_shot: bool = True,
 ):
     """Generate a PyOPL model and data file from a prompt using OpenAI GPT, validate with pyopl, iterate on errors, and assess alignment.
 
@@ -747,7 +903,10 @@ def generative_solve(
         f"Generating with provider={provider.value} model={model_name} iterations={iterations} alignment={'on' if do_alignment else 'off'}",
     )  # NEW
 
-    user_prompt = _build_generation_prompt(prompt, grammar_implementation)
+    # NEW: Retrieve few-shot examples using RAG
+    few_shots: List[Dict[str, str]] = _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir="opl_models", progress=progress) if few_shot else []
+
+    user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)  # CHANGED
     assessment_text = ""
     syntax_errors: list[str] = []
     model_code = ""
@@ -836,15 +995,17 @@ def generative_solve(
                     logger.debug(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
-                    user_prompt = _build_revision_prompt_alignment(
-                        prompt, grammar_implementation, assessment_text, model_code, data_code
+                    user_prompt = _build_revision_prompt_alignment(  # CHANGED
+                        prompt, grammar_implementation, assessment_text, model_code, data_code, few_shots=few_shots  # NEW
                     )
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
             _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising")  # NEW
             logger.debug("Model or data has syntax errors; revising...")
-            user_prompt = _build_revision_prompt_syntax(prompt, grammar_implementation, model_code, data_code, syntax_errors)
+            user_prompt = _build_revision_prompt_syntax(  # CHANGED
+                prompt, grammar_implementation, model_code, data_code, syntax_errors, few_shots=few_shots  # NEW
+            )
 
     # Load latest version of the model and data files
     with open(model_file, "r") as f:
