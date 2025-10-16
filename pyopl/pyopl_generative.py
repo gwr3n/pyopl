@@ -4,16 +4,16 @@ import logging
 import os
 import re
 from enum import Enum, auto
+from pathlib import Path  # NEW
 from time import sleep
 from typing import (
     Any,
     Callable,  # NEW
     Dict,
+    List,  # NEW
     Optional,
-    List,       # NEW
-    Tuple,      # NEW
+    Tuple,  # NEW
 )
-from pathlib import Path  # NEW
 
 # === Local imports ===
 from .pyopl_core import OPLCompiler, SemanticError
@@ -22,6 +22,7 @@ from .rag_helper import rank_problem_descriptions as rag_rank  # NEW
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
+
 
 # NEW: progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
@@ -43,7 +44,8 @@ ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
 # NEW: Few-shot configuration
 FEW_SHOT_TOP_K = 3
-FEW_SHOT_MAX_CHARS = float('inf')  # soft cap per file to keep prompts manageable
+FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
+
 
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
@@ -58,6 +60,7 @@ class Grammar(Enum):
 
 
 # ---------- Utilities ----------
+
 
 def _read_file(path: str) -> str:
     with open(path, "r") as f:
@@ -110,22 +113,26 @@ def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path
     folder = desc_path.parent
     stem = desc_path.stem
 
-    mod = folder / f"{stem}.mod"
-    dat = folder / f"{stem}.dat"
+    mod: Optional[Path] = folder / f"{stem}.mod"
+    dat: Optional[Path] = folder / f"{stem}.dat"
 
-    if not mod.exists() or not mod.is_file():
+    if not (mod and mod.exists() and mod.is_file()):
         mods = sorted(folder.glob("*.mod"))
         mod = mods[0] if mods else None
 
-    if not dat.exists() or not dat.is_file():
+    if not (dat and dat.exists() and dat.is_file()):
         dats = sorted(folder.glob("*.dat"))
         dat = dats[0] if dats else None
 
     return (mod if mod and mod.exists() else None, dat if dat and dat.exists() else None)
 
 
-def _gather_few_shots(problem_description: str, k: int = FEW_SHOT_TOP_K, models_dir: Optional[str | Path] = None,
-                      progress: Optional[Callable[[str], None]] = None) -> List[Dict[str, str]]:
+def _gather_few_shots(
+    problem_description: str,
+    k: int = FEW_SHOT_TOP_K,
+    models_dir: Optional[str | Path] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> List[Dict[str, str]]:
     """
     Use rag_helper to find top-k relevant examples and return a list of dicts with keys:
       - description (str)
@@ -432,7 +439,9 @@ def _call_openai_with_retry(
 # ---------- Prompt builders ----------
 
 
-def _build_generation_prompt(prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None) -> str:  # CHANGED
+def _build_generation_prompt(
+    prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
+) -> str:  # CHANGED
     few_shots_section = ""
     if few_shots:
         blocks = []
@@ -442,7 +451,7 @@ def _build_generation_prompt(prompt: str, grammar_implementation: str, few_shots
             mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
             dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
             blocks.append(
-                f"<example index=\"{i}\">\n"
+                f'<example index="{i}">\n'
                 f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
                 f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
                 f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
@@ -562,7 +571,11 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
 
 
 def _build_revision_prompt_alignment(
-    prompt: str, grammar_implementation: str, assessment_text: str, model_code: str, data_code: str,  # CHANGED
+    prompt: str,
+    grammar_implementation: str,
+    assessment_text: str,
+    model_code: str,
+    data_code: str,  # CHANGED
     few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
 ) -> str:
     few_shots_section = ""
@@ -573,7 +586,7 @@ def _build_revision_prompt_alignment(
             mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
             dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
             blocks.append(
-                f"<example index=\"{i}\">\n"
+                f'<example index="{i}">\n'
                 f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
                 f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
                 f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
@@ -651,7 +664,11 @@ def _build_revision_prompt_alignment(
 
 
 def _build_revision_prompt_syntax(
-    prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors,  # CHANGED
+    prompt: str,
+    grammar_implementation: str,
+    model_code: str,
+    data_code: str,
+    syntax_errors,  # CHANGED
     few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
 ) -> str:
     few_shots_section = ""
@@ -662,7 +679,7 @@ def _build_revision_prompt_syntax(
             mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
             dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
             blocks.append(
-                f"<example index=\"{i}\">\n"
+                f'<example index="{i}">\n'
                 f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
                 f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
                 f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
@@ -904,7 +921,9 @@ def generative_solve(
     )  # NEW
 
     # NEW: Retrieve few-shot examples using RAG
-    few_shots: List[Dict[str, str]] = _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir="opl_models", progress=progress) if few_shot else []
+    few_shots: List[Dict[str, str]] = (
+        _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir="opl_models", progress=progress) if few_shot else []
+    )
 
     user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)  # CHANGED
     assessment_text = ""
