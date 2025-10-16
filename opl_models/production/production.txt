@@ -1,0 +1,1 @@
+Consider a production planning problem in which, over a multi-period horizon, the planner chooses the production quantities of each product in each period with known per‑unit costs, aiming to meet demand requirements while respecting per‑period capacity limits and minimizing the total production cost.

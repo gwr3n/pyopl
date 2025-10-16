@@ -1,0 +1,1 @@
+A set of items, each with a known weight and value, is available; the goal is to select a subset of items to maximize total value while ensuring the total weight does not exceed the knapsack’s capacity, with each item either taken or not taken.

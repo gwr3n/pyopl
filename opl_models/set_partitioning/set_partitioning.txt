@@ -1,0 +1,1 @@
+From a collection of candidate sets with given costs, the goal is to choose a subset such that every element is covered by exactly one selected set—no element is uncovered or covered more than once—while minimizing the total cost of the chosen sets.

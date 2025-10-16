@@ -1,0 +1,1 @@
+A set of feasible crew pairings (each a valid sequence of flights) is available, each with an associated cost; the goal is to select a subset of pairings such that every flight is covered by at least one chosen pairing while minimizing the total cost of the selected pairings.

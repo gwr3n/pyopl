@@ -1,0 +1,1 @@
+Each item provides value and consumes amounts of several resources; the decisions are which items to take and how much capacity to allocate to each resource, with per-resource capacities required to cover chosen items’ usage and a single total capacity budget across all resources. The objective is to maximize total value while respecting these resource and budget constraints.

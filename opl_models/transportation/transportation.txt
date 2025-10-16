@@ -1,0 +1,1 @@
+A set of sources with given supplies ships goods to a set of destinations with given demands at known per‑unit costs; the decision is how much to ship from each source to each destination so that all supplies and demands are exactly satisfied while minimizing total transportation cost.

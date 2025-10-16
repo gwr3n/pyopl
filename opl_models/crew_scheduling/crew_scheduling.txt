@@ -1,0 +1,1 @@
+A set of crew members can be assigned to a set of shifts with known assignment costs; the goal is to assign exactly one crew member to each shift while ensuring no crew member exceeds their allowed number of shifts, minimizing the total assignment cost.

@@ -1,0 +1,1 @@
+A vehicle based at a depot (node 1) must depart the depot, visit each customer exactly once, and return to the depot, incurring a distance cost on each traveled arc. Cumulative load variables propagate along selected arcs to reflect customer demands and eliminate subtours while modeling capacity, and the objective is to minimize total travel distance.

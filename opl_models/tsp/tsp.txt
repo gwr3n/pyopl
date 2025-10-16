@@ -1,0 +1,1 @@
+A single tour must visit each city exactly once and return to the start, using known pairwise travel distances; the goal is to choose the arcs and their order to form one Hamiltonian cycle that minimizes total distance, with subtour‑elimination constraints enforcing a single tour.

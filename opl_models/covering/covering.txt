@@ -1,0 +1,1 @@
+A collection of candidate sets, each with an associated cost, is available to cover a universe of elements; the goal is to choose a subset of these sets so that every element is covered by at least one chosen set while minimizing the total cost of the selected sets.

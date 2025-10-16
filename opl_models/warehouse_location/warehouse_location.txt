@@ -1,0 +1,1 @@
+Candidate warehouses can be opened by paying fixed costs and used to ship goods to customers at per‑unit transportation costs; the decisions are which warehouses to open and how much to ship from each open warehouse to each customer so that all customer demands are met without exceeding warehouse capacities, minimizing the sum of fixed opening and transportation costs.

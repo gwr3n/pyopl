@@ -1,0 +1,1 @@
+Given a universe of elements and a collection of candidate sets with known costs, the goal is to select a subset of sets so that every element is covered by at least one chosen set while minimizing the total cost of the selected sets.
