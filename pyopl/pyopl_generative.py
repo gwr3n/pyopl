@@ -5,7 +5,12 @@ import os
 import re
 from enum import Enum, auto
 from time import sleep
-from typing import Any, Dict, Optional
+from typing import (
+    Any,
+    Callable,  # NEW
+    Dict,
+    Optional,
+)
 
 # === Local imports ===
 from .pyopl_core import OPLCompiler, SemanticError
@@ -13,6 +18,19 @@ from .pyopl_core import OPLCompiler, SemanticError
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
+
+
+# NEW: progress notifier used by generative_solve/feedback and LLM calls
+def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
+    try:
+        if progress:
+            progress(str(msg))
+        else:
+            logger.debug(str(msg))
+    except Exception:
+        # Never let UI callback failures break the run
+        pass
+
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = None
@@ -187,7 +205,6 @@ def _build_create_params(
     input_text: str,
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
-    seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {
@@ -199,8 +216,6 @@ def _build_create_params(
         params["max_output_tokens"] = max_tokens
     if temperature is not None:
         params["temperature"] = temperature
-    if seed is not None:
-        params["seed"] = seed
     if stop:
         params["stop"] = stop
     return params
@@ -229,8 +244,8 @@ def _llm_generate_text(
     input_text: str,
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
-    seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
+    progress: Optional[Callable[[str], None]] = None,  # NEW
 ) -> str:
     if provider == LLMProvider.OPENAI:
         client = _openai_client()
@@ -239,10 +254,11 @@ def _llm_generate_text(
             input_text=input_text,
             max_tokens=max_tokens,
             temperature=temperature,
-            seed=seed,
             stop=stop,
         )
-        response = _call_openai_with_retry(client, create_params)
+        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")  # NEW
+        response = _call_openai_with_retry(client, create_params, progress=progress)  # CHANGED
+        _notify(progress, "[LLM] OpenAI: response received")  # NEW
         response_text = _coalesce_response_text(response)
         if not response_text:
             raise RuntimeError(f"Empty OpenAI response: {response}.")
@@ -256,7 +272,9 @@ def _llm_generate_text(
             generation_config["max_output_tokens"] = max_tokens
         if temperature is not None:
             generation_config["temperature"] = temperature
+        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")  # NEW
         resp = model.generate_content(input_text, generation_config=generation_config)
+        _notify(progress, "[LLM] Gemini: response received")  # NEW
         text = getattr(resp, "text", None)
         if not text and getattr(resp, "candidates", None):
             parts = []
@@ -270,7 +288,10 @@ def _llm_generate_text(
         return text or ""
 
     if provider == LLMProvider.OLLAMA:
-        return _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
+        _notify(progress, f"[LLM] Ollama • {model_name}: generating")  # NEW
+        result = _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
+        _notify(progress, "[LLM] Ollama: response received")  # NEW
+        return result
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -280,13 +301,14 @@ def _call_openai_with_retry(
     create_params: Dict[str, Any],
     retries: int = 3,
     backoff_sec: float = 1.5,
+    progress: Optional[Callable[[str], None]] = None,  # NEW
 ) -> Any:
     """
     Call Responses API with simple exponential backoff.
     Falls back by stripping newer/unsupported kwargs not supported by older SDKs/servers/models.
     """
     last_err: Optional[Exception] = None
-    fallback_keys = ["response_format", "seed", "stop", "reasoning", "temperature"]
+    fallback_keys = ["response_format", "stop", "reasoning", "temperature"]
     params = dict(create_params)  # work on a copy
 
     def _strip_param_from_error_message(msg: str) -> bool:
@@ -313,9 +335,14 @@ def _call_openai_with_retry(
             return client.responses.create(**params)
         except Exception as e:
             last_err = e
-            if _strip_param_from_error_message(str(e) if e else ""):
+            msg = str(e) if e else "unknown error"
+            _notify(progress, msg)
+            if _strip_param_from_error_message(msg):
+                _notify(progress, "[LLM] OpenAI: retrying without unsupported parameters")  # NEW
                 continue
+            _notify(progress, f"[LLM] OpenAI: retry {attempt + 1}/{retries} after error: {msg}")  # NEW
             sleep(backoff_sec * (2**attempt))
+    _notify(progress, f"[LLM] OpenAI: failed after {retries} attempts")  # NEW
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
 
 
@@ -676,9 +703,9 @@ def generative_solve(
     return_statistics=False,
     alignment_check: Optional[bool] = None,
     temperature: Optional[float] = None,
-    seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
+    progress: Optional[Callable[[str], None]] = None,  # NEW
 ):
     """Generate a PyOPL model and data file from a prompt using OpenAI GPT, validate with pyopl, iterate on errors, and assess alignment.
 
@@ -692,9 +719,9 @@ def generative_solve(
         return_statistics (bool): If True, return a dict with statistics instead of just the assessment string.
         alignment_check (bool|None): If True, check alignment with the original prompt; if False, skip alignment check; if None, use default ALIGNMENT_CHECK.
         temperature (float|None): Sampling temperature; if None, use model default.
-        seed (int|None): Random seed for reproducibility; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
+        progress (callable|None): Optional function that receives progress messages (str).  # NEW
 
     Returns:
         str or dict: If return_statistics is False, returns the final assessment string.
@@ -715,6 +742,11 @@ def generative_solve(
     do_alignment = ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)
     provider = _infer_provider(llm_provider, model_name)
 
+    _notify(
+        progress,
+        f"Generating with provider={provider.value} model={model_name} iterations={iterations} alignment={'on' if do_alignment else 'off'}",
+    )  # NEW
+
     user_prompt = _build_generation_prompt(prompt, grammar_implementation)
     assessment_text = ""
     syntax_errors: list[str] = []
@@ -723,15 +755,15 @@ def generative_solve(
 
     for iteration in range(iterations):
         logger.debug(f"Iteration {iteration + 1}/{iterations}")
-        logger.debug("Prompting model...")
+        _notify(progress, f"Iteration {iteration + 1}/{iterations}: prompting model")  # NEW
         content = _llm_generate_text(
             provider=provider,
             model_name=model_name,
             input_text=user_prompt,
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=temperature,
-            seed=seed,
             stop=stop,
+            progress=progress,  # NEW
         )
         if not content:
             raise RuntimeError("Empty model response.")
@@ -739,6 +771,7 @@ def generative_solve(
             result = _json_loads_relaxed(content)
             model_code = result["model"]
             data_code = result["data"]
+            _notify(progress, "LLM response parsed (model + data)")  # NEW
             logger.debug("Model and data generated.")
         except Exception as e:
             raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
@@ -746,6 +779,7 @@ def generative_solve(
         compiler = OPLCompiler()
         syntax_errors = []
         try:
+            _notify(progress, "Compiling model and data")  # NEW
             compiler.compile_model(model_code, data_code)
         except SemanticError as e:
             syntax_errors.append(str(e))
@@ -764,12 +798,15 @@ def generative_solve(
             f.write(model_code)
         with open(data_file, "w") as f:
             f.write(data_code)
+        _notify(progress, f"Wrote files: {model_file} • {data_file}")  # NEW
 
         if not syntax_errors:
             if not do_alignment:
+                _notify(progress, "Syntax OK; alignment check disabled. Stopping.")  # NEW
                 break
 
             logger.debug("Checking alignment with original prompt...")
+            _notify(progress, "Checking alignment with original prompt")  # NEW
             alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
             alignment_content = _llm_generate_text(
                 provider=provider,
@@ -777,8 +814,8 @@ def generative_solve(
                 input_text=alignment_prompt,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.0 if temperature is not None else None,
-                seed=seed,
                 stop=stop,
+                progress=progress,  # NEW
             )
             if not alignment_content:
                 raise RuntimeError("Empty alignment response.")
@@ -791,9 +828,11 @@ def generative_solve(
             ):
                 assessment_text = alignment_obj.get("assessment", "").strip()
                 if alignment_obj["aligned"]:
+                    _notify(progress, "Aligned ✓ Stopping.")  # NEW
                     logger.debug("Model and data are syntactically valid and aligned with the prompt.")
                     break
                 else:
+                    _notify(progress, "Not aligned; revising per assessment")  # NEW
                     logger.debug(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
@@ -803,6 +842,7 @@ def generative_solve(
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
+            _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising")  # NEW
             logger.debug("Model or data has syntax errors; revising...")
             user_prompt = _build_revision_prompt_syntax(prompt, grammar_implementation, model_code, data_code, syntax_errors)
 
@@ -814,6 +854,7 @@ def generative_solve(
 
     if syntax_errors or not do_alignment:
         logger.debug("Final assessment of model and data alignment...")
+        _notify(progress, "Requesting final assessment")  # NEW
         assessment_prompt = _build_final_assessment_prompt(
             prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
@@ -824,12 +865,13 @@ def generative_solve(
                 input_text=assessment_prompt,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.2 if temperature is not None else None,
-                seed=seed,
                 stop=stop,
+                progress=progress,  # NEW
             )
             or ""
         )
 
+    _notify(progress, "Generation complete")  # NEW
     if return_statistics:
         return {
             "iterations": iteration + 1,
@@ -847,9 +889,9 @@ def generative_feedback(
     model_name=MODEL_NAME,
     mode=Grammar.BNF,
     temperature: Optional[float] = None,
-    seed: Optional[int] = 7,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
+    progress: Optional[Callable[[str], None]] = None,  # NEW
 ):
     """Provide feedback on a given PyOPL model and data file based on a user prompt.
 
@@ -860,9 +902,9 @@ def generative_feedback(
         model_name (str): LLM model name, e.g. "gpt-5".
         mode (Grammar): Grammar implementation to use: Grammar.NONE, Grammar.BNF, or Grammar.CODE.
         temperature (float|None): Sampling temperature; if None, use model default.
-        seed (int|None): Random seed for reproducibility; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
+        progress (callable|None): Optional function that receives progress messages (str).  # NEW
 
     Raises:
         RuntimeError: If feedback generation fails irrecoverably.
@@ -881,6 +923,7 @@ def generative_feedback(
     with open(data_file, "r") as fh:
         data_code = fh.read()
 
+    _notify(progress, "Generating feedback from LLM")  # NEW
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
     content = _llm_generate_text(
@@ -889,12 +932,13 @@ def generative_feedback(
         input_text=user_prompt,
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0.0 if temperature is not None else None,
-        seed=seed,
         stop=stop,
+        progress=progress,  # NEW
     )
     if not content:
         raise RuntimeError("Empty model response.")
     try:
+        _notify(progress, "Feedback received; parsing")  # NEW
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
