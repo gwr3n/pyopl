@@ -1545,9 +1545,12 @@ class GurobiCodeGenerator:
         # Extract both raw nodes and string expressions
         ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = extract_linear_constraint(antecedent)
         cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = extract_linear_constraint(consequent)
+        # Compute separate big-M values for antecedent and consequent
         M_ant = _estimate_bigM_for_difference(ant_left, ant_right)
         M_cons = _estimate_bigM_for_difference(cons_left, cons_right)
-        bigM = max([m for m in (M_ant, M_cons) if m is not None], default=bigM_default)
+        bigM_ant = M_ant if M_ant is not None else bigM_default
+        bigM_cons = M_cons if M_cons is not None else bigM_default
+        eps_sep = 1e-6  # epsilon for equality separation on >=/<=
 
         # Try to use indicator constraint if antecedent is a binary variable equality/inequality
         def is_binary_var(node):
@@ -1652,77 +1655,86 @@ class GurobiCodeGenerator:
         else:
             self._add_code_line(f"{flag_var} = model.addVar(vtype=GRB.BINARY, name='{flag_var}')  # 1 if antecedent true")
 
-        eps = 0  # tolerance
+        eps = 1e-5
+        diff_expr = f"({ant_left_expr} - {ant_right_expr})"
         if ant_op == ">=":
+            # flag=1 => diff >= 0 ; flag=0 => diff <= -eps
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} >= -{bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_lb')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= 0.0, name='{constr_name_prefix}_ant_ge_ind1')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} <= -{eps} + {bigM} * {flag_var}, name='{constr_name_prefix}_ant_lb2')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{eps}, name='{constr_name_prefix}_ant_ge_ind0')"
             )
         elif ant_op == ">":
+            # flag=1 => diff >= eps ; flag=0 => diff <= 0
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} >= {eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_gt1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= {eps}, name='{constr_name_prefix}_ant_gt_ind1')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} <= -{eps} + {bigM} * {flag_var}, name='{constr_name_prefix}_ant_gt2')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= 0.0, name='{constr_name_prefix}_ant_gt_ind0')"
             )
         elif ant_op == "<=":
+            # flag=1 => diff <= 0 ; flag=0 => diff >= eps
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} <= {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_ub')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= 0.0, name='{constr_name_prefix}_ant_le_ind1')"
+            )
+            self._add_code_line(
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {eps}, name='{constr_name_prefix}_ant_le_ind0')"
             )
         elif ant_op == "<":
+            # flag=1 => diff <= -eps ; flag=0 => diff >= 0
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} <= -{eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_lt1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= -{eps}, name='{constr_name_prefix}_ant_lt_ind1')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} >= {eps} - {bigM} * {flag_var}, name='{constr_name_prefix}_ant_lt2')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= 0.0, name='{constr_name_prefix}_ant_lt_ind0')"
             )
         elif ant_op == "==":
+            # For equality, keep existing big-M path (non-convex to split exactly without extra binaries).
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} <= {eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq1')"
+                f"model.addConstr({diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq1')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_right_expr} - {ant_left_expr} <= {eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq2')"
+                f"model.addConstr(-{diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq2')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_left_expr} - {ant_right_expr} >= -{eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq3')"
+                f"model.addConstr({diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq3')"
             )
             self._add_code_line(
-                f"model.addConstr({ant_right_expr} - {ant_left_expr} >= -{eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq4')"
+                f"model.addConstr(-{diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq4')"
             )
         else:
             raise ValueError(f"Unsupported antecedent operator in implication: {ant_op}")
 
-        # 2. Enforce consequent only when flag_var == 1
+        # 2. Enforce consequent only when flag_var == 1 (use bigM_cons)
         if cons_op == "==":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq1')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq1')"
             )
             self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} <= {eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq2')"
+                f"model.addConstr({cons_right_expr} - {cons_left_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq2')"
             )
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq3')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq3')"
             )
             self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} >= -{eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq4')"
+                f"model.addConstr({cons_right_expr} - {cons_left_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq4')"
             )
         elif cons_op == ">=":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_ge')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_ge')"
             )
         elif cons_op == ">":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= {eps} - {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_gt')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= {eps} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_gt')"
             )
         elif cons_op == "<=":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_le')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_le')"
             )
         elif cons_op == "<":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= -{eps} + {bigM} * (1 - {flag_var}), name='{constr_name_prefix}_cons_lt')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= -{eps} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_lt')"
             )
         else:
             raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")

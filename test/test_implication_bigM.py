@@ -73,10 +73,20 @@ class TestImplicationBigMTightness(unittest.TestCase):
     def test_gurobi_bigM_tight(self):
         ast = self._ast()
         code = GurobiCodeGenerator(ast).generate_code()
-        # implication is c0, flag var implication_flag_c0
-        # Find line with >= -M * (1 - implication_flag_c0)
-        m = re.search(r">= -([0-9]+(?:\.[0-9]+)?) \* \(1 - implication_flag_c0\)", code)
-        self.assertIsNotNone(m, f"Could not find big-M antecedent line. Code:\n{code}")
+        # Antecedent now uses indicator constraints; ensure they are present
+        self.assertIn(
+            "addGenConstrIndicator(implication_flag_c0, 1",
+            code,
+            f"Expected indicator constraint for antecedent. Code:\n{code}",
+        )
+        self.assertIn(
+            "addGenConstrIndicator(implication_flag_c0, 0",
+            code,
+            f"Expected indicator constraint for negated antecedent. Code:\n{code}",
+        )
+        # Big-M now appears on the consequent side; extract it from the (1 - implication_flag_c0) term
+        m = re.search(r"[<>]=\s*([0-9]+(?:\.[0-9]+)?)\s*\*\s*\(1 - implication_flag_c0\)", code)
+        self.assertIsNotNone(m, f"Could not find big-M consequent line. Code:\n{code}")
         bigM = float(m.group(1))
         self.assertLess(bigM, 1000, f"Expected tightened M < 1000, got {bigM}")
         self.assertLessEqual(bigM, 10, f"Expected M <= 10 (span-based), got {bigM}")

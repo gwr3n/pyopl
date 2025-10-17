@@ -1823,29 +1823,18 @@ class TestModellingConstructs(unittest.TestCase):
             )
 
     def test_sum_boolean_bound_tightening(self):
-        # Three booleans sum >= 2 implies y >= 5; we avoid specialized (>=) => (bin==1) indicator.
-        # All booleans in [0,1]; sum in [0,3]; diff (sum - 2) in [-2,1] so |diff|<=2 -> expected big-M <=2.
+        # Three booleans sum >= 2 implies y >= 5.
+        # With the new encoding, the antecedent uses indicator constraints; there is no big-M on the antecedent anymore.
         opl = """\n        dvar boolean x1; dvar boolean x2; dvar boolean x3; dvar float y;\n        minimize 0;\n        subject to { (x1 + x2 + x3 >= 2) => (y >= 5); }\n        """
         lexer = OPLLexer()
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(opl))
         code = GurobiCodeGenerator(ast).generate_code()
-        # Extract the bigM used in antecedent (look for _ant_lb pattern)
-        # We expect bigM much smaller than default 1e6 (should be <=3)
-        # Fallback: parse the line itself
-        bigm_val = None
-        for line in code.splitlines():
-            if "_ant_lb" in line and "implication_flag_c0" in line and "* (1 - implication_flag_c0)" in line:
-                try:
-                    seg = line.split(">= -", 1)[1]
-                    num = seg.split("* (1 - implication_flag_c0)")[0].strip().rstrip(",")
-                    bigm_val = float(num)
-                    break
-                except Exception:
-                    continue
-        self.assertIsNotNone(bigm_val, "Could not extract big-M value (generic big-M path not taken?)")
-        self.assertLessEqual(bigm_val, 2.0, f"Big-M not tightened (found {bigm_val})")
+        # Core assertions: indicator lines present for antecedent; no specialized contrapositive indicator expected here
+        self.assertIn("addGenConstrIndicator", code, "Expected indicator constraints for the antecedent")
+        self.assertIn("implication_flag_c0", code, "Expected named flag variable for implication")
         self.assertNotIn("indicator_contra_ge", code)
+        # Note: The consequent y >= 5 has no static bounds, so its big-M defaults to 1e6. Do not assert tightness here.
 
     # ---------------- New logical construct coverage tests ----------------
     def test_logical_conjunction_disjunction_of_comparisons(self):
