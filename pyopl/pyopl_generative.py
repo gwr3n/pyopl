@@ -144,6 +144,7 @@ def _gather_few_shots(
     try:
         _notify(progress, f"Retrieving few-shot examples (k={k})")
         hits = rag_rank(query=problem_description, models_dir=models_dir, top_k=k)
+        _notify(progress, f"Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
     except Exception as e:
         logger.debug(f"Few-shot retrieval skipped: {e}")
         _notify(progress, "Few-shot retrieval failed; continuing without examples")
