@@ -489,6 +489,9 @@ def _build_generation_prompt(
         "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
         "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
         "Infer from the problem context whether decision variables should be integer, binary, or continuous.\n"
+        "Label all constraints and the objective function meaningfully; "
+        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
+        "match these explanations to the problem description by following the predicaments of literate programming.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
@@ -627,6 +630,9 @@ def _build_revision_prompt_alignment(
         "</assessment>\n"
         "Revise the model and data so that they fully align with the problem description while preserving syntactic validity.\n"
         "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
+        "Label all constraints and the objective function meaningfully; "
+        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
+        "match these explanations to the problem description by following the predicaments of literate programming.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
         "</task>\n\n"
@@ -717,6 +723,9 @@ def _build_revision_prompt_syntax(
         "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
         "Revise the model and data to fix the errors while retaining alignment with the problem description.\n"
         "Change only what is necessary to fix the errors.\n"
+        "Label all constraints and the objective function meaningfully; "
+        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
+        "match these explanations to the problem description by following the predicaments of literate programming.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
         "</task>\n\n"
@@ -784,6 +793,7 @@ def _build_final_assessment_prompt(
         "<task>\n"
         "Assess how well the generated PyOPL model and data align with the problem description.\n"
         "Be critical and specific about modeling choices, feasibility, and consistency.\n"
+        "If you believe the problem description is incomplete or ambiguous, point this out in your assessment.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
@@ -829,6 +839,9 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "Provide critical, specific feedback. If revisions are necessary for correctness,\n"
         "semantics, or consistency with the grammar reference, propose minimal changes.\n"
         "Only change what is necessary.\n"
+        "Label all constraints and the objective function meaningfully; "
+        "thoroughly comment the changes to explain the purpose of variables, parameters, objective, and constraints; "
+        "match these explanations to user's question by following the predicaments of literate programming.\n"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
@@ -837,9 +850,9 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
         "</grammar_reference>\n\n"
         "<inputs>\n"
-        "<prompt>\n"
+        "<question>\n"
         f"{user_prompt_text}\n"
-        "</prompt>\n\n"
+        "</question>\n\n"
         "<model>\n"
         f"{model_code}\n"
         "</model>\n\n"
@@ -1001,7 +1014,7 @@ def generative_solve(
                 break
 
             logger.debug("Checking alignment with original prompt...")
-            _notify(progress, "Checking alignment with original prompt")  # NEW
+            _notify(progress, "Checking alignment with original prompt...")  # NEW
             alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
             alignment_content = _llm_generate_text(
                 provider=provider,
@@ -1037,7 +1050,7 @@ def generative_solve(
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
-            _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising")  # NEW
+            _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising...")  # NEW
             logger.debug("Model or data has syntax errors; revising...")
             user_prompt = _build_revision_prompt_syntax(  # CHANGED
                 prompt, grammar_implementation, model_code, data_code, syntax_errors, few_shots=few_shots  # NEW
