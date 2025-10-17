@@ -1,4 +1,5 @@
 # === Standard library imports ===
+import inspect
 import json
 import logging
 import os
@@ -301,7 +302,7 @@ def _build_create_params(
     params: Dict[str, Any] = {
         "model": model_name,
         "input": input_text,
-        "response_format": {"type": "json_object"},
+        "response_format": {"type": "json"},
     }
     if max_tokens is not None:
         params["max_output_tokens"] = max_tokens
@@ -401,6 +402,21 @@ def _call_openai_with_retry(
     last_err: Optional[Exception] = None
     fallback_keys = ["response_format", "stop", "reasoning", "temperature"]
     params = dict(create_params)  # work on a copy
+
+    # Prune params that the bound create() does not accept to avoid an initial TypeError
+    try:
+        create_callable = client.responses.create
+        sig = inspect.signature(create_callable)
+        # If create() accepts **kwargs (VAR_KEYWORD) then leave params as-is
+        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            supported = set(sig.parameters.keys())
+            supported.discard("self")
+            for k in list(params.keys()):
+                if k not in supported:
+                    params.pop(k, None)
+    except Exception:
+        # If introspection fails, fall back to the existing runtime-stripping logic below
+        pass
 
     def _strip_param_from_error_message(msg: str) -> bool:
         removed = False
