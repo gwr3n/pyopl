@@ -186,6 +186,15 @@ def run_sparse_example(solver):
     run_sparse_example(solver_name)
 
 
+def run_p_dispersion(solver):
+    """Run the P-Dispersion Problem using the selected solver."""
+    model = "opl_models/p-dispersion/p-dispersion.mod"
+    data = "opl_models/p-dispersion/p-dispersion.dat"
+    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    result = solve(model, data, solver=solver_name)
+    print(result)
+
+
 # Enum for examples
 
 
