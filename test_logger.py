@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="Run unittest test suite. Run all discovered tests or a single test by name.")
+    parser = argparse.ArgumentParser(description="Run unittest test suite. Run all discovered tests or a single test by name and output results to a file.")
     # Run a single test (e.g., 'test.test_problems.TestPyOPLProblems.test_complex_workforce_planning')
     parser.add_argument(
         "-t",
