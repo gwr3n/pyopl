@@ -30,6 +30,85 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_p_dispersion(self):
+        """
+        Test the P-Dispersion Problem with both solvers.
+        """
+        model_code = """
+            # P-Dispersion Problem (Kuby, 1987)
+            int N = ...;
+            range Sites = 1..N;
+            int p = ...;
+            float dist[Sites][Sites] = ...;
+
+            # Decision variables
+            dvar boolean y[Sites];
+            dvar float+ z;
+
+            # Upper bound for z (max inter-site distance)
+            param float maxD = ...;
+
+            maximize z;
+
+            subject to {
+            # Select exactly p sites
+            sum(i in Sites) y[i] == p;
+
+            # Bound z to aid linearization
+            z <= maxD;
+
+            # If both i and j are selected, z cannot exceed their separation
+            forall(i in Sites, j in Sites : i < j)
+                (y[i] + y[j] >= 2) => (z <= dist[i][j]);
+            }
+            """
+        data_code = """
+            N = 6;
+            p = 3;
+            maxD = 41;
+
+            dist = [
+            [0, 31, 22, 15, 28, 36],
+            [31, 0, 27, 19, 33, 41],
+            [22, 27, 0, 14, 25, 30],
+            [15, 19, 14, 0, 18, 26],
+            [28, 33, 25, 18, 0, 12],
+            [36, 41, 30, 26, 12, 0]
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("gurobi",): # Disable scipy for this test as it does not support this class of implications
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["gurobi"]["objective_value"],
+            31.0,
+            places=6,
+        )
+
     def test_complex_workforce_planning_2(self):
         """
         Test a complex workforce planning model with both solvers.
