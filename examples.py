@@ -195,6 +195,15 @@ def run_p_dispersion(solver):
     print(result)
 
 
+def run_on_off_outsourcing(solver):
+    """Run the On-Off Outsourcing Problem using the selected solver."""
+    model = "opl_models/on_off_outsourcing/on_off_outsourcing.mod"
+    data = "opl_models/on_off_outsourcing/on_off_outsourcing.dat"
+    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    result = solve(model, data, solver=solver_name)
+    print(result)
+
+
 # Enum for examples
 
 
@@ -221,6 +230,8 @@ class Example(Enum):
     WORKFORCE_PLANNING = auto()  # Workforce Planning Problem
     INVENTORY_ROUTING = auto()  # Inventory Routing Problem
     SPARSE_EXAMPLE = auto()  # Sparse Data Example
+    P_DISPERSION = auto()  # P-Dispersion Problem
+    ON_OFF_OUTSOURCING = auto()  # On-Off Outsourcing Problem
 
 
 # List of available examples and their functions (all now take solver argument)
@@ -245,6 +256,8 @@ EXAMPLES = {
     Example.WORKFORCE_PLANNING: run_workforce_planning,
     Example.INVENTORY_ROUTING: run_inventory_routing,
     Example.SPARSE_EXAMPLE: run_sparse_example,
+    Example.P_DISPERSION: run_p_dispersion,
+    Example.ON_OFF_OUTSOURCING: run_on_off_outsourcing,
 }
 
 
