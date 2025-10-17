@@ -14,8 +14,9 @@ from .semantic_error import SemanticError
 logger = logging.getLogger(__name__)
 
 # Numerical tolerances (single source of truth)
-EPS = 1e-5        # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
-EQ_TOL = 1e-6     # two-sided tolerance for equality reification
+EPS = 1e-5  # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
+EQ_TOL = 1e-6  # two-sided tolerance for equality reification
+
 
 # === TupleSetHelper ===
 class TupleSetHelper:

@@ -82,7 +82,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("gurobi",): # Disable scipy for this test as it does not support this class of implications
+        for solver in ("gurobi",):  # Disable scipy for this test as it does not support this class of implications
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
