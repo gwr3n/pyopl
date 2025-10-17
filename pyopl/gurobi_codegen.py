@@ -13,6 +13,9 @@ from .semantic_error import SemanticError
 # Module-level logger (no handler/formatter setup here)
 logger = logging.getLogger(__name__)
 
+# Numerical tolerances (single source of truth)
+EPS = 1e-5        # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
+EQ_TOL = 1e-6     # two-sided tolerance for equality reification
 
 # === TupleSetHelper ===
 class TupleSetHelper:
@@ -1550,7 +1553,7 @@ class GurobiCodeGenerator:
         M_cons = _estimate_bigM_for_difference(cons_left, cons_right)
         bigM_ant = M_ant if M_ant is not None else bigM_default
         bigM_cons = M_cons if M_cons is not None else bigM_default
-        eps_sep = 1e-6  # epsilon for equality separation on >=/<=
+        eps_sep = EQ_TOL  # epsilon for equality separation on >=/<=
 
         # Try to use indicator constraint if antecedent is a binary variable equality/inequality
         def is_binary_var(node):
@@ -1565,8 +1568,8 @@ class GurobiCodeGenerator:
                 return decl.get("var_type") == "boolean"
             return False
 
-        # Specialized pattern: (linear_expr > c) => (binvar == 1)  ==> indicator (binvar == 0) => linear_expr <= c
-        # Safer and tighter than generic big-M encoding; preserves ability for binvar=1 with expr=0.
+        # Specialized pattern A: (linear_expr > c) => (binvar == 1)
+        # Contrapositive: (binvar == 0) => linear_expr <= c   [no epsilon]
         if (
             cons_op == "=="
             and is_binary_var(cons_left)
@@ -1577,16 +1580,14 @@ class GurobiCodeGenerator:
             and ant_op == ">"
             and ant_right.get("type") == "number"
         ):
-            # Contrapositive: (binvar == 0) => linear_expr <= c
-            c_val_expr = ant_right_expr  # already rendered
+            # RHS is a numeric literal: use it directly
             self._add_code_line(
-                f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {c_val_expr}, name='{constr_name_prefix}_indicator_contra')"
+                f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name='{constr_name_prefix}_indicator_contra')"
             )
             return
 
-        # Specialized pattern: (linear_expr >= c) => (binvar == 1)
-        # Contrapositive logical form: (binvar == 0) => linear_expr <= c - eps (to model strict negation of >=)
-        # If expression/constant domain is integer and c is integer, could tighten to c-1; for now use small epsilon.
+        # Specialized pattern B: (linear_expr >= c) => (binvar == 1)
+        # Contrapositive: (binvar == 0) => linear_expr <= c - EPS
         if (
             cons_op == "=="
             and is_binary_var(cons_left)
@@ -1597,8 +1598,8 @@ class GurobiCodeGenerator:
             and ant_op == ">="
             and ant_right.get("type") == "number"
         ):
-            epsilon_small = 1e-6
-            # Use numeric value if RHS is number literal
+            epsilon_small = EPS
+            # Prefer numeric if possible, otherwise subtract symbolically
             try:
                 c_numeric = float(ant_right.get("value", 0))
                 adjusted = c_numeric - epsilon_small
@@ -1606,7 +1607,6 @@ class GurobiCodeGenerator:
                     f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {adjusted}, name='{constr_name_prefix}_indicator_contra_ge')"
                 )
             except Exception:
-                # Fallback: emit RHS expression minus epsilon symbolically
                 self._add_code_line(
                     f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= ({ant_right_expr} - {epsilon_small}), name='{constr_name_prefix}_indicator_contra_ge')"
                 )
@@ -1655,18 +1655,19 @@ class GurobiCodeGenerator:
         else:
             self._add_code_line(f"{flag_var} = model.addVar(vtype=GRB.BINARY, name='{flag_var}')  # 1 if antecedent true")
 
-        eps = 1e-5
+        eps = EPS
         diff_expr = f"({ant_left_expr} - {ant_right_expr})"
         if ant_op == ">=":
-            # flag=1 => diff >= 0 ; flag=0 => diff <= -eps
+            # Robust split with bias against feasibility tolerance:
+            # flag=1 => diff >= -eps ; flag=0 => diff <= -2*eps
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= 0.0, name='{constr_name_prefix}_ant_ge_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= -{eps}, name='{constr_name_prefix}_ant_ge_ind1')"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{eps}, name='{constr_name_prefix}_ant_ge_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{2*eps}, name='{constr_name_prefix}_ant_ge_ind0')"
             )
         elif ant_op == ">":
-            # flag=1 => diff >= eps ; flag=0 => diff <= 0
+            # flag=1 => diff >= eps ; flag=0 => diff <= 0.0
             self._add_code_line(
                 f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= {eps}, name='{constr_name_prefix}_ant_gt_ind1')"
             )
@@ -1674,15 +1675,16 @@ class GurobiCodeGenerator:
                 f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= 0.0, name='{constr_name_prefix}_ant_gt_ind0')"
             )
         elif ant_op == "<=":
-            # flag=1 => diff <= 0 ; flag=0 => diff >= eps
+            # Robust split with bias against feasibility tolerance:
+            # flag=1 => diff <= +eps ; flag=0 => diff >= +2*eps
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= 0.0, name='{constr_name_prefix}_ant_le_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= {eps}, name='{constr_name_prefix}_ant_le_ind1')"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {eps}, name='{constr_name_prefix}_ant_le_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {2*eps}, name='{constr_name_prefix}_ant_le_ind0')"
             )
         elif ant_op == "<":
-            # flag=1 => diff <= -eps ; flag=0 => diff >= 0
+            # flag=1 => diff <= -eps ; flag=0 => diff >= 0.0
             self._add_code_line(
                 f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= -{eps}, name='{constr_name_prefix}_ant_lt_ind1')"
             )
@@ -2704,25 +2706,30 @@ class GurobiCodeGenerator:
 
         bigM = _estimate_M(left_node, right_node)
         lines = [f"# Reify ({left_expr} {op} {right_expr}) -> {aux_sym} with M={bigM}"]
+        eps = EPS
+        eq_tol = EQ_TOL
         if op == ">=":
-            # Equivalence: z=1 <=> diff >= eps; z=0 => diff <= -eps
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 1e-6 - {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -1e-6 + {bigM} * {aux_sym})")
-        elif op == ">":
+            # z=1 => diff >= 0 ; z=0 => diff <= -eps
             lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= {bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * {aux_sym})")
+        elif op == ">":
+            # z=1 => diff >= eps ; z=0 => diff <= 0
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * {aux_sym})")
         elif op == "<=":
-            # Equivalence: z=1 <=> diff <= -eps; z=0 => diff >= eps
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -1e-6 + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 1e-6 - {bigM} * {aux_sym})")
-        elif op == "<":
+            # z=1 => diff <= 0 ; z=0 => diff >= eps
             lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= -{bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * {aux_sym})")
+        elif op == "<":
+            # z=1 => diff <= -eps ; z=0 => diff >= 0
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * {aux_sym})")
         elif op == "==":
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({right_expr} - {left_expr} <= {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= -{bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({right_expr} - {left_expr} >= -{bigM} * (1 - {aux_sym}))")
+            # z=1 => |diff| <= eq_tol; z=0 => relaxed by M
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({right_expr} - {left_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({right_expr} - {left_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}))")
         else:
             lines.append(f"model.addConstr({aux_sym} == 0)")
         return "\n".join(lines)
