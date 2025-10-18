@@ -2520,6 +2520,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.var_index_tuple_map = {}
         self.var_bounds = []
         self.var_integrality = []
+        self.obj_const_offset = 0.0
 
     # Class-level type annotations for instance variables
     _comparison_truth_cache: dict[Any, Any]
@@ -2689,6 +2690,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("objective_value = -objective_value")
         self.indent_level -= 1
+        self._add_code_line("objective_value += objective_offset")
         # Print objective value (parity with Gurobi output)
         self._add_code_line("print(f'Objective value: {objective_value}')")
         self._add_code_line(f"{self.results_varname}['solution'] = solution")
@@ -3397,6 +3399,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         obj = self.ast["objective"]
         sense = obj["type"]
         expr = obj["expression"]
+        # Reset objective constant offset
+        self.obj_const_offset = 0.0
         # Delegate to helpers for sum and binop
         self._accumulate_objective(expr, c)
         # Flip sign for maximization
@@ -3404,25 +3408,29 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             c = [-v for v in c]
         self.c = c
         self._add_code_line(f"c = {c}")
+        # NEW: emit the constant objective offset for runtime reporting
+        self._add_code_line(f"objective_offset = {float(self.obj_const_offset)}")
 
     def _accumulate_objective(self, expr, c):
         """
         Accumulate coefficients for the objective vector c, handling sum and binop recursively.
-        Delegates to _accumulate_objective_sum and _accumulate_objective_binop for those cases.
-        Fallback: evaluate expression directly and update vector.
+        Also accumulates the constant offset into self.obj_const_offset.
         """
         if isinstance(expr, dict) and expr.get("type") == "sum":
-            self._accumulate_objective_sum(expr, c)
+            self._accumulate_objective_sum(expr, c, sign=1.0)
         elif isinstance(expr, dict) and expr.get("type") == "binop":
             self._accumulate_objective_binop(expr, c)
         else:
             coef_dict, const = self._eval_expr(expr)
             self._update_vector_from_coef_dict(coef_dict, c, "+")
+            if isinstance(const, (int, float)):
+                self.obj_const_offset += float(const)
 
-    def _accumulate_objective_sum(self, expr, c):
+    def _accumulate_objective_sum(self, expr, c, sign: float = 1.0):
         """
         Helper to accumulate coefficients for the objective vector c for a sum expression.
         Handles iterator unrolling with dependent bounds, index constraints, and tuple-indexed variables.
+        Also accumulates numeric constant terms into self.obj_const_offset, scaled by 'sign'.
         """
         iterators = expr["iterators"]
         # Symbolic comment emission (unchanged)
@@ -3451,7 +3459,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if not bool(cond_val):
                         continue
                 except Exception:
-                    # conservative: include if cannot evaluate
                     pass
             coef_dict, const = self._eval_expr(expr["expression"], env=env2)
             if coef_dict:
@@ -3463,56 +3470,59 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         except Exception:
                             idx = None
                     if idx is not None:
-                        c[idx] += coef
+                        c[idx] += sign * coef
+            if isinstance(const, (int, float)):
+                self.obj_const_offset += sign * float(const)
 
     def _accumulate_objective_binop(self, expr, c):
         """
         Helper to accumulate coefficients for the objective vector c for a binop expression.
-        Handles sum/binop combinations and applies the operator elementwise.
+        Handles sum/binop combinations and applies the operator elementwise, including constants.
         """
-        left_type = expr["left"].get("type") if isinstance(expr["left"], dict) else None
-        right_type = expr["right"].get("type") if isinstance(expr["right"], dict) else None
+        left = expr["left"]
+        right = expr["right"]
+        left_type = left.get("type") if isinstance(left, dict) else None
+        right_type = right.get("type") if isinstance(right, dict) else None
+
         if left_type == "sum" and right_type == "sum":
-            # Accumulate left sum, then right sum, with op
-            self._accumulate_objective_sum(expr["left"], c)
-            orig_c = c[:]
-            temp_c = [0.0] * len(c)
-            self._accumulate_objective_sum(expr["right"], temp_c)
             if expr["op"] == "+":
-                for i in range(len(c)):
-                    c[i] = orig_c[i] + temp_c[i]
+                self._accumulate_objective_sum(left, c, sign=1.0)
+                self._accumulate_objective_sum(right, c, sign=1.0)
             elif expr["op"] == "-":
-                for i in range(len(c)):
-                    c[i] = orig_c[i] - temp_c[i]
+                self._accumulate_objective_sum(left, c, sign=1.0)
+                self._accumulate_objective_sum(right, c, sign=-1.0)
             else:
                 raise self._unsupported_operator_error("objective binop", expr["op"])
-        elif left_type == "sum":
-            self._accumulate_objective_sum(expr["left"], c)
-            coef_dict, const = self._eval_expr(expr["right"])
+            return
+
+        if left_type == "sum":
+            self._accumulate_objective_sum(left, c, sign=1.0)
+            coef_dict, const = self._eval_expr(right)
             if expr["op"] == "+":
                 self._update_vector_from_coef_dict(coef_dict, c, op="+")
+                if isinstance(const, (int, float)):
+                    self.obj_const_offset += float(const)
             elif expr["op"] == "-":
                 self._update_vector_from_coef_dict(coef_dict, c, op="-")
+                if isinstance(const, (int, float)):
+                    self.obj_const_offset -= float(const)
             else:
                 raise self._unsupported_operator_error("objective binop", expr["op"])
-        elif right_type == "sum":
-            # Accumulate right sum into temp then combine with left
-            temp_c = [0.0] * len(c)
-            self._accumulate_objective_sum(expr["right"], temp_c)
-            coef_dict, const = self._eval_expr(expr["left"])
-            if expr["op"] == "+":
-                self._update_vector_from_coef_dict(coef_dict, c, op="+")
-                for i in range(len(c)):
-                    c[i] += temp_c[i]
-            elif expr["op"] == "-":
-                self._update_vector_from_coef_dict(coef_dict, c, op="+")
-                for i in range(len(c)):
-                    c[i] -= temp_c[i]
-            else:
-                raise self._unsupported_operator_error("objective binop", expr["op"])
-        else:
-            coef_dict, const = self._eval_expr(expr)
-            self._update_vector_from_coef_dict(coef_dict, c)
+            return
+
+        if right_type == "sum":
+            self._accumulate_objective_sum(right, c, sign=(1.0 if expr["op"] == "+" else -1.0))
+            coef_dict, const = self._eval_expr(left)
+            self._update_vector_from_coef_dict(coef_dict, c, op="+")
+            if isinstance(const, (int, float)):
+                self.obj_const_offset += float(const)
+            return
+
+        # Neither side is a sum
+        coef_dict, const = self._eval_expr(expr)
+        self._update_vector_from_coef_dict(coef_dict, c)
+        if isinstance(const, (int, float)):
+            self.obj_const_offset += float(const)
 
     def _multi_indexed_var_name(self, expr, env, eval_index_expr=None):
         if expr["type"] != "indexed_name":
