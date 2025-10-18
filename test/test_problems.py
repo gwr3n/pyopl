@@ -109,6 +109,247 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    def test_complex_workforce_planning_3(self):
+        """
+        Test a complex workforce planning model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            // TRAINING AND PRODUCTION PLANNING (PyOPL)
+            // Minimal revision: removed a single redundant weekly forbid (see comment below).
+            // The rest of the model is unchanged; extensive comments and meaningful labels are kept
+            // so the model acts as literate documentation of the decisions, parameters, objective,
+            // and constraints.
+
+            // TIME INDEX
+            range Weeks = 1..8;
+
+            // PARAMETERS (problem data)
+            param int originalSkilled = 50;            // initial number of skilled workers (fixed)
+            param float hours_normal = 40;             // normal hours per week per worker
+            param float overtime_extra_hours = 20;     // extra hours when working 60h/week (60-40)
+            param float rateI = 10;                    // kg per hour for product I
+            param float rateII = 6;                    // kg per hour for product II
+            param float wage_orig = 360;               // weekly wage of an original skilled worker
+            param float wage_new = 240;                // weekly wage of a newly trained worker (after training)
+            param float wage_trainee = 120;            // weekly wage of a trainee during the 2-week training
+            param float wage_overtime = 540;           // weekly wage for a worker on overtime (60 h total)
+            param float penI = 0.5;                    // penalty per kg per week delayed for product I
+            param float penII = 0.6;                   // penalty per kg per week delayed for product II
+
+            // Weekly demand (provided in the .dat file)
+            param int demandI[Weeks] = ...;
+            param int demandII[Weeks] = ...;
+
+            // DECISION VARIABLES
+            // startTrain[w]: number of new trainees who start training in week w
+            // (a start in week s implies training during weeks s and s+1)
+            dvar int+ startTrain[Weeks];
+
+            // trainersCommitOrigStart[s] / trainersCommitNewStart[s]: number of trainers (origin) who
+            // begin a 2-week trainer commitment in week s. These trainers are unavailable for production
+            // during their 2-week commitment (weeks s and s+1).
+            dvar int+ trainersCommitOrigStart[Weeks];
+            dvar int+ trainersCommitNewStart[Weeks];
+
+            // Overtime workers by origin (orig/new)
+            // Note: the conservative variant below disallows overtime for newly trained workers.
+            dvar int+ overtimeOrig[Weeks];
+            dvar int+ overtimeNew[Weeks];
+
+            // Production quantities (kg) for each product in each week
+            dvar float+ producedI[Weeks];
+            dvar float+ producedII[Weeks];
+
+            // Backlog (unfulfilled demand) at end of each week for each product
+            // Backlogs are nonnegative; each week's backlog is charged the per-week per-kg penalty
+            dvar float+ backI[Weeks];
+            dvar float+ backII[Weeks];
+
+            // DERIVED QUANTITIES (decision-expressions) for clarity and constraints
+            // trainersCommitStart[w]: total trainers starting commitment in week w
+            dexpr int trainersCommitStart[w in Weeks] = trainersCommitOrigStart[w] + trainersCommitNewStart[w];
+            // trainersActive[w]: trainers active in week w are those who started in w or in w-1 (2-week commitment)
+            dexpr int trainersActive[w in Weeks] = trainersCommitStart[w] + ( (w>1) ? trainersCommitStart[w-1] : 0 );
+            // trainers active by origin
+            dexpr int trainersActiveOrig[w in Weeks] = trainersCommitOrigStart[w] + ( (w>1) ? trainersCommitOrigStart[w-1] : 0 );
+            dexpr int trainersActiveNew[w in Weeks] = trainersCommitNewStart[w] + ( (w>1) ? trainersCommitNewStart[w-1] : 0 );
+
+            // traineesInTraining[w]: trainees in training during week w (start in s are in s and s+1)
+            dexpr int traineesInTraining[w in Weeks] = startTrain[w] + ( (w>1) ? startTrain[w-1] : 0 );
+
+            // trainedSkilled[w]: number of new workers that have completed training and are available as skilled in week w
+            // a trainee who started at s is available in weeks s+2 and onward
+            dexpr int trainedSkilled[w in Weeks] = sum(s in Weeks : s <= w-2) startTrain[s];
+
+            // overtimeTotal[w]: total overtime workers active in week w
+            dexpr int overtimeTotal[w in Weeks] = overtimeOrig[w] + overtimeNew[w];
+
+            // OBJECTIVE: minimize total cost
+            // Break-down of objective terms (per week):
+            //  - originalSkilled * wage_orig: base weekly wages paid to the original 50 skilled workers
+            //  - trainedSkilled[w] * wage_new: weekly wages for newly-trained workers once they are available
+            //  - overtimeOrig * (wage_overtime - wage_orig) : overtime premium for original workers who work 60h
+            //  - overtimeNew  * (wage_overtime - wage_new)  : overtime premium for new skilled (if allowed)
+            //  - traineesInTraining[w] * wage_trainee: wages paid to trainees during their 2-week training
+            //  - backI[w] * penI + backII[w] * penII: backlog delay penalties charged each week per kg delayed
+            minimize total_cost:
+            sum(w in Weeks)
+                (
+                originalSkilled * wage_orig
+                + trainedSkilled[w] * wage_new
+                + overtimeOrig[w] * (wage_overtime - wage_orig)
+                + overtimeNew[w]  * (wage_overtime - wage_new)
+                + traineesInTraining[w] * wage_trainee
+                + backI[w] * penI + backII[w] * penII
+                );
+
+            subject to {
+            // ---------------------------------------------------------------------------
+            // TRAINING COHORT CAPACITY
+            // Each trainer who begins a 2-week commitment in week s can train up to 3 trainees
+            // (trainersCommit*3 >= startTrain ensures capacity). We only enforce the start constraint
+            // for s=1..7 because a start in week 8 would spill beyond the horizon.
+            // ---------------------------------------------------------------------------
+            forall(s in 1..7) training_capacity:
+                (trainersCommitOrigStart[s] + trainersCommitNewStart[s]) * 3 >= startTrain[s];
+
+            // Forbid starting cohorts in week 8 (they would spill beyond horizon)
+            forbid_week8_starts: startTrain[8] == 0;
+            // Keep the forbid for original trainers in week 8 (a trainer starting in week 8 would be active in week 9)
+            forbid_week8_trainer_orig: trainersCommitOrigStart[8] == 0;
+            // NOTE: removed forbid_week8_trainer_new (trainersCommitNewStart[8] == 0) because the
+            // global constraint no_new_trainers (below) already forces trainersCommitNewStart[s] == 0
+            // for all s. Removing the single-week ban avoids redundancy while keeping semantics identical.
+
+            // New trainers who begin a commitment in week s must already be trained/available in week s
+            // (they cannot be trainees in the same cohort they train)
+            forall(s in Weeks) new_trainer_availability:
+                trainersCommitNewStart[s] <= trainedSkilled[s];
+
+            // Active trainers by origin cannot exceed available workers of that origin in that week
+            forall(w in Weeks) trainer_availability_orig:
+                trainersActiveOrig[w] <= originalSkilled;
+            forall(w in Weeks) trainer_availability_new:
+                trainersActiveNew[w] <= trainedSkilled[w];
+
+            // ---------------------------------------------------------------------------
+            // OVERTIME, AVAILABILITY, AND MUTUAL EXCLUSION
+            // ---------------------------------------------------------------------------
+            // Overtime workers cannot be trainers at the same time (for each origin):
+            forall(w in Weeks) overtime_bound_orig:
+                overtimeOrig[w] <= originalSkilled - trainersActiveOrig[w];
+            forall(w in Weeks) overtime_bound_new:
+                overtimeNew[w] <= trainedSkilled[w] - trainersActiveNew[w];
+
+            // Total trainers active plus overtime workers cannot exceed total skilled workforce available that week
+            forall(w in Weeks) availability:
+                trainersActive[w] + overtimeTotal[w] <= originalSkilled + trainedSkilled[w];
+
+            // ---------------------------------------------------------------------------
+            // MINIMAL INTERPRETATION CHANGE (TEXTBOOK / CONSERVATIVE):
+            // Disallow newly trained workers from being scheduled for overtime.
+            // This enforces that only the ORIGINAL skilled workforce may be used for overtime
+            // during the transition period. Remove this block if your interpretation allows
+            // newly trained workers to take overtime immediately.
+            // ---------------------------------------------------------------------------
+            forall(w in Weeks) no_overtime_new:
+                overtimeNew[w] == 0;
+
+            // ---------------------------------------------------------------------------
+            // NEW MINIMAL CHANGE (to match the alternative textbook assumption):
+            // Forbid newly trained workers from serving as TRAINERS (conservative interpretation).
+            // If the target solution assumed that only the ORIGINAL 50 can act as trainers,
+            // enabling this constraint makes model semantics match that assumption.
+            // Remove or comment out this block if newly trained workers should be allowed to train others.
+            // ---------------------------------------------------------------------------
+            forall(s in Weeks) no_new_trainers:
+                trainersCommitNewStart[s] == 0;
+
+            // ---------------------------------------------------------------------------
+            // PRODUCTION CAPACITY (HOURS -> KG)
+            // Producers are skilled workers not assigned as trainers. Each such worker provides
+            // hours_normal hours; overtime workers add overtime_extra_hours.
+            // Convert production (kg) into required hours by dividing by per-hour rates and
+            // ensure capacity suffices.
+            // ---------------------------------------------------------------------------
+            forall(w in Weeks) production_capacity:
+                ( producedI[w] / rateI + producedII[w] / rateII )
+                <= ( (originalSkilled + trainedSkilled[w] - trainersActive[w]) * hours_normal ) + overtimeTotal[w] * overtime_extra_hours;
+
+            // ---------------------------------------------------------------------------
+            // BACKLOG (DELAY) BALANCE
+            // backlog at end of week w = previous backlog + demand - production
+            // (nonnegative by domain of backI/backII). This enforces that production cannot
+            // exceed available demand + previous backlog (because back variables are >= 0).
+            // ---------------------------------------------------------------------------
+            forall(w in Weeks) backlog_I:
+                backI[w] == ( (w>1) ? backI[w-1] : 0 ) + demandI[w] - producedI[w];
+            forall(w in Weeks) backlog_II:
+                backII[w] == ( (w>1) ? backII[w-1] : 0 ) + demandII[w] - producedII[w];
+
+            // ---------------------------------------------------------------------------
+            // TRAINING TARGET: by end of week 8 at least 50 new workers must have completed training
+            // A trainee who starts in week s completes and becomes available in week s+2.
+            // Therefore, to be available by the end of week 8, starts must occur no later than week 6.
+            // ---------------------------------------------------------------------------
+            training_goal:
+                sum(s in 1..6) startTrain[s] >= 50;
+
+            // ---------------------------------------------------------------------------
+            // SIMPLE BOUNDS & CLARITY CONSTRAINTS (domains already enforced by dvar types)
+            // ---------------------------------------------------------------------------
+            forall(w in Weeks) nonneg_prod: producedI[w] >= 0;
+            forall(w in Weeks) nonneg_prod2: producedII[w] >= 0;
+            forall(w in Weeks) nonneg_back: backI[w] >= 0;
+            forall(w in Weeks) nonneg_back2: backII[w] >= 0;
+            }
+            """
+        data_code = """
+            // Workforce Planning DSM - data file (example)
+            demandI = [ 10000, 10000, 12000, 12000, 16000, 16000, 20000, 20000 ];
+            demandII = [ 6000, 7200, 8400, 10800, 10800, 12000, 12000, 12000 ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
     def test_complex_workforce_planning_2(self):
         """
         Test a complex workforce planning model with both solvers.
