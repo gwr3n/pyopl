@@ -1164,7 +1164,7 @@ class OPLIDE(tk.Tk):
             return
 
         question = self._ask_multiline(
-            "GenAI: Ask for Feedback",
+            "GenAI: Ask...",
             "Enter your question about the current model/data (e.g., improvements, changes):",
             "",
         )
