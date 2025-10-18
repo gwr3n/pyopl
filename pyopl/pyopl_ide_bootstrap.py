@@ -10,7 +10,7 @@ import tkinter as tk
 import webbrowser  # FIX: needed for Help menu links
 from pathlib import Path  # NEW
 from tkinter import filedialog, messagebox, scrolledtext, ttk  # NEW: dialogs for GenAI prompts
-from typing import Any, Callable, Optional  # add typing for optional Pillow modules
+from typing import Any, Callable, Optional, Protocol  # add typing for optional Pillow modules
 
 import ttkbootstrap as tb  # NEW: use ttkbootstrap flatly light theme
 from platformdirs import user_config_dir  # NEW
@@ -80,6 +80,10 @@ TOKEN_COLORS = {
 }
 
 
+class _CodeGenerator(Protocol):
+    def generate_code(self) -> str: ...
+
+
 class OPLIDE(tk.Tk):
     """
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
@@ -89,8 +93,8 @@ class OPLIDE(tk.Tk):
         super().__init__()
         self.title("Rhetor")
         self.geometry("1000x700")
-        self.model_file = None
-        self.data_file = None
+        self.model_file: Optional[str] = None
+        self.data_file: Optional[str] = None
         self.current_font_size = 12  # Default font size
         self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"  # Use Courier for all platforms
         self.solver = tk.StringVar(value="gurobi")  # Solver selection: 'gurobi' or 'scipy'
@@ -138,10 +142,6 @@ class OPLIDE(tk.Tk):
                     self.genai_selection_var.set(f"{p_dict}|{m_dict}")
         except Exception:
             pass
-        # NEW: verbose LLM logs setting (defaults True)
-        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))  # NEW
-        # NEW: track font size selection for menu highlighting
-        self.font_size_var = tk.IntVar(value=self.current_font_size)
 
         # --- General Styling (ttkbootstrap 'flatly' light theme) ---
         self.style = tb.Style(theme="flatly")
@@ -180,14 +180,14 @@ class OPLIDE(tk.Tk):
                     # For Python 3.9+, use files().joinpath()
                     from importlib.resources import files
 
-                    icon_path = files("pyopl.icon").joinpath("gear.png")
+                    icon_path = files("pyopl.icon").joinpath("mindset.png")
                     with icon_path.open("rb") as icon_file:
                         img = PILImage.open(icon_file)
                         photo_image = PILImageTk.PhotoImage(img)
                         self.iconphoto(False, photo_image)
                 except Exception:
                     # Fallback for Python 3.7/3.8
-                    with pkg_resources.path("pyopl.icon", "gear.png") as icon_path:
+                    with pkg_resources.path("pyopl.icon", "mindset.png") as icon_path:
                         img = PILImage.open(icon_path)
                         photo_image = PILImageTk.PhotoImage(img)
                         self.iconphoto(False, photo_image)
@@ -935,6 +935,7 @@ class OPLIDE(tk.Tk):
 
             # Choose generator by solver selection
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
+            generator: _CodeGenerator
             if solver_choice == "gurobi":
                 generator = GurobiCodeGenerator(ast, data_dict)
             else:
