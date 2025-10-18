@@ -1429,7 +1429,7 @@ class OPLIDE(tk.Tk):
     def show_about(self) -> None:
         messagebox.showinfo(
             "About Rhetor",
-            "Rhetor: Reasoning Engine\n - \na Tool for High-level Operations Research\n - \n© 2025 Roberto Rossi",
+            "Rhetor\n\n© 2025 Roberto Rossi",
         )
 
     # NEW: async discovery wrapper to avoid blocking UI at startup and on refresh
