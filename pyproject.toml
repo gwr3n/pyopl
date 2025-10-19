@@ -1,5 +1,5 @@
 [project]
-name = "pyopl-rhetor"
+name = "rhetor"
 version = "1.0.0"
 description = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
 authors = [
