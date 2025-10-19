@@ -1007,21 +1007,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     ) -> tuple[dict, bool]:
         """
         Helper to build env2 and check index_constraint for sum/binop-sum expansion.
-        Returns (env2, include:bool)
+        Returns (env2, should_include:bool)
         """
         env2 = dict(env or {})
         for v, val in zip(loop_vars, idx_tuple):
             if v in tuple_set_names and not isinstance(val, tuple):
                 val = tuple(val)
             env2[v] = val
-        include = True
+        should_include = True
         if index_constraint is not None:
             try:
                 _, cond_val = self._eval_expr(index_constraint, env2)
-                include = bool(cond_val)
+                should_include = bool(cond_val)
             except Exception:
-                include = True
-        return env2, include
+                should_include = True
+        return env2, should_include
 
     # ---------------- Boolean composition helpers (AND/OR of linear comparisons) ----------------
     def _is_linear_comparison(self, node: Dict[str, Any]) -> bool:
@@ -5737,14 +5737,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     for v, val in zip(loop_vars, idx_tuple):
                                         env2[v] = val
                                     idx_constr = sum_side.get("index_constraint")
-                                    include = True
+                                    should_include = True
                                     if idx_constr is not None:
                                         try:
                                             _, cval = self._eval_expr(idx_constr, env2)
-                                            include = bool(cval)
+                                            should_include = bool(cval)
                                         except Exception:
-                                            include = True
-                                    if not include:
+                                            should_include = True
+                                    if not should_include:
                                         continue
                                     comp_inst = {
                                         "type": "binop",
@@ -7275,14 +7275,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         # Iterate dynamically honoring dependent bounds
         for env2, _idx_tuple in self._iterate_iterators_dynamic(iterators, env or {}):
-            include = True
+            should_include = True
             if index_constraint is not None:
                 try:
                     _, cond_val = self._eval_expr(index_constraint, env2)
-                    include = bool(cond_val)
+                    should_include = bool(cond_val)
                 except Exception:
-                    include = True
-            if not include:
+                    should_include = True
+            if not should_include:
                 continue
             sum_expr = expr["expression"]
             # If the inner expression is a comparison, defer to constraints builder
