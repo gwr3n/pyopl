@@ -3,7 +3,7 @@
 Core package badges:
 
 ![Codecov (with branch)](https://img.shields.io/codecov/c/gh/gwr3n/pyopl/main)
- ![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Fpython-package.yml) ![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Flint-type.yml?branch=main&label=lint%20%2B%20type-check) [![PyPI](https://img.shields.io/pypi/v/pyopl-rhetor)](https://pypi.org/project/pyopl-rhetor/) [![Python versions](https://img.shields.io/pypi/pyversions/pyopl-rhetor)](https://pypi.org/project/pyopl-rhetor/) [![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE) [![Downloads](https://static.pepy.tech/badge/pyopl)](https://pepy.tech/project/pyopl) [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) [![Wheel](https://img.shields.io/pypi/wheel/pyopl)](https://pypi.org/project/pyopl/)
+ ![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Fpython-package.yml) ![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Flint-type.yml?branch=main&label=lint%20%2B%20type-check) [![PyPI](https://img.shields.io/pypi/v/pyopl)](https://pypi.org/project/pyopl/) [![Python versions](https://img.shields.io/pypi/pyversions/pyopl)](https://pypi.org/project/pyopl/) [![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE) [![Downloads](https://static.pepy.tech/badge/pyopl)](https://pepy.tech/project/pyopl) [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) [![Wheel](https://img.shields.io/pypi/wheel/pyopl)](https://pypi.org/project/pyopl/)
 
 Quality and tooling:
 
@@ -26,7 +26,7 @@ Docs:
 Install via pip (recommended):
 
 ```
-pip install pyopl-rhetor
+pip install rhetor
 ```
 
 Or clone the repository and install locally:
