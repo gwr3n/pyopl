@@ -72,11 +72,11 @@ def _get_direction_from_model(model_file: str):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
-    parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR.")
+    parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR, ComplexOR.")
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
-    parser.add_argument("--gpt", default="gpt-5-mini", help="GPT model to use for generation.")
+    parser.add_argument("--gpt", default="gpt-4.1", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="bnf", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
@@ -98,10 +98,10 @@ def main() -> int:
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {[g.name.lower() for g in Grammar]}")
 
     # Load dataset
-    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR"]:
+    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR"]:
         dataset_path = os.path.join("gen_ai", "datasets", args.dataset, f"{args.dataset}.json")
     else:
-        raise ValueError(f"Unknown dataset: {args.dataset}. Supported: NL4OPT, NLP4LP, IndustryOR.")
+        raise ValueError(f"Unknown dataset: {args.dataset}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR.")
 
     with open(dataset_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
