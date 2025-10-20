@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR.")
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
+    parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
     parser.add_argument("--gpt", default="gpt-5-mini", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="bnf", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
@@ -168,6 +169,7 @@ def main() -> int:
                     prompt,
                     model_path,
                     data_path,
+                    llm_provider=args.provider,
                     model_name=args.gpt,
                     mode=mode,
                     iterations=args.iterations,
@@ -259,6 +261,7 @@ def main() -> int:
             prompt,
             model_path,
             data_path,
+            llm_provider=args.provider,
             model_name=args.gpt,
             mode=mode,
             iterations=args.iterations,
