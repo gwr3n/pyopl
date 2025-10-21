@@ -87,7 +87,6 @@ Below, we provide model and data file for our knapsack example.
 
 Example contents for `knapsack.mod`:
 ```opl
-dvar boolean x[1..n];
 // knapsack.mod
 int+ n = ...; // non-negative integer parameter
 float+ c = ...; // non-negative float parameter
