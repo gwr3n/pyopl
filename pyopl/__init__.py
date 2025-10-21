@@ -5,6 +5,8 @@ import os
 import sys
 
 from .pyopl_core import solve
+from .pyopl_generative import generative_solve
+from .pyopl_generative import generative_feedback
 
 __version__ = "0.6.0"
 __author__ = "Roberto Rossi"
@@ -16,4 +18,4 @@ __url__ = "https://github.com/gwr3n/pyopl"
 icon_dir = os.path.join(os.path.dirname(__file__), "icon")
 if os.path.isdir(icon_dir) and icon_dir not in sys.path:
     sys.path.append(icon_dir)
-__all__ = ["solve"]
+__all__ = ["solve", "generative_solve", "generative_feedback"]
