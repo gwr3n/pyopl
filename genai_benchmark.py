@@ -71,8 +71,22 @@ def _get_direction_from_model(model_file: str):
 
 
 def main() -> int:
+    import logging
+
+    pyg_logger = logging.getLogger("pyopl.pyopl_generative")
+    pyg_logger.setLevel(logging.DEBUG)
+    # Add a dedicated handler (stdout) with formatting
+    if not any(isinstance(h, logging.StreamHandler) for h in pyg_logger.handlers):
+        h = logging.StreamHandler(sys.stdout)
+        h.setLevel(logging.DEBUG)
+        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        pyg_logger.addHandler(h)
+    pyg_logger.propagate = False  # do not bubble to root
+
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
-    parser.add_argument("--dataset", default="NL4OPT", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR, ComplexOR.")
+    parser.add_argument(
+        "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR, ComplexOR."
+    )
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
@@ -179,6 +193,7 @@ def main() -> int:
                 entry["generation_assessment"] = result.get("assessment")
                 entry["generation_iterations"] = result.get("iterations")
                 entry["syntax_errors"] = result.get("syntax_errors")
+                entry["cost"] = result.get("cost")
             except Exception as e:
                 entry.update({"error": f"generative_solve failed: {e}"})
                 results.append(entry)

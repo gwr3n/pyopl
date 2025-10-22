@@ -12,9 +12,15 @@ from typing import (
     Callable,  # NEW
     Dict,
     List,  # NEW
+    Literal,  # NEW
     Optional,
     Tuple,  # NEW
+    Union,  # NEW
+    overload,  # NEW
 )
+
+from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
+from .genai_pricing import estimate_costs as _estimate_costs  # NEW
 
 # === Local imports ===
 from .pyopl_core import OPLCompiler, SemanticError
@@ -274,9 +280,30 @@ def _google_client():
     return genai
 
 
-def _ollama_generate_text(model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS) -> str:
+@overload
+def _ollama_generate_text(
+    model_name: str,
+    prompt: str,
+    num_predict: Optional[int] = ...,
+    return_usage: Literal[True] = ...,
+) -> Tuple[str, Dict[str, int]]: ...
+
+
+@overload
+def _ollama_generate_text(
+    model_name: str,
+    prompt: str,
+    num_predict: Optional[int] = ...,
+    return_usage: Literal[False] = ...,
+) -> str: ...
+
+
+def _ollama_generate_text(
+    model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
+) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
     """
     Call Ollama's Python client and return the response text.
+    If return_usage=True, also return a usage dict with prompt/completion token counts when available.
     """
     try:
         from ollama import generate as ollama_generate
@@ -287,9 +314,18 @@ def _ollama_generate_text(model_name: str, prompt: str, num_predict: Optional[in
         options["num_predict"] = num_predict
     resp = ollama_generate(model=model_name, prompt=prompt, options=options)
     try:
-        return resp["response"] or ""
+        text = resp.get("response", "") or ""
     except (TypeError, KeyError) as e:
         raise RuntimeError(f"Failed to retrieve response text from Ollama response: {e}")
+    if not return_usage:
+        return text
+    prompt_tokens = resp.get("prompt_eval_count")
+    completion_tokens = resp.get("eval_count")
+    usage = {
+        "prompt_tokens": int(prompt_tokens or 0),
+        "completion_tokens": int(completion_tokens or 0),
+    }
+    return text, usage
 
 
 def _build_create_params(
@@ -330,6 +366,32 @@ def _infer_provider(llm_provider: Optional[str], model_name: str) -> LLMProvider
     return LLMProvider.OPENAI
 
 
+@overload
+def _llm_generate_text(
+    provider: LLMProvider,
+    model_name: str,
+    input_text: str,
+    max_tokens: Optional[int] = ...,
+    temperature: Optional[float] = ...,
+    stop: Optional[list[str]] = ...,
+    progress: Optional[Callable[[str], None]] = ...,
+    capture_usage: Literal[True] = ...,
+) -> Tuple[str, Dict[str, int]]: ...
+
+
+@overload
+def _llm_generate_text(
+    provider: LLMProvider,
+    model_name: str,
+    input_text: str,
+    max_tokens: Optional[int] = ...,
+    temperature: Optional[float] = ...,
+    stop: Optional[list[str]] = ...,
+    progress: Optional[Callable[[str], None]] = ...,
+    capture_usage: Literal[False] = ...,
+) -> str: ...
+
+
 def _llm_generate_text(
     provider: LLMProvider,
     model_name: str,
@@ -338,7 +400,8 @@ def _llm_generate_text(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     progress: Optional[Callable[[str], None]] = None,  # NEW
-) -> str:
+    capture_usage: bool = False,  # NEW
+) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
     if provider == LLMProvider.OPENAI:
         client = _openai_client()
         create_params = _build_create_params(
@@ -354,7 +417,10 @@ def _llm_generate_text(
         response_text = _coalesce_response_text(response)
         if not response_text:
             raise RuntimeError(f"Empty OpenAI response: {response}.")
-        return response_text
+        if not capture_usage:
+            return response_text
+        usage = _extract_openai_usage(response, input_text, response_text, model_name)  # NEW
+        return response_text, usage  # NEW
 
     if provider == LLMProvider.GOOGLE:
         genai = _google_client()
@@ -377,13 +443,23 @@ def _llm_generate_text(
                         if hasattr(p, "text"):
                             parts.append(p.text or "")
             text = "".join(parts)
-        return text or ""
+        text = text or ""
+        if not capture_usage:
+            return text
+        usage = _extract_gemini_usage(resp, input_text, text)  # NEW
+        return text, usage  # NEW
 
     if provider == LLMProvider.OLLAMA:
         _notify(progress, f"[LLM] Ollama • {model_name}: generating")  # NEW
-        result = _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
+        if not capture_usage:
+            result = _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
+            _notify(progress, "[LLM] Ollama: response received")  # NEW
+            return result
+        result_text, usage = _ollama_generate_text(
+            model_name=model_name, prompt=input_text, num_predict=max_tokens, return_usage=True
+        )  # NEW
         _notify(progress, "[LLM] Ollama: response received")  # NEW
-        return result
+        return result_text, usage  # NEW
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -932,6 +1008,7 @@ def generative_solve(
                      - "iterations": number of iterations performed
                      - "assessment": final assessment string
                      - "syntax_errors": list of syntax errors encountered (if any)
+                     - "cost": { "model": str, "usage": {"prompt_tokens": int, "completion_tokens": int}, "estimated_costs": dict }  # NEW
     Raises:
         RuntimeError: If generation or validation fails irrecoverably.
     """
@@ -958,13 +1035,19 @@ def generative_solve(
     user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)  # CHANGED
     assessment_text = ""
     syntax_errors: list[str] = []
+
+    # NEW: aggregate token usage across all LLM calls in this run
+    total_prompt_tokens = 0  # NEW
+    total_completion_tokens = 0  # NEW
+
     model_code = ""
     data_code = ""
 
     for iteration in range(iterations):
         logger.debug(f"Iteration {iteration + 1}/{iterations}")
         _notify(progress, f"Iteration {iteration + 1}/{iterations}: prompting model")  # NEW
-        content = _llm_generate_text(
+        # CHANGED: capture usage and unpack directly for mypy
+        content, usage = _llm_generate_text(
             provider=provider,
             model_name=model_name,
             input_text=user_prompt,
@@ -972,7 +1055,11 @@ def generative_solve(
             temperature=temperature,
             stop=stop,
             progress=progress,  # NEW
+            capture_usage=True,  # NEW
         )
+        total_prompt_tokens += usage.get("prompt_tokens", 0)  # NEW
+        total_completion_tokens += usage.get("completion_tokens", 0)  # NEW
+
         if not content:
             raise RuntimeError("Empty model response.")
         try:
@@ -1016,7 +1103,8 @@ def generative_solve(
             logger.debug("Checking alignment with original prompt...")
             _notify(progress, "Checking alignment with original prompt...")  # NEW
             alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
-            alignment_content = _llm_generate_text(
+            # CHANGED: capture usage and unpack directly for mypy
+            alignment_content, usage2 = _llm_generate_text(
                 provider=provider,
                 model_name=model_name,
                 input_text=alignment_prompt,
@@ -1024,7 +1112,11 @@ def generative_solve(
                 temperature=0.0 if temperature is not None else None,
                 stop=stop,
                 progress=progress,  # NEW
+                capture_usage=True,  # NEW
             )
+            total_prompt_tokens += usage2.get("prompt_tokens", 0)  # NEW
+            total_completion_tokens += usage2.get("completion_tokens", 0)  # NEW
+
             if not alignment_content:
                 raise RuntimeError("Empty alignment response.")
 
@@ -1068,25 +1160,53 @@ def generative_solve(
         assessment_prompt = _build_final_assessment_prompt(
             prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
-        assessment_text = (
-            _llm_generate_text(
-                provider=provider,
-                model_name=model_name,
-                input_text=assessment_prompt,
-                max_tokens=MAX_OUTPUT_TOKENS,
-                temperature=0.2 if temperature is not None else None,
-                stop=stop,
-                progress=progress,  # NEW
-            )
-            or ""
+        # CHANGED: capture usage and unpack directly for mypy
+        assessment_text_part, usage3 = _llm_generate_text(
+            provider=provider,
+            model_name=model_name,
+            input_text=assessment_prompt,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=0.2 if temperature is not None else None,
+            stop=stop,
+            progress=progress,  # NEW
+            capture_usage=True,  # NEW
         )
+        total_prompt_tokens += usage3.get("prompt_tokens", 0)  # NEW
+        total_completion_tokens += usage3.get("completion_tokens", 0)  # NEW
+        assessment_text = assessment_text_part or ""
 
     _notify(progress, "Generation complete")  # NEW
+
+    # NEW: pricing estimate using aggregated usage
+    try:
+        from types import SimpleNamespace
+    except Exception:
+        SimpleNamespace = None  # type: ignore
+
+    usage_summary = {
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
+    }
+    estimated_costs: Dict[str, Any] = {}
+    if SimpleNamespace is not None:
+        try:
+            args = SimpleNamespace(model=model_name)
+            estimated_costs = _estimate_costs(args, usage_summary) or {}
+        except Exception:
+            estimated_costs = {}
+    cost = {
+        "model": model_name,
+        "usage": usage_summary,
+        "estimated_costs": estimated_costs,
+    }
+    _notify(progress, f"[LLM] Estimated costs: {cost}")  # NEW
+
     if return_statistics:
         return {
             "iterations": iteration + 1,
             "assessment": assessment_text.strip(),
             "syntax_errors": syntax_errors,
+            "cost": cost,  # NEW
         }
     else:
         return assessment_text.strip()
@@ -1136,7 +1256,7 @@ def generative_feedback(
     _notify(progress, "Generating feedback from LLM")  # NEW
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
-    content = _llm_generate_text(
+    content: str = _llm_generate_text(
         provider=provider,
         model_name=model_name,
         input_text=user_prompt,
@@ -1144,6 +1264,7 @@ def generative_feedback(
         temperature=0.0 if temperature is not None else None,
         stop=stop,
         progress=progress,  # NEW
+        capture_usage=False,
     )
     if not content:
         raise RuntimeError("Empty model response.")
