@@ -9,14 +9,16 @@ from typing import (
 PRICING_URL = "https://github.com/AgentOps-AI/tokencost/blob/main/pricing_table.md"
 
 
-def _approx_token_count(text: str) -> int:  # NEW
+def _approx_token_count(text: str) -> int:
+    # Fallback heuristic for token counting (not used if tiktoken is available)
     if not text:
         return 0
     # Simple heuristic: ~4 characters per token
     return max(0, (len(text) + 3) // 4)
 
 
-def _count_openai_tokens(text: str, model_name: str) -> int:  # NEW
+def _count_openai_tokens(text: str, model_name: str) -> int:
+    # Try to use tiktoken for token counting if available
     try:
         import tiktoken
 
@@ -93,15 +95,20 @@ def _extract_gemini_usage(resp: Any, input_text: str, output_text: str) -> Dict[
 
 
 # Estimate costs using pricing_table.md (best-effort parser)
-@functools.lru_cache(maxsize=1)
-def _parse_pricing(path):
-    rates = {}
+@functools.lru_cache(maxsize=8)
+def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
+    # Explicit type for mypy
+    rates: Dict[str, Dict[str, Optional[float]]] = {}
     try:
 
-        def _read_text(src):
+        def _read_text(src: str) -> str:
             if re.match(r"^https?://", src, re.I):
                 # Normalize GitHub "blob" URL to raw content
-                m = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$", src, re.I)
+                m = re.match(
+                    r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$",
+                    src,
+                    re.I,
+                )
                 if m:
                     src = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}/{m.group(4)}"
                 import urllib.request
@@ -113,39 +120,89 @@ def _parse_pricing(path):
             return open(src, "r", encoding="utf8").read()
 
         txt = _read_text(path)
-    except Exception:
+    except Exception as exc:
+        # make failure visible rather than silently returning empty rates
+        import logging
+
+        logging.getLogger(__name__).warning("Failed to load pricing from %s: %s", path, exc)
         return rates
+
+    # helpers to parse amounts and units, normalizing to "per 1M"
+    def _cell_to_per_1m(cell: str, default_unit: Optional[str] = None) -> Optional[float]:
+        if not cell:
+            return None
+        # find numeric value (allow commas)
+        m = re.search(r"\$?([\d,]*\.?\d+)", cell)
+        if not m:
+            return None
+        val = float(m.group(1).replace(",", ""))
+        # detect explicit unit in the same cell
+        if re.search(r"/\s*1\s*[kK]\b|per\s+1\s*[kK]\b", cell):
+            return val * 1000.0
+        if re.search(r"/\s*1\s*[mM]\b|per\s+1\s*[mM]\b", cell):
+            return val
+        # fallback to default unit from header if provided
+        if default_unit == "1k":
+            return val * 1000.0
+        return val
+
+    # Explicit type so assigning "1k"/"1m" is valid
+    header_units: Dict[str, Optional[str]] = {"prompt": None, "completion": None}
+
     for line in txt.splitlines():
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        # markdown table row: | model | prompt ($/1M) | completion ($/1M) |
         if s.startswith("|"):
             cols = [c.strip() for c in s.strip("|").split("|")]
             if len(cols) >= 3:
+                # Skip markdown alignment/separator rows like |:---|:---|...|
+                if all(re.fullmatch(r":?-{3,}:?", c) for c in cols[:3]):
+                    continue
 
-                def _num(x):
-                    m = re.search(r"\$?([\d\.]+)", x)
-                    return float(m.group(1)) if m else None
+                c0 = cols[0].lower()
+                c1 = cols[1].lower()
+                c2 = cols[2].lower()
+                if "model" in c0 and (("prompt" in c1 or "completion" in c1) or ("prompt" in c2 or "completion" in c2)):
+                    # capture units from header if present
+                    if re.search(r"1\s*[kK]", cols[1]):
+                        header_units["prompt"] = "1k"
+                    elif re.search(r"1\s*[mM]", cols[1]):
+                        header_units["prompt"] = "1m"
+                    else:
+                        header_units["prompt"] = None
+                    if re.search(r"1\s*[kK]", cols[2]):
+                        header_units["completion"] = "1k"
+                    elif re.search(r"1\s*[mM]", cols[2]):
+                        header_units["completion"] = "1m"
+                    else:
+                        header_units["completion"] = None
+                    continue
 
-                model = cols[0].lower()
-                rates[model] = {
-                    "prompt_per_1M": _num(cols[1]),
-                    "completion_per_1M": _num(cols[2]),
-                }
+                def _num_with_header(x, which):
+                    return _cell_to_per_1m(x, default_unit=header_units.get(which))
+
+                model = cols[0].strip().lower()
+                p_val = _num_with_header(cols[1], "prompt")
+                c_val = _num_with_header(cols[2], "completion")
+                # Only store rows with at least one numeric price
+                if p_val is not None or c_val is not None:
+                    rates[model] = {
+                        "prompt_per_1M": p_val,
+                        "completion_per_1M": c_val,
+                    }
                 continue
-        # inline style: "model: prompt $X / 1M, completion $Y / 1M"
-        m = re.match(r"(?P<model>[\w\-\._]+)\s*[:\-]\s*(?P<rest>.*)", s, re.I)
+        # inline style: "model: prompt $X / 1K, completion $Y / 1K"
+        m = re.match(r"(?P<model>[\w\-\._/:@]+)\s*[:\-]\s*(?P<rest>.*)", s, re.I)
         if m:
             model = m.group("model").lower()
             rest = m.group("rest")
-            p = re.search(r"prompt[^$]*\$?([\d\.]+)", rest, re.I)
-            c = re.search(r"completion[^$]*\$?([\d\.]+)", rest, re.I)
-            if p or c:
-                rates[model] = {
-                    "prompt_per_1M": float(p.group(1)) if p else None,
-                    "completion_per_1M": float(c.group(1)) if c else None,
-                }
+            p_match = re.search(r"prompt[^$]*\$?([\d,]*\.?\d+[^,]*)", rest, re.I)
+            c_match = re.search(r"completion[^$]*\$?([\d,]*\.?\d+[^,]*)", rest, re.I)
+            p_val = _cell_to_per_1m(p_match.group(1)) if p_match else None
+            c_val = _cell_to_per_1m(c_match.group(1)) if c_match else None
+            if p_val is not None or c_val is not None:
+                rates[model] = {"prompt_per_1M": p_val, "completion_per_1M": c_val}
     return rates
 
 
@@ -175,7 +232,7 @@ def estimate_costs(args, usage):
 
     est = {}
     entry = _find_model_entry(model_key)
-    # print(f"Estimating costs for model '{args.model}' using pricing entry: {entry}")
+    print(f"Estimating costs for model '{args.model}' using pricing entry: {entry}")
     if entry and prompt_tokens is not None:
         p_rate = entry.get("prompt_per_1M")
         if p_rate is not None:
