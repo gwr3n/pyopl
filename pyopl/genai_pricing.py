@@ -119,7 +119,7 @@ def _parse_pricing(path):
         s = line.strip()
         if not s or s.startswith("#"):
             continue
-        # markdown table row: | model | prompt ($/1K) | completion ($/1K) |
+        # markdown table row: | model | prompt ($/1M) | completion ($/1M) |
         if s.startswith("|"):
             cols = [c.strip() for c in s.strip("|").split("|")]
             if len(cols) >= 3:
@@ -134,7 +134,7 @@ def _parse_pricing(path):
                     "completion_per_1M": _num(cols[2]),
                 }
                 continue
-        # inline style: "model: prompt $X / 1K, completion $Y / 1K"
+        # inline style: "model: prompt $X / 1M, completion $Y / 1M"
         m = re.match(r"(?P<model>[\w\-\._]+)\s*[:\-]\s*(?P<rest>.*)", s, re.I)
         if m:
             model = m.group("model").lower()
@@ -143,8 +143,8 @@ def _parse_pricing(path):
             c = re.search(r"completion[^$]*\$?([\d\.]+)", rest, re.I)
             if p or c:
                 rates[model] = {
-                    "prompt_per_1k": float(p.group(1)) if p else None,
-                    "completion_per_1k": float(c.group(1)) if c else None,
+                    "prompt_per_1M": float(p.group(1)) if p else None,
+                    "completion_per_1M": float(c.group(1)) if c else None,
                 }
     return rates
 
