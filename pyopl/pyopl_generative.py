@@ -986,7 +986,7 @@ def generative_solve(
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
 ):
-    """Generate a PyOPL model and data file from a prompt using OpenAI GPT, validate with pyopl, iterate on errors, and assess alignment.
+    """Generate a PyOPL model and data file from a prompt, validate with pyopl, iterate on errors, and assess alignment.
 
     Args:
         prompt (str): Problem description to model.
