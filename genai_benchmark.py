@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any, Optional
 
 from pyopl import solve
@@ -178,6 +179,7 @@ def main() -> int:
             _ensure_parent_dir(data_path)
 
             # Step 1-2: Generate model and data
+            t0 = time.perf_counter()
             try:
                 result = generative_solve(
                     prompt,
@@ -194,8 +196,9 @@ def main() -> int:
                 entry["generation_iterations"] = result.get("iterations")
                 entry["syntax_errors"] = result.get("syntax_errors")
                 entry["cost"] = result.get("cost")
+                entry["duration_seconds"] = time.perf_counter() - t0
             except Exception as e:
-                entry.update({"error": f"generative_solve failed: {e}"})
+                entry.update({"duration_seconds": time.perf_counter() - t0, "error": f"generative_solve failed: {e}"})
                 results.append(entry)
                 all_ok = False
                 with open(results_json_path, "w", encoding="utf-8") as f:
@@ -271,6 +274,7 @@ def main() -> int:
     _ensure_parent_dir(data_path)
 
     # Step 1-2: Generate model and data
+    t0 = time.perf_counter()
     try:
         result = generative_solve(
             prompt,
@@ -283,6 +287,7 @@ def main() -> int:
             return_statistics=True,
             alignment_check=ALIGNMENT_CHECK,
         )
+        duration_seconds = time.perf_counter() - t0
         assessment = result["assessment"]
         print(f"generative_solve completed. Assessment: {assessment}")
     except Exception as e:
@@ -324,6 +329,7 @@ def main() -> int:
                 "tolerance": args.tolerance,
                 "pass": ok,
                 "direction": direction,
+                "generation_duration_seconds": duration_seconds,
             },
             indent=2,
         )
