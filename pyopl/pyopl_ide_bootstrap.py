@@ -1389,10 +1389,10 @@ class OPLIDE(tk.Tk):
     def _bind_shortcuts(self) -> None:
         # # Save current buffer
         self.bind_all("<Control-s>", self.save_current_buffer)
-        self.bind_all("<Command-s>", self.save_current_buffer)
+        # self.bind_all("<Command-s>", self.save_current_buffer)
         # New model
         self.bind_all("<Control-n>", self._new_model_shortcut)
-        self.bind_all("<Command-n>", self._new_model_shortcut)
+        # self.bind_all("<Command-n>", self._new_model_shortcut)
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
