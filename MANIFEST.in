@@ -1,6 +1,6 @@
 recursive-include pyopl/icon *.png
 recursive-include pyopl *.pyi
-graft opl_models
-graft docs/grammars
+recursive-include pyopl/grammars *
+recursive-include pyopl/opl_models *
 exclude test/*
 prune gen_ai

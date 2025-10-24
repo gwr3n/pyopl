@@ -43,7 +43,7 @@ where = ["."]
 exclude = ["test", "test.*"]
 
 [tool.setuptools.package-data]
-pyopl = ["*.pyi", "icon/mindset.png"]
+pyopl = ["*.pyi", "icon/mindset.png", "grammars/*", "opl_models/*"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

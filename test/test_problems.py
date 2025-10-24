@@ -2508,8 +2508,8 @@ class TestPyOPLProblems(unittest.TestCase):
         # CPLEX reference solution
         cplex_obj = 10.0
 
-        KNAPSACK_MOD = os.path.join(os.path.dirname(__file__), "../opl_models/knapsack/knapsack.mod")
-        KNAPSACK_DAT = os.path.join(os.path.dirname(__file__), "../opl_models/knapsack/knapsack.dat")
+        KNAPSACK_MOD = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsack.mod")
+        KNAPSACK_DAT = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsack.dat")
 
         self.pyopl_vs_cplex_output(KNAPSACK_MOD, KNAPSACK_DAT, cplex_obj)
 
@@ -2519,8 +2519,8 @@ class TestPyOPLProblems(unittest.TestCase):
         # CPLEX reference solution
         cplex_obj = 498.0
 
-        KNAPSACKP_MOD = os.path.join(os.path.dirname(__file__), "../opl_models/knapsack/knapsackp.mod")
-        KNAPSACKP_DAT = os.path.join(os.path.dirname(__file__), "../opl_models/knapsack/knapsackp.dat")
+        KNAPSACKP_MOD = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.mod")
+        KNAPSACKP_DAT = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.dat")
 
         self.pyopl_vs_cplex_output(KNAPSACKP_MOD, KNAPSACKP_DAT, cplex_obj)
 
@@ -2532,11 +2532,11 @@ class TestPyOPLProblems(unittest.TestCase):
 
         INVENTORY_ROUTING_MOD = os.path.join(
             os.path.dirname(__file__),
-            "../opl_models/inventory_routing/inventory_routing.mod",
+            "../pyopl/opl_models/inventory_routing/inventory_routing.mod",
         )
         INVENTORY_ROUTING_DAT = os.path.join(
             os.path.dirname(__file__),
-            "../opl_models/inventory_routing/inventory_routing.dat",
+            "../pyopl/opl_models/inventory_routing/inventory_routing.dat",
         )
 
         self.pyopl_vs_cplex_output(INVENTORY_ROUTING_MOD, INVENTORY_ROUTING_DAT, cplex_obj)
@@ -2544,8 +2544,8 @@ class TestPyOPLProblems(unittest.TestCase):
     def test_tsp_model_parsing_and_codegen_gurobi(self):
         """Test parsing and codegen for the TSP model (Gurobi)."""
         # Paths to the TSP model and data
-        model_path = os.path.join(os.path.dirname(__file__), "../opl_models/tsp/tsp.mod")
-        data_path = os.path.join(os.path.dirname(__file__), "../opl_models/tsp/tsp.dat")
+        model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.mod")
+        data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.dat")
         with open(model_path) as f:
             model_code = f.read()
         with open(data_path) as f:
@@ -2584,8 +2584,8 @@ class TestPyOPLProblems(unittest.TestCase):
     def test_tsp_model_parsing_and_codegen_scipy(self):
         """Test parsing and codegen for the TSP model (SciPy)."""
         # Paths to the TSP model and data
-        model_path = os.path.join(os.path.dirname(__file__), "../opl_models/tsp/tsp.mod")
-        data_path = os.path.join(os.path.dirname(__file__), "../opl_models/tsp/tsp.dat")
+        model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.mod")
+        data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.dat")
         with open(model_path) as f:
             model_code = f.read()
         with open(data_path) as f:

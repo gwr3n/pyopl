@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from enum import Enum, auto
+from importlib.resources import files  # NEW
 from pathlib import Path  # NEW
 from time import sleep
 from typing import (
@@ -73,13 +74,11 @@ def _read_file(path: str) -> str:
 
 
 def _read_pyopl_GBNF() -> str:
-    grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "grammars", "PyOPL_GBNF")
-    return _read_file(grammar_path)
+    return (files("pyopl") / "grammars" / "PyOPL_GBNF").read_text(encoding="utf-8")
 
 
 def _read_pyopl_grammar() -> str:
-    grammar_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "docs", "grammars", "PyOPL grammar.md")
-    return _read_file(grammar_path)
+    return (files("pyopl") / "grammars" / "PyOPL grammar.md").read_text(encoding="utf-8")
 
 
 def _read_pyopl_code() -> str:
@@ -145,10 +144,18 @@ def _gather_few_shots(
       - data (str)
       - desc_path / model_path / data_path (optional metadata)
     """
+    # Resolve default models_dir from package data
+    if models_dir is None:
+        try:
+            models_dir = files("pyopl") / "opl_models"
+        except Exception:
+            models_dir = Path(__file__).parent / "opl_models"
+    base_dir = Path(models_dir)
+
     examples: List[Dict[str, str]] = []
     try:
         _notify(progress, f"Retrieving few-shot examples (k={k})")
-        hits = rag_rank(query=problem_description, models_dir=models_dir, top_k=k)
+        hits = rag_rank(query=problem_description, models_dir=str(base_dir), top_k=k)
         _notify(progress, f"Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
     except Exception as e:
         logger.debug(f"Few-shot retrieval skipped: {e}")
@@ -983,7 +990,7 @@ def generative_solve(
 
     # NEW: Retrieve few-shot examples using RAG
     few_shots: List[Dict[str, str]] = (
-        _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir="opl_models", progress=progress) if few_shot else []
+        _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
     user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)  # CHANGED
@@ -1291,10 +1298,13 @@ def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
     models: list[str] = []
     try:
         resp = ollama_list()
-
-        for model in resp["models"]:
-            models.append(model.model)
-
+        items = resp.get("models", []) if isinstance(resp, dict) else getattr(resp, "models", [])
+        for m in items:
+            name = (m.get("model") if isinstance(m, dict) else getattr(m, "model", None)) or (
+                m.get("name") if isinstance(m, dict) else getattr(m, "name", None)
+            )
+            if isinstance(name, str):
+                models.append(name)
     except Exception as e:
         raise RuntimeError(f"Failed to list Ollama models: {e}")
 

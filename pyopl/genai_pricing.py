@@ -1,10 +1,15 @@
 import functools
+import logging
 import re
 from typing import (
     Any,
     Dict,
     Optional,
 )
+
+# --- Logging Setup ---
+# Use module-level logger, and set DEBUG level for development
+logger = logging.getLogger(__name__)
 
 PRICING_URL = "https://github.com/AgentOps-AI/tokencost/blob/main/pricing_table.md"
 
@@ -228,7 +233,7 @@ def estimate_costs(args, usage):
 
     est = {}
     entry = _find_model_entry(model_key)
-    print(f"Estimating costs for model '{args.model}' using pricing entry: {entry}")
+    logger.debug(f"Estimating costs for model '{args.model}' using pricing entry: {entry}")
     if entry and prompt_tokens is not None:
         p_rate = entry.get("prompt_per_1M")
         if p_rate is not None:
