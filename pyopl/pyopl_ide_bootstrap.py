@@ -272,15 +272,15 @@ class OPLIDE(tk.Tk):
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(
             label="User Guide",
-            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20user%20guide.md"),
+            command=lambda: self._open_url("https://github.com/gwr3n/rhetor/blob/main/docs/PyOPL%20user%20guide.md"),
         )
         help_menu.add_command(
             label="Examples",
-            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL/blob/main/docs/PyOPL%20examples%20overview.md"),
+            command=lambda: self._open_url("https://github.com/gwr3n/rhetor/blob/main/docs/PyOPL%20examples%20overview.md"),
         )
         help_menu.add_command(
             label="GitHub",
-            command=lambda: self._open_url("https://github.com/gwr3n/PyOPL"),
+            command=lambda: self._open_url("https://gwr3n.github.io/rhetor/"),
         )
         # NEW: About dialog
         help_menu.add_separator()
