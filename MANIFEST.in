@@ -1,4 +1,5 @@
 recursive-include pyopl/icon *.png
+recursive-include pyopl *.pyi
 graft opl_models
 graft docs/grammars
 exclude test/*

@@ -12,11 +12,9 @@ from typing import (
     Callable,  # NEW
     Dict,
     List,  # NEW
-    Literal,  # NEW
     Optional,
     Tuple,  # NEW
     Union,  # NEW
-    overload,  # NEW
 )
 
 from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
@@ -280,24 +278,6 @@ def _google_client():
     return genai
 
 
-@overload
-def _ollama_generate_text(
-    model_name: str,
-    prompt: str,
-    num_predict: Optional[int] = ...,
-    return_usage: Literal[True] = ...,
-) -> Tuple[str, Dict[str, int]]: ...
-
-
-@overload
-def _ollama_generate_text(
-    model_name: str,
-    prompt: str,
-    num_predict: Optional[int] = ...,
-    return_usage: Literal[False] = ...,
-) -> str: ...
-
-
 def _ollama_generate_text(
     model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
 ) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
@@ -364,32 +344,6 @@ def _infer_provider(llm_provider: Optional[str], model_name: str) -> LLMProvider
     if "gpt-oss" in model_name or model_name.startswith(("llama", "qwen", "mistral")):
         return LLMProvider.OLLAMA
     return LLMProvider.OPENAI
-
-
-@overload
-def _llm_generate_text(
-    provider: LLMProvider,
-    model_name: str,
-    input_text: str,
-    max_tokens: Optional[int] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[list[str]] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    capture_usage: Literal[True] = ...,
-) -> Tuple[str, Dict[str, int]]: ...
-
-
-@overload
-def _llm_generate_text(
-    provider: LLMProvider,
-    model_name: str,
-    input_text: str,
-    max_tokens: Optional[int] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[list[str]] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    capture_usage: Literal[False] = ...,
-) -> str: ...
 
 
 def _llm_generate_text(
