@@ -7,7 +7,6 @@ import time
 from typing import Any, Optional
 
 from pyopl import solve
-from pyopl.pyopl_generative import Grammar, generative_solve
 
 
 def _ensure_parent_dir(path: str) -> None:
@@ -74,16 +73,6 @@ def _get_direction_from_model(model_file: str):
 def main() -> int:
     import logging
 
-    pyg_logger = logging.getLogger("pyopl.pyopl_generative")
-    pyg_logger.setLevel(logging.DEBUG)
-    # Add a dedicated handler (stdout) with formatting
-    if not any(isinstance(h, logging.StreamHandler) for h in pyg_logger.handlers):
-        h = logging.StreamHandler(sys.stdout)
-        h.setLevel(logging.DEBUG)
-        h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
-        pyg_logger.addHandler(h)
-    pyg_logger.propagate = False  # do not bubble to root
-
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
     parser.add_argument(
         "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR, ComplexOR."
@@ -96,6 +85,13 @@ def main() -> int:
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
     parser.add_argument("--all", action="store_true", help="Solve all problems in the dataset and save results.")
+    parser.add_argument(
+        "--logic",
+        default="generative",
+        choices=["standard", "reflexion", "generative"],
+        help="Generative logic to use: standard, reflexion, or generative.",
+    )
+
     ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
     args = parser.parse_args()
 
@@ -103,14 +99,45 @@ def main() -> int:
     for k, v in vars(args).items():
         print(f"  {k}: {v}")
 
-    if args.grammar == "none":
-        mode = Grammar.NONE
-    elif args.grammar == "code":
-        mode = Grammar.CODE
-    elif args.grammar == "bnf":
-        mode = Grammar.BNF
+    # Select implementation based on --logic
+    if args.logic == "generative":
+        from pyopl.pyopl_generative import Grammar as GrammarType, generative_solve as solve_fn
+
+        logger_names = ["pyopl.pyopl_generative"]
+    elif args.logic == "reflexion":
+        from pyopl.pyopl_reflexion import Grammar as GrammarType, generative_solve as solve_fn
+
+        logger_names = ["pyopl.pyopl_reflexion"]
+    elif args.logic == "standard":
+        from pyopl.pyopl_standard import Grammar as GrammarType, generative_solve as solve_fn
+
+        # standard routes to pyopl_generative under-the-hood
+        logger_names = ["pyopl.pyopl_generative", "pyopl.pyopl_standard"]
     else:
-        raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {[g.name.lower() for g in Grammar]}")
+        print(f"Unknown logic: {args.logic}", file=sys.stderr)
+        return 2
+
+    # Configure module loggers for visibility
+    for name in set(logger_names):
+        lg = logging.getLogger(name)
+        lg.setLevel(logging.DEBUG)
+        if not any(isinstance(h, logging.StreamHandler) for h in lg.handlers):
+            h = logging.StreamHandler(sys.stdout)
+            h.setLevel(logging.DEBUG)
+            h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+            lg.addHandler(h)
+        lg.propagate = False
+
+    # Resolve grammar to the selected module's Grammar enum
+    if args.grammar == "none":
+        mode = GrammarType.NONE
+    elif args.grammar == "code":
+        mode = GrammarType.CODE
+    elif args.grammar == "bnf":
+        mode = GrammarType.BNF
+    else:
+        valid = [g.name.lower() for g in GrammarType]
+        raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {valid}")
 
     # Load dataset
     if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR"]:
@@ -125,9 +152,9 @@ def main() -> int:
         print("Dataset is empty or not a list.", file=sys.stderr)
         return 2
 
-    # Compute segregated output directories:
-    # gen_ai/{dataset}/{grammar}/{gpt}/{iterations}/ and a subfolder models/
-    base_dir = os.path.join("gen_ai", args.dataset, args.grammar, args.gpt, str(args.iterations))
+    # Segregated output directories now include the logic name
+    # gen_ai/{dataset}/{logic}/{grammar}/{gpt}/{iterations}/ and a subfolder models/
+    base_dir = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
     models_dir = os.path.join(base_dir, "models")
     results_json_path = os.path.join(base_dir, f"{args.dataset}_results.json")
 
@@ -147,6 +174,7 @@ def main() -> int:
                 "index": i,
                 "solver": args.solver,
                 "tolerance": args.tolerance,
+                "logic": args.logic,
             }
 
             if not prompt:
@@ -181,7 +209,7 @@ def main() -> int:
             # Step 1-2: Generate model and data
             t0 = time.perf_counter()
             try:
-                result = generative_solve(
+                result = solve_fn(
                     prompt,
                     model_path,
                     data_path,
@@ -276,7 +304,7 @@ def main() -> int:
     # Step 1-2: Generate model and data
     t0 = time.perf_counter()
     try:
-        result = generative_solve(
+        result = solve_fn(
             prompt,
             model_path,
             data_path,
@@ -329,6 +357,7 @@ def main() -> int:
                 "tolerance": args.tolerance,
                 "pass": ok,
                 "direction": direction,
+                "logic": args.logic,
                 "generation_duration_seconds": duration_seconds,
             },
             indent=2,
