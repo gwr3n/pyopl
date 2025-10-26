@@ -13,7 +13,7 @@ def generative_solve(
     model_file,
     data_file,
     model_name: str = MODEL_NAME,
-    mode: Grammar = Grammar.NONE,  # ignored; always enforced to Grammar.NONE below
+    mode: Grammar = Grammar.BNF,  
     iterations: int = 1,           # ignored; always enforced to 1 below
     return_statistics: bool = False,
     alignment_check: Optional[bool] = False,  # ignored; always enforced to False below
@@ -39,12 +39,12 @@ def generative_solve(
         data_file=data_file,
         model_name=model_name,
         mode=mode,
-        iterations=iterations,
+        iterations=1,
         return_statistics=return_statistics,
-        alignment_check=alignment_check,
+        alignment_check=False,
         temperature=temperature,
         stop=stop,
         llm_provider=llm_provider,
         progress=progress,
-        few_shot=few_shot,
+        few_shot=False,
     )
