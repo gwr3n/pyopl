@@ -1127,7 +1127,7 @@ def generative_solve(
             model_name=model_name,
             input_text=assessment_prompt,
             max_tokens=MAX_OUTPUT_TOKENS,
-            temperature=0.2 if temperature is not None else None,
+            temperature=0.0 if temperature is not None else None,
             stop=stop,
             progress=progress,  # NEW
             capture_usage=True,  # NEW
