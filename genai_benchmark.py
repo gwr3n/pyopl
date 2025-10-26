@@ -75,7 +75,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
     parser.add_argument(
-        "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT (default), NLP4LP, IndustryOR, ComplexOR."
+        "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default)."
     )
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
@@ -88,8 +88,8 @@ def main() -> int:
     parser.add_argument(
         "--logic",
         default="generative",
-        choices=["standard", "reflexion", "generative"],
-        help="Generative logic to use: standard, reflexion, or generative.",
+        choices=["standard", "chain_of_thought", "reflexion", "generative"],
+        help="Generative logic to use: standard, chain_of_thought, reflexion, or generative.",
     )
 
     ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
@@ -108,6 +108,10 @@ def main() -> int:
         from pyopl.pyopl_reflexion import Grammar as GrammarType, generative_solve as solve_fn
 
         logger_names = ["pyopl.pyopl_reflexion"]
+    elif args.logic == "chain_of_thought":
+        from pyopl.pyopl_chain_of_thought import Grammar as GrammarType, generative_solve as solve_fn
+
+        logger_names = ["pyopl.pyopl_chain_of_thought"]
     elif args.logic == "standard":
         from pyopl.pyopl_standard import Grammar as GrammarType, generative_solve as solve_fn
 
