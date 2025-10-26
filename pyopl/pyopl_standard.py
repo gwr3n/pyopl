@@ -25,7 +25,6 @@ def generative_solve(
 ):
     """
     Thin wrapper that calls pyopl_generative.generative_solve in a closest-to-vanilla configuration:
-      - mode=Grammar.NONE
       - few_shot=False
       - iterations=1
       - alignment_check=False
