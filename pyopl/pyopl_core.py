@@ -3397,9 +3397,20 @@ class OPLCompiler:
                     return int(data_rng["start"]), int(data_rng["end"])
                 raise SemanticError(f"Named range '{rng_name}' not found for computed parameter.")
 
+            # Build tuple metadata for field access in computed params
+            tuple_fields_by_type: dict[str, list[str]] = {}
+            set_tuple_type_by_name: dict[str, str] = {}
+            for d in model_ast.get("declarations") or []:
+                if isinstance(d, dict) and d.get("type") == "tuple_type":
+                    tname = d.get("name")
+                    fields = [f.get("name") for f in (d.get("fields") or [])]
+                    tuple_fields_by_type[tname] = fields
+                if isinstance(d, dict) and d.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                    set_tuple_type_by_name[d.get("name")] = d.get("tuple_type")
+
             # Evaluate general numeric/boolean/string expression for param RHS. Limited support: number, name,
-            # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum aggregates.
-            def eval_expr(expr, env):
+            # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum/min_agg/max_agg & field_access.
+            def eval_expr(expr, env, iter_meta=None):
                 t = expr.get("type") if isinstance(expr, dict) else None
                 if t == "number":
                     return float(expr.get("value"))
@@ -3415,6 +3426,35 @@ class OPLCompiler:
                     if nm in working_data:
                         return working_data[nm]
                     raise SemanticError(f"Unknown name '{nm}' in computed parameter expression.")
+                if t == "field_access":
+                    # Support s.demand where s is an iterator bound to a tuple from a set-of-tuples
+                    base = expr.get("base")
+                    field = expr.get("field")
+                    # Evaluate base value
+                    base_val = eval_expr(base, env, iter_meta)
+                    # Determine tuple type: prefer base.sem_type, then iterator metadata
+                    tuple_type = None
+                    if isinstance(base, dict):
+                        bst = base.get("sem_type")
+                        if isinstance(bst, str) and bst in tuple_fields_by_type:
+                            tuple_type = bst
+                    if tuple_type is None and isinstance(base, dict) and base.get("type") == "name" and isinstance(iter_meta, dict):
+                        itn = base.get("value")
+                        meta = iter_meta.get(itn) if itn else None
+                        if isinstance(meta, dict):
+                            tuple_type = meta.get("tuple_type")
+                    if tuple_type is None:
+                        raise SemanticError("Cannot resolve tuple type for field access in computed parameter.")
+                    fields = tuple_fields_by_type.get(tuple_type) or []
+                    try:
+                        idx = fields.index(field)
+                    except ValueError as e:
+                        raise SemanticError(f"Unknown field '{field}' for tuple type '{tuple_type}'.") from e
+                    try:
+                        val = base_val[idx]
+                    except Exception as e:
+                        raise SemanticError(f"Field access failed on base value: {e}") from e
+                    return float(val) if isinstance(val, (int, float)) else val
                 if t == "indexed_name":
                     base = expr.get("name")
                     dims = expr.get("dimensions", [])
@@ -3456,7 +3496,6 @@ class OPLCompiler:
                     iters = expr.get("iterators", [])
                     idxc = expr.get("index_constraint")
                     body = expr.get("expression")
-
                     # Build iterator domains
                     domains = []
                     for it in iters:
@@ -3478,32 +3517,113 @@ class OPLCompiler:
                             domains.append(list(elems or []))
                         else:
                             raise SemanticError(f"Unsupported range in sum aggregate: {rng['type']}")
-
                     # Recursive nested loops
                     def rec_sum(depth, local_env):
                         if depth == len(iters):
                             # index constraint filter
                             if idxc is not None:
-                                cond_val = eval_expr(idxc, local_env)
-                                # treat nonzero numeric as True
+                                cond_val = eval_expr(idxc, local_env, it_meta)
                                 if isinstance(cond_val, (int, float)):
                                     if not bool(cond_val):
                                         return 0.0
                                 else:
                                     if not cond_val:
                                         return 0.0
-                            v = eval_expr(body, local_env)
+                            v = eval_expr(body, local_env, it_meta)
                             return float(v)
                         it_name = iters[depth]["iterator"]
                         total = 0.0
                         for val in domains[depth]:
                             local_env[it_name] = val
                             total += rec_sum(depth + 1, local_env)
-                        # clean up for safety
                         local_env.pop(it_name, None)
                         return total
-
+                    # Build iterator metadata map for field access
+                    it_meta: dict[str, dict] = {}
+                    for it in iters:
+                        nm = it["iterator"]
+                        rng = it["range"]
+                        meta = {}
+                        if rng.get("type") in ("named_set", "named_set_dimension"):
+                            sname = rng["name"]
+                            meta["set"] = sname
+                            meta["tuple_type"] = set_tuple_type_by_name.get(sname)
+                        it_meta[nm] = meta
                     return rec_sum(0, dict(env))
+                if t in ("max_agg", "min_agg"):
+                    iters = expr.get("iterators", [])
+                    idxc = expr.get("index_constraint")
+                    body = expr.get("expression")
+
+                    # Build domains
+                    domains = []
+                    for it in iters:
+                        rng = it["range"]
+                        if rng["type"] == "range_specifier":
+                            st = eval_bound(rng["start"])
+                            en = eval_bound(rng["end"])
+                            domains.append(list(range(st, en + 1)))
+                        elif rng["type"] == "named_range":
+                            st, en = resolve_named_range(rng["name"])
+                            domains.append(list(range(st, en + 1)))
+                        elif rng["type"] in ("named_set", "named_set_dimension"):
+                            set_name = rng["name"]
+                            set_obj = working_data.get(set_name, [])
+                            if isinstance(set_obj, dict) and "elements" in set_obj:
+                                elems = set_obj["elements"]
+                            else:
+                                elems = set_obj
+                            domains.append(list(elems or []))
+                        else:
+                            raise SemanticError(f"Unsupported range in aggregate: {rng['type']}")
+
+                    # Iterator metadata for field access
+                    it_meta: dict[str, dict] = {}
+                    for it in iters:
+                        nm = it["iterator"]
+                        rng = it["range"]
+                        meta = {}
+                        if rng.get("type") in ("named_set", "named_set_dimension"):
+                            sname = rng["name"]
+                            meta["set"] = sname
+                            meta["tuple_type"] = set_tuple_type_by_name.get(sname)
+                        it_meta[nm] = meta
+
+                    best = None
+
+                    def rec_agg(depth, local_env):
+                        nonlocal best
+                        if depth == len(iters):
+                            # filter
+                            if idxc is not None:
+                                cond_val = eval_expr(idxc, local_env, it_meta)
+                                if isinstance(cond_val, (int, float)):
+                                    if not bool(cond_val):
+                                        return
+                                else:
+                                    if not cond_val:
+                                        return
+                            v = float(eval_expr(body, local_env, it_meta))
+                            if best is None:
+                                best = v
+                            else:
+                                if t == "max_agg":
+                                    if v > best:
+                                        best = v
+                                else:
+                                    if v < best:
+                                        best = v
+                            return
+                        it_name = iters[depth]["iterator"]
+                        for val in domains[depth]:
+                            local_env[it_name] = val
+                            rec_agg(depth + 1, local_env)
+                        local_env.pop(it_name, None)
+
+                    rec_agg(0, dict(env))
+                    if best is None:
+                        raise SemanticError("Aggregate domain is empty in computed parameter expression.")
+                    return best
                 if t == "and":
                     return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
                 if t == "or":
