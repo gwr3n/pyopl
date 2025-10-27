@@ -57,7 +57,7 @@ REFLEXION_MAX_MEMORY = 5
 
 # NEW: Tree-of-Thoughts search parameters
 TOT_BRANCH_FACTOR = 3  # number of candidate thoughts per node (K)
-TOT_BEAM_WIDTH = 3     # number of best thoughts kept per level (B)
+TOT_BEAM_WIDTH = 3  # number of best thoughts kept per level (B)
 
 
 class LLMProvider(Enum):
@@ -263,7 +263,7 @@ def _json_loads_relaxed(text: str) -> Any:
         return json.loads(payload)
     except Exception:
         # As a last resort, strip leading/trailing whitespace and try again
-        payload = (payload if 'payload' in locals() else text).strip()
+        payload = (payload if "payload" in locals() else text).strip()
         return json.loads(payload)
 
 
@@ -532,6 +532,7 @@ def _call_openai_with_retry(
 
 # ---------- Prompt builders ----------
 
+
 def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code: str, data_code: str) -> str:
     return (
         "<role>\n"
@@ -701,6 +702,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
 
 
 # ---------- Public API ----------
+
 
 def generative_solve(
     prompt,
@@ -892,7 +894,7 @@ def generative_solve(
 
         # Score each candidate
         scored: List[ThoughtNode] = []
-        for (m_code, d_code) in candidate_pairs:
+        for m_code, d_code in candidate_pairs:
             s, aligned, assess, errs, u = _score_candidate(m_code, d_code)
             total_prompt_tokens += u.get("prompt_tokens", 0)
             total_completion_tokens += u.get("completion_tokens", 0)
@@ -1169,7 +1171,9 @@ def test():
             print(f"• {m}")
         print()
 
+
 # ---------- Prompt builders ----------
+
 
 def _build_tot_expand_prompt(
     prompt: str,

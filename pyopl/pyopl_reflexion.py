@@ -650,10 +650,7 @@ def _build_reflection_prompt(
         aligned = alignment_result.get("aligned")
         assessment = alignment_result.get("assessment", "")
         alignment_block = (
-            "<alignment_assessment>\n"
-            f"aligned={bool(aligned)}\n"
-            f"{assessment}\n"
-            "</alignment_assessment>\n\n"
+            "<alignment_assessment>\n" f"aligned={bool(aligned)}\n" f"{assessment}\n" "</alignment_assessment>\n\n"
         )
 
     compile_block = ""
@@ -695,7 +692,7 @@ def _build_reflection_prompt(
         "</output_requirements>\n\n"
         "<example_output>\n"
         '{ "reflection": "Indices for demand-period constraints were mismatched; ensure sets align. '
-        'Use binary variables for facility open decisions and include fixed-opening costs in the objective. '
+        "Use binary variables for facility open decisions and include fixed-opening costs in the objective. "
         'Tighten capacity linkage between facilities and shipments. Keep parameter names consistent with the data." }\n'
         "</example_output>\n"
     )
