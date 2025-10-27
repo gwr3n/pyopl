@@ -2215,18 +2215,106 @@ class GurobiCodeGenerator:
         right_expr_str = self._traverse_expression(right_node, current_iterators)
         self._add_code_line(f"model.addConstr({left_expr_str} {op} {right_expr_str}, name='{constr_name_prefix}')")
 
+    def _emit_index_condition(self, node, current_iterators):
+        """
+        Emit a pure-Python boolean/numeric expression for forall/sum index filters.
+        Never emits Gurobi constructs (no gp.quicksum/TempConstr). Intended only
+        for 'if <cond>:' guards around model.addConstr calls.
+        """
+        t = node.get("type") if isinstance(node, dict) else None
+        if not isinstance(node, dict):
+            return repr(node)
+
+        if t == "boolean_literal":
+            return "True" if node.get("value") else "False"
+        if t == "number":
+            return str(node.get("value"))
+        if t == "string_literal":
+            return repr(node.get("value"))
+        if t == "name":
+            name = node.get("value")
+            # iterators and scalar params are accessible as Python vars
+            return name
+        if t == "indexed_name":
+            base_name = node.get("name")
+            # Disallow dvars in index filters (should be data-only)
+            decl = self._find_declaration_by_name(base_name)
+            if decl and decl.get("type") in ("dvar", "dvar_indexed"):
+                raise ValueError("Index constraint may not reference decision variables.")
+
+            # Emit Python indexing into param/tuple arrays
+            def emit_idx(dim):
+                dt = dim.get("type")
+                if dt == "number_literal_index":
+                    return str(dim.get("value"))
+                if dt == "name_reference_index":
+                    return str(dim.get("name"))
+                if dt == "string_literal":
+                    return repr(dim.get("value"))
+                if dt == "binop" or dt == "uminus" or dt == "parenthesized_expression" or dt == "field_access":
+                    return self._traverse_expression(dim, current_iterators, symbolic=True)
+                return self._traverse_expression(dim, current_iterators, symbolic=True)
+
+            idxs = [emit_idx(d) for d in node.get("dimensions", [])]
+            if len(idxs) == 1:
+                return f"{base_name}[{idxs[0]}]"
+            return f"{base_name}[({', '.join(idxs)})]"
+        if t == "parenthesized_expression":
+            inner = self._emit_index_condition(node.get("expression"), current_iterators)
+            return f"({inner})"
+        if t == "not":
+            val = self._emit_index_condition(node.get("value"), current_iterators)
+            return f"(not ({val}))"
+        if t == "and":
+            L = self._emit_index_condition(node.get("left"), current_iterators)
+            R = self._emit_index_condition(node.get("right"), current_iterators)
+            return f"(({L}) and ({R}))"
+        if t == "or":
+            L = self._emit_index_condition(node.get("left"), current_iterators)
+            R = self._emit_index_condition(node.get("right"), current_iterators)
+            return f"(({L}) or ({R}))"
+        if t == "binop":
+            op = node.get("op")
+            L = self._emit_index_condition(node.get("left"), current_iterators)
+            R = self._emit_index_condition(node.get("right"), current_iterators)
+            return f"({L} {op} {R})"
+        if t == "sum":
+            # Python sum over iterators, converting boolean to 0/1
+            iters = node.get("iterators", [])
+            idxc = node.get("index_constraint")
+            inner = node.get("expression")
+            # if inner is a comparison, emit 1 if (...) else 0
+            inner_expr = self._emit_index_condition(inner, current_iterators)
+            # wrap non-numeric booleans into int(): int(cond)
+            # Use generators with nested 'for ... in ...' and optional if guard
+            gens = []
+            local_iterators = current_iterators.copy()
+            for it in iters:
+                var = it["iterator"]
+                rng = self._forall_range_expr(it["range"], local_iterators)
+                gens.append(f"for {var} in {rng}")
+                local_iterators[var] = var
+            gen_str = " ".join(gens)
+            guard = ""
+            if idxc is not None:
+                guard = f" if {self._emit_index_condition(idxc, local_iterators)}"
+            # Coerce boolean to 0/1 via int(...)
+            return f"sum((1 if ({inner_expr}) else 0) {gen_str}{guard})"
+        # Fallback to symbolic traversal for safe literals
+        return self._traverse_expression(node, current_iterators, symbolic=True)
+
     def _constraint_forall_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         iterators = constraint_node["iterators"]
         index_constraint = constraint_node.get("index_constraint")
         loop_vars, loop_ranges = self._extract_forall_loops(iterators, current_iterators)
-        loop_header = self._construct_loop_header(loop_vars, loop_ranges)
-        self._add_code_line(loop_header)
+        self._add_code_line(self._construct_loop_header(loop_vars, loop_ranges))
         self.indent_level += 1
         new_iterators = current_iterators.copy()
         for v in loop_vars:
             new_iterators[v] = v
         if index_constraint is not None:
-            cond_str = self._traverse_expression(index_constraint, new_iterators)
+            # Use Python-only condition so 'if' sees a real boolean, not a Gurobi TempConstr
+            cond_str = self._emit_index_condition(index_constraint, new_iterators)
             self._add_code_line(f"if {cond_str}:")
             self.indent_level += 1
         self._emit_forall_inner_constraints(constraint_node, constr_name_prefix, loop_vars, new_iterators)

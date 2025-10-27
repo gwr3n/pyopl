@@ -30,6 +30,149 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_lot_sizing(self):
+        """
+        Test the stochastic lot-sizing problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            // Stochastic Lot-Sizing with Inventory and Backlog (Scenario-based, PyOPL)
+            // Literate formulation with comments for clarity
+
+            // -------------------------------
+            // Sets and index ranges
+            // -------------------------------
+            {string} Scenarios = ...;                                       // Set of scenario labels
+            param int T = ...;                                              // Number of periods
+            range Periods = 1..T;                                           // Periods 1,2,...,T
+            range ExtPeriods = 0..T;                                        // Extended periods including initial state (0)
+
+            // -------------------------------
+            // Parameters
+            // -------------------------------
+            param float p[Scenarios];                                       // Scenario probability (nonnegative, sum=1)
+            param float demand[Scenarios][Periods];                         // Demand in each period for each scenario
+            param float init_inventory;                                     // Initial inventory at time 0
+            param float init_backlog;                                       // Initial backlog at time 0
+            param float order_cost;                                         // Per-unit order cost
+            param float holding_cost;                                       // Per-unit inventory holding cost per period
+            param float backlog_cost;                                       // Per-unit backlog cost per period
+            param float order_cap;                                          // Maximum order per period
+            param float terminal_value;                                     // Terminal adjustment value per unit (salvage/penalty)
+
+            // -------------------------------
+            // Decision Variables
+            // -------------------------------
+            dvar float+ x[Scenarios][Periods];                              // Order quantity in period t under scenario s
+            // State variables (indexed by periods 0..T, i.e. ExtPeriods)
+            dvar float+ inventory[Scenarios][ExtPeriods];                   // Inventory at end of each period
+            // 'inventory[s][t]' = ending inventory of scenario s after period t
+            // inventory[s][0] = initial, known
+            
+            dvar float+ backlog[Scenarios][ExtPeriods];                     // Backlog at end of each period
+            // 'backlog[s][t]' = ending backlog of scenario s after period t
+            // backlog[s][0] = initial, known
+
+            // -------------------------------
+            // Objective: expected total cost
+            // -------------------------------
+            // (Ordering, holding, backlog, and terminal adjustment. Expected over scenarios.)
+            minimize expected_total_cost:
+            sum(s in Scenarios) p[s] * (
+                sum(t in Periods) (
+                order_cost * x[s][t]                        // variable ordering cost
+                + holding_cost * inventory[s][t]            // end-of-period inventory holding cost
+                + backlog_cost * backlog[s][t]              // end-of-period backlog cost
+                )
+                + terminal_value * (inventory[s][T] - backlog[s][T])    // salvage/penalty at time horizon end
+            );
+
+            subject to {
+            // (C1) Initial state constraints: inventory and backlog at time 0 for all scenarios
+            forall(s in Scenarios) {
+                inventory[s][0] == init_inventory;
+                backlog[s][0] == init_backlog;
+            }
+
+            // (C2) Inventory and backlog evolution equations
+            forall(s in Scenarios, t in Periods) {
+                // After orders and demand are realized in period t
+                inventory[s][t] >= inventory[s][t-1] - backlog[s][t-1] + x[s][t] - demand[s][t];
+                backlog[s][t] >= -(inventory[s][t-1] - backlog[s][t-1] + x[s][t] - demand[s][t]);
+            }
+
+            // (C3) Order capacity constraints
+            forall(s in Scenarios, t in Periods)
+                x[s][t] <= order_cap;
+
+            // (C4) Nonanticipativity constraints
+            // In period t: If two scenarios s1 and s2 have same demand history up to t-1,
+            // then their order decisions in t must match (since decisions are made before t's demand).
+            forall(t in Periods, s1 in Scenarios, s2 in Scenarios :
+                (t == 1) || (sum(k in 1..(t-1)) (demand[s1][k] == demand[s2][k]) == t-1)
+            ) x[s1][t] == x[s2][t];
+
+            // (C5) Variable domains (float+) ensure nonnegativity; order, inventory, and backlog >= 0
+            }
+            """
+        data_code = """
+            T = 3;
+            Scenarios = { "S1", "S2", "S3", "S4" };
+            p = [ "S1" 0.25, "S2" 0.25, "S3" 0.25, "S4" 0.25 ];
+            demand = [
+            "S1" [80, 70, 60],
+            "S2" [80, 70, 140],
+            "S3" [80, 110, 60],
+            "S4" [130, 110, 140]
+            ];
+            init_inventory = 15;
+            init_backlog = 0;
+            order_cost = 5.0;
+            holding_cost = 1.0;
+            backlog_cost = 9.0;
+            order_cap = 120.0;
+            terminal_value = 0.0;
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
     def test_newsvendor(self):
         """
         Test the newsvendor problem with both solvers.
