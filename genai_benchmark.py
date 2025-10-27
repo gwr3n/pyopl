@@ -4,7 +4,8 @@ import os
 import re
 import sys
 import time
-from typing import Any, Optional
+import importlib
+from typing import Any, Optional, Callable
 
 from pyopl import solve
 
@@ -100,30 +101,25 @@ def main() -> int:
         print(f"  {k}: {v}")
 
     # Select implementation based on --logic
-    if args.logic == "generative":
-        from pyopl.pyopl_generative import Grammar as GrammarType, generative_solve as solve_fn
-
-        logger_names = ["pyopl.pyopl_generative"]
-    elif args.logic == "reflexion":
-        from pyopl.pyopl_reflexion import Grammar as GrammarType, generative_solve as solve_fn
-
-        logger_names = ["pyopl.pyopl_reflexion"]
-    elif args.logic == "tree_of_thoughts":
-        from pyopl.pyopl_tree_of_thoughts import Grammar as GrammarType, generative_solve as solve_fn
-
-        logger_names = ["pyopl.pyopl_tree_of_thoughts"]
-    elif args.logic == "chain_of_thought":
-        from pyopl.pyopl_chain_of_thought import Grammar as GrammarType, generative_solve as solve_fn
-
-        logger_names = ["pyopl.pyopl_chain_of_thought"]
-    elif args.logic == "standard":
-        from pyopl.pyopl_standard import Grammar as GrammarType, generative_solve as solve_fn
-
-        # standard routes to pyopl_generative under-the-hood
-        logger_names = ["pyopl.pyopl_generative", "pyopl.pyopl_standard"]
-    else:
+    logic_to_module = {
+        "generative": "pyopl.pyopl_generative",
+        "reflexion": "pyopl.pyopl_reflexion",
+        "tree_of_thoughts": "pyopl.pyopl_tree_of_thoughts",
+        "chain_of_thought": "pyopl.pyopl_chain_of_thought",
+        "standard": "pyopl.pyopl_standard",
+    }
+    mod_name = logic_to_module.get(args.logic)
+    if not mod_name:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
+    impl = importlib.import_module(mod_name)
+    # Assign once to broadly-typed variables to satisfy mypy
+    solve_fn: Callable[..., Any] = getattr(impl, "generative_solve")
+    GrammarType: Any = getattr(impl, "Grammar")
+    logger_names = [impl.__name__]
+    if args.logic == "standard":
+        # standard routes to pyopl_generative under-the-hood
+        logger_names.append("pyopl.pyopl_generative")
 
     # Configure module loggers for visibility
     for name in set(logger_names):
