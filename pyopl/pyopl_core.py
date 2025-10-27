@@ -3401,12 +3401,24 @@ class OPLCompiler:
             tuple_fields_by_type: dict[str, list[str]] = {}
             set_tuple_type_by_name: dict[str, str] = {}
             for d in model_ast.get("declarations") or []:
-                if isinstance(d, dict) and d.get("type") == "tuple_type":
-                    tname = d.get("name")
-                    fields = [f.get("name") for f in (d.get("fields") or [])]
-                    tuple_fields_by_type[tname] = fields
-                if isinstance(d, dict) and d.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    set_tuple_type_by_name[d.get("name")] = d.get("tuple_type")
+                if not isinstance(d, dict):
+                    continue
+                if d.get("type") == "tuple_type":
+                    tname_any = d.get("name")
+                    if isinstance(tname_any, str):
+                        raw_fields = d.get("fields") or []
+                        fields: list[str] = []
+                        for f in raw_fields:
+                            if isinstance(f, dict):
+                                fname = f.get("name")
+                                if isinstance(fname, str):
+                                    fields.append(fname)
+                        tuple_fields_by_type[tname_any] = fields
+                elif d.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                    name_any = d.get("name")
+                    tuple_type_any = d.get("tuple_type")
+                    if isinstance(name_any, str) and isinstance(tuple_type_any, str):
+                        set_tuple_type_by_name[name_any] = tuple_type_any
 
             # Evaluate general numeric/boolean/string expression for param RHS. Limited support: number, name,
             # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum/min_agg/max_agg & field_access.
