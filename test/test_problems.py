@@ -134,6 +134,7 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
+
     def test_static_stochastic_knapsack(self):
         """
         Test the static stochastic knapsack problem with both solvers.

@@ -5,9 +5,6 @@ from .pyopl_generative import (
     MODEL_NAME,
     Grammar,
 )
-from .pyopl_generative import (
-    generative_solve as _generative_solve,
-)
 
 
 def generative_solve(

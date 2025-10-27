@@ -495,6 +495,7 @@ def _call_openai_with_retry(
 
 # ---------- Prompt builders ----------
 
+
 def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code: str, data_code: str) -> str:
     return (
         "<role>\n"
@@ -732,6 +733,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
 
 
 # ---------- Public API ----------
+
 
 def generative_solve(
     prompt,

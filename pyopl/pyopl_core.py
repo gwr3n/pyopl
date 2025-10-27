@@ -3438,7 +3438,12 @@ class OPLCompiler:
                         bst = base.get("sem_type")
                         if isinstance(bst, str) and bst in tuple_fields_by_type:
                             tuple_type = bst
-                    if tuple_type is None and isinstance(base, dict) and base.get("type") == "name" and isinstance(iter_meta, dict):
+                    if (
+                        tuple_type is None
+                        and isinstance(base, dict)
+                        and base.get("type") == "name"
+                        and isinstance(iter_meta, dict)
+                    ):
                         itn = base.get("value")
                         meta = iter_meta.get(itn) if itn else None
                         if isinstance(meta, dict):
@@ -3517,6 +3522,7 @@ class OPLCompiler:
                             domains.append(list(elems or []))
                         else:
                             raise SemanticError(f"Unsupported range in sum aggregate: {rng['type']}")
+
                     # Recursive nested loops
                     def rec_sum(depth, local_env):
                         if depth == len(iters):
@@ -3538,6 +3544,7 @@ class OPLCompiler:
                             total += rec_sum(depth + 1, local_env)
                         local_env.pop(it_name, None)
                         return total
+
                     # Build iterator metadata map for field access
                     it_meta: dict[str, dict] = {}
                     for it in iters:
