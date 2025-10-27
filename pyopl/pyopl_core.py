@@ -3933,29 +3933,44 @@ class OPLCompiler:
             If the same name is present only in the .dat (as a range assignment), raise a clear SemanticError.
             """
             # Inline range declarations present in the model
-            declared_inline = {
-                d.get("name") for d in ast.get("declarations", [])
-                if d.get("type") == "range_declaration_inline"
+            declared_inline: set[str] = {
+                n
+                for n in (
+                    d.get("name")
+                    for d in (ast.get("declarations") or [])
+                    if isinstance(d, dict) and d.get("type") == "range_declaration_inline"
+                )
+                if isinstance(n, str)
             }
 
             # Collect named ranges used as indices in declarations
-            used = set()
-            for d in ast.get("declarations", []):
+            used: set[str] = set()
+            for d in ast.get("declarations", []) or []:
+                if not isinstance(d, dict):
+                    continue
                 dims = d.get("dimensions", []) or []
                 for dim in dims:
                     if isinstance(dim, dict) and dim.get("type") == "named_range_dimension":
-                        used.add(dim.get("name"))
+                        n = dim.get("name")
+                        if isinstance(n, str):
+                            used.add(n)
 
             # Collect named ranges used in forall/sum iterators
-            def walk(node):
+            def walk(node: object) -> None:
                 if isinstance(node, dict):
                     t = node.get("type")
                     if t in ("forall_constraint", "sum"):
-                        for it in node.get("iterators", []) or []:
-                            rng = it.get("range") or {}
-                            if isinstance(rng, dict) and rng.get("type") == "named_range":
-                                used.add(rng.get("name"))
-                    for v in node.values():
+                        iters = node.get("iterators", []) or []
+                        if isinstance(iters, list):
+                            for it in iters:
+                                if not isinstance(it, dict):
+                                    continue
+                                rng = it.get("range") or {}
+                                if isinstance(rng, dict) and rng.get("type") == "named_range":
+                                    n = rng.get("name")
+                                    if isinstance(n, str):
+                                        used.add(n)
+                    for v in list(node.values()):
                         walk(v)
                 elif isinstance(node, list):
                     for v in node:
