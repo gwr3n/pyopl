@@ -30,6 +30,110 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_newsvendor(self):
+        """
+        Test the newsvendor problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            # Classical Newsvendor Model
+            # This model determines the optimal order quantity Q for a single-period stochastic inventory problem (the newsvendor problem).
+            # The goal is to maximize expected profit, considering revenue from units sold, cost of ordering, and salvage value for surplus stock.
+
+            # -------- Parameters --------
+            param float revenue_per_unit;    # Revenue per unit sold
+            param float cost_per_unit;       # Cost per unit ordered
+            param float salvage_value;       # Salvage value per leftover unit
+
+            tuple Scenario { int demand; float prob; }
+            {Scenario} Scenarios = ...;      # Set of demand scenarios with probabilities
+
+            float MaxDemand = max(s in Scenarios) (s.demand);
+
+            # -------- Decision Variables --------
+            dvar float+ Q;                    # Order quantity (continuous, nonnegative)
+
+            # Number of units sold in each scenario: bounded above by both Q and realized demand.
+            dvar float+ sold[Scenarios];      # Sold[s] = actual units sold in scenario s; 0 <= sold[s] <= min(Q, s.demand)
+
+            # Number of leftover units in each scenario: Q - units sold, i.e., stock leftover after meeting demand (or 0 if all sold).
+            dvar float+ leftover[Scenarios];  # leftover[s] = Q - sold[s]
+
+            # -------- Objective Function --------
+            # Maximizes the expected profit across all demand scenarios
+            maximize expected_profit:
+                sum(s in Scenarios) (
+                    s.prob * (
+                        revenue_per_unit * sold[s]
+                    - cost_per_unit * Q
+                    + salvage_value * leftover[s]
+                    )
+                );
+
+            # -------- Constraints --------
+            subject to {
+                # Sales cannot exceed order quantity or scenario demand
+                forall(s in Scenarios)
+                    sold[s] <= Q;
+                forall(s in Scenarios)
+                    sold[s] <= s.demand;
+
+                # leftover[s] = Q - sold[s]
+                forall(s in Scenarios)
+                    leftover[s] == Q - sold[s];
+
+                # Upper bound on Q: practical maximum is the highest demand scenario
+                Q <= MaxDemand;
+            }
+            """
+        data_code = """
+            # Instance parameters for the classical newsvendor problem
+            revenue_per_unit = 10;
+            cost_per_unit = 6;
+            salvage_value = 2;
+
+            # Demand scenarios: <demand, probability>
+            Scenarios = { <400,0.1>, <600,0.2>, <700,0.4>, <800,0.2>, <1000,0.1> };
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
     def test_static_stochastic_knapsack(self):
         """
         Test the static stochastic knapsack problem with both solvers.
