@@ -30,6 +30,141 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_static_stochastic_knapsack(self):
+        """
+        Test the static stochastic knapsack problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            // Static Stochastic Knapsack (scenario-based, here-and-now decisions)
+            //
+            // Problem summary (literate notes):
+            // - We must choose a subset of items before uncertainty realizes (static decision x[i] in {0,1}).
+            // - Each scenario s in Scenarios has a probability p[s], and induces item weights w[s][i] and values v[s][i].
+            // - The knapsack capacity C must be satisfied with probability at least 1 - epsilon (a chance constraint).
+            // - Objective is to maximize the expected total value of selected items.
+            //
+            // Modeling constructs:
+            // - Decision variables:
+            //     x[i] in {0,1}: pick item i (here-and-now, scenario-independent).
+            //     y[s] in {0,1}: indicator that scenario s respects capacity (1 if capacity holds under s).
+            // - Parameters (inputs): capacity C, risk epsilon, scenario probabilities p, scenario weights w, scenario values v.
+            // - Derived quantities:
+            //     Ev[i] = sum_s p[s] * v[s][i] — expected value contribution of item i.
+            //     BigM[s] = max(0, sum_i w[s][i] - C) — scenario-specific relaxation magnitude.
+            //       When y[s] = 0, BigM[s] relaxes the capacity enough to never cut off any x.
+            //
+            // Objective (label: expected_value): maximize sum_i Ev[i] * x[i].
+            // Constraints:
+            //   - chance_requirement: sum_s p[s] * y[s] >= 1 - epsilon  (probability mass of feasible scenarios ≥ target)
+            //   - capacity_linking (for all s): sum_i w[s][i] * x[i] <= C + BigM[s] * (1 - y[s])  (links y to capacity feasibility)
+
+            // Index sets
+            range Items = 1..5;                 // item indices (use numeric indices to align with array data)
+            {string} Scenarios = ...;     // scenario identifiers (typed set of strings)
+
+            // Parameters (external unless defined inline)
+            param float C = ...;                         // knapsack capacity
+            param float epsilon = ...;                   // risk tolerance in [0,1); probability of violation <= epsilon
+            param float p[Scenarios] = ...;              // scenario probabilities (should sum to 1)
+            param float w[Scenarios][Items] = ...;       // scenario-dependent weights (s,i)
+            param float v[Scenarios][Items] = ...;       // scenario-dependent values (s,i)
+
+            // Derived expected value per item: Ev[i] = E[v_i]
+            dexpr float Ev[i in Items] = sum(s in Scenarios) p[s] * v[s][i];
+
+            // Big-M per scenario to relax capacity when y[s] = 0
+            // Use maxl to ensure nonnegativity while staying within supported function calls.
+            param float BigM[s in Scenarios] = maxl( (sum(i in Items) w[s][i]) - C, 0 );
+
+            // Decisions
+            // x[i] = 1 if item i is selected; 0 otherwise (here-and-now)
+            // y[s] = 1 if capacity is met in scenario s; 0 otherwise
+            dvar boolean x[Items];
+            dvar boolean y[Scenarios];
+
+            // Objective: maximize expected total value of selected items
+            maximize expected_value: sum(i in Items) Ev[i] * x[i];
+
+            subject to {
+            // Chance constraint: probability of meeting capacity >= 1 - epsilon
+            chance_requirement: sum(s in Scenarios) p[s] * y[s] >= 1 - epsilon;
+
+            // Scenario-wise capacity linking with big-M relaxation
+            forall(s in Scenarios)
+                capacity_linking: sum(i in Items) w[s][i] * x[i] <= C + BigM[s] * (1 - y[s]);
+            }
+            """
+        data_code = """
+            Scenarios = { "S1", "S2", "S3", "S4" };
+
+            C = 9.0;
+            epsilon = 0.25;  // require at least 75% probability mass to satisfy capacity
+
+            // Scenario probabilities (sum to 1)
+            p = [
+            "S1" 0.25,
+            "S2" 0.25,
+            "S3" 0.25,
+            "S4" 0.25
+            ];
+
+            // Scenario-dependent weights per scenario (rows) over Items = 1..5
+            w = [
+            "S1" [2.0, 5.0, 1.0, 1.0, 1.0],
+            "S2" [2.2, 5.6, 1.2, 1.1, 1.0],
+            "S3" [1.8, 5.1, 1.0, 1.2, 1.0],
+            "S4" [2.5, 6.0, 1.5, 1.0, 1.2]
+            ];
+
+            // Scenario-dependent values per scenario (rows) over Items = 1..5
+            v = [
+            "S1" [9.0, 13.0, 5.0, 2.0, 1.5],
+            "S2" [8.5, 12.5, 5.0, 2.0, 1.5],
+            "S3" [9.0, 12.0, 4.5, 2.5, 1.2],
+            "S4" [8.0, 13.5, 5.0, 1.8, 1.0]
+            ];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
     def test_p_dispersion(self):
         """
         Test the P-Dispersion Problem with both solvers.
