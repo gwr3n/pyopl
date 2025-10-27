@@ -1,0 +1,37 @@
+T = 3;
+Scenarios = { "S1", "S2", "S3", "S4", "S5" };
+Groups = { 1, 2 }; // group identifiers used by groupDay2
+
+// Regular capacity (hours) per day
+baseCap = [ 8, 8, 8 ];
+
+// Overtime cost per hour
+otCost = 100;
+
+// Scenario probabilities (equal)
+prob = [
+  "S1" 0.2,
+  "S2" 0.2,
+  "S3" 0.2,
+  "S4" 0.2,
+  "S5" 0.2
+];
+
+// Daily arrivals by scenario (students per day)
+arrivals = [
+  "S1" [ 10,  8,  6 ],
+  "S2" [ 10, 12, 10 ],
+  "S3" [ 12, 10,  8 ],
+  "S4" [ 12, 14, 12 ],
+  "S5" [ 12, 16, 14 ]
+];
+
+// Day-2 information groups (same value => same Day-1 history)
+// Group identifiers must be elements of Groups
+groupDay2 = [
+  "S1" 1,
+  "S2" 1,
+  "S3" 2,
+  "S4" 2,
+  "S5" 2
+];

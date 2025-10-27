@@ -1,0 +1,12 @@
+A university must schedule computer lab time for student project presentations over three consecutive days. Each day has 8 available hours, and each presentation takes 1 hour. The schedule must be set before knowing how many students will actually need to present, but adjustments can be made after each day based on observed attendance. The university wants to minimize expected overtime costs while ensuring that at least 95% of all presentations are completed within the three-day horizon.
+Before the first day begins, the university creates an initial schedule assuming moderate demand. 
+
+After each day, actual attendance reveals which scenario is unfolding. There are five possible demand scenarios, each with equal probability. To reflect partial information after the first day, two scenarios share the same day‑one attendance and three others share another day‑one attendance, then they diverge on later days. Specifically:
+Scenario 1 has 10 students on day one, 8 on day two, and 6 on day three (total 24).
+Scenario 2 has 10 students on day one, 12 on day two, and 10 on day three (total 32).
+Scenario 3 has 12 students on day one, 10 on day two, and 8 on day three (total 30).
+Scenario 4 has 12 students on day one, 14 on day two, and 12 on day three (total 38).
+Scenario 5 has 12 students on day one, 16 on day two, and 14 on day three (total 42).
+Because scenarios 1 and 2 share the same day‑one attendance, any decisions made before day two must be identical across them; similarly, scenarios 3–5 share a common day‑one outcome and must follow identical decisions before day two. After day two, scenarios are fully revealed and can be adjusted separately.
+
+If the initial schedule is too tight, the university can add overtime at a cost of 100 pounds per hour to meet the service level constraint. Rescheduling between days is allowed; execution each day adapts to realized attendance. For example, if the university initially schedules 8 presentations per day and Scenario 5 occurs, day one will require 16 hours for 16 students, creating 8 hours of overtime. Day two will require 14 hours, and day three will require 12 hours, adding further overtime costs. The university must ensure that at least 95% of all students in each scenario present within the three days, even if this requires costly overtime. The goal is to choose the initial allocation and adjustment plan that minimizes expected overtime costs while satisfying the service level requirement.

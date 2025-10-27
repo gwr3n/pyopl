@@ -1,0 +1,15 @@
+Scenarios = { "Low", "High" };
+
+c_init = 10;     // cost per unit for initial production
+c_rec  = 15;     // cost per unit for recourse production
+
+// Scenario demands and probabilities (keyed by scenario label)
+demand = [
+  "Low"  100,
+  "High" 200
+];
+
+prob = [
+  "Low"  0.4,
+  "High" 0.6
+];
