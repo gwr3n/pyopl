@@ -3927,6 +3927,60 @@ class OPLCompiler:
         validate_typed_sets(model_ast, data_dict)
         # --- End typed set validation ---
 
+        def validate_named_ranges(ast: dict, data_dict: dict) -> None:
+            """
+            Ensure every named range used as an index or iterator is declared with explicit bounds in the model (.mod).
+            If the same name is present only in the .dat (as a range assignment), raise a clear SemanticError.
+            """
+            # Inline range declarations present in the model
+            declared_inline = {
+                d.get("name") for d in ast.get("declarations", [])
+                if d.get("type") == "range_declaration_inline"
+            }
+
+            # Collect named ranges used as indices in declarations
+            used = set()
+            for d in ast.get("declarations", []):
+                dims = d.get("dimensions", []) or []
+                for dim in dims:
+                    if isinstance(dim, dict) and dim.get("type") == "named_range_dimension":
+                        used.add(dim.get("name"))
+
+            # Collect named ranges used in forall/sum iterators
+            def walk(node):
+                if isinstance(node, dict):
+                    t = node.get("type")
+                    if t in ("forall_constraint", "sum"):
+                        for it in node.get("iterators", []) or []:
+                            rng = it.get("range") or {}
+                            if isinstance(rng, dict) and rng.get("type") == "named_range":
+                                used.add(rng.get("name"))
+                    for v in node.values():
+                        walk(v)
+                elif isinstance(node, list):
+                    for v in node:
+                        walk(v)
+
+            walk(ast.get("objective", {}))
+            walk(ast.get("constraints", []))
+
+            # For each used range, require inline declaration
+            for name in sorted(used):
+                if name in declared_inline:
+                    continue
+                # If present in data as range_data, point to the correct fix
+                dv = data_dict.get(name)
+                if isinstance(dv, dict) and dv.get("type") == "range_data":
+                    raise SemanticError(
+                        f"Range '{name}' was supplied in the data file, but ranges used for indexing must be declared "
+                        f"with explicit bounds in the model file. Declare it in the model (e.g., 'range {name} = 1..N;') "
+                        f"and remove it from the .dat."
+                    )
+                # Otherwise generic not-found
+                raise SemanticError(f"Range '{name}' is used as an index but not declared in the model.")
+
+        validate_named_ranges(model_ast, data_dict)
+
         # --- Generate code for the model ---
 
         ast = model_ast
