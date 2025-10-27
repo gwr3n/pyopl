@@ -76,7 +76,7 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="Run problems from a dataset with generative_solve and compare objective.")
     parser.add_argument(
-        "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default)."
+        "--dataset", default="ComplexOR", help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default), StochasticOR."
     )
     parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
@@ -144,7 +144,7 @@ def main() -> int:
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {valid}")
 
     # Load dataset
-    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR"]:
+    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "StochasticOR"]:
         dataset_path = os.path.join("gen_ai", "datasets", args.dataset, f"{args.dataset}.json")
     else:
         raise ValueError(f"Unknown dataset: {args.dataset}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR.")
