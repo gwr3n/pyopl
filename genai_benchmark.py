@@ -88,8 +88,8 @@ def main() -> int:
     parser.add_argument(
         "--logic",
         default="generative",
-        choices=["standard", "chain_of_thought", "reflexion", "generative"],
-        help="Generative logic to use: standard, chain_of_thought, reflexion, or generative.",
+        choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "generative"],
+        help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, or generative (default).",
     )
 
     ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
@@ -108,6 +108,10 @@ def main() -> int:
         from pyopl.pyopl_reflexion import Grammar as GrammarType, generative_solve as solve_fn
 
         logger_names = ["pyopl.pyopl_reflexion"]
+    elif args.logic == "tree_of_thoughts":
+        from pyopl.pyopl_tree_of_thoughts import Grammar as GrammarType, generative_solve as solve_fn
+
+        logger_names = ["pyopl.pyopl_tree_of_thoughts"]
     elif args.logic == "chain_of_thought":
         from pyopl.pyopl_chain_of_thought import Grammar as GrammarType, generative_solve as solve_fn
 
