@@ -86,8 +86,8 @@ BNF is simplified for readability. Optional elements are in [brackets]. Alternat
 ```
 
 Clarification:
-- Labels apply to a single constraint and cannot prefix a forall. To label constraints produced by a forall, put the label inside the forall:
-  - `forall(i in I) lbl[i]: expr;` or `forall(i in I) { lbl[i]: expr; }`
+- Labels must be unindexed. Labels apply to a single constraint and cannot prefix a forall. To label constraints produced by a forall, put the label inside the forall:
+  - `forall(i in I) lbl: expr;` or `forall(i in I) { lbl: expr; }`
 
 Semantics:
 - In `<expression> ';'`, if the expression is a comparison, it is used directly; if it is boolean-valued, it is equated to `true`.
