@@ -524,18 +524,42 @@ def _commenting_guidelines() -> str:
         "aligned to the problem (literate style).\n"
     )
 
+def _revision_guidelines_syntax() -> str:
+    return (
+        "<revision_guidelines>\n"
+        "- Fix the listed syntax/semantic errors.\n"
+        "- Make the minimal set of changes necessary to correct syntax/semantic errors.\n"
+        "- Preserve the original modeling structure when possible.\n"
+        "- Ensure the objective, constraints, indices, and variable domains reflect the problem description.\n"
+        "- Keep syntax strictly valid.\n"
+        "- Return complete model and data strings; do not return diffs.\n"
+        "</revision_guidelines>\n\n"
+    )
+
+def _revision_guidelines_alignment() -> str:
+    return (
+        "<revision_guidelines>\n"
+        "- Address the alignment issues noted in the assessment.\n"
+        "- Make the minimal set of changes necessary to correct misalignment.\n"
+        "- Preserve the original modeling structure when possible.\n"
+        "- Ensure the objective, constraints, indices, and variable domains reflect the problem description.\n"
+        "- Keep syntax strictly valid.\n"
+        "- Return complete model and data strings; do not return diffs.\n"
+        "</revision_guidelines>\n\n"
+    )
+
 def _build_generation_prompt(
     prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
 ) -> str:
     few_shots_section = _render_few_shots_section(few_shots)
-    guidelines = _commenting_guidelines()  # NEW
+    commenting_guidelines = _commenting_guidelines()  # NEW
 
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
         "Produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
         "Choose correct variable domains.\n"
-        f"{guidelines}"
+        f"{commenting_guidelines}"
         "Use the PyOPL reference below strictly for syntax.\n"
         "If data are missing, create a small plausible instance.\n"
         "</task>\n\n"
@@ -554,6 +578,12 @@ def _build_generation_prompt(
         '{ "type": "object", "additionalProperties": false, "required": ["model","data"], '
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
+        # "<example_output>\n"
+        # '{\n'
+        # '  "model": "// minimal example\\nfloat a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
+        # '  "data":  "a = 10;\\n b = 5;"\n'
+        # "}\n"
+        # "</example_output>\n"
     )
 
 
@@ -578,6 +608,14 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         f"{data_code}\n"
         "</data>\n"
         "</inputs>\n\n"
+        "<assessment_focus>\n"
+        "- Objective and constraints reflect the prompt intent.\n"
+        "- Decision variables have correct domains and indices.\n"
+        "- Data is consistent with sets/parameters used by the model.\n"
+        "- Signs, units, and indexing are correct; no missing links.\n"
+        "- Any critical omissions or extraneous constraints.\n"
+        "- Most impactful improvements if misaligned.\n"
+        "</assessment_focus>\n\n"
         "<output_requirements>\n"
         '- Return ONLY a JSON object with keys "aligned" (boolean) and "assessment" (string, 3–6 sentences). No extra keys.\n'
         "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
@@ -586,6 +624,9 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         '{ "type":"object", "additionalProperties": false, "required":["aligned","assessment"], '
         '"properties": { "aligned":{"type":"boolean"}, "assessment":{"type":"string"} } }\n'
         "</json_schema>\n"
+        # "<example_output>\n"
+        # '{ "aligned": false, "assessment": "The capacity constraint omits fixed setup costs and the data set D is unused." }\n'
+        # "</example_output>\n"
     )
 
 
@@ -600,7 +641,7 @@ def _build_revision_prompt(
     few_shots: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     few_shots_section = _render_few_shots_section(few_shots)
-    guidelines = _commenting_guidelines()  # NEW
+    commenting_guidelines = _commenting_guidelines()  # NEW
 
     errors_block = ""
     if compile_errors:
@@ -611,14 +652,19 @@ def _build_revision_prompt(
     if alignment_assessment:
         assess_block = f"<alignment_assessment>\n{alignment_assessment}\n</alignment_assessment>\n\n"
 
+    revision_guidelines = (
+        _revision_guidelines_syntax() if compile_errors and len(compile_errors) > 0 else _revision_guidelines_alignment()
+    )
+
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
         "Revise the model/data to resolve the specified issues while preserving the intended formulation.\n"
-        "Change only what is necessary; keep syntax valid. Retain meaningful labels.\n"
-        f"{guidelines}"
+        "Change only what is necessary; keep syntax valid.\n"
+        f"{commenting_guidelines}"
         "Use the PyOPL reference strictly for syntax.\n"
         "</task>\n\n"
+        f"{revision_guidelines}"
         "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
         "--- END PYOPL SYNTAX IMPLEMENTATION ---\n</grammar_reference>\n\n"
@@ -641,6 +687,12 @@ def _build_revision_prompt(
         '{ "type":"object", "additionalProperties": false, "required":["model","data"], '
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
+        # "<example_output>\n"
+        # '{\n'
+        # '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
+        # '  "data":  "a = 10;\\n b = 5;"\n'
+        # "}\n"
+        # "</example_output>\n"
     )
 
 
