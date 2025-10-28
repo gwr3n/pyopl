@@ -191,6 +191,30 @@ def _gather_few_shots(
     return examples
 
 
+# NEW: central renderer for few-shot exemplars (to avoid duplication)
+def _render_few_shots_section(few_shots: Optional[List[Dict[str, str]]]) -> str:
+    if not few_shots:
+        return ""
+    blocks: List[str] = []
+    for i, ex in enumerate(few_shots, 1):
+        desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
+        mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
+        dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
+        blocks.append(
+            f'<example index="{i}">\n'
+            f"{desc_hdr}\n{ex.get('description','')}\n</description>\n\n"
+            f"{mod_hdr}\n{ex.get('model','')}\n</model_file>\n\n"
+            f"{dat_hdr}\n{ex.get('data','')}\n</data_file>\n"
+            f"</example>\n"
+        )
+    return (
+        "<few_shot_examples>\n"
+        "Use these exemplars for structure and syntax only. Tailor names/indices to this problem.\n"
+        + "".join(blocks)
+        + "</few_shot_examples>\n\n"
+    )
+
+
 def extract_json_from_markdown(text: str) -> str:
     """
     Extract JSON object from a Markdown code block if present.
@@ -492,99 +516,57 @@ def _call_openai_with_retry(
 
 # ---------- Prompt builders ----------
 
+# NEW: shared commenting guidance for prompts
+def _commenting_guidelines() -> str:
+    return (
+        "Label the objective and each constraint. "
+        "Add concise comments explaining variables, parameters, and constraints, "
+        "aligned to the problem (literate style).\n"
+    )
 
 def _build_generation_prompt(
     prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
-) -> str:  # CHANGED
-    few_shots_section = ""
-    if few_shots:
-        blocks = []
-        for i, ex in enumerate(few_shots, 1):
-            # Include file paths as metadata to provide provenance (optional for the model)
-            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
-            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
-            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
-            blocks.append(
-                f'<example index="{i}">\n'
-                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
-                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
-                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
-                f"</example>\n"
-            )
-        few_shots_section = (
-            "<few_shot_examples>\n"
-            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
-            + "".join(blocks)
-            + "</few_shot_examples>\n\n"
-        )
+) -> str:
+    few_shots_section = _render_few_shots_section(few_shots)
+    guidelines = _commenting_guidelines()  # NEW
 
     return (
-        "<role>\n"
-        "You are an expert in mathematical optimization and PyOPL.\n"
-        "</role>\n\n"
+        "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
-        "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
-        "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
-        "Infer from the problem context whether decision variables should be integer, binary, or continuous.\n"
-        "Label all constraints and the objective function meaningfully; "
-        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
-        "match these explanations to the problem description by following the predicaments of literate programming.\n"
-        "If data are missing, create a small, plausible mock instance consistent with the model.\n"
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
-        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
+        "Produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
+        "Choose correct variable domains.\n"
+        f"{guidelines}"
+        "Use the PyOPL reference below strictly for syntax.\n"
+        "If data are missing, create a small plausible instance.\n"
         "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
+        "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n</grammar_reference>\n\n"
         f"{few_shots_section}"
         "<problem_description>\n"
         f"{prompt}\n"
         "</problem_description>\n\n"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
-        "- The values must be single JSON strings (no arrays/objects inside them).\n"
-        "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
-        "- No trailing commas. No additional keys. No commentary.\n"
-        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        '- Return ONLY a JSON object with keys "model" and "data". Values are single strings; escape quotes and backslashes; encode newlines as \\n. No extra keys.\n'
+        "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
-        "{\n"
-        '  "type": "object",\n'
-        '  "additionalProperties": false,\n'
-        '  "required": ["model", "data"],\n'
-        '  "properties": {\n'
-        '    "model": {"type": "string"},\n'
-        '    "data":  {"type": "string"}\n'
-        "  }\n"
-        "}\n"
-        "</json_schema>\n\n"
-        "<example_output>\n"
-        "{\n"
-        '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
-        '  "data":  "a = 10;\\nb= 5;"\n'
-        "}\n"
-        "</example_output>\n"
+        '{ "type": "object", "additionalProperties": false, "required": ["model","data"], '
+        '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
+        "</json_schema>\n"
     )
 
 
 def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code: str, data_code: str) -> str:
     return (
-        "<role>\n"
-        "You are an expert in mathematical optimization and PyOPL.\n"
-        "</role>\n\n"
+        "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
-        "Assess whether the generated PyOPL model and data fully align with the problem description.\n"
-        "Alignment means the objective, constraints, decision variables, and data match the problem description.\n"
-        "Be critical and specific about modeling choices, feasibility, and consistency.\n"
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
+        "Judge if the model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
+        "Be specific and critical.\n"
         "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
+        "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n</grammar_reference>\n\n"
         "<inputs>\n"
         "<problem_description>\n"
         f"{prompt}\n"
@@ -596,226 +578,69 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         f"{data_code}\n"
         "</data>\n"
         "</inputs>\n\n"
-        "<assessment_focus>\n"
-        "- Objective and constraints reflect the prompt intent.\n"
-        "- Decision variables have correct domains and indices.\n"
-        "- Data is consistent with sets/parameters used by the model.\n"
-        "- Signs, units, and indexing are correct; no missing links.\n"
-        "- Any syntax error raised by the compiler.\n"
-        "- Most impactful improvements if misaligned.\n"
-        "</assessment_focus>\n\n"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "aligned" (boolean) and "assessment" (string).\n'
-        '- If issues exist, mention the most critical fixes in "assessment", a single short paragraph (3–6 sentences) of plain text.\n'
-        "- No Markdown. No bullet lists. No commentary. No additional keys. No trailing commas.\n"
-        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        '- Return ONLY a JSON object with keys "aligned" (boolean) and "assessment" (string, 3–6 sentences). No extra keys.\n'
+        "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
-        "{\n"
-        '  "type": "object",\n'
-        '  "additionalProperties": false,\n'
-        '  "required": ["aligned", "assessment"],\n'
-        '  "properties": {\n'
-        '    "aligned": {"type": "boolean"},\n'
-        '    "assessment": {"type": "string"}\n'
-        "  }\n"
-        "}\n"
-        "</json_schema>\n\n"
-        "<example_output>\n"
-        '{ "aligned": false, "assessment": "The model objective function does not include fixed costs." }\n'
-        "</example_output>\n"
+        '{ "type":"object", "additionalProperties": false, "required":["aligned","assessment"], '
+        '"properties": { "aligned":{"type":"boolean"}, "assessment":{"type":"string"} } }\n'
+        "</json_schema>\n"
     )
 
 
-def _build_revision_prompt_alignment(
-    prompt: str,
-    grammar_implementation: str,
-    assessment_text: str,
-    model_code: str,
-    data_code: str,  # CHANGED
-    few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
-) -> str:
-    few_shots_section = ""
-    if few_shots:
-        blocks = []
-        for i, ex in enumerate(few_shots, 1):
-            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
-            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
-            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
-            blocks.append(
-                f'<example index="{i}">\n'
-                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
-                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
-                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
-                f"</example>\n"
-            )
-        few_shots_section = (
-            "<few_shot_examples>\n"
-            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
-            + "".join(blocks)
-            + "</few_shot_examples>\n\n"
-        )
-
-    return (
-        "<role>\n"
-        "You are an expert in mathematical optimization and PyOPL.\n"
-        "</role>\n\n"
-        "<task>\n"
-        "The previous attempt produced a syntactically valid PyOPL model and data, but they are NOT fully aligned with the problem description.\n"
-        "<assessment>\n"
-        f"{assessment_text}\n"
-        "</assessment>\n"
-        "Revise the model and data so that they fully align with the problem description while preserving syntactic validity.\n"
-        "Change only what is necessary to achieve alignment (objective, constraints, variables, sets/parameters, and data consistency).\n"
-        "Label all constraints and the objective function meaningfully; "
-        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
-        "match these explanations to the problem description by following the predicaments of literate programming.\n"
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
-        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
-        "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
-        f"{grammar_implementation}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
-        f"{few_shots_section}"  # NEW
-        "<problem_description>\n"
-        f"{prompt}\n"
-        "</problem_description>\n\n"
-        "<previous_attempt>\n"
-        "<model>\n"
-        f"{model_code}\n"
-        "</model>\n\n"
-        "<data>\n"
-        f"{data_code}\n"
-        "</data>\n"
-        "</previous_attempt>\n\n"
-        "<revision_guidelines>\n"
-        "- Ensure the objective, constraints, indices, and variable domains reflect the problem description.\n"
-        "- Make the minimal set of changes necessary to correct misalignment.\n"
-        "- Keep syntax strictly valid.\n"
-        "- Return complete model and data strings; do not return diffs.\n"
-        "</revision_guidelines>\n\n"
-        "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
-        "- The values must be single JSON strings (no arrays/objects inside them).\n"
-        "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
-        "- No trailing commas. No additional keys. No commentary.\n"
-        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
-        "</output_requirements>\n\n"
-        "<json_schema>\n"
-        "{\n"
-        '  "type": "object",\n'
-        '  "additionalProperties": false,\n'
-        '  "required": ["model", "data"],\n'
-        '  "properties": {\n'
-        '    "model": {"type": "string"},\n'
-        '    "data":  {"type": "string"}\n'
-        "  }\n"
-        "}\n"
-        "</json_schema>\n\n"
-        "<example_output>\n"
-        "{\n"
-        '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
-        '  "data":  "a = 10;\\nb= 5;"\n'
-        "}\n"
-        "</example_output>\n"
-    )
-
-
-def _build_revision_prompt_syntax(
+# NEW: unified revision prompt for both syntax errors and alignment issues
+def _build_revision_prompt(
     prompt: str,
     grammar_implementation: str,
     model_code: str,
     data_code: str,
-    syntax_errors,  # CHANGED
-    few_shots: Optional[List[Dict[str, str]]] = None,  # NEW
+    compile_errors: Optional[List[str]] = None,
+    alignment_assessment: Optional[str] = None,
+    few_shots: Optional[List[Dict[str, str]]] = None,
 ) -> str:
-    few_shots_section = ""
-    if few_shots:
-        blocks = []
-        for i, ex in enumerate(few_shots, 1):
-            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
-            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
-            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
-            blocks.append(
-                f'<example index="{i}">\n'
-                f"{desc_hdr}\n{ex['description']}\n</description>\n\n"
-                f"{mod_hdr}\n{ex['model']}\n</model_file>\n\n"
-                f"{dat_hdr}\n{ex['data']}\n</data_file>\n"
-                f"</example>\n"
-            )
-        few_shots_section = (
-            "<few_shot_examples>\n"
-            "Use the following exemplars as guidance for structure and syntax only. Do not copy variable names unless appropriate to the new problem.\n"
-            + "".join(blocks)
-            + "</few_shot_examples>\n\n"
-        )
+    few_shots_section = _render_few_shots_section(few_shots)
+    guidelines = _commenting_guidelines()  # NEW
+
+    errors_block = ""
+    if compile_errors:
+        joined = "\n".join(f"- {e}" for e in compile_errors)
+        errors_block = f"<errors>\n{joined}\n</errors>\n\n"
+
+    assess_block = ""
+    if alignment_assessment:
+        assess_block = f"<alignment_assessment>\n{alignment_assessment}\n</alignment_assessment>\n\n"
 
     return (
-        "<role>\n"
-        "You are an expert in mathematical optimization and PyOPL.\n"
-        "</role>\n\n"
+        "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
-        "The previous attempt to generate a PyOPL model and data file failed due to syntax errors.\n"
-        "Revise the model and data to fix the errors while retaining alignment with the problem description.\n"
-        "Change only what is necessary to fix the errors.\n"
-        "Label all constraints and the objective function meaningfully; "
-        "thoroughly comment the model to explain the purpose of variables, parameters, objective, and constraints; "
-        "match these explanations to the problem description by following the predicaments of literate programming.\n"
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
-        "You are also provided with a few-shot examples section; use it only as guidance and produce a solution tailored to the new problem.\n"
+        "Revise the model/data to resolve the specified issues while preserving the intended formulation.\n"
+        "Change only what is necessary; keep syntax valid. Retain meaningful labels.\n"
+        f"{guidelines}"
+        "Use the PyOPL reference strictly for syntax.\n"
         "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
+        "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
         f"{grammar_implementation}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
-        f"{few_shots_section}"  # NEW
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n</grammar_reference>\n\n"
+        f"{few_shots_section}"
         "<problem_description>\n"
         f"{prompt}\n"
         "</problem_description>\n\n"
-        "<previous_attempt>\n"
-        "<model>\n"
+        "<previous_attempt>\n<model>\n"
         f"{model_code}\n"
-        "</model>\n\n"
-        "<data>\n"
+        "</model>\n\n<data>\n"
         f"{data_code}\n"
-        "</data>\n"
-        "</previous_attempt>\n\n"
-        "<errors>\n"
-        f"{syntax_errors}\n"
-        "</errors>\n\n"
-        "<revision_guidelines>\n"
-        "- Fix the listed syntax/semantic errors.\n"
-        "- Preserve the original modeling intent and structure when possible.\n"
-        "- Ensure the model compiles with the data under the given implementation.\n"
-        "- Return complete model and data strings; do not return diffs.\n"
-        "</revision_guidelines>\n\n"
+        "</data>\n</previous_attempt>\n\n"
+        f"{errors_block}"
+        f"{assess_block}"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" (the PyOPL model) and "data" (the matching data file).\n'
-        "- The values must be single JSON strings (no arrays/objects inside them).\n"
-        "- Escape all double quotes and backslashes; encode newlines as \\n.\n"
-        "- No trailing commas. No additional keys. No commentary.\n"
-        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        '- Return ONLY a JSON object with keys "model" and "data". Values are single strings; escape quotes/backslashes; encode newlines as \\n. No extra keys.\n'
+        "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
-        "{\n"
-        '  "type": "object",\n'
-        '  "additionalProperties": false,\n'
-        '  "required": ["model", "data"],\n'
-        '  "properties": {\n'
-        '    "model": {"type": "string"},\n'
-        '    "data":  {"type": "string"}\n'
-        "  }\n"
-        "}\n"
-        "</json_schema>\n\n"
-        "<example_output>\n"
-        "{\n"
-        '  "model": "float a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
-        '  "data":  "a = 10;\\nb= 5;"\n'
-        "}\n"
-        "</example_output>\n"
+        '{ "type":"object", "additionalProperties": false, "required":["model","data"], '
+        '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
+        "</json_schema>\n"
     )
 
 
@@ -867,6 +692,12 @@ def _build_final_assessment_prompt(
 
 
 def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, model_code: str, data_code: str) -> str:
+    guidelines = (
+        "Label the objective and each constraint. "
+        "Include concise comments explaining variables, parameters, and constraints, "
+        "aligned to the user's question and the problem (literate style).\n"
+    )  # NEW
+
     return (
         "<role>\n"
         "You are an expert in mathematical optimization and PyOPL.\n"
@@ -876,9 +707,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "Provide critical, specific feedback. If revisions are necessary for correctness,\n"
         "semantics, or consistency with the grammar reference, propose minimal changes.\n"
         "Only change what is necessary.\n"
-        "Label all constraints and the objective function meaningfully; "
-        "thoroughly comment the changes to explain the purpose of variables, parameters, objective, and constraints; "
-        "match these explanations to user's question by following the predicaments of literate programming.\n"
+        f"{guidelines}"  # NEW
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
@@ -1093,20 +922,32 @@ def generative_solve(
                     logger.debug("Model and data are syntactically valid and aligned with the prompt.")
                     break
                 else:
-                    _notify(progress, "Not aligned; revising per assessment")  # NEW
+                    _notify(progress, "Not aligned; revising per assessment")
                     logger.debug(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
-                    user_prompt = _build_revision_prompt_alignment(  # CHANGED
-                        prompt, grammar_implementation, assessment_text, model_code, data_code, few_shots=few_shots  # NEW
+                    user_prompt = _build_revision_prompt(
+                        prompt=prompt,
+                        grammar_implementation=grammar_implementation,
+                        model_code=model_code,
+                        data_code=data_code,
+                        compile_errors=None,
+                        alignment_assessment=assessment_text,
+                        few_shots=few_shots,
                     )
             else:
                 raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
         else:
-            _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising...")  # NEW
+            _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising...")
             logger.debug("Model or data has syntax errors; revising...")
-            user_prompt = _build_revision_prompt_syntax(  # CHANGED
-                prompt, grammar_implementation, model_code, data_code, syntax_errors, few_shots=few_shots  # NEW
+            user_prompt = _build_revision_prompt(
+                prompt=prompt,
+                grammar_implementation=grammar_implementation,
+                model_code=model_code,
+                data_code=data_code,
+                compile_errors=syntax_errors,
+                alignment_assessment=None,
+                few_shots=few_shots,
             )
 
     # Load latest version of the model and data files
