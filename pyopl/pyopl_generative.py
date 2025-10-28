@@ -578,12 +578,12 @@ def _build_generation_prompt(
         '{ "type": "object", "additionalProperties": false, "required": ["model","data"], '
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
-        # "<example_output>\n"
-        # '{\n'
-        # '  "model": "// minimal example\\nfloat a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
-        # '  "data":  "a = 10;\\n b = 5;"\n'
-        # "}\n"
-        # "</example_output>\n"
+        "<example_output>\n"
+        '{\n'
+        '  "model": "// minimal example\\nfloat a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
+        '  "data":  "a = 10;\\n b = 5;"\n'
+        "}\n"
+        "</example_output>\n"
     )
 
 
@@ -624,9 +624,9 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         '{ "type":"object", "additionalProperties": false, "required":["aligned","assessment"], '
         '"properties": { "aligned":{"type":"boolean"}, "assessment":{"type":"string"} } }\n'
         "</json_schema>\n"
-        # "<example_output>\n"
-        # '{ "aligned": false, "assessment": "The capacity constraint omits fixed setup costs and the data set D is unused." }\n'
-        # "</example_output>\n"
+        "<example_output>\n"
+        '{ "aligned": false, "assessment": "The capacity constraint omits fixed setup costs and the data set D is unused." }\n'
+        "</example_output>\n"
     )
 
 
@@ -687,12 +687,12 @@ def _build_revision_prompt(
         '{ "type":"object", "additionalProperties": false, "required":["model","data"], '
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
-        # "<example_output>\n"
-        # '{\n'
-        # '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
-        # '  "data":  "a = 10;\\n b = 5;"\n'
-        # "}\n"
-        # "</example_output>\n"
+        "<example_output>\n"
+        '{\n'
+        '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
+        '  "data":  "a = 10;\\n b = 5;"\n'
+        "}\n"
+        "</example_output>\n"
     )
 
 
