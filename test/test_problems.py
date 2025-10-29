@@ -68,7 +68,7 @@ class TestPyOPLProblems(unittest.TestCase):
             dvar float+ inventory[Scenarios][ExtPeriods];                   // Inventory at end of each period
             // 'inventory[s][t]' = ending inventory of scenario s after period t
             // inventory[s][0] = initial, known
-            
+
             dvar float+ backlog[Scenarios][ExtPeriods];                     // Backlog at end of each period
             // 'backlog[s][t]' = ending backlog of scenario s after period t
             // backlog[s][0] = initial, known
