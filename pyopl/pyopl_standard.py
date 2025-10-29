@@ -324,12 +324,15 @@ def _build_create_params(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
+    response_json: bool = False,  # NEW
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "model": model_name,
         "input": input_text,
-        "response_format": {"type": "json"},
     }
+    if response_json:
+        # Only require JSON when the caller expects JSON output
+        params["response_format"] = {"type": "json"}
     if max_tokens is not None:
         params["max_output_tokens"] = max_tokens
     if temperature is not None:
@@ -365,6 +368,7 @@ def _llm_generate_text(
     stop: Optional[list[str]] = None,
     progress: Optional[Callable[[str], None]] = None,  # NEW
     capture_usage: bool = False,  # NEW
+    response_json: bool = False,  # NEW
 ) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
     if provider == LLMProvider.OPENAI:
         client = _openai_client()
@@ -374,17 +378,18 @@ def _llm_generate_text(
             max_tokens=max_tokens,
             temperature=temperature,
             stop=stop,
+            response_json=response_json,  # NEW
         )
-        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")  # NEW
-        response = _call_openai_with_retry(client, create_params, progress=progress)  # CHANGED
-        _notify(progress, "[LLM] OpenAI: response received")  # NEW
+        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")
+        response = _call_openai_with_retry(client, create_params, progress=progress)
+        _notify(progress, "[LLM] OpenAI: response received")
         response_text = _coalesce_response_text(response)
         if not response_text:
             raise RuntimeError(f"Empty OpenAI response: {response}.")
         if not capture_usage:
             return response_text
-        usage = _extract_openai_usage(response, input_text, response_text, model_name)  # NEW
-        return response_text, usage  # NEW
+        usage = _extract_openai_usage(response, input_text, response_text, model_name)
+        return response_text, usage
 
     if provider == LLMProvider.GOOGLE:
         genai = _google_client()
@@ -394,9 +399,9 @@ def _llm_generate_text(
             generation_config["max_output_tokens"] = max_tokens
         if temperature is not None:
             generation_config["temperature"] = temperature
-        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")  # NEW
+        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")
         resp = model.generate_content(input_text, generation_config=generation_config)
-        _notify(progress, "[LLM] Gemini: response received")  # NEW
+        _notify(progress, "[LLM] Gemini: response received")
         text = getattr(resp, "text", None)
         if not text and getattr(resp, "candidates", None):
             parts = []
@@ -558,7 +563,7 @@ def _build_standard_generation_prompt(
     few_shots: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """
-    Standard generation prompt.
+    Standard generation prompt (single-shot, structured JSON output).
     """
     # Few-shot exemplars (optional)
     few_shots_section = ""
@@ -604,15 +609,13 @@ def _build_standard_generation_prompt(
         '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
         "- Each value must be a single JSON string (escape quotes/backslashes, encode newlines as \\n).\n"
         "- Optional: you MAY wrap the JSON in a ```json fenced block that contains only the JSON.\n"
+        "- Do any necessary reasoning internally and return only the JSON.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
         '{ "type": "object", "additionalProperties": false,\n'
         '  "required": ["model", "data"],\n'
         '  "properties": { "model": {"type": "string"}, "data": {"type": "string"} } }\n'
         "</json_schema>\n"
-        "<hint>\n"
-        "Let's think step by step in the scratchpad before writing the final JSON.\n"
-        "</hint>\n"
     )
 
 
@@ -733,36 +736,35 @@ def generative_solve(
     model_file,
     data_file,
     model_name=MODEL_NAME, 
-    mode=Grammar.BNF, # ignored; always enforced to Grammar.NONE below
-    iterations=MAX_ITERATIONS, # ignored; always enforced to 1 below
+    mode=Grammar.BNF,  # ignored; enforced to Grammar.BNF below
+    iterations=MAX_ITERATIONS,  # ignored; enforced to 1 below
     return_statistics=False,
-    alignment_check: Optional[bool] = None, # ignored; always enforced to False below
+    alignment_check: Optional[bool] = None,  # ignored; enforced to False below
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
     progress: Optional[Callable[[str], None]] = None,
-    few_shot: bool = False, # ignored; always enforced to False below
+    few_shot: bool = False,  # ignored; enforced to False below
 ):
-    """Generate a PyOPL model and data file using Chain-of-Thought (CoT) sampling:
-    sample -> evaluate (compile + optional alignment), repeated up to `iterations`.
-
+    """Generate a PyOPL model and data file using standard prompting:
+    single-shot JSON output, compile check, optional alignment (disabled here).
     Signatures and return shape preserved for drop-in compatibility.
     """
-    grammar_implementation = _get_grammar_implementation(mode)
-
-    mode=Grammar.BNF
+    # Enforce standard prompting defaults
+    mode = Grammar.BNF
     iterations = 1
     alignment_check = False
     few_shot = False
+
+    grammar_implementation = _get_grammar_implementation(mode)  # moved after overrides
 
     do_alignment = ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)
     provider = _infer_provider(llm_provider, model_name)
 
     _notify(
         progress,
-        f"CoT: provider={provider.value} model={model_name} samples={iterations} alignment={'on' if do_alignment else 'off'}",
+        f"Standard: provider={provider.value} model={model_name} samples={iterations} alignment={'on' if do_alignment else 'off'}",
     )
-
     # Few-shot examples (static per run)
     few_shots_list: List[Dict[str, str]] = (
         _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
@@ -790,6 +792,7 @@ def generative_solve(
             stop=stop,
             progress=progress,
             capture_usage=True,
+            response_json=True,  # NEW: generation returns JSON
         )
         total_prompt_tokens += usage.get("prompt_tokens", 0)
         total_completion_tokens += usage.get("completion_tokens", 0)
@@ -842,6 +845,7 @@ def generative_solve(
                     stop=stop,
                     progress=progress,
                     capture_usage=True,
+                    response_json=True,  # NEW: alignment returns JSON
                 )
                 total_prompt_tokens += usage2.get("prompt_tokens", 0)
                 total_completion_tokens += usage2.get("completion_tokens", 0)
@@ -889,6 +893,7 @@ def generative_solve(
             stop=stop,
             progress=progress,
             capture_usage=True,
+            response_json=False,  # NEW: final assessment is plain text
         )
         total_prompt_tokens += usage4.get("prompt_tokens", 0)
         total_completion_tokens += usage4.get("completion_tokens", 0)
@@ -942,28 +947,7 @@ def generative_feedback(
     llm_provider: Optional[str] = LLM_PROVIDER,
     progress: Optional[Callable[[str], None]] = None,  # NEW
 ):
-    """Provide feedback on a given PyOPL model and data file based on a user prompt.
-
-    Args:
-        prompt (str): User question or request regarding the model and data.
-        model_file (str): Path to the PyOPL model file (.mod).
-        data_file (str): Path to the PyOPL data file (.dat).
-        model_name (str): LLM model name, e.g. "gpt-5".
-        mode (Grammar): Grammar implementation to use: Grammar.NONE, Grammar.BNF, or Grammar.CODE.
-        temperature (float|None): Sampling temperature; if None, use model default.
-        stop (list[str]|None): List of stop sequences; if None, no stop sequences.
-        llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).  # NEW
-
-    Raises:
-        RuntimeError: If feedback generation fails irrecoverably.
-
-    Returns:
-        dict: A dictionary with keys:
-              - "feedback": string with the feedback message
-              - "revised_model": (optional) string with revised PyOPL model if changes are proposed
-              - "revised_data": (optional) string with revised PyOPL data if changes are proposed
-    """
+    """Provide feedback on a given PyOPL model and data file based on a user prompt."""
     provider = _infer_provider(llm_provider, model_name)
     grammar_implementation = _get_grammar_implementation(mode)
 
@@ -980,10 +964,11 @@ def generative_feedback(
         model_name=model_name,
         input_text=user_prompt,
         max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0.0 if temperature is not None else None,
+        temperature=temperature,  # FIX: honor caller’s temperature
         stop=stop,
-        progress=progress,  # NEW
+        progress=progress,
         capture_usage=False,
+        response_json=True,  # feedback returns JSON
     )
     if not content:
         raise RuntimeError("Empty model response.")
