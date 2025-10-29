@@ -598,7 +598,7 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
-        "Judge if the model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
+        "Judge if the PyOPL model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
         "Be specific and critical.\n"
         "</task>\n\n"
         "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
@@ -712,7 +712,7 @@ def _build_final_assessment_prompt(
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Judge if the model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
+        "Judge if the PyOPL model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
         "Be specific and critical.\n"
         "If you believe the problem description is incomplete or ambiguous, point this out in your assessment.\n"
         "</task>\n\n"
