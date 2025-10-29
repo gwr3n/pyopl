@@ -587,7 +587,7 @@ def _build_standard_generation_prompt(
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Generate a valid PyOPL model (.mod) and a matching data file (.dat) for the given problem description.\n"
+        "Produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
         "Ensure the model decision variables, objective function, and constraints fully align with the provided problem description.\n"
         "If data are missing, create a small, plausible mock instance consistent with the model.\n"
         "</task>\n\n"

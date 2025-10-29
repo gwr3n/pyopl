@@ -561,7 +561,7 @@ def _build_generation_prompt(
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
-        "Produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
+        "Think step by step to produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
         "First, reason in a private scratchpad to identify sets, parameters, decision variables, objective, and constraints.\n"
         "Ensure indices, domains (binary/integer/float), and data are correct and consistent with the problem description.\n"
         "Choose correct domains (binary/integer/float) from context. Add clear labels and explanatory comments.\n"
