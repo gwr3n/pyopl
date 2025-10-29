@@ -1789,7 +1789,7 @@ class OPLParser(Parser):
             "forall(i in I) ct: ...;",
             lineno=p.lineno,
         )
-    
+
     @_('SUBJECT_TO "{" constraint_list "}"')  # type: ignore
     def constraints_section(self, p):
         return p.constraint_list

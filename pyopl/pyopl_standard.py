@@ -13,8 +13,8 @@ def generative_solve(
     model_file,
     data_file,
     model_name: str = MODEL_NAME,
-    mode: Grammar = Grammar.BNF,  
-    iterations: int = 1,           # ignored; always enforced to 1 below
+    mode: Grammar = Grammar.BNF,
+    iterations: int = 1,  # ignored; always enforced to 1 below
     return_statistics: bool = False,
     alignment_check: Optional[bool] = False,  # ignored; always enforced to False below
     temperature: Optional[float] = None,

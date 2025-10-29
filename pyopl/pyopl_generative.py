@@ -516,6 +516,7 @@ def _call_openai_with_retry(
 
 # ---------- Prompt builders ----------
 
+
 # NEW: shared commenting guidance for prompts
 def _commenting_guidelines() -> str:
     return (
@@ -523,6 +524,7 @@ def _commenting_guidelines() -> str:
         "Add concise comments explaining variables, parameters, and constraints, "
         "aligned to the problem (literate style).\n"
     )
+
 
 def _revision_guidelines_syntax() -> str:
     return (
@@ -536,6 +538,7 @@ def _revision_guidelines_syntax() -> str:
         "</revision_guidelines>\n\n"
     )
 
+
 def _revision_guidelines_alignment() -> str:
     return (
         "<revision_guidelines>\n"
@@ -547,6 +550,7 @@ def _revision_guidelines_alignment() -> str:
         "- Return complete model and data strings; do not return diffs.\n"
         "</revision_guidelines>\n\n"
     )
+
 
 def _build_generation_prompt(
     prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
@@ -582,7 +586,7 @@ def _build_generation_prompt(
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
         "<example_output>\n"
-        '{\n'
+        "{\n"
         '  "model": "// minimal example\\nfloat a;\\nfloat b;\\ndvar float x;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
         '  "data":  "a = 10;\\n b = 5;"\n'
         "}\n"
@@ -691,7 +695,7 @@ def _build_revision_prompt(
         '"properties": { "model":{"type":"string"}, "data":{"type":"string"} } }\n'
         "</json_schema>\n"
         "<example_output>\n"
-        '{\n'
+        "{\n"
         '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
         '  "data":  "a = 10;\\n b = 5;"\n'
         "}\n"

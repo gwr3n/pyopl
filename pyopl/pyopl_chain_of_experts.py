@@ -64,6 +64,7 @@ COE_DEFAULT_EXPERTS = [
     "Code Reviewer",
 ]
 
+
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
     GOOGLE = "google"
@@ -503,13 +504,14 @@ def _call_openai_with_retry(
 
 # ---------- Prompt builders (CoE) ----------
 
+
 def _format_few_shots_knowledge(few_shots: List[Dict[str, str]]) -> str:
     if not few_shots:
         return ""
     blocks: List[str] = []
     for i, ex in enumerate(few_shots, 1):
         blocks.append(
-            f"<example index=\"{i}\">\n"
+            f'<example index="{i}">\n'
             f"<description path=\"{ex.get('desc_path','')}\">\n{ex.get('description','')}\n</description>\n"
             f"<model_file path=\"{ex.get('model_path','')}\">\n{ex.get('model','')}\n</model_file>\n"
             f"<data_file path=\"{ex.get('data_path','')}\">\n{ex.get('data','')}\n</data_file>\n"
@@ -548,7 +550,9 @@ def _build_conductor_prompt(problem: str, experts: List[str], comments: List[Dic
     )
 
 
-def _build_expert_prompt(expert: str, problem: str, grammar: str, comments: List[Dict[str, str]], few_shots: List[Dict[str, str]]) -> str:
+def _build_expert_prompt(
+    expert: str, problem: str, grammar: str, comments: List[Dict[str, str]], few_shots: List[Dict[str, str]]
+) -> str:
     """
     Build prompts for individual experts. Output must be JSON: {"comment":"<short actionable insight or snippet>"}.
     Experts: Terminology Interpreter, Modeling Expert, Data Builder, Code Reviewer.
@@ -579,8 +583,7 @@ def _build_expert_prompt(expert: str, problem: str, grammar: str, comments: List
             "Clarify domain terms, implicit constraints, and edge conditions that affect modeling and data.\n"
             "Point out zero lead times, backlogging, capacity semantics, initial/final statuses, and objective components.\n"
             "Be concise and actionable.\n"
-            "</task>\n\n"
-            + common_prefix
+            "</task>\n\n" + common_prefix
         )
     if expert == "Modeling Expert":
         return (
@@ -589,8 +592,7 @@ def _build_expert_prompt(expert: str, problem: str, grammar: str, comments: List
             "Propose a correct PyOPL MODEL structure: sets, parameters, decision variables (domains), objective, and constraints.\n"
             "If uncertain, state assumptions explicitly. Keep names consistent and ready for a Reducer to synthesize final .mod.\n"
             "Return a compact, well-structured outline or small code snippet (not the full model yet).\n"
-            "</task>\n\n"
-            + common_prefix
+            "</task>\n\n" + common_prefix
         )
     if expert == "Data Builder":
         return (
@@ -598,8 +600,7 @@ def _build_expert_prompt(expert: str, problem: str, grammar: str, comments: List
             "<task>\n"
             "Propose a consistent PyOPL DATA outline matching the current modeling assumptions.\n"
             "If data are missing, create a minimal plausible instance. Keep it small and consistent with indices.\n"
-            "</task>\n\n"
-            + common_prefix
+            "</task>\n\n" + common_prefix
         )
     if expert == "Code Reviewer":
         return (
@@ -607,8 +608,7 @@ def _build_expert_prompt(expert: str, problem: str, grammar: str, comments: List
             "<task>\n"
             "Identify likely issues or missing links between model and data, suggest minimal fixes or clarifications.\n"
             "Focus on variable domains, indices, constraint signs, bounds, and objective completeness.\n"
-            "</task>\n\n"
-            + common_prefix
+            "</task>\n\n" + common_prefix
         )
     # Fallback to modeling
     return _build_expert_prompt("Modeling Expert", problem, grammar, comments, few_shots)
@@ -855,6 +855,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
 
 # ---------- CoE Orchestration ----------
 
+
 def _call_json(provider, model_name, prompt, progress, temperature=None, stop=None) -> Tuple[Dict[str, Any], Dict[str, int]]:
     """
     Call LLM expecting JSON; parse with relaxed loader. Returns (obj, usage).
@@ -913,7 +914,14 @@ def _run_chain_of_experts(
             # Conductor picks expert
             try:
                 conductor_prompt = _build_conductor_prompt(problem, experts_catalog, comments, remaining)
-                conductor_obj, u = _call_json(provider, model_name, conductor_prompt, progress, temperature=0.0 if temperature is not None else None, stop=stop)
+                conductor_obj, u = _call_json(
+                    provider,
+                    model_name,
+                    conductor_prompt,
+                    progress,
+                    temperature=0.0 if temperature is not None else None,
+                    stop=stop,
+                )
                 total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
                 total_usage["completion_tokens"] += u.get("completion_tokens", 0)
                 next_expert = str(conductor_obj.get("next_expert") or "").strip()
@@ -975,7 +983,14 @@ def _run_chain_of_experts(
                 _notify(progress, "[CoE] Checking alignment with original prompt...")
                 align_prompt = _build_alignment_prompt(problem, grammar_implementation, model_code, data_code)
                 try:
-                    align_obj, u4 = _call_json(provider, model_name, align_prompt, progress, temperature=0.0 if temperature is not None else None, stop=stop)
+                    align_obj, u4 = _call_json(
+                        provider,
+                        model_name,
+                        align_prompt,
+                        progress,
+                        temperature=0.0 if temperature is not None else None,
+                        stop=stop,
+                    )
                     total_usage["prompt_tokens"] += u4.get("prompt_tokens", 0)
                     total_usage["completion_tokens"] += u4.get("completion_tokens", 0)
                     assessment_text = str(align_obj.get("assessment", "")).strip()
@@ -1005,7 +1020,14 @@ def _run_chain_of_experts(
                 break
             try:
                 reflect_prompt = _build_reflection_prompt(ex, problem, grammar_implementation, comments, feedback_text)
-                reflect_obj, u5 = _call_json(provider, model_name, reflect_prompt, progress, temperature=0.0 if temperature is not None else None, stop=stop)
+                reflect_obj, u5 = _call_json(
+                    provider,
+                    model_name,
+                    reflect_prompt,
+                    progress,
+                    temperature=0.0 if temperature is not None else None,
+                    stop=stop,
+                )
                 total_usage["prompt_tokens"] += u5.get("prompt_tokens", 0)
                 total_usage["completion_tokens"] += u5.get("completion_tokens", 0)
                 new_comment = str(reflect_obj.get("comment") or "").strip()
@@ -1017,7 +1039,14 @@ def _run_chain_of_experts(
         # After reflection, re-reduce once
         _notify(progress, "[CoE] Re-reducing after reflection")
         try:
-            reducer_obj2, u6 = _call_json(provider, model_name, _build_reducer_prompt(problem, grammar_implementation, comments, few_shots), progress, temperature=temperature, stop=stop)
+            reducer_obj2, u6 = _call_json(
+                provider,
+                model_name,
+                _build_reducer_prompt(problem, grammar_implementation, comments, few_shots),
+                progress,
+                temperature=temperature,
+                stop=stop,
+            )
             total_usage["prompt_tokens"] += u6.get("prompt_tokens", 0)
             total_usage["completion_tokens"] += u6.get("completion_tokens", 0)
             model_code = str(reducer_obj2["model"])
@@ -1039,7 +1068,14 @@ def _run_chain_of_experts(
 
         if not syntax_errors and do_alignment:
             try:
-                align_obj2, u7 = _call_json(provider, model_name, _build_alignment_prompt(problem, grammar_implementation, model_code, data_code), progress, temperature=0.0 if temperature is not None else None, stop=stop)
+                align_obj2, u7 = _call_json(
+                    provider,
+                    model_name,
+                    _build_alignment_prompt(problem, grammar_implementation, model_code, data_code),
+                    progress,
+                    temperature=0.0 if temperature is not None else None,
+                    stop=stop,
+                )
                 total_usage["prompt_tokens"] += u7.get("prompt_tokens", 0)
                 total_usage["completion_tokens"] += u7.get("completion_tokens", 0)
                 assessment_text = str(align_obj2.get("assessment", "")).strip()
