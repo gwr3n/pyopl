@@ -735,7 +735,7 @@ def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name=MODEL_NAME, 
+    model_name=MODEL_NAME,
     mode=Grammar.BNF,  # ignored; enforced to Grammar.BNF below
     iterations=MAX_ITERATIONS,  # ignored; enforced to 1 below
     return_statistics=False,
