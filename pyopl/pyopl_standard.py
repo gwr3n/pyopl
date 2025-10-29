@@ -732,16 +732,16 @@ def generative_solve(
     prompt,
     model_file,
     data_file,
-    model_name=MODEL_NAME,
-    mode=Grammar.BNF,
-    iterations=MAX_ITERATIONS,
+    model_name=MODEL_NAME, 
+    mode=Grammar.BNF, # ignored; always enforced to Grammar.NONE below
+    iterations=MAX_ITERATIONS, # ignored; always enforced to 1 below
     return_statistics=False,
-    alignment_check: Optional[bool] = None,
+    alignment_check: Optional[bool] = None, # ignored; always enforced to False below
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
     progress: Optional[Callable[[str], None]] = None,
-    few_shot: bool = False,
+    few_shot: bool = False, # ignored; always enforced to False below
 ):
     """Generate a PyOPL model and data file using Chain-of-Thought (CoT) sampling:
     sample -> evaluate (compile + optional alignment), repeated up to `iterations`.
@@ -750,10 +750,10 @@ def generative_solve(
     """
     grammar_implementation = _get_grammar_implementation(mode)
 
-    try:
-        iterations = max(1, int(iterations))
-    except Exception:
-        iterations = MAX_ITERATIONS
+    mode=Grammar.BNF
+    iterations = 1
+    alignment_check = False
+    few_shot = False
 
     do_alignment = ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)
     provider = _infer_provider(llm_provider, model_name)

@@ -120,9 +120,6 @@ def main() -> int:
     solve_fn: Callable[..., Any] = getattr(impl, "generative_solve")
     GrammarType: Any = getattr(impl, "Grammar")
     logger_names = [impl.__name__]
-    if args.logic == "standard":
-        # standard routes to pyopl_generative under-the-hood
-        logger_names.append("pyopl.pyopl_generative")
 
     # Configure module loggers for visibility
     for name in set(logger_names):
