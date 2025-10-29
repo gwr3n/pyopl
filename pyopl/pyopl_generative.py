@@ -566,7 +566,6 @@ def _build_generation_prompt(
         "Ensure indices, domains (binary/integer/float), and data are correct and consistent with the problem description.\n"
         "Choose correct domains (binary/integer/float) from context. Add clear labels and explanatory comments.\n"
         f"{commenting_guidelines}"
-        "Use the PyOPL reference below strictly for syntax.\n"
         "If any data are missing, create a small, plausible mock instance consistent with the model.\n"
         "</task>\n\n"
         "<grammar_reference>\n--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
