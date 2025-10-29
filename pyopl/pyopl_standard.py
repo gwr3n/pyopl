@@ -779,10 +779,10 @@ def generative_solve(
     total_completion_tokens = 0
 
     for iteration in range(iterations):
-        # Build CoT generation prompt (no Reflexion memory; independent samples)
+        # Build standard generation prompt (no Reflexion memory; independent samples)
         user_prompt = _build_standard_generation_prompt(prompt, grammar_implementation, few_shots=few_shots_list)
 
-        _notify(progress, f"Sample {iteration + 1}/{iterations}: generating (CoT)")
+        _notify(progress, f"Iteration {iteration + 1}/{iterations}: generating (standard)")
         content, usage = _llm_generate_text(
             provider=provider,
             model_name=model_name,
@@ -865,12 +865,12 @@ def generative_solve(
                     _notify(progress, "Aligned ✓ Stopping.")
                     break
                 else:
-                    _notify(progress, "Not aligned; trying another CoT sample")
+                    _notify(progress, "Not aligned; trying another iteration")
             else:
                 _notify(progress, "Compiled ✓ (alignment disabled) Stopping.")
                 break
         else:
-            _notify(progress, f"Compilation failed with {len(syntax_errors)} error(s); trying another CoT sample")
+            _notify(progress, f"Compilation failed with {len(syntax_errors)} error(s); trying another iteration")
 
     # Load the latest attempt from disk
     with open(model_file, "r") as f:
