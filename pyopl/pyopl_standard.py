@@ -4,6 +4,7 @@ from .pyopl_generative import (
     LLM_PROVIDER,
     MODEL_NAME,
     Grammar,
+    generative_solve as _generative_solve,  # FIX: import under alias
 )
 
 
@@ -33,7 +34,7 @@ def generative_solve(
     """
     # Call generative_solve with a Literal[True]/[False] for return_statistics
     if return_statistics is True:
-        result = generative_solve(
+        result = _generative_solve(
             prompt,
             model_file,
             data_file,
@@ -49,7 +50,7 @@ def generative_solve(
             few_shot=few_shot,
         )
     else:
-        result = generative_solve(
+        result = _generative_solve(
             prompt,
             model_file,
             data_file,
