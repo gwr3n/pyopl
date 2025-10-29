@@ -970,7 +970,7 @@ def _run_chain_of_experts(
             syntax_errors.append(f"{type(e).__name__}: {e}")
 
         # Write current attempt to disk
-        model_dir = os.path.dirname("noop")  # ensure file ops below safe even if no dir
+        # model_dir = os.path.dirname("noop")  # ensure file ops below safe even if no dir
         try:
             # The caller will write to desired files; we only return strings here
             pass

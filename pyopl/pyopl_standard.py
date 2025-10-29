@@ -1,10 +1,12 @@
-from typing import Optional, Callable
+from typing import Callable, Optional
 
 from .pyopl_generative import (
-    generative_solve as _generative_solve,
-    Grammar,
-    MODEL_NAME,
     LLM_PROVIDER,
+    MODEL_NAME,
+    Grammar,
+)
+from .pyopl_generative import (
+    generative_solve as _generative_solve,
 )
 
 
