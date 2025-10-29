@@ -558,6 +558,8 @@ def _build_generation_prompt(
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\n"
         "Produce a syntactically valid PyOPL model (.mod) and matching data (.dat) that faithfully implement the problem.\n"
+        "First, reason in a private scratchpad to identify sets, parameters, decision variables, objective, and constraints.\n"
+        "Ensure indices, domains (binary/integer/float), and data are correct and consistent with the problem description.\n"
         "Choose correct domains (binary/integer/float) from context. Add clear labels and explanatory comments.\n"
         f"{commenting_guidelines}"
         "Use the PyOPL reference below strictly for syntax.\n"
@@ -571,6 +573,7 @@ def _build_generation_prompt(
         f"{prompt}\n"
         "</problem_description>\n\n"
         "<output_requirements>\n"
+        "- Output ONLY the final JSON with the model and data; do not include your scratchpad in the output.\n"
         '- Return ONLY a JSON object with keys "model" and "data". Values are single strings; escape quotes and backslashes; encode newlines as \\n. No extra keys.\n'
         "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
         "</output_requirements>\n\n"
