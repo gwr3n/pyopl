@@ -91,8 +91,8 @@ def main() -> int:
     parser.add_argument(
         "--logic",
         default="generative",
-        choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "generative"],
-        help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, or generative (default).",
+        choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "chain_of_experts", "generative"],
+        help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, chain_of_experts, or generative (default).",
     )
 
     ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
@@ -108,6 +108,7 @@ def main() -> int:
         "reflexion": "pyopl.pyopl_reflexion",
         "tree_of_thoughts": "pyopl.pyopl_tree_of_thoughts",
         "chain_of_thought": "pyopl.pyopl_chain_of_thought",
+        "chain_of_experts": "pyopl.pyopl_chain_of_experts",
         "standard": "pyopl.pyopl_standard",
     }
     mod_name = logic_to_module.get(args.logic)
