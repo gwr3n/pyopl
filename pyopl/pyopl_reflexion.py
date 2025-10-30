@@ -147,13 +147,17 @@ def _gather_few_shots(
       - data (str)
       - desc_path / model_path / data_path (optional metadata)
     """
-    # Resolve default models_dir from package data
+    # Resolve default models_dir from package data with concrete Path for mypy
     if models_dir is None:
         try:
-            models_dir = files("pyopl") / "opl_models"
+            pkg_dir = files("pyopl") / "opl_models"
+            base_dir = Path(str(pkg_dir))
+            if not base_dir.exists():
+                base_dir = Path(__file__).parent / "opl_models"
         except Exception:
-            models_dir = Path(__file__).parent / "opl_models"
-    base_dir = Path(models_dir)
+            base_dir = Path(__file__).parent / "opl_models"
+    else:
+        base_dir = Path(models_dir)
 
     examples: List[Dict[str, str]] = []
     try:
