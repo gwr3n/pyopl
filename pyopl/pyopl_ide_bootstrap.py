@@ -122,6 +122,20 @@ class OPLIDE(tk.Tk):
         # NEW: track font size selection for menu highlighting
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
+        # NEW: GenAI method selection (persisted)
+        self._genai_methods: list[tuple[str, str]] = [
+            ("Generhetor", "pyopl_generative"),  # default, menu label -> module key
+            ("Standard", "pyopl_standard"),
+            ("Chain of Thought", "pyopl_chain_of_thought"),
+            ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+            ("Chain of Experts", "pyopl_chain_of_experts"),
+            ("Reflexion", "pyopl_reflexion"),
+        ]
+        saved_method = loaded_settings.get("genai-method") if isinstance(loaded_settings, dict) else None
+        if not isinstance(saved_method, str) or not saved_method:
+            saved_method = "pyopl_generative"
+        self.genai_method_var = tk.StringVar(value=saved_method)
+
         # NEW: desired GenAI selection from settings (used after model discovery)
         self._desired_genai_provider: Optional[str] = None
         self._desired_genai_model: Optional[str] = None
@@ -1066,13 +1080,17 @@ class OPLIDE(tk.Tk):
         if not prompt:
             return
 
-        self.status_var.set(f"GenAI: generating with {self.genai_provider} • {self.genai_model} ...")
+        # Resolve selected generator module
+        gen_module = self._import_selected_genai_module()
+        module_logger_name = getattr(gen_module, "__name__", "pyopl.pyopl_generative")
+
+        self.status_var.set(
+            f"GenAI: generating with {self.genai_provider} • {self.genai_model} • method={self._label_for_method(self.genai_method_var.get())} ..."
+        )
         self._clear_output("GenAI: Generating model and data...")
 
         def run():
             try:
-                from .pyopl_generative import generative_solve
-
                 # Thread-safe progress hook -> Output panel (always show essential progress)
                 def progress(msg: str) -> None:
                     self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
@@ -1086,10 +1104,10 @@ class OPLIDE(tk.Tk):
                             text = record.getMessage()
                         progress(text)
 
-                log = logging.getLogger("pyopl.pyopl_generative")
+                log = logging.getLogger(module_logger_name)
                 handler = None
                 old_level = log.level
-                if self.verbose_llm_var.get():  # NEW: only attach when verbose enabled
+                if self.verbose_llm_var.get():
                     handler = _ProgressLogHandler()
                     handler.setLevel(logging.DEBUG)
                     log.addHandler(handler)
@@ -1101,8 +1119,8 @@ class OPLIDE(tk.Tk):
                 data_path = os.path.join(tmp_dir, "gen_pyopl_data.dat")
 
                 try:
-                    # Pass selected provider/model and progress callback
-                    assessment = generative_solve(
+                    # Dispatch to selected generation method
+                    assessment = gen_module.generative_solve(
                         prompt,
                         model_path,
                         data_path,
@@ -1111,7 +1129,7 @@ class OPLIDE(tk.Tk):
                         progress=progress,
                     )
                 finally:
-                    if handler is not None:  # NEW
+                    if handler is not None:
                         try:
                             log.removeHandler(handler)
                             log.setLevel(old_level)
@@ -1185,14 +1203,16 @@ class OPLIDE(tk.Tk):
             messagebox.showerror("GenAI Error", f"Failed to save current model/data: {e}")
             return
 
+        # Resolve selected generator module
+        gen_module = self._import_selected_genai_module()
+        module_logger_name = getattr(gen_module, "__name__", "pyopl.pyopl_generative")
+
         self.status_var.set("GenAI: requesting feedback...")
         self._clear_output("GenAI: Requesting feedback...")
 
         def run():
             try:
-                from .pyopl_generative import generative_feedback
-
-                # Thread-safe progress hook -> Output panel (always show essential progress)
+                # Thread-safe progress hook -> Output panel
                 def progress(msg: str) -> None:
                     self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
 
@@ -1205,17 +1225,17 @@ class OPLIDE(tk.Tk):
                             text = record.getMessage()
                         progress(text)
 
-                log = logging.getLogger("pyopl.pyopl_generative")
+                log = logging.getLogger(module_logger_name)
                 handler = None
                 old_level = log.level
-                if self.verbose_llm_var.get():  # NEW: only attach when verbose enabled
+                if self.verbose_llm_var.get():
                     handler = _ProgressLogHandler()
                     handler.setLevel(logging.DEBUG)
                     log.addHandler(handler)
                     log.setLevel(logging.DEBUG)
 
                 try:
-                    result = generative_feedback(
+                    result = gen_module.generative_feedback(
                         question,
                         model_path,
                         data_path,
@@ -1224,7 +1244,7 @@ class OPLIDE(tk.Tk):
                         progress=progress,
                     )
                 finally:
-                    if handler is not None:  # NEW
+                    if handler is not None:
                         try:
                             log.removeHandler(handler)
                             log.setLevel(old_level)
@@ -1365,6 +1385,8 @@ class OPLIDE(tk.Tk):
                     if getattr(self, "genai_provider", None) and getattr(self, "genai_model", None)
                     else ""
                 ),
+                # NEW: persist generation method
+                "genai-method": self.genai_method_var.get() if hasattr(self, "genai_method_var") else "pyopl_generative",
             }
             with open(self._config_path, "w") as f:
                 json.dump(payload, f, indent=4)
@@ -1516,20 +1538,31 @@ class OPLIDE(tk.Tk):
             if provider_models.get("ollama"):
                 add_provider_menu("Ollama", "ollama", provider_models["ollama"])
 
+            # NEW: Generation Method submenu
+            method_menu = tk.Menu(self.genai_menu, tearoff=0)
+            for label, key in self._genai_methods:
+                method_menu.add_radiobutton(
+                    label=label,
+                    variable=self.genai_method_var,
+                    value=key,
+                    command=self._make_select_genai_method_cmd(key),
+                )
+
             # Actions
             self.genai_menu.add_separator()
+            self.genai_menu.add_cascade(label="Method", menu=method_menu)
             self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
 
             # NEW: toggle for verbose LLM progress logs
-            self.genai_menu.add_separator()  # NEW
-            self.genai_menu.add_checkbutton(  # NEW
-                label="Verbose LLM progress logs",
-                onvalue=True,
-                offvalue=False,
-                variable=self.verbose_llm_var,
-                command=self._save_settings,
-            )
+            # self.genai_menu.add_separator()
+            # self.genai_menu.add_checkbutton(
+            #     label="Verbose LLM progress logs",
+            #     onvalue=True,
+            #     offvalue=False,
+            #     variable=self.verbose_llm_var,
+            #     command=self._save_settings,
+            # )
 
             # Enable GenAI cascade
             try:
@@ -1564,6 +1597,46 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
+    # NEW: factory for selecting generation method
+    def _make_select_genai_method_cmd(self, key: str) -> Callable[[], None]:
+        def _cmd() -> None:
+            self._on_select_genai_method(key)
+
+        return _cmd
+
+    # NEW: selection handler for GenAI method choice
+    def _on_select_genai_method(self, method_key: str) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        try:
+            self.genai_method_var.set(method_key)
+            self.status_var.set(f"GenAI method: {self._label_for_method(method_key)}")
+        except Exception:
+            pass
+        self._save_settings()
+
+    # NEW: helper to import the selected generator module
+    def _import_selected_genai_module(self):
+        import importlib
+
+        key = self.genai_method_var.get() or "pyopl_generative"
+        try:
+            return importlib.import_module(f"pyopl.{key}")
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Falling back to pyopl_generative due to import error: {e}")
+            try:
+                self.genai_method_var.set("pyopl_generative")
+            except Exception:
+                pass
+            return importlib.import_module("pyopl.pyopl_generative")
+
+    # NEW: helper to map method key to label
+    def _label_for_method(self, key: str) -> str:
+        for label, k in self._genai_methods:
+            if k == key:
+                return label
+        return "Generhetor"
+
     # NEW: factory to build typed callbacks for menu commands (avoids lambda mypy issue)
     def _make_select_model_cmd(self, provider_key: str, model_name: str) -> Callable[[], None]:
         def _cmd() -> None:
@@ -1585,7 +1658,10 @@ class OPLIDE(tk.Tk):
         return _cmd
 
     def _open_url(self, url: str) -> None:
-        webbrowser.open_new(url)
+        try:
+            webbrowser.open_new_tab(url)
+        except Exception as e:
+            messagebox.showerror("Open URL", f"Failed to open URL:\n{url}\n\n{e}")
 
     # NEW: selection handler for GenAI model choice
     def _on_select_genai_model(self, provider_key: str, model_name: str) -> None:
