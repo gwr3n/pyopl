@@ -76,7 +76,11 @@ class GurobiCodeGenerator:
         Initialize the code generator with AST and optional data dictionary.
         """
         self.ast = ast
-        self.data_dict = data_dict if data_dict is not None else {}
+        # Merge inline literals (e.g., int D = 10;) so range bounds resolve during checks
+        self.data_dict = dict(data_dict) if data_dict is not None else {}
+        for decl in self.ast.get("declarations", []):
+            if decl.get("type") == "parameter_inline" and decl.get("name") not in self.data_dict:
+                self.data_dict[decl["name"]] = decl.get("value")
         self.gurobi_code_lines = []
         self.indent_level = 0
         self.gurobi_var_map = {}  # Maps OPL decision variable names to Gurobi variable objects
