@@ -1,4 +1,4 @@
-from pyopl.pyopl_generative import generative_feedback, generative_solve
+from pyopl.genai.pyopl_generative import generative_feedback, generative_solve
 
 
 def test_generative_solve():

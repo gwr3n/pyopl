@@ -3110,6 +3110,10 @@ class OPLDataParser(Parser):
     @_("STRING_LITERAL")  # type: ignore
     def tuple_element(self, p):
         return p.STRING_LITERAL.strip('"')
+    
+    @_("BOOLEAN_LITERAL")  # type: ignore
+    def tuple_element(self, p):
+        return p.BOOLEAN_LITERAL
 
     """
     Parser for OPL .dat files.

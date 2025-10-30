@@ -1864,7 +1864,8 @@ class GurobiCodeGenerator:
     def _decl_set_declaration(self, decl):
         name = decl["name"]
         if name in self.data_dict:
-            self._add_code_line(f"{name} = {json.dumps(self.data_dict[name])}")
+            # Emit Python literal to preserve True/False and tuple keys
+            self._add_code_line(f"{name} = {repr(self.data_dict[name])}")
         else:
             raise SemanticError(
                 f"Set '{name}' declared in .mod but not found in .dat file.",
@@ -1884,11 +1885,8 @@ class GurobiCodeGenerator:
 
     def _decl_parameter_inline(self, decl):
         name = decl["name"]
-        # Use repr if this param is in dict_params (tuple-keyed), else json.dumps
-        if name in getattr(self, "dict_params", set()):
-            self._add_code_line(f"{name} = {repr(decl['value'])}")
-        else:
-            self._add_code_line(f"{name} = {json.dumps(decl['value'])}")
+        # Always emit Python literals (repr) so booleans are True/False
+        self._add_code_line(f"{name} = {repr(decl['value'])}")
 
     def _decl_parameter_inline_indexed(self, decl):
         name = decl["name"]
@@ -1905,23 +1903,14 @@ class GurobiCodeGenerator:
                 param_dict = {k: v for k, v in zip(tuple_keys, decl["value"])}
                 self._add_code_line(f"{name} = {repr(param_dict)}")
                 return
-        # Use repr if this param is in dict_params (tuple-keyed), else json.dumps
-        if name in getattr(self, "dict_params", set()):
-            self._add_code_line(f"{name} = {repr(decl['value'])}")
-        else:
-            self._add_code_line(f"{name} = {json.dumps(decl['value'])}")
+        self._add_code_line(f"{name} = {repr(decl['value'])}")
 
     def _decl_parameter_external(self, decl):
         name = decl["name"]
         if name in self.data_dict:
             val = self.data_dict[name]
-            # Always use repr if dict with tuple keys, regardless of dict_params
-            if isinstance(val, dict) and any(isinstance(k, tuple) for k in val.keys()):
-                self._add_code_line(f"{name} = {repr(val)}")
-            elif name in getattr(self, "dict_params", set()):
-                self._add_code_line(f"{name} = {repr(val)}")
-            else:
-                self._add_code_line(f"{name} = {json.dumps(val)}")
+            # Always emit Python literal (repr). This preserves tuple keys and True/False.
+            self._add_code_line(f"{name} = {repr(val)}")
         else:
             raise SemanticError(
                 f"Parameter '{name}' declared in .mod but not found in .dat file. "
@@ -1935,10 +1924,7 @@ class GurobiCodeGenerator:
     def _decl_parameter_external_explicit(self, decl):
         name = decl["name"]
         if name in self.data_dict:
-            if name in getattr(self, "dict_params", set()):
-                self._add_code_line(f"{name} = {repr(self.data_dict[name])}")
-            else:
-                self._add_code_line(f"{name} = {json.dumps(self.data_dict[name])}")
+            self._add_code_line(f"{name} = {repr(self.data_dict[name])}")
         else:
             raise SemanticError(
                 f"Parameter '{name}' declared with '= ...' in .mod but not found in .dat file.",
@@ -2503,7 +2489,11 @@ class GurobiCodeGenerator:
                 parts = []
                 for el in idx.get("elements", []):
                     if isinstance(el, dict):
-                        parts.append(self._traverse_expression(el, current_iterators, symbolic))
+                        # Preserve boolean literals inside tuple indices
+                        if el.get("type") == "boolean_literal":
+                            parts.append("True" if el.get("value") else "False")
+                        else:
+                            parts.append(self._traverse_expression(el, current_iterators, symbolic))
                     else:
                         parts.append(repr(el))
                 # Ensure single-element tuples include the trailing comma
@@ -2512,9 +2502,6 @@ class GurobiCodeGenerator:
                 else:
                     tuple_expr = f"({', '.join(parts)})"
                 return f"{base_name}[{tuple_expr}]"
-            else:
-                idx_expr = emit_index_expr(idx)
-                return f"{base_name}[{idx_expr}]"
         else:
             # Decision variable case
             if base_name in self.gurobi_var_map:

@@ -16,13 +16,12 @@ from typing import (
     Optional,
     Tuple,  # NEW
     Union,  # NEW
-    )
-
-from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
-from .genai_pricing import estimate_costs as _estimate_costs  # NEW
+)
 
 # === Local imports ===
-from .pyopl_core import OPLCompiler, SemanticError
+from ..pyopl_core import OPLCompiler, SemanticError
+from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
+from .genai_pricing import estimate_costs as _estimate_costs  # NEW
 from .rag_helper import rank_problem_descriptions as rag_rank  # NEW
 
 # --- Logging Setup ---

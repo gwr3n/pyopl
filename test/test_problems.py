@@ -30,6 +30,194 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_vrp(self):
+        """
+        Test the vehicle routing problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            /*
+            PyOPL Model: Vehicle Routing Problem (VRP) with MTZ Subtour Elimination
+            - Cities are nodes with demand and possible depot(s)
+            - Vehicles have capacity
+            - Arcs model feasible routes (with distances)
+            - Decision variables:
+                x[a]: binary, whether arc a in ARCS is used
+                u[n]: continuous, load on vehicle upon arrival at node n (for subtour elimination)
+            - Objective: Minimize total travel distance
+            - Subtour elimination: Miller-Tucker-Zemlin (MTZ) constraints
+            */
+
+            tuple Node {
+            string name;
+            float demand;
+            boolean is_depot;
+            };
+
+            tuple Arc {
+            string from;
+            string to;
+            float distance;
+            };
+
+            {Node} NODES;
+            {Arc}  ARCS;
+            {string} NODE_NAMES;
+            {string} DEPOT_NAMES;
+
+            param int NUM_VEHICLES;
+            param float VEHICLE_CAPACITY;
+            param float demand[NODE_NAMES];
+            param boolean is_depot[NODE_NAMES];
+            param float distance[ARCS];
+
+            // Decision variables
+            // x[a]: 1 if arc a is used, 0 otherwise
+            // u[n]: load assigned to node n (for MTZ subtour elimination), only for non-depot nodes
+
+            dvar boolean x[ARCS];
+            dvar float u[NODE_NAMES];
+
+            minimize total_distance: sum(a in ARCS) distance[a] * x[a];
+
+            subject to {
+            // 1. Each customer node is entered exactly once (except depots)
+            forall(n in NODE_NAMES : !is_depot[n])
+                sum(a in ARCS : a.to == n) x[a] == 1;
+            
+            // 2. Each customer node is exited exactly once (except depots)
+            forall(n in NODE_NAMES : !is_depot[n])
+                sum(a in ARCS : a.from == n) x[a] == 1;
+            
+            // 3. Vehicle count constraint at depots: Outflow == NUM_VEHICLES, Inflow == NUM_VEHICLES
+            forall(d in DEPOT_NAMES)
+                sum(a in ARCS : a.from == d) x[a] == NUM_VEHICLES;
+            forall(d in DEPOT_NAMES)
+                sum(a in ARCS : a.to == d) x[a] == NUM_VEHICLES;
+
+            // 4. Subtour elimination (MTZ) - only for non-depot nodes
+            // For all i != j, i and j are not depots
+            forall(i in NODE_NAMES : !is_depot[i])
+                u[i] >= demand[i];
+            forall(i in NODE_NAMES : !is_depot[i])
+                u[i] <= VEHICLE_CAPACITY;
+            
+            forall(i in NODE_NAMES : !is_depot[i])
+                forall(j in NODE_NAMES : (!is_depot[i] && !is_depot[j] && i != j)) {
+                // There may be multiple arcs between i and j (in ARCS). Apply MTZ to all arcs from i to j.
+                forall(a in ARCS : a.from == i && a.to == j) {
+                    u[i] - u[j] + VEHICLE_CAPACITY * x[a] <= VEHICLE_CAPACITY - demand[j];
+                }
+                }
+
+            // 5. No self-loops
+            forall(a in ARCS : a.from == a.to)
+                x[a] == 0;
+            }
+            """
+        data_code = """
+            // Nodes: name, demand, is_depot
+            NODES = {
+            <"Depot", 0.0,  true>,
+            <"A",     2.0, false>,
+            <"B",     1.5, false>,
+            <"C",     1.0, false>
+            };
+
+            // Arcs: fully connected directed network (except self-loops)
+            ARCS = {
+            <"Depot", "A",  4.0>,
+            <"Depot", "B",  6.0>,
+            <"Depot", "C",  8.0>,
+            <"A",    "Depot", 4.0>,
+            <"B",    "Depot", 6.0>,
+            <"C",    "Depot", 8.0>,
+            <"A",     "B",   5.0>,
+            <"A",     "C",   7.0>,
+            <"B",     "A",   5.0>,
+            <"B",     "C",   4.0>,
+            <"C",     "A",   7.0>,
+            <"C",     "B",   4.0>
+            };
+
+            // Sets of node names and depot names
+            NODE_NAMES = { "Depot", "A", "B", "C" };
+            DEPOT_NAMES = { "Depot" };
+
+            // Demand and is_depot per node name (mapping strings)
+            demand = [
+            "Depot" 0.0,
+            "A"     2.0,
+            "B"     1.5,
+            "C"     1.0
+            ];
+            is_depot = [
+            "Depot" true,
+            "A"     false,
+            "B"     false,
+            "C"     false
+            ];
+
+            // Distance for each arc
+            distance = [
+            <"Depot","A",4.0> 4.0,
+            <"Depot","B",6.0> 6.0,
+            <"Depot","C",8.0> 8.0,
+            <"A","Depot",4.0> 4.0,
+            <"B","Depot",6.0> 6.0,
+            <"C","Depot",8.0> 8.0,
+            <"A","B",5.0>     5.0,
+            <"A","C",7.0>     7.0,
+            <"B","A",5.0>     5.0,
+            <"B","C",4.0>     4.0,
+            <"C","A",7.0>     7.0,
+            <"C","B",4.0>     4.0
+            ];
+
+            // Number of vehicles and vehicle capacity
+            NUM_VEHICLES = 2;
+            VEHICLE_CAPACITY = 3.0;
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
+
     def test_stochastic_lot_sizing(self):
         """
         Test the stochastic lot-sizing problem with both solvers.

@@ -104,12 +104,12 @@ def main() -> int:
 
     # Select implementation based on --logic
     logic_to_module = {
-        "generative": "pyopl.pyopl_generative",
-        "reflexion": "pyopl.pyopl_reflexion",
-        "tree_of_thoughts": "pyopl.pyopl_tree_of_thoughts",
-        "chain_of_thought": "pyopl.pyopl_chain_of_thought",
-        "chain_of_experts": "pyopl.pyopl_chain_of_experts",
-        "standard": "pyopl.pyopl_standard",
+        "generative": "pyopl.genai.pyopl_generative",
+        "reflexion": "pyopl.genai.pyopl_reflexion",
+        "tree_of_thoughts": "pyopl.genai.pyopl_tree_of_thoughts",
+        "chain_of_thought": "pyopl.genai.pyopl_chain_of_thought",
+        "chain_of_experts": "pyopl.genai.pyopl_chain_of_experts",
+        "standard": "pyopl.genai.pyopl_standard",
     }
     mod_name = logic_to_module.get(args.logic)
     if not mod_name:

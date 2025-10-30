@@ -4,8 +4,8 @@
 import os
 import sys
 
+from .genai.pyopl_generative import generative_feedback, generative_solve
 from .pyopl_core import solve
-from .pyopl_generative import generative_feedback, generative_solve
 
 __version__ = "0.6.0"
 __author__ = "Roberto Rossi"

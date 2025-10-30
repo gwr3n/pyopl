@@ -15,17 +15,16 @@ from typing import Any, Callable, Optional, Protocol  # add typing for optional 
 import ttkbootstrap as tb  # NEW: use ttkbootstrap flatly light theme
 from platformdirs import user_config_dir  # NEW
 
-from .gurobi_codegen import GurobiCodeGenerator
-
-# --- Local Imports ---
-from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, solve
-
 # NEW: model discovery (provider-specific)
-from .pyopl_generative import (
+from .genai.pyopl_generative import (
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
 )
+from .gurobi_codegen import GurobiCodeGenerator
+
+# --- Local Imports ---
+from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, solve
 from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 # NEW: settings storage constants (match sample.py strategy)
@@ -1082,7 +1081,7 @@ class OPLIDE(tk.Tk):
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.pyopl_generative")
+        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
         self.status_var.set(
             f"GenAI: generating with {self.genai_provider} • {self.genai_model} • method={self._label_for_method(self.genai_method_var.get())} ..."
@@ -1205,7 +1204,7 @@ class OPLIDE(tk.Tk):
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.pyopl_generative")
+        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
         self.status_var.set("GenAI: requesting feedback...")
         self._clear_output("GenAI: Requesting feedback...")
@@ -1621,14 +1620,14 @@ class OPLIDE(tk.Tk):
 
         key = self.genai_method_var.get() or "pyopl_generative"
         try:
-            return importlib.import_module(f"pyopl.{key}")
+            return importlib.import_module(f"pyopl.genai.{key}")
         except Exception as e:
             logging.getLogger(__name__).warning(f"Falling back to pyopl_generative due to import error: {e}")
             try:
                 self.genai_method_var.set("pyopl_generative")
             except Exception:
                 pass
-            return importlib.import_module("pyopl.pyopl_generative")
+            return importlib.import_module("pyopl.genai.pyopl_generative")
 
     # NEW: helper to map method key to label
     def _label_for_method(self, key: str) -> str:

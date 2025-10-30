@@ -18,11 +18,10 @@ from typing import (
     Union,  # NEW
 )
 
+# === Local imports ===
+from ..pyopl_core import OPLCompiler, SemanticError
 from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
 from .genai_pricing import estimate_costs as _estimate_costs  # NEW
-
-# === Local imports ===
-from .pyopl_core import OPLCompiler, SemanticError
 from .rag_helper import rank_problem_descriptions as rag_rank  # NEW
 
 # --- Logging Setup ---
@@ -54,15 +53,6 @@ FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
 # NEW: Reflexion memory cap
 REFLEXION_MAX_MEMORY = 5
-
-# NEW: CoE configuration
-COE_FORWARD_STEPS = 5
-COE_DEFAULT_EXPERTS = [
-    "Terminology Interpreter",
-    "Modeling Expert",
-    "Data Builder",
-    "Code Reviewer",
-]
 
 
 class LLMProvider(Enum):
@@ -156,7 +146,7 @@ def _gather_few_shots(
       - data (str)
       - desc_path / model_path / data_path (optional metadata)
     """
-    # Resolve default models_dir from package data with a concrete Path for mypy
+    # Resolve default models_dir from package data with concrete Path for mypy
     if models_dir is None:
         try:
             pkg_dir = files("pyopl") / "opl_models"
@@ -506,187 +496,7 @@ def _call_openai_with_retry(
     raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
 
 
-# ---------- Prompt builders (CoE) ----------
-
-
-def _format_few_shots_knowledge(few_shots: List[Dict[str, str]]) -> str:
-    if not few_shots:
-        return ""
-    blocks: List[str] = []
-    for i, ex in enumerate(few_shots, 1):
-        blocks.append(
-            f'<example index="{i}">\n'
-            f"<description path=\"{ex.get('desc_path','')}\">\n{ex.get('description','')}\n</description>\n"
-            f"<model_file path=\"{ex.get('model_path','')}\">\n{ex.get('model','')}\n</model_file>\n"
-            f"<data_file path=\"{ex.get('data_path','')}\">\n{ex.get('data','')}\n</data_file>\n"
-            f"</example>\n"
-        )
-    return "<knowledge_base>\n" + "".join(blocks) + "</knowledge_base>\n"
-
-
-def _build_conductor_prompt(problem: str, experts: List[str], comments: List[Dict[str, str]], remaining_steps: int) -> str:
-    """
-    Ask the conductor to pick the next expert from the provided list.
-    Return JSON: { "next_expert": "<one of experts>", "reason": "<short>" }
-    """
-    comments_text = "\n".join([f"- {c['expert']}: {c['comment']}" for c in comments[-10:]])
-    expert_list = ", ".join(experts)
-    return (
-        "<role>\n"
-        "You are the Conductor coordinating experts to solve an optimization modeling task in PyOPL.\n"
-        "</role>\n\n"
-        "<task>\n"
-        "Choose the next expert to consult to make progress toward a correct PyOPL model (.mod) and data (.dat).\n"
-        f"You must pick ONE from: [{expert_list}].\n"
-        "Be pragmatic. If modeling is unclear, consult Modeling. If data is missing, consult Data Builder.\n"
-        "If terminology is unclear, consult Terminology Interpreter. If close to done, ask Code Reviewer.\n"
-        f"Remaining steps: {remaining_steps}.\n"
-        "</task>\n\n"
-        "<problem>\n"
-        f"{problem}\n"
-        "</problem>\n\n"
-        "<context>\n"
-        f"{comments_text or '(no comments yet)'}\n"
-        "</context>\n\n"
-        "<output>\n"
-        'Return ONLY JSON: {"next_expert": "<name from list>", "reason": "<short>"}\n'
-        "</output>\n"
-    )
-
-
-def _build_expert_prompt(
-    expert: str, problem: str, grammar: str, comments: List[Dict[str, str]], few_shots: List[Dict[str, str]]
-) -> str:
-    """
-    Build prompts for individual experts. Output must be JSON: {"comment":"<short actionable insight or snippet>"}.
-    Experts: Terminology Interpreter, Modeling Expert, Data Builder, Code Reviewer.
-    """
-    comments_text = "\n".join([f"- {c['expert']}: {c['comment']}" for c in comments[-10:]])
-    kb = _format_few_shots_knowledge(few_shots)
-    common_prefix = (
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
-        f"{grammar}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
-        f"{kb}"
-        "<problem>\n"
-        f"{problem}\n"
-        "</problem>\n\n"
-        "<prior_comments>\n"
-        f"{comments_text or '(none)'}\n"
-        "</prior_comments>\n"
-        "<output>\n"
-        'Return ONLY JSON: {"comment":"<short actionable insight or snippet>"}\n'
-        "</output>\n"
-    )
-    if expert == "Terminology Interpreter":
-        return (
-            "<role>Terminology Interpreter</role>\n"
-            "<task>\n"
-            "Clarify domain terms, implicit constraints, and edge conditions that affect modeling and data.\n"
-            "Point out zero lead times, backlogging, capacity semantics, initial/final statuses, and objective components.\n"
-            "Be concise and actionable.\n"
-            "</task>\n\n" + common_prefix
-        )
-    if expert == "Modeling Expert":
-        return (
-            "<role>Modeling Expert (PyOPL)</role>\n"
-            "<task>\n"
-            "Propose a correct PyOPL MODEL structure: sets, parameters, decision variables (domains), objective, and constraints.\n"
-            "If uncertain, state assumptions explicitly. Keep names consistent and ready for a Reducer to synthesize final .mod.\n"
-            "Return a compact, well-structured outline or small code snippet (not the full model yet).\n"
-            "</task>\n\n" + common_prefix
-        )
-    if expert == "Data Builder":
-        return (
-            "<role>Data Builder (PyOPL)</role>\n"
-            "<task>\n"
-            "Propose a consistent PyOPL DATA outline matching the current modeling assumptions.\n"
-            "If data are missing, create a minimal plausible instance. Keep it small and consistent with indices.\n"
-            "</task>\n\n" + common_prefix
-        )
-    if expert == "Code Reviewer":
-        return (
-            "<role>Code Reviewer (PyOPL)</role>\n"
-            "<task>\n"
-            "Identify likely issues or missing links between model and data, suggest minimal fixes or clarifications.\n"
-            "Focus on variable domains, indices, constraint signs, bounds, and objective completeness.\n"
-            "</task>\n\n" + common_prefix
-        )
-    # Fallback to modeling
-    return _build_expert_prompt("Modeling Expert", problem, grammar, comments, few_shots)
-
-
-def _build_reducer_prompt(problem: str, grammar: str, comments: List[Dict[str, str]], few_shots: List[Dict[str, str]]) -> str:
-    """
-    Reducer synthesizes final PyOPL model+data.
-    Output must be JSON: {"model":"<.mod>", "data":"<.dat>"} (strings).
-    """
-    kb = _format_few_shots_knowledge(few_shots)
-    comments_text = "\n".join([f"- {c['expert']}: {c['comment']}" for c in comments])
-    return (
-        "<role>Reducer (PyOPL)</role>\n"
-        "<task>\n"
-        "Synthesize a correct PyOPL model (.mod) and matching data (.dat) from the expert comments.\n"
-        "Ensure consistency of sets, parameters, indices, variable domains, objectives, and constraints.\n"
-        "The output MUST compile under the provided PyOPL grammar implementation.\n"
-        "If assumptions were stated, reflect them coherently.\n"
-        "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
-        f"{grammar}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
-        f"{kb}"
-        "<problem>\n"
-        f"{problem}\n"
-        "</problem>\n\n"
-        "<comments>\n"
-        f"{comments_text}\n"
-        "</comments>\n\n"
-        "<output_requirements>\n"
-        '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
-        "- Each value must be a single JSON string (escape quotes/backslashes, encode newlines as \\n).\n"
-        "</output_requirements>\n\n"
-        "<json_schema>\n"
-        '{ "type": "object", "additionalProperties": false,\n'
-        '  "required": ["model", "data"],\n'
-        '  "properties": { "model": {"type": "string"}, "data": {"type": "string"} } }\n'
-        "</json_schema>\n"
-    )
-
-
-def _build_reflection_prompt(expert: str, problem: str, grammar: str, comments: List[Dict[str, str]], feedback: str) -> str:
-    """
-    Ask a specific expert to reflect and update their comment based on evaluator/conformance feedback.
-    Output must be JSON: {"comment":"<updated>"}.
-    """
-    comments_text = "\n".join([f"- {c['expert']}: {c['comment']}" for c in comments[-10:]])
-    return (
-        f"<role>{expert} — Reflection</role>\n"
-        "<task>\n"
-        "Given evaluator feedback, correct or refine your previous advice.\n"
-        "Be minimal but precise; resolve the pointed issue directly.\n"
-        "</task>\n\n"
-        "<grammar_reference>\n"
-        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
-        f"{grammar}\n"
-        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
-        "</grammar_reference>\n\n"
-        "<problem>\n"
-        f"{problem}\n"
-        "</problem>\n\n"
-        "<prior_context>\n"
-        f"{comments_text or '(none)'}\n"
-        "</prior_context>\n"
-        "<evaluator_feedback>\n"
-        f"{feedback}\n"
-        "</evaluator_feedback>\n\n"
-        "<output>\n"
-        'Return ONLY JSON: {"comment":"<updated>"}\n'
-        "</output>\n"
-    )
+# ---------- Prompt builders ----------
 
 
 def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code: str, data_code: str) -> str:
@@ -695,8 +505,10 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         "You are an expert in mathematical optimization and PyOPL.\n"
         "</role>\n\n"
         "<task>\n"
-        "Judge if the PyOPL model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
-        "Be specific and critical.\n"
+        "Assess whether the generated PyOPL model and data fully align with the problem description.\n"
+        "Alignment means the objective, constraints, decision variables, and data match the problem description.\n"
+        "Be critical and specific about modeling choices, feasibility, and consistency.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
@@ -745,6 +557,150 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
     )
 
 
+def _build_reflexion_generation_prompt(
+    prompt: str,
+    grammar_implementation: str,
+    reflections: Optional[List[str]] = None,
+    few_shots: Optional[List[Dict[str, str]]] = None,
+) -> str:
+    """
+    Reflexion (Shinn et al., 2023) generation prompt.
+    Incorporates prior reflections and optional few-shot exemplars.
+    """
+    # Few-shot exemplars
+    few_shots_section = ""
+    if few_shots:
+        blocks: List[str] = []
+        for i, ex in enumerate(few_shots, 1):
+            desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
+            mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
+            dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
+            blocks.append(
+                f'<example index="{i}">\n'
+                f"{desc_hdr}\n{ex.get('description','')}\n</description>\n\n"
+                f"{mod_hdr}\n{ex.get('model','')}\n</model_file>\n\n"
+                f"{dat_hdr}\n{ex.get('data','')}\n</data_file>\n"
+                f"</example>\n"
+            )
+        few_shots_section = (
+            "<few_shot_examples>\n"
+            "Use these exemplars for structure and syntax inspiration only. Tailor names and indices to the new task.\n"
+            + "".join(blocks)
+            + "</few_shot_examples>\n\n"
+        )
+
+    # Reflexion memory
+    reflections_section = ""
+    if reflections:
+        items = []
+        for idx, r in enumerate(reflections[-REFLEXION_MAX_MEMORY:], 1):
+            items.append(f'<thought index="{idx}">{r}</thought>')
+        reflections_section = (
+            "<reflections>\n"
+            "Leverage these distilled lessons from prior attempts. Do not repeat past mistakes.\n"
+            + "\n".join(items)
+            + "\n</reflections>\n\n"
+        )
+
+    return (
+        "<role>\n"
+        "You are an expert in mathematical optimization and PyOPL.\n"
+        "</role>\n\n"
+        "<task>\n"
+        "Produce a syntactically valid PyOPL model (.mod) and a matching data file (.dat) for the problem below.\n"
+        "Strictly align decision variables, indices, objective, and constraints with the description.\n"
+        "Choose correct domains (binary/integer/float) from context. Add clear labels and explanatory comments.\n"
+        "If any data are missing, create a small, plausible mock instance consistent with the model.\n"
+        "Incorporate the actionable lessons in <reflections> to avoid previously observed issues.\n"
+        "</task>\n\n"
+        "<grammar_reference>\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
+        f"{grammar_implementation}\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
+        "</grammar_reference>\n\n"
+        f"{few_shots_section}"
+        f"{reflections_section}"
+        "<problem_description>\n"
+        f"{prompt}\n"
+        "</problem_description>\n\n"
+        "<output_requirements>\n"
+        '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
+        "- Each value must be a single JSON string (escape quotes/backslashes, encode newlines as \\n).\n"
+        "- No extra keys, no commentary, no trailing commas.\n"
+        "- Optional: you MAY wrap the JSON in a ```json fenced block that contains only the JSON.\n"
+        "</output_requirements>\n\n"
+        "<json_schema>\n"
+        '{ "type": "object", "additionalProperties": false,\n'
+        '  "required": ["model", "data"],\n'
+        '  "properties": { "model": {"type": "string"}, "data": {"type": "string"} } }\n'
+        "</json_schema>\n"
+    )
+
+
+def _build_reflection_prompt(
+    problem_description: str,
+    grammar_implementation: str,
+    model_code: str,
+    data_code: str,
+    compile_errors: List[str],
+    alignment_result: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Reflexion critique prompt: distill concise, actionable guidance for the next attempt.
+    """
+    alignment_block = ""
+    if alignment_result is not None:
+        aligned = alignment_result.get("aligned")
+        assessment = alignment_result.get("assessment", "")
+        alignment_block = (
+            "<alignment_assessment>\n" f"aligned={bool(aligned)}\n" f"{assessment}\n" "</alignment_assessment>\n\n"
+        )
+
+    compile_block = ""
+    if compile_errors:
+        joined = "\n".join(f"- {e}" for e in compile_errors)
+        compile_block = f"<compile_errors>\n{joined}\n</compile_errors>\n\n"
+
+    return (
+        "<role>\n"
+        "You are critiquing a PyOPL solution to derive actionable lessons for the next attempt.\n"
+        "</role>\n\n"
+        "<task>\n"
+        "Analyze the provided model/data against the problem and signals. Produce a concise reflection (3–6 sentences)\n"
+        "that: (1) identifies root causes of issues, (2) states specific corrections to apply next time,\n"
+        "(3) highlights pitfalls to avoid, and (4) confirms core modeling choices.\n"
+        "Be concrete and succinct. Do not repeat the model or data. Focus on guidance.\n"
+        "</task>\n\n"
+        "<grammar_reference>\n"
+        "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
+        f"{grammar_implementation}\n"
+        "--- END PYOPL SYNTAX IMPLEMENTATION ---\n"
+        "</grammar_reference>\n\n"
+        "<inputs>\n"
+        "<problem_description>\n"
+        f"{problem_description}\n"
+        "</problem_description>\n\n"
+        "<model>\n"
+        f"{model_code}\n"
+        "</model>\n\n"
+        "<data>\n"
+        f"{data_code}\n"
+        "</data>\n\n"
+        f"{compile_block}"
+        f"{alignment_block}"
+        "</inputs>\n\n"
+        "<output_requirements>\n"
+        '- Return ONLY a JSON object with key "reflection" whose value is a single string.\n'
+        "- No extra keys, no commentary, no code fences except an optional ```json wrapper around the JSON itself.\n"
+        "</output_requirements>\n\n"
+        "<example_output>\n"
+        '{ "reflection": "Indices for demand-period constraints were mismatched; ensure sets align. '
+        "Use binary variables for facility open decisions and include fixed-opening costs in the objective. "
+        'Tighten capacity linkage between facilities and shipments. Keep parameter names consistent with the data." }\n'
+        "</example_output>\n"
+    )
+
+
 def _build_final_assessment_prompt(
     prompt: str, grammar_implementation: str, model_code: str, data_code: str, syntax_errors
 ) -> str:
@@ -757,6 +713,7 @@ def _build_final_assessment_prompt(
         "Judge if the PyOPL model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
         "Be specific and critical.\n"
         "If you believe the problem description is incomplete or ambiguous, point this out in your assessment.\n"
+        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
@@ -854,247 +811,6 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
     )
 
 
-# ---------- CoE Orchestration ----------
-
-
-def _call_json(provider, model_name, prompt, progress, temperature=None, stop=None) -> Tuple[Dict[str, Any], Dict[str, int]]:
-    """
-    Call LLM expecting JSON; parse with relaxed loader. Returns (obj, usage).
-    """
-    content, usage = _llm_generate_text(
-        provider=provider,
-        model_name=model_name,
-        input_text=prompt,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=temperature,
-        stop=stop,
-        progress=progress,
-        capture_usage=True,
-    )
-    if not content:
-        raise RuntimeError("Empty LLM response.")
-    try:
-        return _json_loads_relaxed(content), usage
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse LLM JSON response: {e}\nResponse: {content}")
-
-
-def _run_chain_of_experts(
-    problem: str,
-    grammar_implementation: str,
-    provider: LLMProvider,
-    model_name: str,
-    progress: Optional[Callable[[str], None]],
-    temperature: Optional[float],
-    stop: Optional[list[str]],
-    few_shots: List[Dict[str, str]],
-    max_forward_steps: int,
-    max_trials: int,
-    do_alignment: bool,
-) -> Tuple[str, str, str, List[str], Dict[str, int]]:
-    """
-    Implements Conductor -> Experts -> Reducer -> Evaluator with backward reflection (Xiao et al., 2024).
-    Returns (model_code, data_code, assessment_text, syntax_errors, usage_totals).
-    """
-    total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-    assessment_text = ""
-    syntax_errors: List[str] = []
-    model_code = ""
-    data_code = ""
-
-    experts_catalog = list(COE_DEFAULT_EXPERTS)
-
-    for trial in range(1, max_trials + 1):
-        _notify(progress, f"[CoE] Trial {trial}/{max_trials}: forward-thought construction")
-        comments: List[Dict[str, str]] = []
-        expert_stack: List[str] = []
-
-        # Forward thought construction
-        for step in range(1, max_forward_steps + 1):
-            remaining = max_forward_steps - step + 1
-            # Conductor picks expert
-            try:
-                conductor_prompt = _build_conductor_prompt(problem, experts_catalog, comments, remaining)
-                conductor_obj, u = _call_json(
-                    provider,
-                    model_name,
-                    conductor_prompt,
-                    progress,
-                    temperature=0.0 if temperature is not None else None,
-                    stop=stop,
-                )
-                total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
-                total_usage["completion_tokens"] += u.get("completion_tokens", 0)
-                next_expert = str(conductor_obj.get("next_expert") or "").strip()
-                if next_expert not in experts_catalog:
-                    # Fallback heuristic
-                    next_expert = experts_catalog[min(step - 1, len(experts_catalog) - 1)]
-            except Exception as e:
-                _notify(progress, f"[CoE] Conductor fallback due to error: {e}")
-                next_expert = experts_catalog[min(step - 1, len(experts_catalog) - 1)]
-
-            # Query expert
-            expert_prompt = _build_expert_prompt(next_expert, problem, grammar_implementation, comments, few_shots)
-            try:
-                expert_obj, u2 = _call_json(provider, model_name, expert_prompt, progress, temperature=temperature, stop=stop)
-                total_usage["prompt_tokens"] += u2.get("prompt_tokens", 0)
-                total_usage["completion_tokens"] += u2.get("completion_tokens", 0)
-                comment = str(expert_obj.get("comment") or "").strip()
-                if comment:
-                    comments.append({"expert": next_expert, "comment": comment})
-                    expert_stack.append(next_expert)
-                    _notify(progress, f"[CoE] {next_expert}: contributed")
-            except Exception as e:
-                _notify(progress, f"[CoE] {next_expert} failed: {e}")
-
-        # Reducer synthesizes final model+data
-        _notify(progress, "[CoE] Reducing comments into PyOPL model+data")
-        reducer_prompt = _build_reducer_prompt(problem, grammar_implementation, comments, few_shots)
-        try:
-            reducer_obj, u3 = _call_json(provider, model_name, reducer_prompt, progress, temperature=temperature, stop=stop)
-            total_usage["prompt_tokens"] += u3.get("prompt_tokens", 0)
-            total_usage["completion_tokens"] += u3.get("completion_tokens", 0)
-            model_code = str(reducer_obj["model"])
-            data_code = str(reducer_obj["data"])
-        except Exception as e:
-            raise RuntimeError(f"Reducer failed to produce valid JSON: {e}")
-
-        # Evaluate by compiling
-        compiler = OPLCompiler()
-        syntax_errors = []
-        try:
-            _notify(progress, "[CoE] Compiling model and data")
-            compiler.compile_model(model_code, data_code)
-        except SemanticError as e:
-            syntax_errors.append(str(e))
-        except Exception as e:
-            syntax_errors.append(f"{type(e).__name__}: {e}")
-
-        # Write current attempt to disk
-        # model_dir = os.path.dirname("noop")  # ensure file ops below safe even if no dir
-        try:
-            # The caller will write to desired files; we only return strings here
-            pass
-        except Exception:
-            pass
-
-        if not syntax_errors:
-            # Optional alignment check
-            if do_alignment:
-                _notify(progress, "[CoE] Checking alignment with original prompt...")
-                align_prompt = _build_alignment_prompt(problem, grammar_implementation, model_code, data_code)
-                try:
-                    align_obj, u4 = _call_json(
-                        provider,
-                        model_name,
-                        align_prompt,
-                        progress,
-                        temperature=0.0 if temperature is not None else None,
-                        stop=stop,
-                    )
-                    total_usage["prompt_tokens"] += u4.get("prompt_tokens", 0)
-                    total_usage["completion_tokens"] += u4.get("completion_tokens", 0)
-                    assessment_text = str(align_obj.get("assessment", "")).strip()
-                    if bool(align_obj.get("aligned", False)):
-                        _notify(progress, "[CoE] Compiled and aligned ✓")
-                        break
-                    else:
-                        _notify(progress, "[CoE] Not aligned; starting reflection")
-                        # Use alignment assessment as feedback
-                        feedback_text = f"Alignment issues: {assessment_text}"
-                except Exception as e:
-                    _notify(progress, f"[CoE] Alignment check failed: {e}")
-                    feedback_text = "Model may be misaligned with prompt."
-            else:
-                _notify(progress, "[CoE] Compiled ✓ (alignment disabled)")
-                break
-        else:
-            _notify(progress, f"[CoE] Compilation failed with {len(syntax_errors)} error(s); starting reflection")
-            feedback_text = "Syntax/semantic errors: " + "; ".join(syntax_errors)
-
-        # Backward reflection
-        _notify(progress, "[CoE] Backward reflection phase")
-        stop_backward = False
-        # Reflect in reverse order of expert contributions
-        for ex in reversed(expert_stack):
-            if stop_backward:
-                break
-            try:
-                reflect_prompt = _build_reflection_prompt(ex, problem, grammar_implementation, comments, feedback_text)
-                reflect_obj, u5 = _call_json(
-                    provider,
-                    model_name,
-                    reflect_prompt,
-                    progress,
-                    temperature=0.0 if temperature is not None else None,
-                    stop=stop,
-                )
-                total_usage["prompt_tokens"] += u5.get("prompt_tokens", 0)
-                total_usage["completion_tokens"] += u5.get("completion_tokens", 0)
-                new_comment = str(reflect_obj.get("comment") or "").strip()
-                if new_comment:
-                    comments.append({"expert": ex, "comment": new_comment})
-            except Exception as e:
-                _notify(progress, f"[CoE] Reflection by {ex} failed: {e}")
-
-        # After reflection, re-reduce once
-        _notify(progress, "[CoE] Re-reducing after reflection")
-        try:
-            reducer_obj2, u6 = _call_json(
-                provider,
-                model_name,
-                _build_reducer_prompt(problem, grammar_implementation, comments, few_shots),
-                progress,
-                temperature=temperature,
-                stop=stop,
-            )
-            total_usage["prompt_tokens"] += u6.get("prompt_tokens", 0)
-            total_usage["completion_tokens"] += u6.get("completion_tokens", 0)
-            model_code = str(reducer_obj2["model"])
-            data_code = str(reducer_obj2["data"])
-        except Exception as e:
-            _notify(progress, f"[CoE] Reducer after reflection failed: {e}")
-            continue
-
-        # Re-evaluate
-        compiler = OPLCompiler()
-        syntax_errors = []
-        try:
-            _notify(progress, "[CoE] Re-compiling model and data")
-            compiler.compile_model(model_code, data_code)
-        except SemanticError as e:
-            syntax_errors.append(str(e))
-        except Exception as e:
-            syntax_errors.append(f"{type(e).__name__}: {e}")
-
-        if not syntax_errors and do_alignment:
-            try:
-                align_obj2, u7 = _call_json(
-                    provider,
-                    model_name,
-                    _build_alignment_prompt(problem, grammar_implementation, model_code, data_code),
-                    progress,
-                    temperature=0.0 if temperature is not None else None,
-                    stop=stop,
-                )
-                total_usage["prompt_tokens"] += u7.get("prompt_tokens", 0)
-                total_usage["completion_tokens"] += u7.get("completion_tokens", 0)
-                assessment_text = str(align_obj2.get("assessment", "")).strip()
-                if bool(align_obj2.get("aligned", False)):
-                    _notify(progress, "[CoE] Compiled and aligned ✓ after reflection")
-                    break
-                else:
-                    _notify(progress, "[CoE] Still not aligned; continuing trials if any")
-            except Exception as e:
-                _notify(progress, f"[CoE] Alignment post-reflection failed: {e}")
-
-        if not syntax_errors and not do_alignment:
-            _notify(progress, "[CoE] Compiled ✓ after reflection (alignment disabled)")
-            break
-
-    return model_code, data_code, assessment_text, syntax_errors, total_usage
-
-
 # ---------- Public API ----------
 
 
@@ -1113,9 +829,8 @@ def generative_solve(
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = False,
 ):
-    """Generate a PyOPL model and data file using Chain-of-Experts (CoE):
-    forward thought construction (Conductor + Experts) -> Reducer -> compile (+ optional alignment),
-    with backward reflection. Repeated up to `iterations` trials.
+    """Generate a PyOPL model and data file using a Reflexion-style loop:
+    generate -> evaluate (compile + optional alignment) -> reflect -> regenerate.
 
     Signatures and return shape preserved for drop-in compatibility.
     """
@@ -1131,7 +846,7 @@ def generative_solve(
 
     _notify(
         progress,
-        f"CoE: provider={provider.value} model={model_name} trials={iterations} forward_steps={COE_FORWARD_STEPS} alignment={'on' if do_alignment else 'off'}",
+        f"Reflexion: provider={provider.value} model={model_name} iters={iterations} alignment={'on' if do_alignment else 'off'}",
     )
 
     # Few-shot examples (static per run)
@@ -1139,39 +854,157 @@ def generative_solve(
         _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
-    # Run Chain-of-Experts
-    model_code, data_code, assessment_text, syntax_errors, usage_totals = _run_chain_of_experts(
-        problem=prompt,
-        grammar_implementation=grammar_implementation,
-        provider=provider,
-        model_name=model_name,
-        progress=progress,
-        temperature=temperature,
-        stop=stop,
-        few_shots=few_shots_list,
-        max_forward_steps=COE_FORWARD_STEPS,
-        max_trials=iterations,
-        do_alignment=do_alignment,
-    )
+    reflections: List[str] = []
+    assessment_text = ""
+    syntax_errors: List[str] = []
+    model_code = ""
+    data_code = ""
 
-    # Ensure output folder exists and write final artifacts
-    model_dir = os.path.dirname(model_file)
-    if model_dir:
-        os.makedirs(model_dir, exist_ok=True)
-    data_dir = os.path.dirname(data_file)
-    if data_dir:
-        os.makedirs(data_dir, exist_ok=True)
-    with open(model_file, "w") as f:
-        f.write(model_code or "")
-    with open(data_file, "w") as f:
-        f.write(data_code or "")
-    _notify(progress, f"Wrote files: {model_file} • {data_file}")
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
-    # Final assessment if failed or if alignment disabled (like original behavior)
+    for iteration in range(iterations):
+        # Build generation prompt with current reflections (Reflexion memory)
+        user_prompt = _build_reflexion_generation_prompt(
+            prompt, grammar_implementation, reflections=reflections, few_shots=few_shots_list
+        )
+
+        _notify(progress, f"Iteration {iteration + 1}/{iterations}: generating")
+        content, usage = _llm_generate_text(
+            provider=provider,
+            model_name=model_name,
+            input_text=user_prompt,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=temperature,
+            stop=stop,
+            progress=progress,
+            capture_usage=True,
+        )
+        total_prompt_tokens += usage.get("prompt_tokens", 0)
+        total_completion_tokens += usage.get("completion_tokens", 0)
+
+        if not content:
+            raise RuntimeError("Empty model response.")
+        try:
+            result = _json_loads_relaxed(content)
+            model_code = result["model"]
+            data_code = result["data"]
+            _notify(progress, "LLM response parsed (model + data)")
+        except Exception as e:
+            raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
+
+        # Compile/evaluate
+        compiler = OPLCompiler()
+        syntax_errors = []
+        try:
+            _notify(progress, "Compiling model and data")
+            compiler.compile_model(model_code, data_code)
+        except SemanticError as e:
+            syntax_errors.append(str(e))
+        except Exception as e:
+            syntax_errors.append(f"{type(e).__name__}: {e}")
+
+        # Ensure output folder exists and write current attempt
+        model_dir = os.path.dirname(model_file)
+        if model_dir:
+            os.makedirs(model_dir, exist_ok=True)
+        data_dir = os.path.dirname(data_file)
+        if data_dir:
+            os.makedirs(data_dir, exist_ok=True)
+        with open(model_file, "w") as f:
+            f.write(model_code)
+        with open(data_file, "w") as f:
+            f.write(data_code)
+        _notify(progress, f"Wrote files: {model_file} • {data_file}")
+
+        # Success if no syntax errors and, if enabled, aligned
+        alignment_obj: Optional[Dict[str, Any]] = None
+        if not syntax_errors and do_alignment:
+            _notify(progress, "Checking alignment with original prompt...")
+            alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
+            alignment_content, usage2 = _llm_generate_text(
+                provider=provider,
+                model_name=model_name,
+                input_text=alignment_prompt,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=0.0 if temperature is not None else None,
+                stop=stop,
+                progress=progress,
+                capture_usage=True,
+            )
+            total_prompt_tokens += usage2.get("prompt_tokens", 0)
+            total_completion_tokens += usage2.get("completion_tokens", 0)
+
+            if not alignment_content:
+                raise RuntimeError("Empty alignment response.")
+            alignment_obj = _json_loads_relaxed(alignment_content)
+            if not (
+                isinstance(alignment_obj, dict)
+                and isinstance(alignment_obj.get("aligned"), bool)
+                and isinstance(alignment_obj.get("assessment"), str)
+            ):
+                raise RuntimeError(f"Invalid alignment response JSON: {alignment_content}")
+
+            assessment_text = alignment_obj.get("assessment", "").strip()
+            if alignment_obj["aligned"]:
+                _notify(progress, "Aligned ✓ Stopping.")
+                break
+
+        # Not successful; produce a reflection and continue
+        reason = (
+            f"{len(syntax_errors)} syntax/semantic error(s)"
+            if syntax_errors
+            else ("misalignment" if do_alignment else "improvement opportunity")
+        )
+        _notify(progress, f"Deriving reflection from signals ({reason})")
+        reflection_prompt = _build_reflection_prompt(
+            problem_description=prompt,
+            grammar_implementation=grammar_implementation,
+            model_code=model_code,
+            data_code=data_code,
+            compile_errors=syntax_errors,
+            alignment_result=alignment_obj if (alignment_obj and not syntax_errors) else None,
+        )
+        reflection_text, usage3 = _llm_generate_text(
+            provider=provider,
+            model_name=model_name,
+            input_text=reflection_prompt,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=0.0 if temperature is not None else None,
+            stop=stop,
+            progress=progress,
+            capture_usage=True,
+        )
+        total_prompt_tokens += usage3.get("prompt_tokens", 0)
+        total_completion_tokens += usage3.get("completion_tokens", 0)
+
+        if not reflection_text:
+            _notify(progress, "Empty reflection; continuing without new memory")
+        else:
+            try:
+                reflection_obj = _json_loads_relaxed(reflection_text)
+                reflection_str = (reflection_obj or {}).get("reflection", "").strip()
+                if reflection_str:
+                    reflections.append(reflection_str)
+                    if len(reflections) > REFLEXION_MAX_MEMORY:
+                        reflections = reflections[-REFLEXION_MAX_MEMORY:]
+            except Exception:
+                # If parsing fails, keep a truncated raw reflection
+                reflections.append(reflection_text.strip()[:1000])
+                if len(reflections) > REFLEXION_MAX_MEMORY:
+                    reflections = reflections[-REFLEXION_MAX_MEMORY:]
+
+    # Load the latest attempt from disk
+    with open(model_file, "r") as f:
+        model_code = f.read()
+    with open(data_file, "r") as f:
+        data_code = f.read()
+
+    # Final assessment if failed or if alignment disabled
     if syntax_errors or not do_alignment:
         _notify(progress, "Requesting final assessment")
         assessment_prompt = _build_final_assessment_prompt(
-            prompt, grammar_implementation, model_code or "", data_code or "", syntax_errors
+            prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
         assessment_text_part, usage4 = _llm_generate_text(
             provider=provider,
@@ -1183,8 +1016,8 @@ def generative_solve(
             progress=progress,
             capture_usage=True,
         )
-        usage_totals["prompt_tokens"] += usage4.get("prompt_tokens", 0)
-        usage_totals["completion_tokens"] += usage4.get("completion_tokens", 0)
+        total_prompt_tokens += usage4.get("prompt_tokens", 0)
+        total_completion_tokens += usage4.get("completion_tokens", 0)
         assessment_text = assessment_text_part or assessment_text
 
     _notify(progress, "Generation complete")
@@ -1196,8 +1029,8 @@ def generative_solve(
         SimpleNamespace = None  # type: ignore
 
     usage_summary = {
-        "prompt_tokens": usage_totals.get("prompt_tokens", 0),
-        "completion_tokens": usage_totals.get("completion_tokens", 0),
+        "prompt_tokens": total_prompt_tokens,
+        "completion_tokens": total_completion_tokens,
     }
     estimated_costs: Dict[str, Any] = {}
     if SimpleNamespace is not None:
@@ -1214,15 +1047,14 @@ def generative_solve(
     _notify(progress, f"[LLM] Estimated costs: {cost}")
 
     if return_statistics:
-        # iterations reflects trials attempted (best-effort)
         return {
-            "iterations": int(iterations),
-            "assessment": (assessment_text or "").strip(),
+            "iterations": iteration + 1,
+            "assessment": assessment_text.strip(),
             "syntax_errors": syntax_errors,
             "cost": cost,
         }
     else:
-        return (assessment_text or "").strip()
+        return assessment_text.strip()
 
 
 def generative_feedback(

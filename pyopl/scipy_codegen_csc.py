@@ -48,9 +48,12 @@ class ExpressionEvaluator:
         def to_tuple_recursive(e):
             if isinstance(e, dict) and e.get("type") == "tuple_literal":
                 return tuple(to_tuple_recursive(ee) for ee in e["elements"])
+            elif isinstance(e, dict) and e.get("type") == "boolean_literal":
+                # Preserve bools inside tuple literals
+                return bool(e.get("value"))
             elif isinstance(e, dict):
                 coef, val = self.eval(e, env)
-                if isinstance(val, (float, int, str, tuple)):
+                if isinstance(val, (float, int, str, tuple, bool)):
                     return val
                 raise SemanticError(f"Tuple element evaluated to unsupported type: {type(val)}")
             else:
@@ -2341,10 +2344,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return f"{name}[{idx_str}]"
         elif t == "field_access":
             # --- Tuple field access ---
-            # OPL: a.cost  -->  Python: a[index]
             base = self._emit_python_expr(expr["base"], env)
             field = expr["field"]
-            # Try to resolve tuple type from AST
             if hasattr(self, "tuple_types"):
                 sem_type = expr["base"].get("sem_type")
                 if sem_type and sem_type in self.tuple_types:
@@ -2352,8 +2353,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     for idx, f in enumerate(fields):
                         if f["name"] == field:
                             return f"{base}[{idx}]"
-            # fallback: legacy string access
             return f"{base}['{field}']"
+        # NEW: boolean literal for emitted Python expr
+        elif t == "boolean_literal":
+            return "True" if expr.get("value") else "False"
         # NEW: emit min/max for symbolic comments
         elif t in ("minl", "maxl"):
             args = expr.get("args", [])
@@ -2361,11 +2364,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             fn = "min" if t == "minl" else "max"
             return f"{fn}({', '.join(parts)})"
         elif t == "name_reference_index":
-            # Use the iterator variable from env
             return env.get(expr["name"], expr["name"])
         elif t == "number_literal_index":
             return str(expr["value"])
-        elif t == "string_literal":  # <-- emit quoted string for readability
+        elif t == "string_literal":
             return repr(expr["value"])
         else:
             return str(expr)
@@ -3164,15 +3166,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         tuple_keys = [tuple(t["elements"]) for t in tuple_set["value"]]
                         param_dict = {k: v for k, v in zip(tuple_keys, decl["value"])}
                         self._add_code_line(f"{name} = {repr(param_dict)}")
-                        # Mark as emitted and normalize internal data so evaluators see dicts
-                        emitted_inline_tuple_params.add(name)
-                        try:
-                            self.data_dict[name] = param_dict
-                        except Exception:
-                            pass
-                        continue
+                        return
                 # Fallback: emit as list (for range-indexed)
-                self._add_code_line(f"{name} = {json.dumps(decl['value'])}")
+                self._add_code_line(f"{name} = {repr(decl['value'])}")
                 # Also update internal data_dict so evaluation can resolve inline list-indexed params
                 try:
                     self.data_dict[name] = decl["value"]
@@ -3284,9 +3280,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if isinstance(value, dict) and value.get("type") == "range_data":
                 pass
             elif isinstance(value, (list, dict)):
-                safe_value = convert_keys(value)
-                self._add_code_line(f"{name} = {json.dumps(safe_value)}")
-                # If this is a set override (typed scalar set) and we haven't already created an index map (dat file may supply), emit index map.
+                # Emit Python literals (preserve True/False, tuple keys), not JSON
+                self._add_code_line(f"{name} = {repr(value)}")
+                # If this is a set override and we haven't already created an index map, emit index map.
                 if name not in {
                     d["name"]
                     for d in self.ast.get("declarations", [])
@@ -3301,7 +3297,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if isinstance(value, list) and value and all(isinstance(e, (str, int)) for e in value):
                         self._add_code_line(f"{name}_index = {{v: i for i, v in enumerate({name})}}")
             elif isinstance(value, str):
-                self._add_code_line(f'{name} = "{value}"')
+                self._add_code_line(f"{name} = {repr(value)}")
             else:
                 self._add_code_line(f"{name} = {value}")
         self._add_code_line("")
