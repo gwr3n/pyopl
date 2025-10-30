@@ -31,7 +31,6 @@ def _ollama_generate_text(
     num_predict: Optional[int] = ...,
     return_usage: Literal[False] = ...,
 ) -> str: ...
-
 @overload
 def _llm_generate_text(
     provider: LLMProvider,
@@ -54,7 +53,6 @@ def _llm_generate_text(
     progress: Optional[Callable[[str], None]] = ...,
     capture_usage: Literal[False] = ...,
 ) -> str: ...
-
 @overload
 def generative_solve(
     prompt,
@@ -87,7 +85,6 @@ def generative_solve(
     progress: Optional[Callable[[str], None]] = ...,
     few_shot: bool = ...,
 ) -> str: ...
-
 def generative_feedback(
     prompt,
     model_file,
@@ -99,7 +96,6 @@ def generative_feedback(
     llm_provider: Optional[str] = ...,
     progress: Optional[Callable[[str], None]] = ...,
 ) -> Dict[str, str]: ...
-
 def list_models(llm_provider: Optional[str] = ..., model_name: str = ...) -> List[str]: ...
 def list_openai_models(prefix: Optional[str] = "gpt") -> List[str]: ...
 def list_gemini_models(prefix: Optional[str] = "gemini") -> List[str]: ...
