@@ -84,11 +84,11 @@ class TestPyOPLProblems(unittest.TestCase):
             // 1. Each customer node is entered exactly once (except depots)
             forall(n in NODE_NAMES : !is_depot[n])
                 sum(a in ARCS : a.to == n) x[a] == 1;
-            
+
             // 2. Each customer node is exited exactly once (except depots)
             forall(n in NODE_NAMES : !is_depot[n])
                 sum(a in ARCS : a.from == n) x[a] == 1;
-            
+
             // 3. Vehicle count constraint at depots: Outflow == NUM_VEHICLES, Inflow == NUM_VEHICLES
             forall(d in DEPOT_NAMES)
                 sum(a in ARCS : a.from == d) x[a] == NUM_VEHICLES;
@@ -101,7 +101,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 u[i] >= demand[i];
             forall(i in NODE_NAMES : !is_depot[i])
                 u[i] <= VEHICLE_CAPACITY;
-            
+
             forall(i in NODE_NAMES : !is_depot[i])
                 forall(j in NODE_NAMES : (!is_depot[i] && !is_depot[j] && i != j)) {
                 // There may be multiple arcs between i and j (in ARCS). Apply MTZ to all arcs from i to j.
