@@ -16,6 +16,8 @@ from typing import (
     Optional,
     Tuple,  # NEW
     Union,  # NEW
+    Literal,  # NEW
+    overload,  # NEW
 )
 
 from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
@@ -150,10 +152,14 @@ def _gather_few_shots(
     # Resolve default models_dir from package data
     if models_dir is None:
         try:
-            models_dir = files("pyopl") / "opl_models"
+            pkg_dir = files("pyopl") / "opl_models"
+            base_dir = Path(str(pkg_dir))
+            if not base_dir.exists():
+                base_dir = Path(__file__).parent / "opl_models"
         except Exception:
-            models_dir = Path(__file__).parent / "opl_models"
-    base_dir = Path(models_dir)
+            base_dir = Path(__file__).parent / "opl_models"
+    else:
+        base_dir = Path(models_dir)
 
     examples: List[Dict[str, str]] = []
     try:
