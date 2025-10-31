@@ -3432,18 +3432,19 @@ class OPLCompiler:
         if model_ast and "declarations" in model_ast:
             for decl in model_ast["declarations"]:
                 t = decl.get("type")
-                name = decl.get("name")
+                name = decl.get("name")  # ensure we have the declaration name for all branches
+                if not name:
+                    continue
                 # Inline scalar/array parameters (parameter_inline / parameter_inline_indexed)
                 if t in ("parameter_inline", "parameter_inline_indexed") and decl.get("value") is not None:
                     working_data[name] = decl["value"]
-                # Typed sets declared inline: make them available as a plain list for codegen
+                # Typed sets declared inline
                 if t == "typed_set" and decl.get("value") is not None and name not in working_data:
                     working_data[name] = decl["value"]
-                # Sets-of-tuples declared inline: attach tuple_type metadata and elements
+                # Sets-of-tuples declared inline
                 if t == "set_of_tuples" and decl.get("value") is not None:
                     elems = []
                     for v in decl["value"]:
-                        # accommodate either dict with 'elements' or direct list form
                         if isinstance(v, dict) and "elements" in v:
                             elems.append(v["elements"])
                         else:
@@ -3452,6 +3453,163 @@ class OPLCompiler:
                         "elements": elems,
                         "tuple_type": decl.get("tuple_type"),
                     }
+
+        # --- evaluate typed set-of-tuples comprehensions into concrete sets (must happen BEFORE computed params) ---
+        # Local helpers used by comprehensions to evaluate integer bounds and named ranges against working_data.
+        def eval_bound(expr):
+            if isinstance(expr, dict):
+                t = expr.get("type")
+                if t == "number":
+                    return int(expr.get("value"))
+                if t == "name":
+                    val = working_data.get(expr.get("value"))
+                    if isinstance(val, (int, float)):
+                        return int(val)
+                    raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
+                if t == "binop":
+                    op = expr.get("op")
+                    left = eval_bound(expr.get("left"))
+                    right = eval_bound(expr.get("right"))
+                    if op == "+":
+                        return left + right
+                    if op == "-":
+                        return left - right
+                    if op == "*":
+                        return left * right
+                    if op == "/":
+                        # integer division for bounds
+                        return int(left / right)
+            raise SemanticError(f"Unsupported bound expr: {expr}")
+
+        def resolve_named_range(rng_name: str):
+            # Try inline range declaration in the model
+            rng_decl = next(
+                (
+                    d
+                    for d in (model_ast.get("declarations") or [])
+                    if isinstance(d, dict) and d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
+                ),
+                None,
+            )
+            if rng_decl:
+                s = eval_bound(rng_decl["start"])
+                e = eval_bound(rng_decl["end"])
+                return s, e
+            # Try .dat-provided range
+            dv = working_data.get(rng_name)
+            if isinstance(dv, dict) and dv.get("type") == "range_data":
+                return int(dv["start"]), int(dv["end"])
+            raise SemanticError(f"Named range '{rng_name}' not found for set comprehension.")
+
+        if model_ast and "declarations" in model_ast:
+            new_decls2 = []
+            for decl in model_ast["declarations"]:
+                if decl.get("type") != "set_of_tuples_comprehension":
+                    new_decls2.append(decl)
+                    continue
+
+                comp = decl.get("comprehension") or {}
+                tuple_expr = comp.get("tuple_expr")
+                iterators = comp.get("iterators") or []
+                idxc = comp.get("index_constraint")
+
+                # Domain resolution for each iterator (range, named range, named set)
+                def _domain_for_range(rng):
+                    if rng["type"] == "range_specifier":
+                        s = eval_bound(rng["start"])
+                        e = eval_bound(rng["end"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] == "named_range":
+                        s, e = resolve_named_range(rng["name"])
+                        return list(range(int(s), int(e) + 1))
+                    if rng["type"] in ("named_set", "named_set_dimension"):
+                        set_name = rng["name"]
+                        set_obj = working_data.get(set_name, [])
+                        if isinstance(set_obj, dict) and "elements" in set_obj:
+                            elems = set_obj["elements"]
+                        else:
+                            elems = set_obj
+                        return list(elems or [])
+                    raise SemanticError(
+                        f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
+                    )
+
+                it_names = [it["iterator"] for it in iterators]
+                domains = [_domain_for_range(it["range"]) for it in iterators]
+
+                # Evaluate tuple expression into a Python tuple under env
+                def _eval_tuple(expr, env):
+                    if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
+                        out = []
+                        for el in expr.get("elements", []):
+                            out.append(_eval_tuple(el, env))
+                        return tuple(out)
+                    if isinstance(expr, dict):
+                        # Reuse the later eval_expr if present, else minimally handle names and numbers
+                        t = expr.get("type")
+                        if t == "name":
+                            return env.get(expr.get("value"))
+                        if t == "number":
+                            return expr.get("value")
+                        if t == "parenthesized_expression":
+                            return _eval_tuple(expr.get("expression"), env)
+                    return expr
+
+                tuples = []
+
+                # Nested loops over cartesian product of all iterator domains
+                def _recurse(depth, env):
+                    if depth == len(it_names):
+                        # filter
+                        keep = True
+                        if idxc is not None:
+                            # very simple boolean evaluation: treat nonzero numeric as True
+                            def _eval_bool(e, envb):
+                                if isinstance(e, dict):
+                                    if e.get("type") == "number":
+                                        return bool(e.get("value"))
+                                    if e.get("type") == "name":
+                                        return bool(envb.get(e.get("value")))
+                                    if e.get("type") == "parenthesized_expression":
+                                        return _eval_bool(e.get("expression"), envb)
+                                return bool(e)
+
+                            keep = _eval_bool(idxc, env)
+                        if keep:
+                            tval = _eval_tuple(tuple_expr, env)
+
+                            # Normalize nested numeric to int when integral
+                            def _norm(v):
+                                if isinstance(v, float) and v.is_integer():
+                                    return int(v)
+                                if isinstance(v, tuple):
+                                    return tuple(_norm(x) for x in v)
+                                return v
+
+                            tuples.append(_norm(tval))
+                        return
+                    nm = it_names[depth]
+                    for v in domains[depth]:
+                        env[nm] = v
+                        _recurse(depth + 1, env)
+                    env.pop(nm, None)
+
+                _recurse(0, {})
+                # Mutate working_data and AST: concrete set as list of tuples
+                working_data[decl["name"]] = tuples
+                new_decls2.append(
+                    {
+                        "type": "set_of_tuples",
+                        "tuple_type": decl.get("tuple_type"),
+                        "name": decl.get("name"),
+                        "value": tuples,
+                    }
+                )
+            model_ast["declarations"] = new_decls2
+            data_dict = dict(working_data)
+
+        # Use working_data for subsequent validation/emission
+        data_dict = working_data
 
         # NEW: evaluate computed indexed parameter declarations and rewrite them into concrete inline params
         if model_ast and "declarations" in model_ast:
@@ -3545,6 +3703,12 @@ class OPLCompiler:
                     if nm in working_data:
                         return working_data[nm]
                     raise SemanticError(f"Unknown name '{nm}' in computed parameter expression.")
+                if t == "conditional":
+                    # Support (cond ? then : else) in computed parameter expressions
+                    cval = eval_expr(expr.get("condition"), env, iter_meta)
+                    ctruth = bool(cval)
+                    branch = expr.get("then") if ctruth else expr.get("else")
+                    return eval_expr(branch, env, iter_meta)
                 if t == "field_access":
                     # Support s.demand where s is an iterator bound to a tuple from a set-of-tuples
                     base = expr.get("base")
@@ -3923,104 +4087,6 @@ class OPLCompiler:
             model_ast["declarations"] = new_decls
             # Also update data_dict since generators may consult it directly
             data_dict = dict(working_data)
-
-        # NEW: evaluate typed set-of-tuples comprehensions into concrete sets
-        if model_ast and "declarations" in model_ast:
-            new_decls2 = []
-            for decl in model_ast["declarations"]:
-                if decl.get("type") != "set_of_tuples_comprehension":
-                    new_decls2.append(decl)
-                    continue
-
-                comp = decl.get("comprehension") or {}
-                tuple_expr = comp.get("tuple_expr")
-                iterators = comp.get("iterators") or []
-                idxc = comp.get("index_constraint")
-
-                # Domain resolution for each iterator (range, named range, named set)
-                def _domain_for_range(rng):
-                    if rng["type"] == "range_specifier":
-                        s = eval_bound(rng["start"])
-                        e = eval_bound(rng["end"])
-                        return list(range(int(s), int(e) + 1))
-                    if rng["type"] == "named_range":
-                        s, e = resolve_named_range(rng["name"])
-                        return list(range(int(s), int(e) + 1))
-                    if rng["type"] in ("named_set", "named_set_dimension"):
-                        set_name = rng["name"]
-                        set_obj = working_data.get(set_name, [])
-                        if isinstance(set_obj, dict) and "elements" in set_obj:
-                            elems = set_obj["elements"]
-                        else:
-                            elems = set_obj
-                        return list(elems or [])
-                    raise SemanticError(
-                        f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
-                    )
-
-                it_names = [it["iterator"] for it in iterators]
-                domains = [_domain_for_range(it["range"]) for it in iterators]
-
-                # Evaluate tuple expression into a Python tuple under env
-                def _eval_tuple(expr, env):
-                    if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
-                        out = []
-                        for el in expr.get("elements", []):
-                            out.append(_eval_tuple(el, env))
-                        return tuple(out)
-                    if isinstance(expr, dict):
-                        return eval_expr(expr, env)
-                    return expr
-
-                tuples = []
-
-                # Nested loops over cartesian product of all iterator domains
-                def _recurse(depth, env):
-                    if depth == len(it_names):
-                        # filter
-                        if idxc is not None:
-                            cond_val = eval_expr(idxc, env)
-                            # robust truthiness for numeric/bool/string
-                            if isinstance(cond_val, (int, float, bool)):
-                                if not bool(cond_val):
-                                    return
-                            else:
-                                if not cond_val:
-                                    return
-                        tval = _eval_tuple(tuple_expr, env)
-
-                        # Normalize nested numeric to int when integrals
-                        def _norm(v):
-                            if isinstance(v, float) and v.is_integer():
-                                return int(v)
-                            if isinstance(v, tuple):
-                                return tuple(_norm(x) for x in v)
-                            return v
-
-                        tuples.append(_norm(tval))
-                        return
-                    nm = it_names[depth]
-                    for v in domains[depth]:
-                        env[nm] = v
-                        _recurse(depth + 1, env)
-                    env.pop(nm, None)
-
-                _recurse(0, {})
-                # Mutate working_data and AST: concrete set as list of tuples
-                working_data[decl["name"]] = tuples
-                new_decls2.append(
-                    {
-                        "type": "set_of_tuples",
-                        "tuple_type": decl.get("tuple_type"),
-                        "name": decl.get("name"),
-                        "value": tuples,
-                    }
-                )
-            model_ast["declarations"] = new_decls2
-            data_dict = dict(working_data)
-
-        # Use working_data for subsequent validation/emission
-        data_dict = working_data
 
         # --- Validate shape of multi-dimensional arrays (use merged working data) ---
         def validate_shape(param_data, dims, param_name, data_dict, dim=0):

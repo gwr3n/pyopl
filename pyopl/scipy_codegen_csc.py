@@ -511,22 +511,23 @@ class ExpressionEvaluator:
             if tuple_key in param_dict:
                 # Treat tuple-indexed parameter as a pure constant (no coefficients)
                 return {}, param_dict[tuple_key]
+        # Fallback: find inline param decl and map tuple_key to positional index via tuple-set order
         for d in self.parent._find_decls(expr["name"], "parameter_inline_indexed"):
             dims = d.get("dimensions", [])
             if len(dims) == 1 and dims[0].get("type") == "named_set_dimension":
                 set_name = dims[0]["name"]
-                tuple_set = self.parent._find_decl(set_name, "set_of_tuples")
-                if tuple_set:
-                    tuple_keys = [tuple(t["elements"]) for t in tuple_set["value"]]
+                # Normalize tuple keys from AST/data using helper (supports both dict-with-elements and plain tuples)
+                tuple_keys = TupleSetHelper.get_tuple_set(set_name, self.parent.ast, self.parent.data_dict) or []
+                # Ensure each key is a tuple
+                tuple_keys = [k if isinstance(k, tuple) else (k,) for k in tuple_keys]
+                try:
+                    idx = next((i for i, k in enumerate(tuple_keys) if k == tuple_key), None)
+                except Exception:
                     idx = None
-                    for i, k in enumerate(tuple_keys):
-                        if k == tuple_key:
-                            idx = i
-                            break
-                    if idx is not None:
-                        param_vals = d["value"]
-                        if isinstance(param_vals, list) and idx < len(param_vals):
-                            return {}, param_vals[idx]
+                if idx is not None:
+                    param_vals = d.get("value")
+                    if isinstance(param_vals, list) and idx < len(param_vals):
+                        return {}, param_vals[idx]
         vname_str = f"{expr['name']}[{str(tuple_key)}]"
         if vname_str in self.parent.var_indices:
             return {vname_str: 1.0}, 0.0
@@ -3074,8 +3075,24 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         )
                     raise Exception("Unsupported range bound expr")
 
-                start = eval_bound(rng["start"])
-                end = eval_bound(rng["end"])
+                # NEW: handle named ranges without inline start/end
+                def get_range_bounds(rng_dim):
+                    s_node = rng_dim.get("start")
+                    e_node = rng_dim.get("end")
+                    if isinstance(s_node, dict) and isinstance(e_node, dict):
+                        return eval_bound(s_node), eval_bound(e_node)
+                    # Fallback to range declaration in AST
+                    rng_name = rng_dim.get("name")
+                    decl_rng = self._find_decl(rng_name, "range_declaration_inline")
+                    if isinstance(decl_rng, dict):
+                        return eval_bound(decl_rng["start"]), eval_bound(decl_rng["end"])
+                    # Fallback to .dat-provided range
+                    rd = data_dict.get(rng_name)
+                    if isinstance(rd, dict) and rd.get("type") == "range_data":
+                        return int(rd["start"]), int(rd["end"])
+                    raise SemanticError(f"Named range '{rng_name}' has no bounds.")
+
+                start, end = get_range_bounds(rng)
                 expected_len = end - start + 1
                 if not (
                     len(set_elems) == len(param_rows)
@@ -3162,8 +3179,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             tuple_set = d
                             break
                     if tuple_set:
-                        tuple_keys = [tuple(t["elements"]) for t in tuple_set["value"]]
-                        param_dict = {k: v for k, v in zip(tuple_keys, decl["value"])}
+                        # Robust: get normalized tuple keys (supports dict-of-literals and plain tuples)
+                        keys = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
+                        tuple_keys = [k if isinstance(k, tuple) else tuple(k) for k in keys]
+                        param_vals = decl["value"]
+                        param_dict = {k: v for k, v in zip(tuple_keys, param_vals)}
                         self._add_code_line(f"{name} = {repr(param_dict)}")
                         return
                 # Fallback: emit as list (for range-indexed)

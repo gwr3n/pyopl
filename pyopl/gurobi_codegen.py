@@ -813,7 +813,6 @@ class GurobiCodeGenerator:
                 set_name = param_decl_map[name]["dimensions"][0]["name"]
                 range_dim = param_decl_map[name]["dimensions"][1]
 
-                # Evaluate start/end for the range
                 def eval_expr(expr):
                     if isinstance(expr, dict):
                         if expr.get("type") == "number":
@@ -834,31 +833,32 @@ class GurobiCodeGenerator:
                                 return left // right
                     raise Exception(f"Unsupported range bound expr: {expr}")
 
-                start = eval_expr(range_dim["start"])
-                end = eval_expr(range_dim["end"])
+                # NEW: robust bounds resolver for named ranges
+                def get_range_bounds(rng_dim):
+                    s_node = rng_dim.get("start")
+                    e_node = rng_dim.get("end")
+                    if isinstance(s_node, dict) and isinstance(e_node, dict):
+                        return eval_expr(s_node), eval_expr(e_node)
+                    decl_rng = self._find_declaration_by_name(rng_dim.get("name"), types=["range_declaration_inline"])
+                    if isinstance(decl_rng, dict):
+                        return eval_expr(decl_rng["start"]), eval_expr(decl_rng["end"])
+                    rd = working_data.get(rng_dim.get("name"))
+                    if isinstance(rd, dict) and rd.get("type") == "range_data":
+                        return int(rd["start"]), int(rd["end"])
+                    raise SemanticError(f"Named range '{rng_dim.get('name')}' has no bounds.")
+
+                start, end = get_range_bounds(range_dim)
                 expected_len = end - start + 1
-
-                # Normalize set elements if available in data_dict (preserve tuple keys)
-                set_elems = None
-                if set_name in data_dict:
-                    set_obj = data_dict[set_name]
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        set_elems = set_obj["elements"]
-                    else:
-                        set_elems = set_obj
-
-                # Build composite-key dict: {(tupleKey, p): val}
+                # ...existing code...
                 dict_val = {}
                 for k, row in value.items():
                     if len(row) != expected_len:
                         raise SemanticError(
                             f"Parameter '{name}' row for key {k} has length {len(row)}; expected {expected_len}."
                         )
-                    # If key is a list, coerce to tuple
                     key_obj = tuple(k) if isinstance(k, (list, tuple)) else k
                     for p in range(start, end + 1):
                         dict_val[(key_obj, p)] = row[p - start]
-
                 self._add_code_line(f"{name} = {repr(dict_val)}")
                 self.dict_params.add(name)
                 continue
@@ -882,53 +882,60 @@ class GurobiCodeGenerator:
                 and param_decl_map[name]["dimensions"][1].get("type") == "named_range_dimension"
             ):
                 set_name = param_decl_map[name]["dimensions"][0]["name"]
-                set_decl = self._find_declaration_by_name(set_name, types=["set_of_tuples", "set_of_tuples_external"])
                 range_dim = param_decl_map[name]["dimensions"][1]
 
-                # Evaluate start/end for the range
+                # Evaluate start/end for the range (robust to missing inline start/end on named range)
                 def eval_expr(expr):
-                    if expr["type"] == "number":
-                        return int(expr["value"])
-                    elif expr["type"] == "name":
-                        return int(working_data[expr["value"]])
-                    elif expr["type"] == "binop":
-                        op = expr["op"]
-                        left = eval_expr(expr["left"])
-                        right = eval_expr(expr["right"])
-                        if op == "+":
-                            return left + right
-                        elif op == "-":
-                            return left - right
-                        elif op == "*":
-                            return left * right
-                        elif op == "/":
-                            return left // right
-                        else:
-                            raise Exception(f"Unsupported binop in range bound expr: {op}")
-                    else:
-                        raise Exception(f"Unsupported range bound expr: {expr}")
+                    if isinstance(expr, dict):
+                        if expr.get("type") == "number":
+                            return int(expr["value"])
+                        if expr.get("type") == "name":
+                            return int(working_data[expr["value"]])
+                        if expr.get("type") == "binop":
+                            op = expr["op"]
+                            left = eval_expr(expr["left"])
+                            right = eval_expr(expr["right"])
+                            if op == "+":
+                                return left + right
+                            if op == "-":
+                                return left - right
+                            if op == "*":
+                                return left * right
+                            if op == "/":
+                                return left // right
+                    raise Exception(f"Unsupported range bound expr: {expr}")
 
-                if set_decl and set_name in data_dict:
-                    set_obj = data_dict[set_name]
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        set_elems = set_obj["elements"]
-                    else:
-                        set_elems = set_obj
-                    # Normalize set elements to tuples (preserve 1-field tuples)
-                    set_elems = [tuple(e) if isinstance(e, (list, tuple)) else (e,) for e in set_elems]
-                    start = eval_expr(range_dim["start"])
-                    end = eval_expr(range_dim["end"])
-                    expected_len = end - start + 1
-                    if len(set_elems) == len(value) and all(len(row) == expected_len for row in value):
-                        # Keep tuple keys intact, do not flatten 1-field tuples
-                        dict_val = {
-                            (set_elems[i], p): value[i][p - start]
-                            for i in range(len(set_elems))
-                            for p in range(start, end + 1)
-                        }
-                        self._add_code_line(f"{name} = {repr(dict_val)}")
-                        self.dict_params.add(name)
-                        continue
+                def get_range_bounds(rng_dim):
+                    s_node = rng_dim.get("start")
+                    e_node = rng_dim.get("end")
+                    if isinstance(s_node, dict) and isinstance(e_node, dict):
+                        return eval_expr(s_node), eval_expr(e_node)
+                    decl_rng = self._find_declaration_by_name(rng_dim.get("name"), types=["range_declaration_inline"])
+                    if isinstance(decl_rng, dict):
+                        return eval_expr(decl_rng["start"]), eval_expr(decl_rng["end"])
+                    rd = working_data.get(rng_dim.get("name"))
+                    if isinstance(rd, dict) and rd.get("type") == "range_data":
+                        return int(rd["start"]), int(rd["end"])
+                    raise SemanticError(f"Named range '{rng_dim.get('name')}' has no bounds.")
+
+                # Normalize tuple-set elements from data (.dat) or AST
+                set_elems = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
+                # Ensure tuple keys; preserve 1-field tuples as (x,)
+                set_elems = [tuple(e) if isinstance(e, (list, tuple)) else (e,) for e in set_elems]
+
+                start, end = get_range_bounds(range_dim)
+                expected_len = end - start + 1
+
+                # Only emit when shape matches (row-major list across set, each row length == expected_len)
+                if len(set_elems) == len(value) and all(
+                    isinstance(row, (list, tuple)) and len(row) == expected_len for row in value
+                ):
+                    dict_val = {
+                        (set_elems[i], p): value[i][p - start] for i in range(len(set_elems)) for p in range(start, end + 1)
+                    }
+                    self._add_code_line(f"{name} = {repr(dict_val)}")
+                    self.dict_params.add(name)
+                    continue
             if name in param_decl_map:
                 logger.debug(
                     "_generate_data_declarations: Emitting parameter %s type=%s dims=%s",
@@ -1897,14 +1904,16 @@ class GurobiCodeGenerator:
         dims = decl.get("dimensions", [])
         if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
             set_name = dims[0]["name"]
-            tuple_set = None
-            for d in self.ast["declarations"]:
-                if d.get("type") == "set_of_tuples" and d["name"] == set_name:
-                    tuple_set = d
-                    break
-            if tuple_set:
-                tuple_keys = [tuple(t["elements"]) for t in tuple_set["value"]]
-                param_dict = {k: v for k, v in zip(tuple_keys, decl["value"])}
+            # Robustly resolve tuple-set elements from data_dict/AST
+            keys = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+            if keys:
+                tuple_keys = [k if isinstance(k, tuple) else (k,) for k in keys]
+                vals = decl.get("value") or []
+                if len(vals) != len(tuple_keys):
+                    raise SemanticError(
+                        f"Parameter '{name}' length {len(vals)} does not match index set '{set_name}' length {len(tuple_keys)}."
+                    )
+                param_dict = {tuple_keys[i]: vals[i] for i in range(len(vals))}
                 self._add_code_line(f"{name} = {repr(param_dict)}")
                 return
         self._add_code_line(f"{name} = {repr(decl['value'])}")
