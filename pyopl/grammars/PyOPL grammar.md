@@ -38,7 +38,7 @@ The grammar supports:
 - Data files (.dat):
   - scalars, sets, arrays (nested), ranges, sets of tuples, tuple arrays
   - key-value arrays with string/tuple labels mapping to scalars or arrays
-  - untyped set-of-tuples assignments, and typed-set-of-tuples forms
+  - untyped set-of-tuples assignments; typed set-of-tuples are not parsed in .dat (declare the tuple type in the model and provide an untyped set-of-tuples in .dat)
 
 Notes:
 - Boolean values may appear in arithmetic and sums; booleans are treated numerically (false=0, true=1) where needed.
@@ -70,6 +70,9 @@ BNF is simplified for readability. Optional elements are in [brackets]. Alternat
 <constraint_list_opt> ::= <constraint_list> | ε
 <constraint_list> ::= <constraint_list> <constraint> | <constraint>
 ```
+
+Clarification:
+- Objective labels must be unindexed. Indexed labels like `minimize z[i]: ...;` or `minimize z[i] = ...;` are rejected.
 
 ### Constraints
 
@@ -167,6 +170,12 @@ Set of tuples in models:
 <set_of_tuples_declaration> ::= '{' <NAME> '}' <NAME> '=' '{' <tuple_literal_list> '}' ';'
                               | '{' <NAME> '}' <NAME> ';'
                               | '{' <NAME> '}' <NAME> '=' '...' ';'
+                              | '{' <NAME> '}' <NAME> '=' '{' <tuple_comprehension> '}' ';'  // comprehension
+
+// Tuple set comprehension (iterators usable inside the tuple literal)
+<tuple_comprehension> ::= '<' <tuple_element_list> '>' '|' <sum_index_list> <opt_index_constraint>
+
+// Guard: in typed set-of-tuples declarations, RHS elements must be tuple literals (the parser rejects scalar elements).
 
 // Untyped set-of-tuples assignment allowed in model (tuple literals only)
 <untyped_tuple_set_assignment> ::= <NAME> '=' '{' <tuple_literal_list> '}' ';'
@@ -253,6 +262,10 @@ Index expressions accept:
 - string literal (as index into typed sets)
 - tuple literals for tuple-indexed variables/parameters
 
+Clarifications:
+- Range bounds and literal indices must be non-negative integers; for ranges, start ≤ end is required.
+- When a named range is used in iterators or indexing, it must be declared in the model (e.g., `range T = 1..N;`). A .dat-only assignment `T = 1..N;` is not sufficient for iterators/indexing.
+
 ### Expressions
 
 Precedence from lowest to highest: `? :`, `||`, `&&`, comparisons (`== != <= >= < >`), `+ -`, `* / %`, unary `!/-`, field access `.` (tightest, right-associative).
@@ -326,6 +339,10 @@ Functions and aggregates:
 <parenthesized_expression> ::= '(' <expression> ')'
 ```
 
+Notes:
+- `minl`/`maxl` require at least one argument; a single-argument call returns that argument.
+- `sqrt` is only supported on ground expressions (no decision variables); use it for data/parameter/dexpr evaluation. Applying `sqrt` to decision variables in objectives/constraints is rejected.
+
 Sum/forall headers:
 
 ```
@@ -372,29 +389,21 @@ Important modeling rule:
 <data_file> ::= <data_declaration_list>
 <data_declaration_list> ::= <data_declaration_list> <data_declaration> | <data_declaration>
 
-<data_declaration> ::= 'param' <NAME> '=' <scalar_value> ';'
-                     | 'set' <NAME> '=' <set_value> ';'
-                     | 'param' <NAME> '=' <array_value> ';'
-                     | <NAME> '=' <scalar_value> ';'
+<data_declaration> ::= <NAME> '=' <scalar_value> ';'
                      | <NAME> '=' <set_value> ';'
                      | <NAME> '=' <array_value> ';'
-                     | <NAME> '=' <key_value_array> ';'
-                     | <NAME> '=' 'param' <key_value_array> ';'
-                     | <NAME> '=' 'set' <key_value_array> ';'
+                     | <NAME> '=' <key_value_array> ';'          // map-like array: string/tuple -> scalar/array
                      | <NAME> '=' <NUMBER> '..' <NUMBER> ';'
-                     | <set_of_tuples_assignment>
-
-// Set-of-tuples in .dat (untyped or typed)
-<set_of_tuples_assignment> ::= <NAME> '=' '{' <tuple_literal_list> '}' ';'
-                             | <NAME> '=' '[' <tuple_literal_list> ']' ';'
-                             | '{' <NAME> '}' <NAME> '=' '{' <tuple_literal_list> '}' ';'
+                     | <NAME> '=' '{' <tuple_literal_list> '}' ';'   // set of tuples (untyped)
+                     | <NAME> '=' '[' <tuple_literal_list> ']' ';'   // tuple array: array of tuple literals
 
 <key_value_array> ::= '[' <key_value_row_list> ']'
 <key_value_row_list> ::= <key_value_row_list> ',' <key_value_row> | <key_value_row>
+// Keys may be string or tuple; values may be scalar or array:
 <key_value_row> ::= <STRING_LITERAL> <scalar_value>
                   | <tuple_literal> <scalar_value>
-                  | <STRING_LITERAL> <array_value>     // label with array
-                  | <tuple_literal> <array_value>      // tuple label with array
+                  | <STRING_LITERAL> <array_value>
+                  | <tuple_literal> <array_value>
 
 // Allow trailing comma via lexer/permissive parsing
 
@@ -411,13 +420,20 @@ Important modeling rule:
 <scalar_value> ::= <NUMBER> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
 ```
 
+Clarifications:
+- 'param' and 'set' prefixes are NOT recognized in .dat. Use bare assignments only.
+- Typed scalar set prefixes (e.g., '{string} Aircraft = {...};') are NOT allowed in .dat. The type comes from the model declaration.
+- Typed set-of-tuples form '{TupleType} S = {...};' is NOT parsed in .dat. Provide: S = { <...>, <...> }; and declare '{TupleType} S;' in the model.
+- For parameter arrays keyed by tuples or strings, use the key_value_array form:
+  - Example: c = [ <"A","B",5> [1.1, 1.2, 1.3], <"B","C",3> [2.1, 2.2, 2.3] ];
+
 ### Operator Precedence and Associativity
 
 From lowest to highest binding power:
 1. Ternary `? :` (right-assoc; condition must be parenthesized)
 2. Logical OR `||`
 3. Logical AND `&&`
-4. Comparisons `==`, `!=`, `<=`, `>=`, `<`, `>` (tokens are non-assoc in precedence; the grammar accepts chained comparisons and parses them left-nested; such chains evaluate as boolean expressions)
+4. Comparisons `==`, `!=`, `<=`, `>=`, `<`, `>` (tokens are non-assoc in precedence; chained comparisons are parsed left-nested and are not rewritten; prefer explicit conjunctions like `(a < b) && (b < c)`)
 5. Add/Sub `+`, `-`
 6. Mul/Div/Mod `*`, `/`, `%`
 7. Unary NOT `!` and unary minus `-` (right-assoc)
@@ -428,21 +444,32 @@ From lowest to highest binding power:
 - Arithmetic and comparisons:
   - Mix of int, float, and boolean is allowed (booleans treated numerically where needed).
   - `%` (modulo) is supported in expressions for data and parameter evaluation (including inline/externally loaded parameters and .dat computations). It is not supported inside linear model parts (objectives or constraints). Using `%` in those contexts will be rejected or fail code generation.
+  - `sqrt` is supported for ground computations (parameters, dexpr with ground operands). Using `sqrt` on decision variables in constraints/objectives is not supported and will be rejected.
+
 - Boolean expressions:
   - `==`/`!=` are allowed on booleans and numbers/strings; boolean equality to `true` is used to normalize.
   - Logical `&&`, `||`, `!` are available; boolean objectives allowed.
+
 - Aggregates:
   - `sum` supports multi-indices, optional index constraints, and can sum booleans (result type int).
   - Aggregates `min` and `max` are over index sets (expression-level aggregates).
   - Functions `maxl(a1,...,aN)` / `minl(a1,...,aN)` are function forms (lists of arguments); lowered to linear constraints where convex.
+
+- Convex placement rules for min/max aggregates and minl/maxl:
+  - Allowed (lowered): max(...) ≤ rhs, lhs ≥ max(...), min(...) ≥ rhs, lhs ≤ min(...).
+  - Not allowed: equality to min/max or non‑convex embeddings inside general arithmetic; such uses are rejected.
+
 - Field access:
   - `a.b` is type-checked against declared tuple types and supports chaining. Tuple iterators carry their tuple type so `i.cost` works inside `sum/forall`.
+  - Tuple field access may be used as an index only if the field is integer‑typed.
+
 - Indexing:
   - Range index form `[lo..hi]` requires integer-valued bounds.
   - General index expressions (names, number literals, string literals, arithmetic, parenthesized, or tuple field access with int type) are supported.
   - For set dimensions:
     - If the set is a set of tuples, the index must be of that tuple type (or a tuple literal).
     - If the set is a typed scalar set, the index must match its base type.
+
 - Model typed scalar sets `{string}`, `{int}`, `{float}`, `{boolean}` are validated; floats coerce ints to floats.
 - Untyped sets in model: only set-of-tuples assignments with tuple literals are allowed; scalar sets in model must be typed.
 - Decision expressions (`dexpr`) are expanded on use (scalar and indexed forms).
@@ -459,6 +486,7 @@ The implementation supports common linear encodings involving booleanized compar
 - Sums of comparisons (cardinality):
   - Example: `sum(i in I) (x[i] >= 0) >= k`
   - Comparisons inside sums are treated as 0/1 and linearized via standard big-M bounds when necessary.
+  - Strict inequalities on integer sums are normalized: `sum(...) > k` becomes `sum(...) >= k + 1`, and `sum(...) < k` becomes `sum(...) <= k - 1`.
 
 - Reified comparisons:
   - Example: `b == (x - y >= c)`
@@ -498,7 +526,7 @@ minimize max( t in T ) ( y[t] );        // aggregate max over T
 subject to {
   cap: (sum(t in T) y[t]) >= 1;
 
-  // Implication with boolean expressions on each side
+  // Implication with boolean expressions on each side (only accepted by Gurobi code generator)
   forall(e in E)
     (x[e] == 1) => (y[1] + y[2] >= 0.5);
 
