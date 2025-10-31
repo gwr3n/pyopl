@@ -572,8 +572,8 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
         "<output_requirements>\n"
         '- Return ONLY a JSON object with exactly two keys: "aligned" (boolean) and "assessment" (string).\n'
         '- If issues exist, mention the most critical fixes in "assessment", a single short paragraph (3–6 sentences) of plain text.\n'
-        "- No Markdown. No bullet lists. No commentary. No additional keys. No trailing commas.\n"
-        "- Optional: you MAY wrap the JSON in a ```json fenced block; if you do, the fence must contain only the JSON.\n"
+        "- Do not include any Markdown other than an optional ```json fenced block containing only the JSON.\n"
+        "- No bullet lists. No commentary. No additional keys. No trailing commas.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
         "{\n"
