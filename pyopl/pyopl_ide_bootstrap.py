@@ -1555,14 +1555,14 @@ class OPLIDE(tk.Tk):
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
 
             # NEW: toggle for verbose LLM progress logs
-            # self.genai_menu.add_separator()
-            # self.genai_menu.add_checkbutton(
-            #     label="Verbose LLM progress logs",
-            #     onvalue=True,
-            #     offvalue=False,
-            #     variable=self.verbose_llm_var,
-            #     command=self._save_settings,
-            # )
+            self.genai_menu.add_separator()
+            self.genai_menu.add_checkbutton(
+                label="Verbose LLM progress logs",
+                onvalue=True,
+                offvalue=False,
+                variable=self.verbose_llm_var,
+                command=self._save_settings,
+            )
 
             # Enable GenAI cascade
             try:
