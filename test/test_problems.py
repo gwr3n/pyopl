@@ -30,6 +30,227 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    # @unittest.skip("reason for skipping")
+    def test_asset_location(self):
+        """
+        Test the vehicle routing problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                // Cell-based 8-neighbor MILP for A--B routing with per-asset zones (PyOPL)
+
+                // Tuple types for grid constructs
+                // Cell: grid coordinate (row i, col j)
+                // Arc:  directed neighbor arc u=(ui,uj) -> v=(vi,vj)
+                // Edge: undirected neighbor edge endpoints (canonicalized order)
+                tuple Cell { int i; int j; }
+                tuple Arc  { int ui; int uj; int vi; int vj; }
+                tuple Edge { int i1; int j1; int i2; int j2; }
+
+                // Grid and type dimensions
+                param int NR = ...;                               // number of rows
+                param int NC = ...;                               // number of cols
+                param int NT = ...;                               // number of asset types
+
+                range I = 1..NR;                                  // row indices
+                range J = 1..NC;                                  // col indices
+                range Types = 1..NT;                              // asset types {1..NT}
+
+                // Cells, directed arcs (8-neighbor), and undirected edges (canonicalized)
+                {Cell} V = { <i, j> | i in I, j in J };
+
+                {Arc} A = {
+                <i, j, ip, jp>
+                | i in I, j in J, ip in I, jp in J
+                : ((i != ip) || (j != jp))
+                    && ((ip == i - 1) || (ip == i) || (ip == i + 1))
+                    && ((jp == j - 1) || (jp == j) || (jp == j + 1))
+                };
+
+                {Edge} E = {
+                <i, j, ip, jp>
+                | i in I, j in J, ip in I, jp in J
+                : ((i != ip) || (j != jp))
+                    && ((ip == i - 1) || (ip == i) || (ip == i + 1))
+                    && ((jp == j - 1) || (jp == j) || (jp == j + 1))
+                    && ((i < ip) || ((i == ip) && (j < jp)))
+                };
+
+                // Terminals as scalar coordinates (avoid tuple in .dat)
+                param int Ai = ...;  // row of terminal A
+                param int Aj = ...;  // col of terminal A
+                param int Bi = ...;  // row of terminal B
+                param int Bj = ...;  // col of terminal B
+
+                // Geometry weights and cost parameters
+                param float lambda_w = ...;                        // weight on geometric length
+                param float eps = ...;                             // small penalty on selected cells
+
+                // Per-type base build costs; per-cell cost derived below
+                param float base[Types] = ...;                     // base cost per type
+
+                // Arc geometric weights: 1 for cardinal, sqrt(2) for diagonal
+                param float w[a in A] = (((a.ui != a.vi) && (a.uj != a.vj)) ? sqrt(2) : 1);
+
+                // Connectivity supply (+1 at A), demand (-1 at B), zero elsewhere
+                param float b[v in V] = (((v.i == Ai && v.j == Aj) ? 1 : ((v.i == Bi && v.j == Bj) ? -1 : 0)));
+
+                // Zone definitions to compute allowed[v,t]
+                param int Z1_i_lo = ...;  param int Z1_i_hi = ...;   // mandatory type-1 rectangle rows
+                param int Z1_j_lo = ...;  param int Z1_j_hi = ...;   // mandatory type-1 rectangle cols
+                param int Z2_i_lo = ...;  param int Z2_i_hi = ...;   // mandatory type-2 rectangle rows
+                param int Z2_j_lo = ...;  param int Z2_j_hi = ...;   // mandatory type-2 rectangle cols
+                param int RS_lo = ...;     param int RS_hi = ...;     // row stripe forbidding type-6
+
+                // Per-cell, per-type allowance (boolean) built from simple zones
+                // - Zone1: only type 1 allowed
+                // - Zone2: only type 2 allowed
+                // - Diagonal band (i==j or adjacent): type 3 forbidden
+                // - Row stripe [RS_lo..RS_hi]: type 6 forbidden
+                param boolean allowed[v in V][t in Types] =
+                (((v.i >= Z1_i_lo) && (v.i <= Z1_i_hi) && (v.j >= Z1_j_lo) && (v.j <= Z1_j_hi))
+                    ? (t == 1)
+                    : (((v.i >= Z2_i_lo) && (v.i <= Z2_i_hi) && (v.j >= Z2_j_lo) && (v.j <= Z2_j_hi))
+                        ? (t == 2)
+                        : (((v.j == v.i) || (v.j == v.i + 1) || (v.i == v.j + 1))
+                            ? (t != 3)
+                            : ((((v.i >= RS_lo) && (v.i <= RS_hi)) ? (t != 6) : (true))))));
+
+                // Per-cell, per-type build cost (computed); avoids external data for c
+                // cost[v,t] = base[t] + small location term
+                dexpr float cost[v in V][t in Types] = base[t] + 0.01 * (v.i + v.j);
+
+                // Decision variables
+                // x[v] = 1 if cell v is on the route
+                // y[v,t] = 1 if asset t is used in cell v
+                // f[a] >= 0 is unit flow on arc a (for A->B connectivity)
+                // z[e] = 1 if undirected edge e is used by the chain (optional simple-path enforcement)
+                dvar boolean x[V];
+                dvar boolean y[V][Types];
+                dvar float+  f[A];
+                dvar boolean z[E];
+
+                // Objective: build cost + geometric length + small node penalty
+                minimize obj:
+                    sum(v in V, t in Types) cost[v][t] * y[v][t]
+                + lambda_w * sum(a in A) w[a] * f[a]
+                + eps * sum(v in V) x[v]
+                ;
+
+                subject to {
+                // C1: include terminals (force A and B cells selected)
+                C1A: sum(v in V: v.i == Ai && v.j == Aj) x[v] == 1;
+                C1B: sum(v in V: v.i == Bi && v.j == Bj) x[v] == 1;
+
+                // C2: exactly one asset iff the cell is selected
+                forall(v in V) C2_assign: sum(t in Types) y[v][t] == x[v];
+
+                // C3: respect allowed asset types per cell
+                forall(v in V, t in Types) C3_allowed: y[v][t] <= allowed[v][t];
+
+                // C4: flow conservation enforces A->B connectivity
+                forall(v in V)
+                    C4_flow:
+                    (sum(a in A: a.ui == v.i && a.uj == v.j) f[a])
+                    - (sum(a in A: a.vi == v.i && a.vj == v.j) f[a])
+                    == b[v];
+
+                // C5: flow can leave node u only if u is selected
+                forall(a in A)
+                    C5_cap_u: f[a] <= sum(v in V: v.i == a.ui && v.j == a.uj) x[v];
+
+                // C6: flow can enter node v only if v is selected
+                forall(a in A)
+                    C6_cap_v: f[a] <= sum(v in V: v.i == a.vi && v.j == a.vj) x[v];
+
+                // Optional simple-path (non-branching) chain constraints
+                // S1: any flow across {u,v} activates that undirected edge
+                forall(e in E, a in A: a.ui == e.i1 && a.uj == e.j1 && a.vi == e.i2 && a.vj == e.j2)
+                    S1_dir1: f[a] <= z[e];
+                forall(e in E, a in A: a.ui == e.i2 && a.uj == e.j2 && a.vi == e.i1 && a.vj == e.j1)
+                    S1_dir2: f[a] <= z[e];
+
+                // S2: used edge implies both endpoint cells are selected
+                forall(e in E) S2_u: z[e] <= sum(v in V: v.i == e.i1 && v.j == e.j1) x[v];
+                forall(e in E) S2_v: z[e] <= sum(v in V: v.i == e.i2 && v.j == e.j2) x[v];
+
+                // S3: degree-1 at terminals
+                S3_A: sum(e in E: ((e.i1 == Ai && e.j1 == Aj) || (e.i2 == Ai && e.j2 == Aj))) z[e] == 1;
+                S3_B: sum(e in E: ((e.i1 == Bi && e.j1 == Bj) || (e.i2 == Bi && e.j2 == Bj))) z[e] == 1;
+
+                // S4: degree-2 at internal selected cells
+                forall(v in V: !((v.i == Ai && v.j == Aj) || (v.i == Bi && v.j == Bj)))
+                    S4_deg2:
+                    sum(e in E: ((e.i1 == v.i && e.j1 == v.j) || (e.i2 == v.i && e.j2 == v.j))) z[e] == 2 * x[v];
+                }
+                """
+            data_code = """
+                NR = 4;
+                NC = 4;
+                NT = 2;
+                Ai = 2;
+                Aj = 2;
+                Bi = 3;
+                Bj = 3;
+                lambda_w = 0.5;
+                eps = 0.001;
+                base = [1.0, 1.2];
+                Z1_i_lo = 1;  Z1_i_hi = 2;
+                Z1_j_lo = 1;  Z1_j_hi = 13;
+                Z2_i_lo = 1;  Z2_i_hi = 3;
+                Z2_j_lo = 2; Z2_j_hi = 4;
+                RS_lo = 1;   RS_hi = 2;
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_vrp(self):
         """
         Test the vehicle routing problem with both solvers.
