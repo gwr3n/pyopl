@@ -711,7 +711,6 @@ def _build_final_assessment_prompt(
         "Judge if the PyOPL model/data fully align with the problem (objective, constraints, variables, indices, and data consistency).\n"
         "Be specific and critical.\n"
         "If you believe the problem description is incomplete or ambiguous, point this out in your assessment.\n"
-        "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
         "--- BEGIN PYOPL SYNTAX IMPLEMENTATION ---\n"
