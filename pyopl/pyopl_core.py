@@ -1766,6 +1766,37 @@ class OPLParser(Parser):
         )
 
     # --- Constraints section ---
+    # Lint: reject a plain label that prefixes a forall, e.g. `c: forall(...) { ... }`
+    @_('NAME ":" FORALL forall_index_header constraint')  # type: ignore
+    def constraint(self, p):
+        # Clean up any iterator context opened by the header to avoid leaking state
+        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
+        if p.forall_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        raise SemanticError(
+            "Constraint labels may not prefix a forall. To label constraints produced by a forall, put the label inside the forall, e.g.:\n"
+            "  forall(i in I) ct: expr;\n"
+            "or\n"
+            "  forall(i in I) { ct: expr; }",
+            lineno=p.lineno,
+        )
+
+    @_('NAME ":" FORALL forall_index_header constraint_block')  # type: ignore
+    def constraint(self, p):
+        # Clean up any iterator context opened by the header to avoid leaking state
+        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
+        if p.forall_index_header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
+        raise SemanticError(
+            "Constraint labels may not prefix a forall. To label constraints produced by a forall, put the label inside the forall, e.g.:\n"
+            "  forall(i in I) ct: expr;\n"
+            "or\n"
+            "  forall(i in I) { ct: expr; }",
+            lineno=p.lineno,
+        )
+    
     # Lint: reject indexed labels like 'ct[i]: ...;' at top level
     @_('NAME indexed_dimensions ":" expression ";"')  # type: ignore
     def constraint(self, p):
@@ -3037,6 +3068,24 @@ class OPLDataLexer(Lexer):
 
 # --- Parser for .dat files ---
 class OPLDataParser(Parser):
+    @_('"{" NAME "}" NAME "=" "{" element_list "}" ";"')  # type: ignore
+    def data_declaration(self, p):
+        # Clear error for typed scalar-set prefix in .dat
+        raise SemanticError(
+            "Typed scalar set prefixes (e.g. '{string} S = {...};') are not allowed in .dat files. "
+            "Declare the typed set in the model (.mod) and use 'S = {...};' in the data file.",
+            lineno=getattr(self.lexer, "lineno", None),
+        )
+
+    @_('"{" NAME "}" NAME "=" "{" tuple_literal_list "}" ";"')  # type: ignore
+    def data_declaration(self, p):
+        # Clear error for typed set-of-tuples prefix in .dat
+        raise SemanticError(
+            "Typed set-of-tuples prefix ('{TupleType} S = {...};') is not allowed in .dat files. "
+            "Declare '{TupleType} S;' in the model and use 'S = { <...>, ... };' in the data file.",
+            lineno=getattr(self.lexer, "lineno", None),
+        )
+    
     @_("tuple_literal")  # type: ignore
     def tuple_element(self, p):
         return p.tuple_literal
