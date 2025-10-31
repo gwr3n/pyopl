@@ -1796,7 +1796,7 @@ class OPLParser(Parser):
             "  forall(i in I) { ct: expr; }",
             lineno=p.lineno,
         )
-    
+
     # Lint: reject indexed labels like 'ct[i]: ...;' at top level
     @_('NAME indexed_dimensions ":" expression ";"')  # type: ignore
     def constraint(self, p):
@@ -3085,7 +3085,7 @@ class OPLDataParser(Parser):
             "Declare '{TupleType} S;' in the model and use 'S = { <...>, ... };' in the data file.",
             lineno=getattr(self.lexer, "lineno", None),
         )
-    
+
     @_("tuple_literal")  # type: ignore
     def tuple_element(self, p):
         return p.tuple_literal
