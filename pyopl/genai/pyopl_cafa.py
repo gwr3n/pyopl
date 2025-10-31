@@ -621,12 +621,15 @@ def _build_cafa_generation_prompt(
         "</json_schema>\n"
     )
 
+
 # Simple CAFA post-processing for model/data strings
 _CODE_BLOCK_RE = re.compile(r"^\s*```(?:[a-zA-Z0-9_+-]*)?\s*(.*?)\s*```\s*$", re.DOTALL)
+
 
 def _strip_code_fence(s: str) -> str:
     m = _CODE_BLOCK_RE.match(s or "")
     return (m.group(1) if m else s or "").strip()
+
 
 def _cafa_postprocess(model_code: str, data_code: str) -> Tuple[str, str]:
     """
