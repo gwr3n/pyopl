@@ -127,6 +127,7 @@ class OPLIDE(tk.Tk):
             ("Standard", "pyopl_standard"),
             ("Chain of Thought", "pyopl_chain_of_thought"),
             ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+            ("CAFA", "pyopl_cafa"),
             ("Chain of Experts", "pyopl_chain_of_experts"),
             ("Reflexion", "pyopl_reflexion"),
         ]
