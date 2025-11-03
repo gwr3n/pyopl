@@ -1199,6 +1199,18 @@ class OPLParser(Parser):
     def additive(self, p):
         return self._handle_binop(p.additive, p.multiplicative, "-", getattr(p, "lineno", None))
 
+    # Helper: reject chained comparisons like a <= b <= c early
+    def _reject_chained_comparison(self, left_expr, lineno):
+        if isinstance(left_expr, dict):
+            t = left_expr.get("type")
+            op = left_expr.get("op")
+            if t in ("binop", "constraint") and op in ("<", ">", "<=", ">=", "=="):
+                raise SemanticError(
+                    "Chained comparisons (e.g., a <= b <= c) are not supported. "
+                    "Split into two constraints: a <= b; b <= c;",
+                    lineno=lineno,
+                )
+
     # relational (<, <=, >, >=)
     @_("additive")
     def relational(self, p):
@@ -1206,51 +1218,31 @@ class OPLParser(Parser):
 
     @_('relational "<" additive')
     def relational(self, p):
+        self._reject_chained_comparison(p.relational, getattr(p, "lineno", None))
         left = p.relational
         right = p.additive
-        return {
-            "type": "binop",
-            "op": "<",
-            "left": left,
-            "right": right,
-            "sem_type": "boolean",
-        }
+        return {"type": "binop", "op": "<", "left": left, "right": right, "sem_type": "boolean"}
 
     @_('relational ">" additive')
     def relational(self, p):
+        self._reject_chained_comparison(p.relational, getattr(p, "lineno", None))
         left = p.relational
         right = p.additive
-        return {
-            "type": "binop",
-            "op": ">",
-            "left": left,
-            "right": right,
-            "sem_type": "boolean",
-        }
+        return {"type": "binop", "op": ">", "left": left, "right": right, "sem_type": "boolean"}
 
     @_("relational LE additive")
     def relational(self, p):
+        self._reject_chained_comparison(p.relational, getattr(p, "lineno", None))
         left = p.relational
         right = p.additive
-        return {
-            "type": "binop",
-            "op": "<=",
-            "left": left,
-            "right": right,
-            "sem_type": "boolean",
-        }
+        return {"type": "binop", "op": "<=", "left": left, "right": right, "sem_type": "boolean"}
 
     @_("relational GE additive")
     def relational(self, p):
+        self._reject_chained_comparison(p.relational, getattr(p, "lineno", None))
         left = p.relational
         right = p.additive
-        return {
-            "type": "binop",
-            "op": ">=",
-            "left": left,
-            "right": right,
-            "sem_type": "boolean",
-        }
+        return {"type": "binop", "op": ">=", "left": left, "right": right, "sem_type": "boolean"}
 
     # equality (==, !=)
     @_("relational")
@@ -4317,6 +4309,7 @@ class OPLCompiler:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
             self._lower_minmax_aggregates(ast)
             self._lower_maxmin_convex(ast)
+            self._split_boolean_and_constraints(ast)  # NEW: split conjunctions
         except SemanticError as e:
             logger.error(f"Conditional constraint error: {e}")
             # Surface the error similarly to other semantic errors
@@ -4330,6 +4323,43 @@ class OPLCompiler:
             raise ValueError(f"Unsupported solver: {solver}")
 
         return ast, code, data_dict
+
+    # NEW: split (A && B && ...) == true into multiple constraints A==true; B==true; ...
+    def _split_boolean_and_constraints(self, ast: dict) -> None:
+        def is_true(node: Any) -> bool:
+            return isinstance(node, dict) and node.get("type") == "boolean_literal" and node.get("value") is True
+
+        def flatten_and(node: Any) -> list[dict]:
+            if isinstance(node, dict) and node.get("type") == "and":
+                return flatten_and(node.get("left")) + flatten_and(node.get("right"))
+            return [node]
+
+        if not isinstance(ast, dict) or "constraints" not in ast:
+            return
+
+        new_cons: list[dict] = []
+        for c in ast["constraints"]:
+            if (
+                isinstance(c, dict)
+                and c.get("type") == "constraint"
+                and c.get("op") == "=="
+                and is_true(c.get("right"))
+                and isinstance(c.get("left"), dict)
+                and c["left"].get("type") == "and"
+            ):
+                for part in flatten_and(c["left"]):
+                    new_cons.append(
+                        {
+                            "type": "constraint",
+                            "op": "==",
+                            "left": part,
+                            "right": {"type": "boolean_literal", "value": True, "sem_type": "boolean"},
+                            "label": c.get("label"),
+                        }
+                    )
+            else:
+                new_cons.append(c)
+        ast["constraints"] = new_cons
 
     # ----------------- NEW: Conditional-constraint compile-time rewrite -----------------
 
