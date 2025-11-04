@@ -252,22 +252,115 @@ def extract_json_from_markdown(text: str) -> str:
 def _json_loads_relaxed(text: str) -> Any:
     """
     Parse JSON from raw text, allowing for Markdown fences and surrounding prose.
-    Returns a Python object (dict, list, etc.).
+    Tries multiple candidates and returns the first parsed JSON object/array.
     """
-    # Try raw first
+    # 0) Try raw first
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # Try extracting the fenced/balanced JSON payload
+    def _balanced_slice(s: str, start: int, opener: str, closer: str) -> Optional[str]:
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif c == "\\":
+                    escape = True
+                elif c == '"':
+                    in_string = False
+            else:
+                if c == '"':
+                    in_string = True
+                elif c == opener:
+                    depth += 1
+                elif c == closer:
+                    depth -= 1
+                    if depth == 0:
+                        return s[start : i + 1]
+        return None
+
+    candidates: list[str] = []
+
+    # 1) All fenced code blocks (prefer ```json)
+    fenced = list(re.finditer(r"```(\w+)?\s*([\s\S]+?)\s*```", text, re.IGNORECASE))
+    json_pref: list[str] = []
+    other_pref: list[str] = []
+    for m in fenced:
+        lang = (m.group(1) or "").lower().strip()
+        body = (m.group(2) or "").strip()
+        if body:
+            (json_pref if lang == "json" else other_pref).append(body)
+    candidates.extend(json_pref + other_pref)
+
+    # 2) Every balanced JSON array starting at each '['
+    seen = set()
+    for i, ch in enumerate(text):
+        if ch == "[":
+            frag = _balanced_slice(text, i, "[", "]")
+            if frag and frag not in seen:
+                seen.add(frag)
+                candidates.append(frag)
+
+    # 3) Every balanced JSON object starting at each '{'
+    for i, ch in enumerate(text):
+        if ch == "{":
+            frag = _balanced_slice(text, i, "{", "}")
+            if frag and frag not in seen:
+                seen.add(frag)
+                candidates.append(frag)
+
+    # 4) Legacy single-extract heuristic
     try:
-        payload = extract_json_from_markdown(text)
-        return json.loads(payload)
+        legacy = extract_json_from_markdown(text).strip()
+        if legacy and legacy not in seen:
+            candidates.append(legacy)
     except Exception:
-        # As a last resort, strip leading/trailing whitespace and try again
-        payload = (payload if "payload" in locals() else text).strip()
-        return json.loads(payload)
+        pass
+
+    # Prefer arrays of objects with "model" and "data"
+    def _score(obj: Any) -> int:
+        if isinstance(obj, list) and obj and all(isinstance(x, dict) for x in obj):
+            has_keys = sum(1 for x in obj if "model" in x and "data" in x)
+            return 100 + has_keys
+        if isinstance(obj, dict) and isinstance(obj.get("candidates"), list):
+            inner = obj["candidates"]
+            has_keys = sum(1 for x in inner if isinstance(x, dict) and "model" in x and "data" in x)
+            return 90 + has_keys
+        if isinstance(obj, list):
+            return 50
+        if isinstance(obj, dict):
+            return 40
+        return 0
+
+    best_obj = None
+    best_score = -1
+    first_exception: Optional[Exception] = None
+    for cand in candidates:
+        try:
+            obj = json.loads(cand)
+            sc = _score(obj)
+            if sc > best_score:
+                best_score = sc
+                best_obj = obj
+                if sc >= 100:
+                    return obj
+        except Exception as e:
+            if first_exception is None:
+                first_exception = e
+
+    if best_obj is not None:
+        return best_obj
+
+    # Last resort
+    try:
+        return json.loads((text or "").strip())
+    except Exception as e:
+        raise e if first_exception is None else first_exception
 
 
 def _coalesce_response_text(resp) -> str:
@@ -329,7 +422,11 @@ def _google_client():
 
 
 def _ollama_generate_text(
-    model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
+    model_name: str,
+    prompt: str,
+    num_predict: Optional[int] = MAX_OUTPUT_TOKENS,
+    return_usage: bool = False,
+    enforce_json: bool = False,  # NEW
 ) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
     """
     Call Ollama's Python client and return the response text.
@@ -342,6 +439,8 @@ def _ollama_generate_text(
     options: Dict[str, Any] = {}
     if num_predict is not None:
         options["num_predict"] = num_predict
+    if enforce_json:
+        options["format"] = "json"  # NEW
     resp = ollama_generate(model=model_name, prompt=prompt, options=options)
     try:
         text = resp.get("response", "") or ""
@@ -364,12 +463,14 @@ def _build_create_params(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
+    expected_json: bool = False,  # NEW
 ) -> Dict[str, Any]:
     params: Dict[str, Any] = {
         "model": model_name,
         "input": input_text,
-        "response_format": {"type": "json"},
     }
+    if expected_json:
+        params["response_format"] = {"type": "json"}
     if max_tokens is not None:
         params["max_output_tokens"] = max_tokens
     if temperature is not None:
@@ -405,6 +506,7 @@ def _llm_generate_text(
     stop: Optional[list[str]] = None,
     progress: Optional[Callable[[str], None]] = None,  # NEW
     capture_usage: bool = False,  # NEW
+    expected_json: bool = False,  # NEW
 ) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
     if provider == LLMProvider.OPENAI:
         client = _openai_client()
@@ -414,17 +516,18 @@ def _llm_generate_text(
             max_tokens=max_tokens,
             temperature=temperature,
             stop=stop,
+            expected_json=expected_json,  # NEW
         )
-        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")  # NEW
-        response = _call_openai_with_retry(client, create_params, progress=progress)  # CHANGED
-        _notify(progress, "[LLM] OpenAI: response received")  # NEW
+        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")
+        response = _call_openai_with_retry(client, create_params, progress=progress)
+        _notify(progress, "[LLM] OpenAI: response received")
         response_text = _coalesce_response_text(response)
         if not response_text:
             raise RuntimeError(f"Empty OpenAI response: {response}.")
         if not capture_usage:
             return response_text
-        usage = _extract_openai_usage(response, input_text, response_text, model_name)  # NEW
-        return response_text, usage  # NEW
+        usage = _extract_openai_usage(response, input_text, response_text, model_name)
+        return response_text, usage
 
     if provider == LLMProvider.GOOGLE:
         genai = _google_client()
@@ -434,9 +537,11 @@ def _llm_generate_text(
             generation_config["max_output_tokens"] = max_tokens
         if temperature is not None:
             generation_config["temperature"] = temperature
-        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")  # NEW
+        if expected_json:
+            generation_config["response_mime_type"] = "application/json"  # NEW
+        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")
         resp = model.generate_content(input_text, generation_config=generation_config)
-        _notify(progress, "[LLM] Gemini: response received")  # NEW
+        _notify(progress, "[LLM] Gemini: response received")
         text = getattr(resp, "text", None)
         if not text and getattr(resp, "candidates", None):
             parts = []
@@ -450,20 +555,29 @@ def _llm_generate_text(
         text = text or ""
         if not capture_usage:
             return text
-        usage = _extract_gemini_usage(resp, input_text, text)  # NEW
-        return text, usage  # NEW
+        usage = _extract_gemini_usage(resp, input_text, text)
+        return text, usage
 
     if provider == LLMProvider.OLLAMA:
-        _notify(progress, f"[LLM] Ollama • {model_name}: generating")  # NEW
+        _notify(progress, f"[LLM] Ollama • {model_name}: generating")
         if not capture_usage:
-            result = _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
-            _notify(progress, "[LLM] Ollama: response received")  # NEW
+            result = _ollama_generate_text(
+                model_name=model_name,
+                prompt=input_text,
+                num_predict=max_tokens,
+                enforce_json=expected_json,  # NEW
+            )
+            _notify(progress, "[LLM] Ollama: response received")
             return result
         result_text, usage = _ollama_generate_text(
-            model_name=model_name, prompt=input_text, num_predict=max_tokens, return_usage=True
-        )  # NEW
-        _notify(progress, "[LLM] Ollama: response received")  # NEW
-        return result_text, usage  # NEW
+            model_name=model_name,
+            prompt=input_text,
+            num_predict=max_tokens,
+            return_usage=True,
+            enforce_json=expected_json,  # NEW
+        )
+        _notify(progress, "[LLM] Ollama: response received")
+        return result_text, usage
 
     raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -791,6 +905,7 @@ def generative_solve(
                 stop=stop,
                 progress=progress,
                 capture_usage=True,
+                expected_json=True,  # NEW
             )
             usage_totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
             usage_totals["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -834,6 +949,7 @@ def generative_solve(
             stop=stop,
             progress=progress,
             capture_usage=True,
+            expected_json=True,  # NEW
         )
         total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
         total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -1058,6 +1174,7 @@ def generative_feedback(
         stop=stop,
         progress=progress,  # NEW
         capture_usage=False,
+        expected_json=True,  # NEW
     )
     if not content:
         raise RuntimeError("Empty model response.")
