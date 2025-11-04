@@ -6,6 +6,7 @@ import re
 import sys
 import time
 from typing import Any, Callable, Optional
+from pathlib import Path  # NEW
 
 from pyopl import solve
 
@@ -14,6 +15,18 @@ def _ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
+
+# NEW: atomic JSON write to avoid partial files on crash
+def _dump_json_atomic(path: str, payload: Any) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(tmp, path)
+
+# NEW: resolve dataset file path relative to this script
+def _dataset_file(dataset_name: str) -> Path:
+    root = Path(__file__).resolve().parent
+    return root / "gen_ai" / "datasets" / dataset_name / f"{dataset_name}.json"
 
 
 def _extract_number(value: Any) -> Optional[float]:
@@ -70,6 +83,122 @@ def _get_direction_from_model(model_file: str):
         return "max"
     return None
 
+# NEW: unify single/batch processing into one function
+def _process_item(
+    index: int,
+    item: Any,
+    args: Any,
+    mode: Any,
+    solve_fn: Callable[..., Any],
+    models_dir: str,
+    alignment_check: bool,
+    few_shot: Optional[bool] = None,  # NEW
+) -> tuple[dict, bool]:
+    entry: dict[str, Any] = {
+        "index": index,
+        "solver": args.solver,
+        "tolerance": args.tolerance,
+        "logic": args.logic,
+    }
+
+    prompt = item.get("en_question") if isinstance(item, dict) else None
+    expected_raw = item.get("en_answer") if isinstance(item, dict) else None
+
+    if not prompt:
+        entry.update({"error": "Selected item has no 'en_question'.", "exit_code": 2})
+        return entry, False
+
+    expected = _extract_number(expected_raw)
+    if expected is None:
+        entry.update(
+            {
+                "expected_objective": None,
+                "error": f"Could not parse numeric en_answer from: {expected_raw}",
+                "exit_code": 2,
+            }
+        )
+        return entry, False
+
+    entry["expected_objective"] = expected
+
+    # Per-index output files
+    model_path = os.path.join(models_dir, f"gen_pyopl_model_{index}.mod")
+    data_path = os.path.join(models_dir, f"gen_pyopl_data_{index}.dat")
+    _ensure_parent_dir(model_path)
+    _ensure_parent_dir(data_path)
+
+    # Step 1-2: Generate model and data
+    t0 = time.perf_counter()
+    try:
+        # NEW: Build kwargs so we can conditionally add few_shot without breaking non-generative signatures
+        gen_kwargs: dict[str, Any] = dict(
+            llm_provider=args.provider,
+            model_name=args.gpt,
+            mode=mode,
+            iterations=args.iterations,
+            return_statistics=True,
+            alignment_check=alignment_check,
+        )
+        if few_shot is not None:
+            gen_kwargs["few_shot"] = few_shot
+
+        gen = solve_fn(
+            prompt,
+            model_path,
+            data_path,
+            **gen_kwargs,
+        )
+        entry["generation_assessment"] = gen.get("assessment")
+        entry["generation_iterations"] = gen.get("iterations")
+        entry["syntax_errors"] = gen.get("syntax_errors")
+        entry["cost"] = gen.get("cost")
+        entry["duration_seconds"] = time.perf_counter() - t0
+    except Exception as e:
+        entry.update(
+            {
+                "duration_seconds": time.perf_counter() - t0,
+                "error": f"generative_solve failed: {e}",
+                "exit_code": 3,
+            }
+        )
+        return entry, False
+
+    # Step 3: Solve and compare
+    try:
+        result = solve(model_path, data_path, solver=args.solver)
+        obj = _extract_objective(result)
+        if obj is None:
+            entry.update(
+                {
+                    "observed_objective": None,
+                    "error": f"Could not extract objective_value from result: {result}",
+                    "exit_code": 5,
+                }
+            )
+            ok = False
+        else:
+            diff = abs(obj - expected)
+            ok = diff <= args.tolerance
+            entry.update({"observed_objective": obj, "abs_diff": diff, "pass": ok})
+    except Exception as e:
+        entry.update({"observed_objective": None, "error": f"solve failed: {e}", "exit_code": 4})
+        ok = False
+
+    # Infer direction if model exists
+    direction = None
+    if os.path.exists(model_path):
+        try:
+            direction = _get_direction_from_model(model_path)
+        except Exception:
+            direction = None
+    entry["direction"] = direction
+
+    # Success exit code if no earlier errors
+    if "exit_code" not in entry:
+        entry["exit_code"] = 0 if ok else 1
+
+    return entry, ok
+
 
 def main() -> int:
     import logging
@@ -80,22 +209,34 @@ def main() -> int:
         default="ComplexOR",
         help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default), StochasticOR.",
     )
-    parser.add_argument("--index", type=int, default=0, help="Index of the problem in the JSON problem list.")
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
     parser.add_argument("--gpt", default="gpt-4.1", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="bnf", help="Grammar to use for generation (none, code, bnf).")
     parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
-    parser.add_argument("--all", action="store_true", help="Solve all problems in the dataset and save results.")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--all", action="store_true", help="Solve all problems in the dataset and save results.")
+    group.add_argument("--index", type=int, help="Index of the problem in the JSON problem list (default: 0).")
     parser.add_argument(
         "--logic",
         default="generative",
         choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "cafa", "chain_of_experts", "generative"],
         help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, cafa, chain_of_experts, or generative (default).",
     )
+    # NEW: ablation flags (only valid for --logic generative)
+    parser.add_argument(
+        "--no-few-shot",
+        action="store_true",
+        help="Disable few-shot prompting (generative logic only).",
+    )
+    parser.add_argument(
+        "--no-alignment-check",
+        action="store_true",
+        help="Disable alignment check (generative logic only).",
+    )
 
-    ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt (always check alignment in benchmark mode)
+    # Default: always check alignment in benchmark mode unless explicitly disabled for generative
     args = parser.parse_args()
 
     print("Arguments:")
@@ -116,6 +257,11 @@ def main() -> int:
     if not mod_name:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
+    # NEW: enforce ablation flags only for generative
+    if args.logic != "generative" and (args.no_few_shot or args.no_alignment_check):
+        print("--no-few-shot and --no-alignment-check are only allowed with --logic generative.", file=sys.stderr)
+        return 2
+
     impl = importlib.import_module(mod_name)
     # Assign once to broadly-typed variables to satisfy mypy
     solve_fn: Callable[..., Any] = getattr(impl, "generative_solve")
@@ -133,22 +279,26 @@ def main() -> int:
             lg.addHandler(h)
         lg.propagate = False
 
-    # Resolve grammar to the selected module's Grammar enum
-    if args.grammar == "none":
-        mode = GrammarType.NONE
-    elif args.grammar == "code":
-        mode = GrammarType.CODE
-    elif args.grammar == "bnf":
-        mode = GrammarType.BNF
-    else:
+    # Resolve grammar to the selected module's Grammar enum (case-insensitive)
+    try:
+        mode = getattr(GrammarType, args.grammar.upper())
+    except AttributeError:
         valid = [g.name.lower() for g in GrammarType]
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {valid}")
 
+    # NEW: determine alignment_check and few_shot for generative ablations
+    ALIGNMENT_CHECK = True
+    if args.logic == "generative" and args.no_alignment_check:
+        ALIGNMENT_CHECK = False
+    few_shot_opt: Optional[bool] = None
+    if args.logic == "generative" and args.no_few_shot:
+        few_shot_opt = False
+
     # Load dataset
     if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "StochasticOR"]:
-        dataset_path = os.path.join("gen_ai", "datasets", args.dataset, f"{args.dataset}.json")
+        dataset_path = _dataset_file(args.dataset)
     else:
-        raise ValueError(f"Unknown dataset: {args.dataset}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR.")
+        raise ValueError("Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, StochasticOR.".format(args.dataset))
 
     with open(dataset_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
@@ -157,219 +307,83 @@ def main() -> int:
         print("Dataset is empty or not a list.", file=sys.stderr)
         return 2
 
-    # Segregated output directories now include the logic name
-    # gen_ai/{dataset}/{logic}/{grammar}/{gpt}/{iterations}/ and a subfolder models/
+    # Output directories
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
     base_dir = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
+    # NEW: add ablation tag subfolder only for generative and only when flags set
+    if args.logic == "generative":
+        tags = []
+        if args.no_few_shot:
+            tags.append("fewshot_off")
+        if args.no_alignment_check:
+            tags.append("align_off")
+        if tags:
+            base_dir = os.path.join(base_dir, "+".join(tags))
+    base_dir = os.path.join(base_dir, timestamp)
+
     models_dir = os.path.join(base_dir, "models")
     results_json_path = os.path.join(base_dir, f"{args.dataset}_results.json")
 
     _ensure_parent_dir(results_json_path)
     os.makedirs(models_dir, exist_ok=True)
 
-    # NEW: batch processing branch
+    # Unified flow: choose indices based on --all
     if args.all:
+        indices = range(len(dataset))
+    else:
+        idx = 0 if args.index is None else args.index
+        if idx < 0 or idx >= len(dataset):
+            print(f"Index {idx} out of range. Dataset size: {len(dataset)}", file=sys.stderr)
+            return 2
+        indices = [idx]
 
-        results = []
-        all_ok = True
+    results: list[dict[str, Any]] = []
+    all_ok = True
+    last_entry: dict[str, Any] | None = None
+    last_ok = False
 
-        for i, item in enumerate(dataset):
-            prompt = item.get("en_question")
-            expected_raw = item.get("en_answer")
-            entry = {
-                "index": i,
-                "solver": args.solver,
-                "tolerance": args.tolerance,
-                "logic": args.logic,
-            }
+    for i in indices:
+        entry, ok = _process_item(i, dataset[i], args, mode, solve_fn, models_dir, ALIGNMENT_CHECK, few_shot=few_shot_opt)
+        results.append(entry)
+        last_entry, last_ok = entry, ok
+        all_ok = all_ok and ok
 
-            if not prompt:
-                entry.update({"error": "Selected item has no 'en_question'."})
-                results.append(entry)
-                all_ok = False
-                # Persist partial results
-                with open(results_json_path, "w", encoding="utf-8") as f:
-                    json.dump(results, f, indent=2)
-                print(f"Wrote results for {len(results)} problems to {results_json_path}")
-                continue
-
-            expected = _extract_number(expected_raw)
-            if expected is None:
-                entry.update({"expected_objective": None, "error": f"Could not parse numeric en_answer from: {expected_raw}"})
-                results.append(entry)
-                all_ok = False
-                with open(results_json_path, "w", encoding="utf-8") as f:
-                    json.dump(results, f, indent=2)
-                print(f"Wrote results for {len(results)} problems to {results_json_path}")
-                continue
-
-            entry["expected_objective"] = expected
-
-            # Use segregated per-index files inside models_dir
-            model_path = os.path.join(models_dir, f"gen_pyopl_model_{i}.mod")
-            data_path = os.path.join(models_dir, f"gen_pyopl_data_{i}.dat")
-
-            _ensure_parent_dir(model_path)
-            _ensure_parent_dir(data_path)
-
-            # Step 1-2: Generate model and data
-            t0 = time.perf_counter()
-            try:
-                result = solve_fn(
-                    prompt,
-                    model_path,
-                    data_path,
-                    llm_provider=args.provider,
-                    model_name=args.gpt,
-                    mode=mode,
-                    iterations=args.iterations,
-                    return_statistics=True,
-                    alignment_check=ALIGNMENT_CHECK,
-                )
-                entry["generation_assessment"] = result.get("assessment")
-                entry["generation_iterations"] = result.get("iterations")
-                entry["syntax_errors"] = result.get("syntax_errors")
-                entry["cost"] = result.get("cost")
-                entry["duration_seconds"] = time.perf_counter() - t0
-            except Exception as e:
-                entry.update({"duration_seconds": time.perf_counter() - t0, "error": f"generative_solve failed: {e}"})
-                results.append(entry)
-                all_ok = False
-                with open(results_json_path, "w", encoding="utf-8") as f:
-                    json.dump(results, f, indent=2)
-                print(f"Wrote results for {len(results)} problems to {results_json_path}")
-                continue
-
-            # Step 3: Solve and compare
-            try:
-                result = solve(model_path, data_path, solver=args.solver)
-                obj = _extract_objective(result)
-                if obj is None:
-                    entry.update(
-                        {"observed_objective": None, "error": f"Could not extract objective_value from result: {result}"}
-                    )
-                    all_ok = False
-                else:
-                    diff = abs(obj - expected)
-                    ok = diff <= args.tolerance
-                    entry.update(
-                        {
-                            "observed_objective": obj,
-                            "abs_diff": diff,
-                            "pass": ok,
-                        }
-                    )
-                    if not ok:
-                        all_ok = False
-            except Exception as e:
-                entry.update({"observed_objective": None, "error": f"solve failed: {e}"})
-                all_ok = False
-
-            # Infer direction using wrangler-style function if available
-            direction = None
-            if os.path.exists(model_path):
-                try:
-                    direction = _get_direction_from_model(model_path)
-                except Exception:
-                    direction = None
-            entry["direction"] = direction
-
-            # Persist partial results after each instance
-            results.append(entry)
-            with open(results_json_path, "w", encoding="utf-8") as f:
-                json.dump(results, f, indent=2)
+        if args.all:
+            _dump_json_atomic(results_json_path, results)
             print(f"Wrote results for {len(results)} problems to {results_json_path}")
 
-        return 0 if all_ok else 1
+    # If single, print summary similar to previous behavior
+    if not args.all and last_entry is not None:
+        if "error" in last_entry:
+            print(last_entry["error"], file=sys.stderr)
+            return int(last_entry.get("exit_code", 1))
 
-    # Single problem branch
-    if args.index < 0 or args.index >= len(dataset):
-        print(f"Index {args.index} out of range. Dataset size: {len(dataset)}", file=sys.stderr)
-        return 2
+        # Parity with previous single-branch logging
+        if last_entry.get("generation_assessment") is not None:
+            print(f"generative_solve completed. Assessment: {last_entry.get('generation_assessment')}")
 
-    item = dataset[args.index]
-    prompt = item.get("en_question")
-    expected_raw = item.get("en_answer")
-
-    if not prompt:
-        print("Selected item has no 'en_question'.", file=sys.stderr)
-        return 2
-
-    expected = _extract_number(expected_raw)
-    if expected is None:
-        print(f"Could not parse numeric en_answer from: {expected_raw}", file=sys.stderr)
-        return 2
-
-    # Use segregated per-index files inside models_dir
-    model_path = os.path.join(models_dir, f"gen_pyopl_model_{args.index}.mod")
-    data_path = os.path.join(models_dir, f"gen_pyopl_data_{args.index}.dat")
-
-    _ensure_parent_dir(model_path)
-    _ensure_parent_dir(data_path)
-
-    # Step 1-2: Generate model and data
-    t0 = time.perf_counter()
-    try:
-        result = solve_fn(
-            prompt,
-            model_path,
-            data_path,
-            llm_provider=args.provider,
-            model_name=args.gpt,
-            mode=mode,
-            iterations=args.iterations,
-            return_statistics=True,
-            alignment_check=ALIGNMENT_CHECK,
+        print("Summary:")
+        print(
+            json.dumps(
+                {
+                    "index": last_entry["index"],
+                    "solver": last_entry["solver"],
+                    "expected_objective": last_entry.get("expected_objective"),
+                    "observed_objective": last_entry.get("observed_objective"),
+                    "abs_diff": last_entry.get("abs_diff"),
+                    "tolerance": last_entry["tolerance"],
+                    "pass": last_entry.get("pass", False),
+                    "direction": last_entry.get("direction"),
+                    "logic": last_entry["logic"],
+                    "generation_duration_seconds": last_entry.get("duration_seconds"),
+                },
+                indent=2,
+            )
         )
-        duration_seconds = time.perf_counter() - t0
-        assessment = result["assessment"]
-        print(f"generative_solve completed. Assessment: {assessment}")
-    except Exception as e:
-        print(f"generative_solve failed: {e}", file=sys.stderr)
-        return 3
+        return 0 if last_ok else 1
 
-    # Step 3: Solve and compare
-    try:
-        result = solve(model_path, data_path, solver=args.solver)
-        obj = _extract_objective(result)
-    except Exception as e:
-        print(f"solve failed: {e}", file=sys.stderr)
-        return 4
-
-    if obj is None:
-        print(f"Could not extract objective_value from result: {result}", file=sys.stderr)
-        return 5
-
-    diff = abs(obj - expected)
-    ok = diff <= args.tolerance
-
-    # Infer direction using wrangler-style function if available
-    direction = None
-    if os.path.exists(model_path):
-        try:
-            direction = _get_direction_from_model(model_path)
-        except Exception:
-            direction = None
-
-    print("Summary:")
-    print(
-        json.dumps(
-            {
-                "index": args.index,
-                "solver": args.solver,
-                "expected_objective": expected,
-                "observed_objective": obj,
-                "abs_diff": diff,
-                "tolerance": args.tolerance,
-                "pass": ok,
-                "direction": direction,
-                "logic": args.logic,
-                "generation_duration_seconds": duration_seconds,
-            },
-            indent=2,
-        )
-    )
-
-    return 0 if ok else 1
+    # Batch mode exit
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
