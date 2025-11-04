@@ -4383,8 +4383,6 @@ class OPLCompiler:
 
         def is_ground(expr: Any) -> bool:
             # Ground = contains no decision variables and no free iterators.
-            # Top-level evaluation uses only env (data); iterators are not available.
-            # Groundness here only checks dvars; evaluation will fail if unknown names remain.
             return not contains_dvar(expr)
 
         def and_expr(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
@@ -4399,14 +4397,14 @@ class OPLCompiler:
 
         def normalize_forall_body(fc: dict) -> list[dict]:
             if "constraints" in fc and isinstance(fc["constraints"], list):
-                return fc["constraints"]
+                # Filter to dict items only to satisfy typing and avoid None
+                return [c for c in fc["constraints"] if isinstance(c, dict)]
             if "constraint" in fc and isinstance(fc["constraint"], dict):
                 return [fc["constraint"]]
             return []
 
-        def make_forall(iterators, index_constraint, body_constraints) -> dict:
-            # Return a new forall_constraint node; preserve single vs list shape
-            node = {
+        def make_forall(iterators, index_constraint: Optional[dict], body_constraints: list[dict]) -> dict:
+            node: dict[str, Any] = {
                 "type": "forall_constraint",
                 "iterators": iterators,
                 "index_constraint": index_constraint,
@@ -4417,17 +4415,69 @@ class OPLCompiler:
                 node["constraints"] = body_constraints
             return node
 
-        # Rewrite a single forall node: split any inner if-constraints into separate forall nodes
+        # Helper: normalized boolean literal
+        def _bool_lit(v: bool) -> dict:
+            return {"type": "boolean_literal", "value": bool(v), "sem_type": "boolean"}
+
+        # Convert any constraint/boolean-like node to a boolean expression dict.
+        # Guarantees a dict is returned.
+        def to_bool_expr(node_any: Any) -> dict:
+            n = node_any
+            # unwrap parentheses
+            while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
+                n = n.get("expression")
+            # Already a boolean expression node
+            if isinstance(n, dict):
+                t = n.get("type")
+                if t in ("and", "or", "not", "boolean_literal"):
+                    return cast(dict, n)
+                if t == "binop":
+                    # binop is used both for arithmetic and comparisons; allow as boolean when used in conditions
+                    return cast(dict, n)
+                if t == "constraint":
+                    op = n.get("op")
+                    L = n.get("left")
+                    R = n.get("right")
+                    # constraint of form (expr == true/false)
+                    if op == "==" and isinstance(R, dict) and R.get("type") == "boolean_literal":
+                        return (
+                            cast(dict, L)
+                            if R.get("value") is True
+                            else {"type": "not", "value": cast(dict, L), "sem_type": "boolean"}
+                        )
+                    # General comparison -> boolean expression
+                    if op in ("<", "<=", ">", ">=", "==", "!="):
+                        return {"type": "binop", "op": op, "left": L, "right": R, "sem_type": "boolean"}
+                    # Fallback: equate to true
+                    return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
+                if t in ("name", "indexed_name", "funcall"):
+                    # Treat bare boolean-valued symbol/expression as == true
+                    return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
+                # Last resort: wrap unknown dict node as == true
+                return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
+            # Python literal fallback
+            if isinstance(n, bool):
+                return _bool_lit(n)
+            # Numbers/strings -> treat nonzero/nonempty as boolean at eval time; still force a node
+            return {
+                "type": "binop",
+                "op": "==",
+                "left": {"type": "number", "value": n, "sem_type": "int" if isinstance(n, int) else "float"},
+                "right": _bool_lit(True),
+                "sem_type": "boolean",
+            }
+
+        # Rewrite a single forall node: split inner if-constraints and ground-antecedent implications
         def rewrite_forall_node(fc: dict) -> list[dict]:
             iterators = fc.get("iterators", [])
-            base_ic = fc.get("index_constraint")
+            base_ic: Optional[dict] = cast(Optional[dict], fc.get("index_constraint"))
             body = normalize_forall_body(fc)
 
-            # Collect non-if constraints to keep under the original base_ic
             regular_constraints: list[dict] = []
             new_foralls: list[dict] = []
 
             for c in body:
+                # Handle if-constraints
                 if isinstance(c, dict) and c.get("type") == "if_constraint":
                     cond_any = c.get("condition")
                     if not isinstance(cond_any, dict):
@@ -4437,28 +4487,45 @@ class OPLCompiler:
                         raise SemanticError("Condition of if-constraint inside forall must not reference decision variables.")
                     then_list = c.get("then_constraints") or []
                     else_list = c.get("else_constraints") or []
-
-                    # Recursively rewrite nested ifs inside the branch bodies
                     if then_list:
-                        then_fc = make_forall(iterators, and_expr(base_ic, cond), then_list)
+                        then_fc = make_forall(
+                            iterators, and_expr(base_ic, cond), [cc for cc in then_list if isinstance(cc, dict)]
+                        )
                         new_foralls.extend(rewrite_forall_node(then_fc))
                     if else_list:
-                        else_fc = make_forall(iterators, and_expr(base_ic, not_expr(cond)), else_list)
+                        else_fc = make_forall(
+                            iterators, and_expr(base_ic, not_expr(cond)), [cc for cc in else_list if isinstance(cc, dict)]
+                        )
                         new_foralls.extend(rewrite_forall_node(else_fc))
-                    # If no else branch, omit those iterations (no constraints emitted)
-                else:
+                    continue
+
+                # Implication with ground antecedent inside forall: push antecedent into index condition
+                if isinstance(c, dict) and c.get("type") == "implication_constraint":
+                    ant = c.get("antecedent")
+                    cons = c.get("consequent")
+                    ant_bool: dict = to_bool_expr(ant)
+                    if contains_dvar(ant_bool):
+                        regular_constraints.append(c)
+                    else:
+                        guarded_ic: Optional[dict] = and_expr(base_ic, ant_bool)
+                        if isinstance(cons, dict):
+                            new_foralls.append(make_forall(iterators, guarded_ic, [cons]))
+                    continue
+
+                # Keep others
+                if isinstance(c, dict):
                     regular_constraints.append(c)
 
-            # Keep the regular constraints under the original base_ic (if any)
             if regular_constraints:
                 new_foralls.append(make_forall(iterators, base_ic, regular_constraints))
 
             return new_foralls
 
-        # Top-level pass: splice ground if-constraints and rewrite forall bodies
-        out_top: list = []
+        # Top-level pass
+        out_top: list[dict] = []
 
         for c in ast.get("constraints", []):
+            # Top-level if-constraint
             if isinstance(c, dict) and c.get("type") == "if_constraint":
                 cond_any = c.get("condition")
                 if not isinstance(cond_any, dict):
@@ -4472,15 +4539,31 @@ class OPLCompiler:
                     raise SemanticError("Condition of if-constraint at top level cannot reference iterators.")
                 val = self._eval_ground_condition(cond, env)
                 chosen_list = (c.get("then_constraints") or []) if val else (c.get("else_constraints") or [])
-                # Splice chosen branch. If it contains forall blocks, rewrite them; else append as-is.
                 for cc in chosen_list:
                     if isinstance(cc, dict) and cc.get("type") == "forall_constraint":
                         out_top.extend(rewrite_forall_node(cc))
-                    else:
+                    elif isinstance(cc, dict):
                         out_top.append(cc)
-            elif isinstance(c, dict) and c.get("type") == "forall_constraint":
+                continue
+
+            # Top-level forall
+            if isinstance(c, dict) and c.get("type") == "forall_constraint":
                 out_top.extend(rewrite_forall_node(c))
-            else:
+                continue
+
+            # Top-level implication with ground antecedent
+            if isinstance(c, dict) and c.get("type") == "implication_constraint":
+                ant = c.get("antecedent")
+                cons = c.get("consequent")
+                ant_bool: dict = to_bool_expr(ant)
+                if contains_dvar(ant_bool):
+                    out_top.append(c)
+                else:
+                    if self._eval_ground_condition(ant_bool, env) and isinstance(cons, dict):
+                        out_top.append(cons)
+                continue
+
+            if isinstance(c, dict):
                 out_top.append(c)
 
         ast["constraints"] = out_top
