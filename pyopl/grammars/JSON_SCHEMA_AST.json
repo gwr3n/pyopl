@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema",
-  "$id": "https://github.com/gwren/pyopl/pyopl_ast.schema.json",
+  "$id": "urn:sha256:5a9aa3336f9ed918b47f626d25475a75bd6992f0fe96d5f50934603202d7e575",
   "title": "PyOPL AST",
   "type": "object",
   "required": ["declarations", "objective", "constraints"],
