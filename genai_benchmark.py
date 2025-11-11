@@ -295,10 +295,10 @@ def main() -> int:
         few_shot_opt = False
 
     # Load dataset
-    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "StochasticOR"]:
+    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR"]:
         dataset_path = _dataset_file(args.dataset)
     else:
-        raise ValueError("Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, StochasticOR.".format(args.dataset))
+        raise ValueError("Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, ReSocratic, StochasticOR.".format(args.dataset))
 
     with open(dataset_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
