@@ -5,8 +5,8 @@ import os
 import re
 import sys
 import time
-from typing import Any, Callable, Optional
 from pathlib import Path  # NEW
+from typing import Any, Callable, Optional
 
 from pyopl import solve
 
@@ -16,12 +16,14 @@ def _ensure_parent_dir(path: str) -> None:
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
 
+
 # NEW: atomic JSON write to avoid partial files on crash
 def _dump_json_atomic(path: str, payload: Any) -> None:
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp, path)
+
 
 # NEW: resolve dataset file path relative to this script
 def _dataset_file(dataset_name: str) -> Path:
@@ -82,6 +84,7 @@ def _get_direction_from_model(model_file: str):
     if re.search(r"\bmaximize\b", content, re.IGNORECASE):
         return "max"
     return None
+
 
 # NEW: unify single/batch processing into one function
 def _process_item(
@@ -298,7 +301,11 @@ def main() -> int:
     if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR"]:
         dataset_path = _dataset_file(args.dataset)
     else:
-        raise ValueError("Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, ReSocratic, StochasticOR.".format(args.dataset))
+        raise ValueError(
+            "Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, ReSocratic, StochasticOR.".format(
+                args.dataset
+            )
+        )
 
     with open(dataset_path, "r", encoding="utf-8") as f:
         dataset = json.load(f)
@@ -329,7 +336,7 @@ def main() -> int:
 
     # Unified flow: choose indices based on --all
     if args.all:
-        indices = range(len(dataset))
+        indices: list[int] = list(range(len(dataset)))
     else:
         idx = 0 if args.index is None else args.index
         if idx < 0 or idx >= len(dataset):
