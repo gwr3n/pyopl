@@ -929,7 +929,7 @@ class OPLIDE(tk.Tk):
                 if ast is None:
                     raise ValueError("Parser returned no AST.")
             except Exception as e:
-                messagebox.showerror("Export model", f"Failed to parse model: {e}")
+                messagebox.showerror("Export model", f"Failed to parse model: {type(e).__name__}")
                 return
 
             # Parse data -> data_dict (if any)
@@ -944,7 +944,7 @@ class OPLIDE(tk.Tk):
                     if isinstance(parsed, dict):
                         data_dict = parsed
                 except Exception as e:
-                    messagebox.showerror("Export model", f"Failed to parse data: {e}")
+                    messagebox.showerror("Export model", f"Failed to parse data: {type(e).__name__}")
                     return
 
             # Choose generator by solver selection
@@ -963,7 +963,7 @@ class OPLIDE(tk.Tk):
                 if lines:
                     generated_code = "\n".join(lines[:-1])
             except Exception as e:
-                messagebox.showerror("Export model", f"Code generation failed: {e}")
+                messagebox.showerror("Export model", f"Code generation failed: {type(e).__name__}")
                 return
 
             # Ask for destination file
@@ -985,7 +985,7 @@ class OPLIDE(tk.Tk):
 
             self.status_var.set(f"Exported model to {dest_path}")
         except Exception as e:
-            messagebox.showerror("Export model", f"Unexpected error: {e}")
+            messagebox.showerror("Export model", f"Unexpected error: {type(e).__name__}")
             self.status_var.set(f"Export failed: {e}")
 
     # --- GenAI actions ---
@@ -1166,7 +1166,7 @@ class OPLIDE(tk.Tk):
             except Exception as e:
 
                 def on_error(e):
-                    messagebox.showerror("GenAI Error", str(e))
+                    messagebox.showerror("GenAI Error", type(e).__name__)
                     self._append_output(f"\nGenAI Error: {e}\n")
                     self.status_var.set("GenAI: error")
 
@@ -1200,7 +1200,7 @@ class OPLIDE(tk.Tk):
             with open(data_path, "w") as f:
                 f.write(self.data_text.get("1.0", tk.END))
         except Exception as e:
-            messagebox.showerror("GenAI Error", f"Failed to save current model/data: {e}")
+            messagebox.showerror("GenAI Error", f"Failed to save current model/data: {type(e).__name__}")
             return
 
         # Resolve selected generator module
@@ -1661,7 +1661,7 @@ class OPLIDE(tk.Tk):
         try:
             webbrowser.open_new_tab(url)
         except Exception as e:
-            messagebox.showerror("Open URL", f"Failed to open URL:\n{url}\n\n{e}")
+            messagebox.showerror("Open URL", f"Failed to open URL:\n{url}\n\n{type(e).__name__}")
 
     # NEW: selection handler for GenAI model choice
     def _on_select_genai_model(self, provider_key: str, model_name: str) -> None:
