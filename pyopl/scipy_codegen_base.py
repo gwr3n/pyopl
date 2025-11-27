@@ -1,7 +1,3 @@
-# Import the single, canonical SemanticError class
-from .semantic_error import SemanticError
-
-
 class SciPyCodeGeneratorBase:
     """
     Abstract base class for SciPy code generators.
