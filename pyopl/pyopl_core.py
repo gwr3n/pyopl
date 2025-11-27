@@ -3679,7 +3679,7 @@ class OPLCompiler:
 
             # Evaluate general numeric/boolean/string expression for param RHS. Limited support: number, name,
             # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum/min_agg/max_agg & field_access.
-            def eval_expr(expr, env, iter_meta=None):
+            def eval_expr(expr, env, iter_meta=None) -> Any:
                 t = expr.get("type") if isinstance(expr, dict) else None
                 if t == "number":
                     return float(expr.get("value"))
