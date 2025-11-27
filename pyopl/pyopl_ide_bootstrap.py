@@ -1,22 +1,22 @@
 # --- Standard Library Imports ---
-import json  # NEW
-import logging  # NEW
+import json
+import logging
 import os
-import sys  # NEW
+import sys
 import threading
 
 # --- Third-Party Imports ---
 import tkinter as tk
-import webbrowser  # FIX: needed for Help menu links
-from datetime import datetime  # NEW
-from pathlib import Path  # NEW
-from tkinter import filedialog, messagebox, scrolledtext, ttk  # NEW: dialogs for GenAI prompts
-from typing import Any, Callable, Optional, Protocol  # add typing for optional Pillow modules
+import webbrowser
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox, scrolledtext, ttk
+from typing import Any, Callable, Optional, Protocol
 
-import ttkbootstrap as tb  # NEW: use ttkbootstrap flatly light theme
-from platformdirs import user_config_dir  # NEW
+import ttkbootstrap as tb
+from platformdirs import user_config_dir
 
-# NEW: model discovery (provider-specific)
+# Model discovery (provider-specific)
 from .genai.pyopl_generative import (
     list_gemini_models,
     list_ollama_models,
@@ -28,12 +28,11 @@ from .gurobi_codegen import GurobiCodeGenerator
 from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, solve
 from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
-# NEW: settings storage constants (match sample.py strategy)
+# Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
 CONFIG_FILENAME = "settings.json"
 
-# Pillow for image handling (optional)
-# Use typed optional aliases to satisfy type checkers
+# Pillow (optional) for window icon
 PILImage: Optional[Any]
 PILImageTk: Optional[Any]
 try:
@@ -45,7 +44,6 @@ except ImportError:
     print("Pillow not found. Install it with: pip install Pillow")
 
 # --- Syntax Highlighting Colors ---
-# Updated colors for a darker theme
 TOKEN_COLORS = {
     "DVAR": "#56b6c2",  # Teal
     "INT": "#61afef",  # Blue
@@ -95,26 +93,26 @@ class OPLIDE(tk.Tk):
         self.geometry("1000x700")
         self.model_file: Optional[str] = None
         self.data_file: Optional[str] = None
-        self.current_font_size = 12  # Default font size
-        self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"  # Use Courier for all platforms
-        self.solver = tk.StringVar(value="gurobi")  # Solver selection: 'gurobi' or 'scipy'
-        self.theme_var = tk.StringVar(value="flatly")  # NEW: current ttkbootstrap theme
+        self.current_font_size = 12
+        self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"
+        self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
+        self.theme_var = tk.StringVar(value="flatly")
 
-        # NEW: GenAI selection state
-        self.genai_selection_var = tk.StringVar(value="")  # stores "provider|model"
+        # GenAI selection state
+        self.genai_selection_var = tk.StringVar(value="")  # format: "provider|model"
         self.genai_provider: Optional[str] = None
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
-        self._genai_loading: bool = False  # NEW: avoid concurrent loads
+        self._genai_loading: bool = False
 
-        # NEW: output session history
+        # Output sessions
         self._output_sessions: dict[str, str] = {}
         self._output_session_ids: list[str] = []
         self._output_session_display: dict[str, str] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
 
-        # NEW: init settings storage and load persisted settings
+        # Settings
         self._init_settings_storage()
         loaded_settings = self._load_settings()
         desired_theme = None
@@ -124,14 +122,14 @@ class OPLIDE(tk.Tk):
                 desired_theme = loaded_settings.get("theme")
         except Exception:
             pass
-        # NEW: verbose LLM logs setting (defaults True)
-        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))  # NEW
-        # NEW: track font size selection for menu highlighting
+        # LLM progress logs in Output
+        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))
+        # Track font size selection for menu state
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
-        # NEW: GenAI method selection (persisted)
+        # GenAI method selection (persisted)
         self._genai_methods: list[tuple[str, str]] = [
-            ("Generhetor", "pyopl_generative"),  # default, menu label -> module key
+            ("Generhetor", "pyopl_generative"),
             ("Standard", "pyopl_standard"),
             ("Chain of Thought", "pyopl_chain_of_thought"),
             ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
@@ -144,7 +142,7 @@ class OPLIDE(tk.Tk):
             saved_method = "pyopl_generative"
         self.genai_method_var = tk.StringVar(value=saved_method)
 
-        # NEW: desired GenAI selection from settings (used after model discovery)
+        # Desired GenAI selection from settings (applied after model discovery)
         self._desired_genai_provider: Optional[str] = None
         self._desired_genai_model: Optional[str] = None
         try:
@@ -165,41 +163,40 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        # --- General Styling (ttkbootstrap 'flatly' light theme) ---
+        # Styling (ttkbootstrap 'flatly' theme by default)
         self.style = tb.Style(theme="flatly")
 
         self._set_icon()
         self._setup_menu()
-        # NEW: build GenAI model menus asynchronously to avoid blocking UI
+        # Build GenAI model menus asynchronously
         self._build_genai_model_menus_async()
         self._setup_panes()
         self._setup_status_bar()
         self._setup_tag_configs()
-        # NEW: apply theme-specific editor/output colors
+        # Apply theme-specific colors
         self._apply_theme_colors()
 
-        # Apply saved theme (after widgets exist) if different
+        # Apply saved theme after widgets exist
         if desired_theme in ("flatly", "darkly") and desired_theme != self.theme_var.get():
             self.set_theme(desired_theme)
 
         # Initial status update
         self._update_caret_position(self.model_text)
 
-        # NEW: global shortcut bindings
+        # Global shortcuts
         self._bind_shortcuts()
 
-        # NEW: save settings on close
+        # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # --- UI Setup Methods ---
     def _set_icon(self) -> None:
-        """Set the application window icon if Pillow is available and icon is present."""
+        """Set the application window icon if Pillow is available and the icon is present."""
         if PILImage and PILImageTk:
             try:
                 import importlib.resources as pkg_resources
 
                 try:
-                    # For Python 3.9+, use files().joinpath()
                     from importlib.resources import files
 
                     icon_path = files("pyopl.icon").joinpath("mindset.png")
@@ -208,7 +205,6 @@ class OPLIDE(tk.Tk):
                         photo_image = PILImageTk.PhotoImage(img)
                         self.iconphoto(False, photo_image)
                 except Exception:
-                    # Fallback for Python 3.7/3.8
                     with pkg_resources.path("pyopl.icon", "mindset.png") as icon_path:
                         img = PILImage.open(icon_path)
                         photo_image = PILImageTk.PhotoImage(img)
@@ -220,13 +216,11 @@ class OPLIDE(tk.Tk):
 
     def _setup_menu(self) -> None:
         """Create the application menu bar."""
-
         menubar = tk.Menu(self)
-        self.menubar = menubar  # NEW: keep reference
+        self.menubar = menubar
 
-        # File Menu
+        # File
         filemenu = tk.Menu(menubar, tearoff=0)
-        # CHANGED: add accelerator to New Model
         filemenu.add_command(label="New Model", command=self.new_model, accelerator=self._accel("N"))
         filemenu.add_separator()
         filemenu.add_command(label="Open Model...", command=self.open_model)
@@ -239,32 +233,30 @@ class OPLIDE(tk.Tk):
         filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
 
-        # NEW: Edit Menu
+        # Edit
         editmenu = tk.Menu(menubar, tearoff=0)
         editmenu.add_command(label="Undo", command=self._undo, accelerator=self._accel("Z"))
         editmenu.add_command(label="Redo", command=self._redo, accelerator=f"Shift+{self._accel('Z')}")
         menubar.add_cascade(label="Edit", menu=editmenu)
 
-        # Run Menu
+        # Run
         runmenu = tk.Menu(menubar, tearoff=0)
         runmenu.add_command(label="Run Model", command=self.run_model, accelerator=self._accel("R"))
-        # Solver selection submenu
         solver_menu = tk.Menu(runmenu, tearoff=0)
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi")
         solver_menu.add_radiobutton(label="Scipy (HiGHS)", variable=self.solver, value="scipy")
         runmenu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Run", menu=runmenu)
 
-        # NEW: GenAI Menu placeholder (populated later)
+        # GenAI (populated after discovery)
         self.genai_menu = tk.Menu(menubar, tearoff=0)
-        # Initial non-blocking placeholder UI
         self.genai_menu.add_command(label="Loading models...", state="disabled")
         menubar.add_cascade(label="GenAI", menu=self.genai_menu)
 
-        # Settings Menu (renamed from View to avoid macOS system items)
+        # Settings
         settings_menu = tk.Menu(menubar, tearoff=0)
 
-        # CHANGED: Font Size submenu uses radiobuttons with typed callbacks
+        # Font Size
         font_size_menu = tk.Menu(settings_menu, tearoff=0)
         for size, label in zip(
             [10, 12, 14, 16],
@@ -278,7 +270,7 @@ class OPLIDE(tk.Tk):
             )
         settings_menu.add_cascade(label="Font Size", menu=font_size_menu)
 
-        # Theme submenu (typed callbacks)
+        # Theme
         theme_menu = tk.Menu(settings_menu, tearoff=0)
         theme_menu.add_radiobutton(
             label="Light (Flatly)",
@@ -296,7 +288,7 @@ class OPLIDE(tk.Tk):
 
         menubar.add_cascade(label="Settings", menu=settings_menu)
 
-        # Help Menu (typed URL openers)
+        # Help
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_command(
             label="User Guide",
@@ -310,19 +302,18 @@ class OPLIDE(tk.Tk):
             label="GitHub",
             command=lambda: self._open_url("https://gwr3n.github.io/rhetor/"),
         )
-        # NEW: About dialog
         help_menu.add_separator()
         help_menu.add_command(label="About", command=self.show_about)
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.config(menu=menubar)
 
-    # NEW: platform-aware accelerator label
     def _accel(self, key: str) -> str:
+        """Return platform-aware accelerator label."""
         return f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+{key}"
 
     def new_model(self) -> None:
-        """Clear the model and data editors, reset file paths, and update UI for a new model."""
+        """Clear editors, reset file paths, and prepare for a new model."""
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
         self.model_file = None
@@ -337,21 +328,20 @@ class OPLIDE(tk.Tk):
         self.highlight(self.data_text, is_data=True)
         self.status_var.set("New model created. Ready.")
 
-        # Clear output
+        # Clear output with a message
         self.output_text.config(state="normal")
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, "New model created. Ready.\n")
         self.output_text.config(state="disabled")
 
     def _setup_panes(self) -> None:
-        """Set up the main paned window and all subframes/editors/output, using tabs for Model/Data."""
-        # Replace left file tree with a single vertical paned layout (Editors over Output)
+        """Set up the main paned window with editors on top and output below."""
         editor_output_paned = tk.PanedWindow(
             self,
             orient=tk.VERTICAL,
             sashrelief=tk.FLAT,
             bd=2,
-            bg="#e9ecef",  # CHANGED: light background to match flatly theme
+            bg="#e9ecef",
         )
         editor_output_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
 
@@ -359,15 +349,15 @@ class OPLIDE(tk.Tk):
         self._setup_output(editor_output_paned)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
-        """Create model and data editor frames inside a Notebook (tabs)."""
+        """Create model and data editor frames inside a Notebook."""
         editor_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
         parent.add(editor_frame, stretch="always")
 
-        # Notebook for Model/Data tabs
+        # Notebook
         self.editor_notebook = ttk.Notebook(editor_frame)
         self.editor_notebook.pack(fill=tk.BOTH, expand=1)
 
-        # Model Editor tab
+        # Model editor
         self.model_frame = ttk.Frame(self.editor_notebook)
         self.model_text = scrolledtext.ScrolledText(
             self.model_frame,
@@ -382,7 +372,7 @@ class OPLIDE(tk.Tk):
         )
         self.model_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
 
-        # Typed event handlers to avoid mypy lambda inference issue
+        # Event handlers (typed to avoid lambda inference issues)
         def _on_model_changed(event: tk.Event) -> None:
             self._on_text_change(self.model_text, False)
 
@@ -393,7 +383,7 @@ class OPLIDE(tk.Tk):
         self.model_text.bind("<ButtonRelease-1>", _on_model_changed)
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
-        # Data Editor tab
+        # Data editor
         self.data_frame = ttk.Frame(self.editor_notebook)
         self.data_text = scrolledtext.ScrolledText(
             self.data_frame,
@@ -411,7 +401,7 @@ class OPLIDE(tk.Tk):
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
-        # NEW: bind Undo/Redo on the widgets (preempts Text class bindings)
+        # Undo/Redo on widgets (overrides Text default bindings)
         self.model_text.bind("<Control-z>", self._undo_shortcut)
         self.model_text.bind("<Control-Shift-Z>", self._redo_shortcut)
         self.model_text.bind("<Control-Shift-z>", self._redo_shortcut)
@@ -424,7 +414,7 @@ class OPLIDE(tk.Tk):
             self.data_text.bind("<Command-z>", self._undo_shortcut)
             self.data_text.bind("<Command-Shift-Z>", self._redo_shortcut)
 
-        # Add tabs
+        # Tabs
         self.editor_notebook.add(self.model_frame, text="Model")
         self.editor_notebook.add(self.data_frame, text="Data")
 
@@ -437,14 +427,14 @@ class OPLIDE(tk.Tk):
         """Create the output panel with a request history list on the right."""
         output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
 
-        # Container that splits Output (left) and Requests list (right)
+        # Split Output (left) and Requests list (right)
         container = ttk.Frame(output_frame)
         container.pack(fill=tk.BOTH, expand=1, padx=5, pady=(0, 5))
-        container.columnconfigure(0, weight=1)  # Output area expands
-        container.columnconfigure(1, weight=0)  # Requests list fixed width
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
         container.rowconfigure(0, weight=1)
 
-        # Left: Output text
+        # Output text
         left = ttk.Frame(container)
         left.grid(row=0, column=0, sticky="nsew")
         self.output_text = scrolledtext.ScrolledText(
@@ -453,14 +443,14 @@ class OPLIDE(tk.Tk):
             height=12,
             font=(self.editor_font_family, self.current_font_size - 1),
             state="disabled",
-            bg="#f8f9fa",  # CHANGED: light neutral background
-            fg="#212529",  # CHANGED: dark text
+            bg="#f8f9fa",
+            fg="#212529",
             relief=tk.FLAT,
             bd=0,
         )
         self.output_text.pack(fill=tk.BOTH, expand=1)
 
-        # Right: Requests list with scrollbar
+        # Requests list
         right = ttk.Frame(container, width=220)
         right.grid(row=0, column=1, sticky="ns", padx=(8, 0))
         right.rowconfigure(0, weight=1)
@@ -475,7 +465,7 @@ class OPLIDE(tk.Tk):
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
 
-        # Selection handler to show a previous request's output
+        # Selection handler to show previous output
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
         parent.add(output_frame, minsize=150)
@@ -489,8 +479,8 @@ class OPLIDE(tk.Tk):
             textvariable=self.status_var,
             anchor="w",
             font=("Segoe UI", 9),
-            padding=(8, 0, 0, 2),  # left, top, right, bottom
-            relief=tk.FLAT,  # avoid bevel that can look cut off
+            padding=(8, 0, 0, 2),
+            relief=tk.FLAT,
         )
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -499,10 +489,10 @@ class OPLIDE(tk.Tk):
         for token, color in TOKEN_COLORS.items():
             self.model_text.tag_configure(token, foreground=color)
             self.data_text.tag_configure(token, foreground=color)
-        # Special tag for error highlighting
+        # Error tag
         self.model_text.tag_configure("ERROR", background="#e06c75", foreground="black")
         self.data_text.tag_configure("ERROR", background="#e06c75", foreground="black")
-        # Special tag for comments (not a token, but used in highlighting)
+        # Comments
         self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
 
     # --- Event Handlers and Core Logic ---
@@ -512,7 +502,7 @@ class OPLIDE(tk.Tk):
         self._update_caret_position(text_widget)
 
     def on_tree_select(self, event: Optional[tk.Event]) -> None:
-        """Compatibility handler: no file tree in current UI; focus Model editor."""
+        """Compatibility handler: focus Model editor (no file tree in this UI)."""
         self.editor_notebook.select(self.model_frame)
         self.model_text.focus_set()
         self.highlight(self.model_text, is_data=False)
@@ -532,7 +522,7 @@ class OPLIDE(tk.Tk):
 
     # --- File Operations ---
     def open_model(self) -> None:
-        """Open a model file and load its contents into the model editor."""
+        """Open a model file into the model editor."""
         fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
             with open(fname, "r") as f:
@@ -548,7 +538,7 @@ class OPLIDE(tk.Tk):
             self.on_tab_changed(None)
 
     def open_data(self) -> None:
-        """Open a data file and load its contents into the data editor."""
+        """Open a data file into the data editor."""
         fname = filedialog.askopenfilename(filetypes=[("Data files", "*.dat"), ("All files", "*.*")])
         if fname:
             with open(fname, "r") as f:
@@ -576,7 +566,7 @@ class OPLIDE(tk.Tk):
         content = self.model_text.get(1.0, tk.END).rstrip("\n")
         with open(self.model_file, "w") as f:
             f.write(content)
-        # Update tab title to reflect filename
+        # Update tab title
         try:
             self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
         except Exception:
@@ -595,7 +585,7 @@ class OPLIDE(tk.Tk):
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
         with open(self.data_file, "w") as f:
             f.write(content)
-        # Update tab title to reflect filename
+        # Update tab title
         try:
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
         except Exception:
@@ -631,7 +621,7 @@ class OPLIDE(tk.Tk):
 
     # --- Syntax Highlighting ---
     def highlight(self, text_widget: tk.Text, is_data: bool = False) -> None:
-        """Apply syntax highlighting to the given text widget, using both lexer and parser for model and data files."""
+        """Apply syntax highlighting to the given text widget, using lexer and parser for model and data files."""
         # Remove previous tags
         for previous_tag in TOKEN_COLORS.keys():
             text_widget.tag_remove(previous_tag, "1.0", tk.END)
@@ -658,7 +648,7 @@ class OPLIDE(tk.Tk):
                 error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                 text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
                 self._last_syntax_error = f"Lexer Error on line {lineno}: {error_message}"
-            # Syntax analysis (parsing)
+            # Syntax analysis
             if not lexer_error:
                 try:
                     parser.parse(iter(tokens))
@@ -669,7 +659,7 @@ class OPLIDE(tk.Tk):
                     error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                     text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
                     self._last_syntax_error = f"Parser Error on line {lineno}: {error_message}"
-            # Apply syntax highlighting regardless of errors
+            # Apply highlighting
             for token in tokens:
                 start_idx = self._index_from_pos(code, token.index)
                 end_idx = self._index_from_pos(code, token.index + len(str(token.value)))
@@ -692,7 +682,7 @@ class OPLIDE(tk.Tk):
                 error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                 text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
                 self._last_syntax_error = f"Lexer Error on line {lineno}: {error_message}"
-            # Syntax analysis (parsing)
+            # Syntax analysis
             if not lexer_error:
                 try:
                     parser.parse(iter(tokens), lexer=lexer)
@@ -703,7 +693,7 @@ class OPLIDE(tk.Tk):
                     error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                     text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
                     self._last_syntax_error = f"Parser Error on line {lineno}: {error_message}"
-            # Apply basic highlighting for .dat regardless of errors
+            # Apply basic highlighting for .dat
             import re
 
             for kw in ["param", "set", "true", "false"]:
@@ -719,10 +709,7 @@ class OPLIDE(tk.Tk):
 
     def _index_from_pos(self, text: str, pos: int) -> str:
         """
-        Converts a character offset (pos) in a string to a Tkinter Text widget index (line.char).
-
-        Tkinter's line numbers are 1-based, and character offsets within a line are 0-based.
-        This function handles newlines correctly to determine the accurate line and character.
+        Convert a character offset in a string to a Tk Text index (line.char).
         """
         if pos < 0:
             pos = 0
@@ -737,10 +724,10 @@ class OPLIDE(tk.Tk):
     # --- Font Size ---
     def _change_font_size(self, size: int) -> None:
         """
-        Changes the font size of the text editors and output console.
+        Change font size of editors and output console.
         """
         self.current_font_size = size
-        # NEW: keep menu highlight in sync
+        # Sync menu state
         try:
             self.font_size_var.set(size)
         except Exception:
@@ -752,24 +739,23 @@ class OPLIDE(tk.Tk):
         self.data_text.config(font=editor_font)
         self.output_text.config(font=output_font)
 
-        # Re-apply comment font to reflect new base size
+        # Adjust comment tag to match new size
         self.model_text.tag_configure("COMMENT", font=(self.editor_font_family, size, "italic"))
 
-        # Update caret position display after font size change
-        self._update_caret_position(self.model_text)  # Assuming model_text is currently active, or last active)
+        # Update caret position after size change
+        self._update_caret_position(self.model_text)
 
-        # NEW: persist settings
+        # Persist settings
         self._save_settings()
 
     # --- Status Bar ---
     def _update_caret_position(self, text_widget: tk.Text) -> None:
         """
-        Updates the status bar with the current caret position (line and column).
-        Also, displays the most recent syntax error (if any) alongside caret position.
+        Update status bar with current caret position. If a syntax error is present,
+        display its line alongside the caret position.
         """
         if text_widget.winfo_exists():
             try:
-                # Get current cursor index
                 index = text_widget.index(tk.INSERT)
                 index_str = str(index)
                 if "." in index_str:
@@ -777,7 +763,7 @@ class OPLIDE(tk.Tk):
                 else:
                     caret_line, caret_col = 1, 0
 
-                # Gather all error tags and their line numbers
+                # Collect all error lines
                 error_lines = []
                 if text_widget.tag_ranges("ERROR"):
                     tag_ranges = list(text_widget.tag_ranges("ERROR"))
@@ -787,7 +773,7 @@ class OPLIDE(tk.Tk):
                         for err_line in range(tag_start_line, tag_end_line + 1):
                             error_lines.append(err_line)
 
-                # Try to get the error message for the current caret line
+                # Try to get an error message for the current caret line
                 error_msg = None
                 if error_lines and caret_line in error_lines:
                     last_error = getattr(self, "_last_syntax_error", None)
@@ -807,7 +793,6 @@ class OPLIDE(tk.Tk):
                 if error_msg:
                     self.status_var.set(f"{error_msg} | {caret_msg}")
                 else:
-                    # Treat both model and data editors the same: show syntax status
                     self.status_var.set(f"Syntax OK | {caret_msg}")
 
             except tk.TclError:
@@ -831,29 +816,28 @@ class OPLIDE(tk.Tk):
         self.model_text.tag_add("sel", "1.0", tk.END)
         self.model_text.mark_set(tk.INSERT, "1.0")
         self.model_text.see(tk.INSERT)
-        return "break"  # Prevent default Tkinter behavior
+        return "break"
 
     def _select_all_data(self, event: Optional[tk.Event] = None) -> str:
         """Select all text in the data editor."""
         self.data_text.tag_add("sel", "1.0", tk.END)
         self.data_text.mark_set(tk.INSERT, "1.0")
         self.data_text.see(tk.INSERT)
-        return "break"  # Prevent default Tkinter behavior
+        return "break"
 
-    # NEW: active editor resolver
     def _get_active_text_widget(self) -> tk.Text:
+        """Return the active editor, falling back to the selected tab."""
         try:
             w = self.focus_get()
         except Exception:
             w = None
         if w is self.model_text or w is self.data_text:
             return w  # type: ignore[return-value]
-        # Fallback to selected tab
         idx = self.editor_notebook.index(self.editor_notebook.select())
         return self.model_text if idx == 0 else self.data_text
 
-    # NEW: Undo/Redo actions
     def _undo(self) -> None:
+        """Undo in the active editor."""
         tw = self._get_active_text_widget()
         try:
             tw.edit_undo()
@@ -862,6 +846,7 @@ class OPLIDE(tk.Tk):
         self._on_text_change(tw, is_data=(tw is self.data_text))
 
     def _redo(self) -> None:
+        """Redo in the active editor."""
         tw = self._get_active_text_widget()
         try:
             tw.edit_redo()
@@ -871,41 +856,34 @@ class OPLIDE(tk.Tk):
 
     # --- Model Execution ---
     def run_model(self) -> None:
-        """Run the model using the current editor contents, with data file checks and error reporting."""
+        """Run the model using current editor contents, checking data file presence and validity."""
         import re
 
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
         data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
-        # NEW: start a new request session instead of clearing permanently
+        # Start a new output session
         self._clear_output("Run: Running model...")
 
         self.status_var.set("Running model...")
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
-        # --- Data file presence and validity checks ---
-        # 1. Check if model references data (e.g. int X = ...; or similar)
-        # 2. If so, check if data file is loaded and non-empty
-        # 3. If not, show error in status bar and abort
-        # 4. If data file is present, try to parse it, and if error, show error in status bar and abort
-
-        # 1. Find all identifiers in model that are declared as external data (i.e., int X = ...; or similar)
-        # Only include variables with '= ...;' or '= ...' (external data), not all declarations
+        # Data file checks
         data_vars = set()
-        # Match lines like: int nbSets = ...;
+        # Variables like: int nbSets = ...;
         for m in re.finditer(
             r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\.\.\.",
             model_code,
         ):
             data_vars.add(m.group(1))
-        # Also match arrays: float cost[Sets] = ...;
+        # Arrays: float cost[Sets] = ...;
         for m in re.finditer(
             r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[.*?\]\s*=\s*\.\.\.",
             model_code,
         ):
             data_vars.add(m.group(1))
 
-        # 2. If model references data, but data file is missing or empty, show error
+        # If model references data but data is missing/empty
         if data_vars and (not self.data_file or not os.path.exists(self.data_file) or not data_code.strip()):
             self.status_var.set("Error: Data file missing or empty for required model parameters.")
             self.output_text.config(state="normal")
@@ -916,7 +894,7 @@ class OPLIDE(tk.Tk):
             self.output_text.config(state="disabled")
             return
 
-        # 3. Try to parse the data file, if present
+        # Parse the data file, if present
         if self.data_file and os.path.exists(self.data_file):
             try:
                 from .pyopl_core import OPLDataLexer, OPLDataParser
@@ -932,11 +910,9 @@ class OPLIDE(tk.Tk):
                 self.output_text.config(state="disabled")
                 return
 
-        # 4. Optionally, check if all required data variables are present in the data file
-        # This is a simple check: look for assignments to those variables in the data file
+        # Check that all required data variables are present
         missing_vars = []
         for var in data_vars:
-            # Look for 'var =' or 'var[' (for arrays)
             if not re.search(r"\b" + re.escape(var) + r"\s*(=|\[)", data_code):
                 missing_vars.append(var)
         if missing_vars:
@@ -957,8 +933,8 @@ class OPLIDE(tk.Tk):
                     f.write(data_code)
                 results = solve(model_file, data_file, solver=solver_choice)
 
-                # Buffer all output and append on UI thread
-                buf: list[str] = []
+                # Buffer output and append on UI thread
+                buf = []
                 buf.append(f"\nSolver: {solver_choice}\n")
                 buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
                 if "objective_value" in results and results["objective_value"] is not None:
@@ -982,7 +958,6 @@ class OPLIDE(tk.Tk):
                 def apply():
                     for s in buf:
                         self._append_output(s)
-                    # Set status bar to success or solver message
                     msg = results.get("message") or results.get("status", "Done")
                     self.status_var.set(msg)
 
@@ -1001,7 +976,6 @@ class OPLIDE(tk.Tk):
     def export_model(self) -> None:
         """Export the current model as a standalone Python file using the selected solver's code generator."""
         try:
-            # Grab editor contents
             model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
             data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
@@ -1028,7 +1002,6 @@ class OPLIDE(tk.Tk):
                     d_lexer = OPLDataLexer()
                     d_parser = OPLDataParser()
                     d_tokens = list(d_lexer.tokenize(data_code))
-                    # Some parsers need lexer=... passed in
                     parsed = d_parser.parse(iter(d_tokens), lexer=d_lexer)
                     if isinstance(parsed, dict):
                         data_dict = parsed
@@ -1047,7 +1020,7 @@ class OPLIDE(tk.Tk):
             # Generate Python code
             try:
                 generated_code = generator.generate_code()
-                # Strip the last line of generated_code if it exists
+                # Strip the last line if present
                 lines = generated_code.rstrip("\n").split("\n")
                 if lines:
                     generated_code = "\n".join(lines[:-1])
@@ -1055,7 +1028,7 @@ class OPLIDE(tk.Tk):
                 messagebox.showerror("Export model", f"Code generation failed: {type(e).__name__}")
                 return
 
-            # Ask for destination file
+            # Destination file
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
             if self.model_file:
                 base = os.path.splitext(os.path.basename(self.model_file))[0]
@@ -1068,7 +1041,6 @@ class OPLIDE(tk.Tk):
             if not dest_path:
                 return
 
-            # Write file
             with open(dest_path, "w", encoding="utf-8") as f:
                 f.write(generated_code)
 
@@ -1079,27 +1051,26 @@ class OPLIDE(tk.Tk):
 
     # --- GenAI actions ---
     def _clear_output(self, header: str = "") -> None:
-        """Start a new Output request session and display its header."""
-        self._begin_new_output_session(header)  # NEW
+        """Start a new output request session and display its header."""
+        self._begin_new_output_session(header)
 
     def _append_output(self, text: str) -> None:
-        """Append text to the current Output session and, if visible, to the Output panel."""
+        """Append text to the current output session and update the Output panel if visible."""
         sid = getattr(self, "_current_output_session_id", None)
         if sid:
             self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
-        # Only update UI if we're viewing this session
         if sid and getattr(self, "_viewing_output_session_id", None) == sid and self.output_text.winfo_exists():
             self.output_text.config(state="normal")
             self.output_text.insert(tk.END, text)
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
 
-    # NEW: internal helpers for request history
+    # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> None:
-        """Create a new request session, add it to the right-hand list, and show it."""
+        """Create a new request session, add it to the list, and show it."""
         dt = datetime.now()
-        display = dt.strftime("%Y-%m-%d %H:%M:%S")  # for the list
-        session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")  # unique internal id
+        display = dt.strftime("%Y-%m-%d %H:%M:%S")
+        session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
         initial = (header + "\n") if header else ""
         self._output_sessions[session_id] = initial
@@ -1201,14 +1172,13 @@ class OPLIDE(tk.Tk):
 
         dlg.bind("<Escape>", on_cancel)
         dlg.bind("<Control-Return>", on_ok)
-        dlg.bind("<Command-Return>", on_ok)  # macOS shortcut
+        dlg.bind("<Command-Return>", on_ok)  # macOS
 
         dlg.wait_window()
         return result["text"]
 
     def genai_generate(self) -> None:
-        """Prompt user for a problem description and generate model & data via GenAI."""
-        # Guard: ensure a model is selected
+        """Prompt for a problem description and generate model & data via GenAI."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
@@ -1230,19 +1200,18 @@ class OPLIDE(tk.Tk):
         )
         self._clear_output("GenAI: Generating model and data...")
 
-        # Build unique filenames from the visible request timestamp (same as Requests list)
+        # Use the visible request timestamp for filenames
         sid = self._current_output_session_id or ""
         display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        # Make it filename-safe (avoid spaces/colons)
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         def run():
             try:
-                # Thread-safe progress hook -> Output panel (always show essential progress)
+                # Progress hook -> Output panel
                 def progress(msg: str) -> None:
                     self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
 
-                # Optional: bridge module logger to progress (controlled by setting)
+                # Bridge module logger to progress (optional)
                 class _ProgressLogHandler(logging.Handler):
                     def emit(self, record: logging.LogRecord) -> None:
                         try:
@@ -1262,7 +1231,7 @@ class OPLIDE(tk.Tk):
 
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
-                # Use timestamp-based unique filenames per request; add suffix if needed
+                # Unique filenames per request
                 base = os.path.join(tmp_dir, f"gen_pyopl_{safe_ts}")
                 model_path = base + ".mod"
                 data_path = base + ".dat"
@@ -1330,7 +1299,6 @@ class OPLIDE(tk.Tk):
 
     def genai_feedback(self) -> None:
         """Prompt for a question and request feedback/revisions from GenAI for the current model/data."""
-        # Guard: ensure a model is selected
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
@@ -1343,7 +1311,7 @@ class OPLIDE(tk.Tk):
         if not question:
             return
 
-        # Ensure we have model/data files to pass to GenAI; save current buffers if needed
+        # Ensure we have model/data files; save current buffers if needed
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         model_path = self.model_file or os.path.join(tmp_dir, "current_model.mod")
@@ -1364,7 +1332,7 @@ class OPLIDE(tk.Tk):
         self.status_var.set("GenAI: requesting feedback...")
         self._clear_output("GenAI: Requesting feedback...")
 
-        # NEW: use visible request timestamp for filenames
+        # Use visible request timestamp for filenames
         sid = self._current_output_session_id or ""
         display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
@@ -1374,11 +1342,11 @@ class OPLIDE(tk.Tk):
 
         def run():
             try:
-                # Thread-safe progress hook -> Output panel
+                # Progress hook -> Output panel
                 def progress(msg: str) -> None:
                     self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
 
-                # Optional: bridge module logger to progress (controlled by setting)
+                # Bridge module logger to progress (optional)
                 class _ProgressLogHandler(logging.Handler):
                     def emit(self, record: logging.LogRecord) -> None:
                         try:
@@ -1450,7 +1418,6 @@ class OPLIDE(tk.Tk):
                                 d_base_name, d_ext = os.path.splitext(os.path.basename(data_path))
                                 d_ext = d_ext or ".dat"
                             else:
-                                # No data file existed: reuse model name as base
                                 d_base_name, d_ext = m_base_name, ".dat"
 
                             data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
@@ -1497,7 +1464,7 @@ class OPLIDE(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    # NEW: theme switching
+    # --- Theme ---
     def set_theme(self, theme_name: str) -> None:
         """Switch ttkbootstrap theme and reapply widget colors."""
         if theme_name not in ("flatly", "darkly"):
@@ -1506,17 +1473,16 @@ class OPLIDE(tk.Tk):
         try:
             self.style.theme_use(theme_name)
         except Exception:
-            # fallback: recreate style
             self.style = tb.Style(theme=theme_name)
         self._apply_theme_colors()
-        # Re-highlight for best contrast
+        # Re-highlight for contrast
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
-        # NEW: persist settings
+        # Persist settings
         self._save_settings()
 
-    # NEW: apply text widget colors based on theme
     def _apply_theme_colors(self) -> None:
+        """Apply text widget colors based on theme."""
         theme = self.theme_var.get()
         if theme == "darkly":
             editor_bg = "#2b3035"
@@ -1547,7 +1513,7 @@ class OPLIDE(tk.Tk):
         if hasattr(self, "data_text"):
             self.data_text.tag_configure("ERROR", background="#e06c75", foreground=error_fg)
 
-    # NEW: settings helpers (sample.py strategy)
+    # --- Settings ---
     def _init_settings_storage(self) -> None:
         """Initialize settings storage path."""
         try:
@@ -1555,7 +1521,7 @@ class OPLIDE(tk.Tk):
             config_dir.mkdir(parents=True, exist_ok=True)
             self._config_path = config_dir / CONFIG_FILENAME
         except Exception:
-            # Fallback to current working directory if platformdirs fails
+            # Fallback to current working directory
             self._config_path = Path(os.getcwd()) / CONFIG_FILENAME
 
     def _load_settings(self) -> dict[str, Any]:
@@ -1574,14 +1540,12 @@ class OPLIDE(tk.Tk):
             payload = {
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
-                "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else True,  # NEW
-                # NEW: persist last selected GenAI model
+                "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else True,
                 "genai-selection": (
                     f"{self.genai_provider}|{self.genai_model}"
                     if getattr(self, "genai_provider", None) and getattr(self, "genai_model", None)
                     else ""
                 ),
-                # NEW: persist generation method
                 "genai-method": self.genai_method_var.get() if hasattr(self, "genai_method_var") else "pyopl_generative",
             }
             with open(self._config_path, "w") as f:
@@ -1591,27 +1555,22 @@ class OPLIDE(tk.Tk):
 
     def _on_close(self) -> None:
         """Persist settings and close the app."""
-        # Flag to refuse further UI updates from background threads
         setattr(self, "_shutting_down", True)
         self._save_settings()
         try:
             self.destroy()
         finally:
-            # Ensure mainloop breaks even if destroy raised
             try:
                 self.quit()
             except Exception:
                 pass
 
-    # NEW: bind Ctrl/Cmd shortcuts
+    # --- Shortcuts ---
     def _bind_shortcuts(self) -> None:
-        # # Save current buffer
+        """Bind keyboard shortcuts."""
         self.bind_all("<Control-s>", self.save_current_buffer)
-        # New model
         self.bind_all("<Control-n>", self._new_model_shortcut)
-        # Run
         self.bind_all("<Control-r>", self._run_model_shortcut)
-        # GenAI shortcuts
         self.bind_all("<Control-g>", self._genai_generate_shortcut)
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
 
@@ -1627,7 +1586,6 @@ class OPLIDE(tk.Tk):
         self.new_model()
         return "break"
 
-    # NEW: wrappers for menu actions to work as accelerators
     def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self.run_model()
         return "break"
@@ -1640,7 +1598,6 @@ class OPLIDE(tk.Tk):
         self.genai_feedback()
         return "break"
 
-    # NEW: Undo/Redo shortcut wrappers
     def _undo_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self._undo()
         return "break"
@@ -1649,8 +1606,8 @@ class OPLIDE(tk.Tk):
         self._redo()
         return "break"
 
-    # NEW: save current tab (model or data)
     def save_current_buffer(self, event: Optional[tk.Event] = None) -> str:
+        """Save the current tab (model or data)."""
         try:
             idx = self.editor_notebook.index(self.editor_notebook.select())
             if idx == 0:
@@ -1663,8 +1620,8 @@ class OPLIDE(tk.Tk):
             self.save_data()
         return "break"
 
-    # NEW: save-as for current tab (model or data)
     def save_current_buffer_as(self, event: Optional[tk.Event] = None) -> str:
+        """Save-as for the current tab (model or data)."""
         try:
             idx = self.editor_notebook.index(self.editor_notebook.select())
             if idx == 0:
@@ -1675,21 +1632,21 @@ class OPLIDE(tk.Tk):
             pass
         return "break"
 
-    # NEW: About dialog handler
     def show_about(self) -> None:
+        """About dialog."""
         messagebox.showinfo(
             "About Rhetor",
             "Rhetor\n\n© 2025 Roberto Rossi",
         )
 
-    # NEW: async discovery wrapper to avoid blocking UI at startup and on refresh
+    # --- GenAI model discovery ---
     def _build_genai_model_menus_async(self) -> None:
         """Discover models in a background thread and populate the GenAI menu on completion."""
         if self._genai_loading:
-            return  # avoid concurrent discovery
+            return
         self._genai_loading = True
 
-        # Update placeholder UI
+        # Placeholder UI
         try:
             self.genai_menu.delete(0, tk.END)
         except Exception:
@@ -1719,17 +1676,14 @@ class OPLIDE(tk.Tk):
                 self._genai_loading = False
                 self._populate_genai_model_menus(provider_models)
 
-            # Ensure UI updates happen on the main thread
             self.after(0, on_done)
 
         threading.Thread(target=discover, daemon=True).start()
 
-    # NEW: populate GenAI menu given discovered models (UI-thread only)
     def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]) -> None:
         """Populate the GenAI menu with provider submenus and radio items per model."""
         if getattr(self, "_shutting_down", False):
             return
-        # Ensure the GenAI menu exists
         if not hasattr(self, "genai_menu"):
             self.genai_menu = tk.Menu(self.menubar, tearoff=0)
             self.menubar.add_cascade(label="GenAI", menu=self.genai_menu)
@@ -1766,7 +1720,7 @@ class OPLIDE(tk.Tk):
             if provider_models.get("ollama"):
                 add_provider_menu("Ollama", "ollama", provider_models["ollama"])
 
-            # NEW: Generation Method submenu
+            # Generation Method submenu
             method_menu = tk.Menu(self.genai_menu, tearoff=0)
             for label, key in self._genai_methods:
                 method_menu.add_radiobutton(
@@ -1784,7 +1738,7 @@ class OPLIDE(tk.Tk):
             )
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
 
-            # NEW: toggle for verbose LLM progress logs
+            # Verbose LLM progress logs
             self.genai_menu.add_separator()
             self.genai_menu.add_checkbutton(
                 label="Verbose LLM progress logs",
@@ -1800,7 +1754,7 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
-            # NEW: Prefer saved selection if available and present; otherwise, first available
+            # Prefer saved selection if available; otherwise first available
             preselected = False
             try:
                 if self._desired_genai_provider and self._desired_genai_model:
@@ -1827,15 +1781,16 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
-    # NEW: factory for selecting generation method
     def _make_select_genai_method_cmd(self, key: str) -> Callable[[], None]:
+        """Factory for selecting generation method."""
+
         def _cmd() -> None:
             self._on_select_genai_method(key)
 
         return _cmd
 
-    # NEW: selection handler for GenAI method choice
     def _on_select_genai_method(self, method_key: str) -> None:
+        """Update method selection and persist."""
         if getattr(self, "_shutting_down", False):
             return
         try:
@@ -1845,8 +1800,8 @@ class OPLIDE(tk.Tk):
             pass
         self._save_settings()
 
-    # NEW: helper to import the selected generator module
     def _import_selected_genai_module(self):
+        """Import the selected generator module, falling back to generative."""
         import importlib
 
         key = self.genai_method_var.get() or "pyopl_generative"
@@ -1860,52 +1815,55 @@ class OPLIDE(tk.Tk):
                 pass
             return importlib.import_module("pyopl.genai.pyopl_generative")
 
-    # NEW: helper to map method key to label
     def _label_for_method(self, key: str) -> str:
+        """Return UI label for a method key."""
         for label, k in self._genai_methods:
             if k == key:
                 return label
         return "Generhetor"
 
-    # NEW: factory to build typed callbacks for menu commands (avoids lambda mypy issue)
     def _make_select_model_cmd(self, provider_key: str, model_name: str) -> Callable[[], None]:
+        """Factory for selecting a GenAI model."""
+
         def _cmd() -> None:
             self._on_select_genai_model(provider_key, model_name)
 
         return _cmd
 
-    # NEW: typed helpers to replace lambdas in menus
     def _make_change_font_cmd(self, size: int) -> Callable[[], None]:
+        """Factory for changing font size."""
+
         def _cmd() -> None:
             self._change_font_size(size)
 
         return _cmd
 
     def _make_theme_cmd(self, theme: str) -> Callable[[], None]:
+        """Factory for changing theme."""
+
         def _cmd() -> None:
             self.set_theme(theme)
 
         return _cmd
 
     def _open_url(self, url: str) -> None:
+        """Open a URL in the default browser."""
         try:
             webbrowser.open_new_tab(url)
         except Exception as e:
             messagebox.showerror("Open URL", f"Failed to open URL:\n{url}\n\n{type(e).__name__}")
 
-    # NEW: selection handler for GenAI model choice
     def _on_select_genai_model(self, provider_key: str, model_name: str) -> None:
+        """Update GenAI model selection and persist."""
         if getattr(self, "_shutting_down", False):
             return
         self.genai_provider = provider_key
         self.genai_model = model_name
         try:
-            # Ensure the variable reflects the current selection
             self.genai_selection_var.set(f"{provider_key}|{model_name}")
             self.status_var.set(f"GenAI selected: {provider_key} • {model_name}")
         except Exception:
             pass
-        # NEW: persist selection immediately
         self._save_settings()
 
 
