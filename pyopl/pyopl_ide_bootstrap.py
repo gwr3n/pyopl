@@ -239,9 +239,15 @@ class OPLIDE(tk.Tk):
         filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
 
+        # NEW: Edit Menu
+        editmenu = tk.Menu(menubar, tearoff=0)
+        editmenu.add_command(label="Undo", command=self._undo, accelerator=self._accel("Z"))
+        editmenu.add_command(label="Redo", command=self._redo, accelerator=f"Shift+{self._accel('Z')}")
+        menubar.add_cascade(label="Edit", menu=editmenu)
+
         # Run Menu
         runmenu = tk.Menu(menubar, tearoff=0)
-        runmenu.add_command(label="Run Model", command=self.run_model)
+        runmenu.add_command(label="Run Model", command=self.run_model, accelerator=self._accel("R"))
         # Solver selection submenu
         solver_menu = tk.Menu(runmenu, tearoff=0)
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi")
@@ -405,6 +411,19 @@ class OPLIDE(tk.Tk):
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
+        # NEW: bind Undo/Redo on the widgets (preempts Text class bindings)
+        self.model_text.bind("<Control-z>", self._undo_shortcut)
+        self.model_text.bind("<Control-Shift-Z>", self._redo_shortcut)
+        self.model_text.bind("<Control-Shift-z>", self._redo_shortcut)
+        self.data_text.bind("<Control-z>", self._undo_shortcut)
+        self.data_text.bind("<Control-Shift-Z>", self._redo_shortcut)
+        self.data_text.bind("<Control-Shift-z>", self._redo_shortcut)
+        if sys.platform == "darwin":
+            self.model_text.bind("<Command-z>", self._undo_shortcut)
+            self.model_text.bind("<Command-Shift-Z>", self._redo_shortcut)
+            self.data_text.bind("<Command-z>", self._undo_shortcut)
+            self.data_text.bind("<Command-Shift-Z>", self._redo_shortcut)
+
         # Add tabs
         self.editor_notebook.add(self.model_frame, text="Model")
         self.editor_notebook.add(self.data_frame, text="Data")
@@ -444,7 +463,7 @@ class OPLIDE(tk.Tk):
         # Right: Requests list with scrollbar
         right = ttk.Frame(container, width=220)
         right.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        right.rowconfigure(1, weight=1)
+        right.rowconfigure(0, weight=1)
 
         self.request_listbox = tk.Listbox(
             right,
@@ -453,8 +472,8 @@ class OPLIDE(tk.Tk):
         )
         request_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
-        self.request_listbox.grid(row=1, column=0, sticky="nsew")
-        request_scroll.grid(row=1, column=1, sticky="ns")
+        self.request_listbox.grid(row=0, column=0, sticky="nsew")
+        request_scroll.grid(row=0, column=1, sticky="ns")
 
         # Selection handler to show a previous request's output
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
@@ -820,6 +839,35 @@ class OPLIDE(tk.Tk):
         self.data_text.mark_set(tk.INSERT, "1.0")
         self.data_text.see(tk.INSERT)
         return "break"  # Prevent default Tkinter behavior
+    
+    # NEW: active editor resolver
+    def _get_active_text_widget(self) -> tk.Text:
+        try:
+            w = self.focus_get()
+        except Exception:
+            w = None
+        if w is self.model_text or w is self.data_text:
+            return w  # type: ignore[return-value]
+        # Fallback to selected tab
+        idx = self.editor_notebook.index(self.editor_notebook.select())
+        return self.model_text if idx == 0 else self.data_text
+    
+    # NEW: Undo/Redo actions
+    def _undo(self) -> None:
+        tw = self._get_active_text_widget()
+        try:
+            tw.edit_undo()
+        except tk.TclError:
+            pass
+        self._on_text_change(tw, is_data=(tw is self.data_text))
+
+    def _redo(self) -> None:
+        tw = self._get_active_text_widget()
+        try:
+            tw.edit_redo()
+        except tk.TclError:
+            pass
+        self._on_text_change(tw, is_data=(tw is self.data_text))
 
     # --- Model Execution ---
     def run_model(self) -> None:
@@ -1181,6 +1229,14 @@ class OPLIDE(tk.Tk):
         )
         self._clear_output("GenAI: Generating model and data...")
 
+        # Build unique filenames from the visible request timestamp (same as Requests list)
+        sid = self._current_output_session_id
+        display_ts = self._output_session_display.get(
+            sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        # Make it filename-safe (avoid spaces/colons)
+        safe_ts = display_ts.replace(":", "-").replace(" ", "_")
+
         def run():
             try:
                 # Thread-safe progress hook -> Output panel (always show essential progress)
@@ -1207,8 +1263,15 @@ class OPLIDE(tk.Tk):
 
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
-                model_path = os.path.join(tmp_dir, "gen_pyopl_model.mod")
-                data_path = os.path.join(tmp_dir, "gen_pyopl_data.dat")
+                # Use timestamp-based unique filenames per request; add suffix if needed
+                base = os.path.join(tmp_dir, f"gen_pyopl_{safe_ts}")
+                model_path = base + ".mod"
+                data_path = base + ".dat"
+                i = 1
+                while os.path.exists(model_path) or os.path.exists(data_path):
+                    model_path = f"{base}_{i}.mod"
+                    data_path = f"{base}_{i}.dat"
+                    i += 1
 
                 try:
                     # Dispatch to selected generation method
@@ -1302,6 +1365,16 @@ class OPLIDE(tk.Tk):
         self.status_var.set("GenAI: requesting feedback...")
         self._clear_output("GenAI: Requesting feedback...")
 
+        # NEW: use visible request timestamp for filenames
+        sid = self._current_output_session_id
+        display_ts = self._output_session_display.get(
+            sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        safe_ts = display_ts.replace(":", "-").replace(" ", "_")
+
+        # Track if a data file actually existed before this request
+        had_data_file = bool(self.data_file and os.path.exists(self.data_file))
+
         def run():
             try:
                 # Thread-safe progress hook -> Output panel
@@ -1352,36 +1425,70 @@ class OPLIDE(tk.Tk):
                     apply = False
                     if revised_model or revised_data:
                         apply = messagebox.askyesno(
-                            "Apply Revisions?", "GenAI returned revised model/data. Apply these revisions to the editors?"
+                            "Apply Revisions?",
+                            "GenAI returned revised model/data. Apply these revisions to the editors?",
                         )
                     if apply:
+                        os.makedirs(tmp_dir, exist_ok=True)
+
+                        # Derive model base name and extension from model_path
+                        m_base_name, m_ext = os.path.splitext(os.path.basename(model_path))
+                        m_ext = m_ext or ".mod"
+                        model_base = os.path.join(tmp_dir, f"{m_base_name}_{safe_ts}")
+                        model_tgt = model_base + m_ext
+                        i = 1
+                        while os.path.exists(model_tgt):
+                            model_tgt = f"{model_base}_{i}{m_ext}"
+                            i += 1
+
+                        # Always write a timestamped model (revised or current text)
+                        model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
+                        with open(model_tgt, "w", encoding="utf-8") as f:
+                            f.write(model_content)
+
+                        # Data target only if revised_data is present
+                        data_tgt = None
+                        if revised_data:
+                            if had_data_file:
+                                d_base_name, d_ext = os.path.splitext(os.path.basename(data_path))
+                                d_ext = d_ext or ".dat"
+                            else:
+                                # No data file existed: reuse model name as base
+                                d_base_name, d_ext = m_base_name, ".dat"
+
+                            data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
+                            data_tgt = data_base + d_ext
+                            j = 1
+                            while os.path.exists(data_tgt):
+                                data_tgt = f"{data_base}_{j}{d_ext}"
+                                j += 1
+                            with open(data_tgt, "w", encoding="utf-8") as f:
+                                f.write(revised_data)
+
+                        # Update editors with revised content only
                         if revised_model:
                             self.model_text.delete("1.0", tk.END)
                             self.model_text.insert(tk.END, revised_model)
                         if revised_data:
                             self.data_text.delete("1.0", tk.END)
                             self.data_text.insert(tk.END, revised_data)
-                        # Keep files pointing to saved paths
-                        self.model_file = model_path
-                        self.data_file = data_path
-                        # Write applied content back to files
-                        try:
-                            with open(model_path, "w") as f:
-                                f.write(self.model_text.get("1.0", tk.END))
-                            with open(data_path, "w") as f:
-                                f.write(self.data_text.get("1.0", tk.END))
-                        except Exception as e2:
-                            self._append_output(f"\nWarning: Failed to write revisions to files: {e2}\n")
+
+                        # Point IDE to the new files
+                        self.model_file = model_tgt
+                        if data_tgt:
+                            self.data_file = data_tgt
+
                         # Update tabs and highlighting
-                        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
-                        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
+                        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
+                        if data_tgt:
+                            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
                         self.highlight(self.model_text, is_data=False)
                         self.highlight(self.data_text, is_data=True)
                         self._append_output("\nRevisions applied to editors.\n")
+
                     self.status_var.set("GenAI: feedback complete")
 
                 self.after(0, after_feedback)
-
             except Exception as e:
 
                 def on_error(e):
@@ -1503,14 +1610,46 @@ class OPLIDE(tk.Tk):
     def _bind_shortcuts(self) -> None:
         # # Save current buffer
         self.bind_all("<Control-s>", self.save_current_buffer)
-        # self.bind_all("<Command-s>", self.save_current_buffer)
         # New model
         self.bind_all("<Control-n>", self._new_model_shortcut)
-        # self.bind_all("<Command-n>", self._new_model_shortcut)
+        # Run
+        self.bind_all("<Control-r>", self._run_model_shortcut)
+        # GenAI shortcuts
+        self.bind_all("<Control-g>", self._genai_generate_shortcut)
+        self.bind_all("<Control-i>", self._genai_feedback_shortcut)
+
+        if sys.platform == "darwin":
+            self.bind_all("<Command-s>", self.save_current_buffer)
+            self.bind_all("<Command-n>", self._new_model_shortcut)
+            self.bind_all("<Command-r>", self._run_model_shortcut)
+            self.bind_all("<Command-g>", self._genai_generate_shortcut)
+            self.bind_all("<Command-i>", self._genai_feedback_shortcut)
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
         self.new_model()
+        return "break"
+
+    # NEW: wrappers for menu actions to work as accelerators
+    def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self.run_model()
+        return "break"
+
+    def _genai_generate_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self.genai_generate()
+        return "break"
+
+    def _genai_feedback_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self.genai_feedback()
+        return "break"
+    
+    # NEW: Undo/Redo shortcut wrappers
+    def _undo_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self._undo()
+        return "break"
+
+    def _redo_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self._redo()
         return "break"
 
     # NEW: save current tab (model or data)
@@ -1643,8 +1782,8 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_cascade(label="Method", menu=method_menu)
-            self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate)
-            self.genai_menu.add_command(label="Ask...", command=self.genai_feedback)
+            self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G"))
+            self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
 
             # NEW: toggle for verbose LLM progress logs
             self.genai_menu.add_separator()
