@@ -4,11 +4,11 @@ import logging  # NEW
 import os
 import sys  # NEW
 import threading
-from datetime import datetime  # NEW
 
 # --- Third-Party Imports ---
 import tkinter as tk
 import webbrowser  # FIX: needed for Help menu links
+from datetime import datetime  # NEW
 from pathlib import Path  # NEW
 from tkinter import filedialog, messagebox, scrolledtext, ttk  # NEW: dialogs for GenAI prompts
 from typing import Any, Callable, Optional, Protocol  # add typing for optional Pillow modules
@@ -440,8 +440,8 @@ class OPLIDE(tk.Tk):
         # Container that splits Output (left) and Requests list (right)
         container = ttk.Frame(output_frame)
         container.pack(fill=tk.BOTH, expand=1, padx=5, pady=(0, 5))
-        container.columnconfigure(0, weight=1)   # Output area expands
-        container.columnconfigure(1, weight=0)   # Requests list fixed width
+        container.columnconfigure(0, weight=1)  # Output area expands
+        container.columnconfigure(1, weight=0)  # Requests list fixed width
         container.rowconfigure(0, weight=1)
 
         # Left: Output text
@@ -839,7 +839,7 @@ class OPLIDE(tk.Tk):
         self.data_text.mark_set(tk.INSERT, "1.0")
         self.data_text.see(tk.INSERT)
         return "break"  # Prevent default Tkinter behavior
-    
+
     # NEW: active editor resolver
     def _get_active_text_widget(self) -> tk.Text:
         try:
@@ -851,7 +851,7 @@ class OPLIDE(tk.Tk):
         # Fallback to selected tab
         idx = self.editor_notebook.index(self.editor_notebook.select())
         return self.model_text if idx == 0 else self.data_text
-    
+
     # NEW: Undo/Redo actions
     def _undo(self) -> None:
         tw = self._get_active_text_widget()
@@ -879,7 +879,7 @@ class OPLIDE(tk.Tk):
 
         # NEW: start a new request session instead of clearing permanently
         self._clear_output("Run: Running model...")
-        
+
         self.status_var.set("Running model...")
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
@@ -989,6 +989,7 @@ class OPLIDE(tk.Tk):
                 self.after(0, apply)
 
             except Exception as e:
+
                 def on_err(err: Exception):
                     self._append_output(f"\nError: {err}\n")
                     self.status_var.set(f"Error: {err}")
@@ -1230,10 +1231,8 @@ class OPLIDE(tk.Tk):
         self._clear_output("GenAI: Generating model and data...")
 
         # Build unique filenames from the visible request timestamp (same as Requests list)
-        sid = self._current_output_session_id
-        display_ts = self._output_session_display.get(
-            sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
+        sid = self._current_output_session_id or ""
+        display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         # Make it filename-safe (avoid spaces/colons)
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
@@ -1366,10 +1365,8 @@ class OPLIDE(tk.Tk):
         self._clear_output("GenAI: Requesting feedback...")
 
         # NEW: use visible request timestamp for filenames
-        sid = self._current_output_session_id
-        display_ts = self._output_session_display.get(
-            sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
+        sid = self._current_output_session_id or ""
+        display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         # Track if a data file actually existed before this request
@@ -1642,7 +1639,7 @@ class OPLIDE(tk.Tk):
     def _genai_feedback_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self.genai_feedback()
         return "break"
-    
+
     # NEW: Undo/Redo shortcut wrappers
     def _undo_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self._undo()
@@ -1782,7 +1779,9 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_cascade(label="Method", menu=method_menu)
-            self.genai_menu.add_command(label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G"))
+            self.genai_menu.add_command(
+                label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G")
+            )
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
 
             # NEW: toggle for verbose LLM progress logs
