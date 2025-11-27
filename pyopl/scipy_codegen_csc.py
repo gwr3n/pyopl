@@ -1672,7 +1672,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         Return index as tuple if list/tuple, else unchanged. Recursively normalizes nested indices.
         """
         if isinstance(idx, (list, tuple)):
-            return tuple(SciPyCodeGeneratorBase.normalize_index(e) for e in idx)
+            return tuple(SciPyCSCCodeGenerator.normalize_index(e) for e in idx)
         return idx
 
     # === Section: Private Helpers ===
