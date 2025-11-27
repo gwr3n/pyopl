@@ -11,13 +11,6 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 
 ---
 
-## Set Covering Problem (`covering`)
-**Files:** `covering.mod`, `covering.dat`
-- **Description:** Selects a subset of sets to cover all elements at minimum cost.
-- **Features:** Binary variables for set selection, coverage constraints, cost minimization.
-
----
-
 ## Crew Pairing Problem (`crew_pairing`)
 **Files:** `crew_pairing.mod`, `crew_pairing.dat`
 - **Description:** Selects a set of crew pairings to cover all flights at minimum cost.
@@ -36,6 +29,13 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 **Files:** `graph_coloring.mod`, `graph_coloring.dat`
 - **Description:** Assigns colors to graph nodes so that adjacent nodes have different colors, minimizing the number of colors used.
 - **Features:** Integer color variables, big-M encoding for adjacency constraints, minimization of maximum color.
+
+---
+
+## Inventory Routing Problem (`inventory_routing`)
+**Files:** `inventory_routing.mod`, `inventory_routing.dat`
+- **Description:** Determines delivery schedules and quantities for multiple customers over time, balancing inventory holding and transportation costs.
+- **Features:** Integer delivery and inventory variables, vehicle capacity constraints, time-dependent routing, cost minimization.
 
 ---
 
@@ -60,6 +60,20 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 
 ---
 
+## On/Off Production with Outsourcing (`on_off_outsourcing`)
+**Files:** `on_off_outsourcing.mod`, `on_off_outsourcing.dat`
+- **Description:** Plans production over time with binary on/off decisions and optional outsourcing to satisfy demand at minimum total cost.
+- **Features:** Binary setup (on/off) variables, production and inventory variables, capacity active when on, demand balance, outsourcing quantities and costs, setup and production costs.
+
+---
+
+## P-Dispersion Problem (`p-dispersion`)
+**Files:** `p-dispersion.mod`, `p-dispersion.txt`
+- **Description:** Selects exactly p locations from a set of candidates to maximize the minimum pairwise distance among the selected locations.
+- **Features:** Binary selection variables, cardinality constraint (sum of selections equals p), auxiliary minimum-distance variable, pairwise distance constraints (big-M/indicator), max–min objective.
+
+---
+
 ## Plant Location Problem (`plant_location`)
 **Files:** `plant_location.mod`, `plant_location.dat`
 - **Description:** Decides which plants to open and how to supply customers to minimize fixed and transportation costs.
@@ -74,10 +88,31 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 
 ---
 
+## Set Covering Problem (`set_covering`)
+**Files:** `set_covering.mod`, `set_covering.txt`
+- **Description:** Selects a minimum-cost collection of sets so that every element is covered by at least one chosen set.
+- **Features:** Binary selection variables, coverage constraints (each element covered ≥ 1), cost minimization.
+
+---
+
 ## Set Partitioning Problem (`set_partitioning`)
 **Files:** `set_partitioning.mod`, `set_partitioning.dat`
 - **Description:** Selects sets to partition all elements exactly once at minimum cost.
 - **Features:** Binary selection variables, partitioning constraints, cost minimization.
+
+---
+
+## Stochastic Production Problem (`stochastic_production`)
+**Files:** `stochastic_production.mod`, `stochastic_production.txt`
+- **Description:** Plans production over time under demand uncertainty using scenario-based stochastic programming to minimize expected total cost.
+- **Features:** Scenario probabilities, nonanticipativity constraints on first-stage decisions, production and inventory variables, capacity limits, per-scenario demand balance, expected-cost minimization.
+
+---
+
+## Stochastic Scheduling Problem (`stochastic_scheduling`)
+**Files:** `stochastic_scheduling.mod`, `stochastic_scheduling.txt`
+- **Description:** Schedules jobs on machines under uncertainty using scenario-based stochastic programming to minimize expected performance (e.g., makespan or tardiness).
+- **Features:** Scenario probabilities, nonanticipativity on first-stage sequencing/scheduling decisions, machine capacity (no-overlap) and precedence constraints, per-scenario timing constraints, expected-objective minimization.
 
 ---
 
@@ -113,13 +148,6 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 **Files:** `workforce_planning.mod`, `workforce_planning.dat`
 - **Description:** Plans workforce levels over time to meet demand and minimize costs, considering hiring, firing, and training.
 - **Features:** Integer and binary variables, workforce balance, cost minimization, hiring/firing/training constraints.
-
----
-
-## Inventory Routing Problem (`inventory_routing`)
-**Files:** `inventory_routing.mod`, `inventory_routing.dat`
-- **Description:** Determines delivery schedules and quantities for multiple customers over time, balancing inventory holding and transportation costs.
-- **Features:** Integer delivery and inventory variables, vehicle capacity constraints, time-dependent routing, cost minimization.
 
 ---
 
