@@ -4,6 +4,7 @@ import logging  # NEW
 import os
 import sys  # NEW
 import threading
+from datetime import datetime  # NEW
 
 # --- Third-Party Imports ---
 import tkinter as tk
@@ -105,6 +106,13 @@ class OPLIDE(tk.Tk):
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
         self._genai_loading: bool = False  # NEW: avoid concurrent loads
+
+        # NEW: output session history
+        self._output_sessions: dict[str, str] = {}
+        self._output_session_ids: list[str] = []
+        self._output_session_display: dict[str, str] = {}
+        self._current_output_session_id: Optional[str] = None
+        self._viewing_output_session_id: Optional[str] = None
 
         # NEW: init settings storage and load persisted settings
         self._init_settings_storage()
@@ -355,7 +363,6 @@ class OPLIDE(tk.Tk):
 
         # Model Editor tab
         self.model_frame = ttk.Frame(self.editor_notebook)
-        ttk.Label(self.model_frame, text="Model (.mod)").pack(anchor="nw", padx=5, pady=5)  # CHANGED: use ttk.Label
         self.model_text = scrolledtext.ScrolledText(
             self.model_frame,
             wrap=tk.NONE,
@@ -382,7 +389,6 @@ class OPLIDE(tk.Tk):
 
         # Data Editor tab
         self.data_frame = ttk.Frame(self.editor_notebook)
-        ttk.Label(self.data_frame, text="Data (.dat)").pack(anchor="nw", padx=5, pady=5)  # CHANGED: use ttk.Label
         self.data_text = scrolledtext.ScrolledText(
             self.data_frame,
             wrap=tk.NONE,
@@ -409,11 +415,21 @@ class OPLIDE(tk.Tk):
         self.editor_frame = editor_frame
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
-        """Create the output panel."""
+        """Create the output panel with a request history list on the right."""
         output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
-        ttk.Label(output_frame, text="Output").pack(anchor="nw", padx=5, pady=5)  # CHANGED: use ttk.Label
+
+        # Container that splits Output (left) and Requests list (right)
+        container = ttk.Frame(output_frame)
+        container.pack(fill=tk.BOTH, expand=1, padx=5, pady=(0, 5))
+        container.columnconfigure(0, weight=1)   # Output area expands
+        container.columnconfigure(1, weight=0)   # Requests list fixed width
+        container.rowconfigure(0, weight=1)
+
+        # Left: Output text
+        left = ttk.Frame(container)
+        left.grid(row=0, column=0, sticky="nsew")
         self.output_text = scrolledtext.ScrolledText(
-            output_frame,
+            left,
             wrap=tk.WORD,
             height=12,
             font=(self.editor_font_family, self.current_font_size - 1),
@@ -423,7 +439,26 @@ class OPLIDE(tk.Tk):
             relief=tk.FLAT,
             bd=0,
         )
-        self.output_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        self.output_text.pack(fill=tk.BOTH, expand=1)
+
+        # Right: Requests list with scrollbar
+        right = ttk.Frame(container, width=220)
+        right.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        right.rowconfigure(1, weight=1)
+
+        self.request_listbox = tk.Listbox(
+            right,
+            exportselection=False,
+            height=12,
+        )
+        request_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.request_listbox.yview)
+        self.request_listbox.configure(yscrollcommand=request_scroll.set)
+        self.request_listbox.grid(row=1, column=0, sticky="nsew")
+        request_scroll.grid(row=1, column=1, sticky="ns")
+
+        # Selection handler to show a previous request's output
+        self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
+
         parent.add(output_frame, minsize=150)
 
     def _setup_status_bar(self) -> None:
@@ -793,10 +828,10 @@ class OPLIDE(tk.Tk):
 
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
         data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
-        self.output_text.config(state="normal")
-        self.output_text.delete(1.0, tk.END)
-        self.output_text.insert(tk.END, "Running model...\n")
-        self.output_text.config(state="disabled")
+
+        # NEW: start a new request session instead of clearing permanently
+        self._clear_output("Run: Running model...")
+        
         self.status_var.set("Running model...")
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
@@ -873,39 +908,44 @@ class OPLIDE(tk.Tk):
                 with open(data_file, "w") as f:
                     f.write(data_code)
                 results = solve(model_file, data_file, solver=solver_choice)
-                self.output_text.config(state="normal")
-                self.output_text.insert(tk.END, f"\nSolver: {solver_choice}\n")
-                self.output_text.insert(tk.END, "\nStatus: " + results.get("status", "UNKNOWN") + "\n")
+
+                # Buffer all output and append on UI thread
+                buf: list[str] = []
+                buf.append(f"\nSolver: {solver_choice}\n")
+                buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
                 if "objective_value" in results and results["objective_value"] is not None:
-                    self.output_text.insert(tk.END, f"Objective: {results['objective_value']}\n")
+                    buf.append(f"Objective: {results['objective_value']}\n")
                 if "solution" in results and results["solution"]:
-                    self.output_text.insert(tk.END, "Solution:\n")
+                    buf.append("Solution:\n")
                     for k, v in results["solution"].items():
-                        self.output_text.insert(tk.END, f"  {k}: {v}\n")
+                        buf.append(f"  {k}: {v}\n")
                 if "stats" in results and results["stats"]:
-                    self.output_text.insert(tk.END, "\nSolver Statistics (from 'stats' field):\n")
+                    buf.append("\nSolver Statistics (from 'stats' field):\n")
                     if isinstance(results["stats"], dict):
                         for stat_key, stat_value in results["stats"].items():
-                            self.output_text.insert(tk.END, f"  {stat_key}: {stat_value}\n")
-                    else:  # If it's a string or other format
-                        self.output_text.insert(tk.END, str(results["stats"]) + "\n")
+                            buf.append(f"  {stat_key}: {stat_value}\n")
+                    else:
+                        buf.append(str(results["stats"]) + "\n")
                 else:
-                    self.output_text.insert(
-                        tk.END,
-                        "\nNo detailed solver statistics available from pyopl.solve.\n",
-                    )
-
+                    buf.append("\nNo detailed solver statistics available from pyopl.solve.\n")
                 if "message" in results:
-                    self.output_text.insert(tk.END, f"Message: {results['message']}\n")
-                self.output_text.config(state="disabled")
-                # Set status bar to success or solver message
-                msg = results.get("message") or results.get("status", "Done")
-                self.status_var.set(msg)
+                    buf.append(f"Message: {results['message']}\n")
+
+                def apply():
+                    for s in buf:
+                        self._append_output(s)
+                    # Set status bar to success or solver message
+                    msg = results.get("message") or results.get("status", "Done")
+                    self.status_var.set(msg)
+
+                self.after(0, apply)
+
             except Exception as e:
-                self.output_text.config(state="normal")
-                self.output_text.insert(tk.END, f"\nError: {e}\n")
-                self.output_text.config(state="disabled")
-                self.status_var.set(f"Error: {e}")
+                def on_err(err: Exception):
+                    self._append_output(f"\nError: {err}\n")
+                    self.status_var.set(f"Error: {err}")
+
+                self.after(0, on_err, e)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -990,19 +1030,71 @@ class OPLIDE(tk.Tk):
 
     # --- GenAI actions ---
     def _clear_output(self, header: str = "") -> None:
-        """Clear the Output panel and optionally write a header line."""
-        self.output_text.config(state="normal")
-        self.output_text.delete("1.0", tk.END)
-        if header:
-            self.output_text.insert(tk.END, header + "\n")
-        self.output_text.config(state="disabled")
+        """Start a new Output request session and display its header."""
+        self._begin_new_output_session(header)  # NEW
 
     def _append_output(self, text: str) -> None:
-        """Append text to the Output panel safely."""
-        self.output_text.config(state="normal")
-        self.output_text.insert(tk.END, text)
-        self.output_text.see(tk.END)
-        self.output_text.config(state="disabled")
+        """Append text to the current Output session and, if visible, to the Output panel."""
+        sid = getattr(self, "_current_output_session_id", None)
+        if sid:
+            self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
+        # Only update UI if we're viewing this session
+        if sid and getattr(self, "_viewing_output_session_id", None) == sid and self.output_text.winfo_exists():
+            self.output_text.config(state="normal")
+            self.output_text.insert(tk.END, text)
+            self.output_text.see(tk.END)
+            self.output_text.config(state="disabled")
+
+    # NEW: internal helpers for request history
+    def _begin_new_output_session(self, header: str = "") -> None:
+        """Create a new request session, add it to the right-hand list, and show it."""
+        dt = datetime.now()
+        display = dt.strftime("%Y-%m-%d %H:%M:%S")  # for the list
+        session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")  # unique internal id
+
+        initial = (header + "\n") if header else ""
+        self._output_sessions[session_id] = initial
+        self._output_session_display[session_id] = display
+        self._output_session_ids.insert(0, session_id)
+
+        # Update UI list (most recent at top)
+        if hasattr(self, "request_listbox"):
+            try:
+                self.request_listbox.insert(0, display)
+                self.request_listbox.selection_clear(0, tk.END)
+                self.request_listbox.selection_set(0)
+                self.request_listbox.activate(0)
+            except Exception:
+                pass
+
+        self._current_output_session_id = session_id
+        self._viewing_output_session_id = session_id
+        self._show_output_session(session_id)
+
+    def _show_output_session(self, session_id: str) -> None:
+        """Display a session's content in the Output panel."""
+        content = self._output_sessions.get(session_id, "")
+        if hasattr(self, "output_text") and self.output_text.winfo_exists():
+            self.output_text.config(state="normal")
+            self.output_text.delete("1.0", tk.END)
+            self.output_text.insert(tk.END, content)
+            self.output_text.see(tk.END)
+            self.output_text.config(state="disabled")
+
+    def _on_request_select(self, event: Optional[tk.Event]) -> None:
+        """Handle selection in the Requests list."""
+        try:
+            sel = self.request_listbox.curselection()
+            if not sel:
+                return
+            index = int(sel[0])
+            if index < 0 or index >= len(self._output_session_ids):
+                return
+            sid = self._output_session_ids[index]
+            self._viewing_output_session_id = sid
+            self._show_output_session(sid)
+        except Exception:
+            pass
 
     def _ask_multiline(self, title: str, prompt: str, initial_text: str = "") -> Optional[str]:
         """Show a resizable multi-line prompt dialog and return the text or None if cancelled."""
