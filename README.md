@@ -180,102 +180,101 @@ PyOPL supports a rich subset of OPL constructs for linear and mixed-integer prog
     dvar float x;
     dvar int+ y[1..N][1..M];
     dvar boolean z[i in Items, j in Cities];
-    dvar float x[arcs]; // tuple-indexed
-    dvar float y[nested]; // nested tuple-indexed
+    dvar float x[arcs]; // tuple-indexed (set of tuples)
     ```
 - **Ranges:**
-  - Inline ranges: `range T = 1..N;`
-  - Ranges with general integer expressions: `range MyRange = 10..(N-1);`
-  - External ranges (value from `.dat`): `range T;`
+  - Inline ranges with general integer expressions: `range T = 1..(N+M-1);`
+  - Named ranges used for indexing must be declared in the model with explicit bounds. .dat-supplied ranges are not accepted for indexing.
 - **Sets:**
-  - Declared in the model, values provided in `.dat`:
+  - Typed scalar sets declared in the model, values provided in `.dat`:
     ```opl
-    set Cities;
-    set MySet;
-    {string} Gasolines = { "R92", "R95" };
-    {Arc} arcs = { <"A", "B", 10.0>, <"B", "C", 12.5> };
-    {Outer} nested = { <<1,2>, 3.5>, <<2,3>, 4.0> };
+    {string} Cities = { "A", "B" };
+    {int}    Periods = { 1, 2, 3 };
+    {float}  Weights = { 1.5, 2.0 };
+    {boolean} Flags = { true, false };
+    ```
+  - Sets of tuples (including nested), declared in the model; values can be provided inline or in `.dat`:
+    ```opl
+    tuple Arc { string u; string v; float cost; }
+    {Arc} arcs = { <"A","B",10.0>, <"B","C",12.5> };
     ```
 - **Tuple Types and Sets of Tuples:**
-  - Define tuple types and sets of tuples for use as indices:
+  - Define tuple types and use them as indices; field access supported (e.g., `a.cost`):
     ```opl
-    tuple Arc { string start; string end; float cost; }
     tuple Inner { int i; int j; }
-    tuple Outer { Inner pair; float value; }
-    {Arc} arcs = { <"A", "B", 10.0>, <"B", "C", 12.5> };
+    tuple Outer { Inner pair; float val; }
     {Outer} nested = { <<1,2>, 3.5>, <<2,3>, 4.0> };
     dvar float x[arcs];
     dvar float y[nested];
-    param float w[arcs] = [1.5, 2.5];
     ```
-  - Tuple field access: `a.cost`, `a[2]`, including nested fields (`o.pair.i`).
-  - Empty and singleton tuples: `< >`, `<1,>`
-  - All tuple literal forms (including nested and empty) are supported in both model and data files.
+  - Tuple arrays indexed by a set (data records) are supported and accessible via field access in expressions.
 - **Parameters:**
-  - Scalar and indexed, with inline values, implicit external, or explicit external declaration:
+  - Scalar and indexed parameters with inline values or external values in `.dat`:
     ```opl
-    param float C;           // external, value from .dat
-    param int num_items = ...; // explicit external
-    float alpha = 5.0;       // inline value
-    int+ n = ...;            // non-negative, external
-    param float d[i in Items, j in Cities] = ...; // explicit external indexed
-    param float w[arcs] = [1.5, 2.5]; // tuple-indexed
+    param float C;
+    float alpha = 5.0;
+    param float d[i in Items, j in Cities];
+    param float w[arcs]; // tuple-indexed parameter
     ```
+  - Computed parameters from expressions and iterator headers are supported; they are evaluated at compile time into concrete arrays.
 - **Indexing:**
-  - Use named ranges/sets or integer expressions as indices:
-    ```opl
-    dvar float x[i in Items, j in Cities];
-    dvar float y[1..N][1..M];
-    dvar float x[arcs]; // tuple-indexed
-    dvar float y[nested]; // nested tuple-indexed
-    ```
+  - Use named ranges/sets or expressions as indices (including tuple indices over sets of tuples).
 - **Constraints:**
-  - Comparison: `<=`, `>=`, `==`, `<`, `>`
-  - Not-equal: `!=` (boolean XOR or numeric disjunctive big-M with automatic span-based tightening)
-  - Implication: `(antecedent) => (consequent)`; Gurobi uses indicator constraints when possible, otherwise a tightened big-M; SciPy uses tightened big-M for linear comparison antecedent/consequent pairs.
-  - Conditional (ternary) expressions: `(cond) ? thenExpr : elseExpr` (ground conditions only)
-  - Boolean-valued objectives and constraints (interpreted as 1/0)
-  - Boolean expression trees (and/or/not) in constraints (Gurobi: full support, SciPy: limited)
+  - Linear comparisons: `<=`, `>=`, `==`, `<`, `>`
+  - Not-equal: `!=`
+    - For boolean vars: XOR linearization
+    - For numeric: disjunctive big-M with automatic tightening where possible
+  - Implication: `(antecedent) => (consequent)`
+    - Gurobi: uses indicator constraints when possible, or tightened big-M otherwise
+    - SciPy: supports linear antecedent/consequent via big-M; boolean combinations are linearized to auxiliaries
+  - Conditional (ternary) expressions: `(cond) ? thenExpr : elseExpr` (condition must be ground)
+  - Boolean-valued constraints and boolean expression trees (and/or/not) are supported and linearized in constraints
+  - Conditional constraints: `if (ground_condition) { ... } else { ... }` (compile-time rewrite)
 - **forall:**
   - Multi-indexed, with optional index constraints, over ranges, sets, or sets of tuples:
     ```opl
     forall (i in Items, j in Items: i != j)
         x[i] + x[j] <= 1;
     forall (a in arcs)
-        x[a] >= w[a];
-    forall (o in nested)
-        y[o] >= o.value;
+        x[a] >= a.cost;
     ```
 - **sum:**
   - Multi-indexed summation, with optional index constraints, over ranges, sets, or sets of tuples:
     ```opl
     minimize sum (i in Items, j in Items: i != j) (cost[i][j] * x[i][j]);
     minimize sum (a in arcs) (a.cost * x[a]);
-    minimize sum (o in nested) (o.value * y[o]);
     ```
-  - Tuple field access is supported in the sum/forall body, objectives, and constraints.
+  - Sum of comparisons (cardinality constraints) and reified forms (e.g., `b == (sum(...) >= k)`) are recognized and linearized.
 - **Tuple Field Access:**
-  - Use dot notation or integer index to access tuple fields in expressions, e.g., `a.cost * x[a]`, `o.pair.i`.
-- **Logical / Boolean Expressions (Gurobi advanced):**
-  - Boolean expression trees with `and`, `or`, `not` over comparison atoms are linearized to auxiliary binaries and can appear inside implications.
-  - SciPy currently restricts implication antecedents to a single comparison (or `b == 1`).
+  - Use dot notation or positional access in expressions, e.g., `a.cost * x[a]`, `o.pair.i`.
+- **Logical / Boolean Expressions:**
+  - Gurobi: boolean expression trees with `and`, `or`, `not` over comparisons are linearized to auxiliary binaries and can appear inside implications.
+  - SciPy: boolean trees over linear comparisons are supported via auxiliaries; combined with big-M for gating. Implication antecedents must be a single comparison or a boolean variable (no composite trees in implications).
 - **Automatic Big-M Tightening:**
-  - For `!=` and general implication encodings, PyOPL infers bounds from variable types (boolean in [0,1], non-negative domains, simple linear combinations, finite sums) to compute the smallest safe M (span of possible difference). Falls back to a large constant only if bounds are unknown.
+  - For `!=`, implication, and reification, PyOPL infers bounds from variable types, simple linear combinations, and finite sums to compute tighter M values; falls back to conservative constants if unknown.
+- **Functions and Aggregates:**
+  - Functions (ground-only): `sqrt(...)`
+  - Aggregates: `maxl(arg1, arg2, ...)`, `minl(arg1, arg2, ...)`
+  - Convex lowering:
+    - Objective: supported in convex forms only (minimize maxl(...), maximize minl(...)); introduces auxiliary epigraph/hypograph constraints
+    - Constraints: supported in monotone convex forms (e.g., `maxl(...) <= rhs`, `lhs >= maxl(...)`, `minl(...) >= rhs`, `lhs <= minl(...)`)
 - **Comments:**
   - Single-line: `// comment` or `# comment`
   - Multi-line: `/* ... */`
 - **Data Files:**
-  - Support for numbers, lists, nested lists, sets, ranges, and nested tuple literals in `.dat` files:
+  - Support numbers, lists, nested lists, sets, ranges, and nested tuple literals:
     ```opl
     n = 4;
     w = [2, 3, 4, 5];
-    my_set = {1, 2, 3};
     Items = 1..5;
-    arcs = { <"A", "B", 10.0>, <"B", "C", 12.5> };
+    arcs = { <"A","B",10.0>, <"B","C",12.5> };
     nested = { <<1,2>, 3.5>, <<2,3>, 4.0> };
-    singletons = { <1,>, <2,> };
-    empties = { < > };
     ```
+  - 2D parameters accept row-major lists or keyed-row dict-of-lists for common shapes (set×range, set×set), e.g.:
+    ```
+    Demand = [ "StoreA" [1,2,3], "StoreB" [4,5,6] ];
+    ```
+  - Typed prefixes for sets must be in the model; data files use untyped assignments (e.g., `Cities = { "A", "B" };`).
 
 ## License
 
@@ -286,7 +285,7 @@ MIT License.
 - PyOPL robustly supports tuple types, sets of tuples (including nested), tuple field access, `sum` / `forall` over tuple sets, `!=`, and implication constraints.
 - Composite boolean implication antecedents are currently only available in the Gurobi backend.
 - Features not yet supported: piecewise linear expressions, SOS constraints, user-defined functions, nonlinear arithmetic, bi-implication `<=>`, global constraints (alldiff, etc.).
-- SciPy backend implication support is limited to linear comparisons (no multi-operator boolean trees yet).
+- SciPy backend implication: antecedents must be a single comparison or a boolean variable; composite boolean antecedents are not yet supported (boolean trees are supported in general constraints).
 - Automatic big-M tightening applies where bounds are inferable; otherwise a conservative fallback is used.
 - Gurobi must be installed and licensed for `solver='gurobi'`.
 - SciPy/HiGHS is open-source and can be used for linear programs and, if supported by your SciPy version, mixed-integer programs (MIP, i.e., integer and boolean variables). Integrality is passed to `linprog` if present, but full MIP support depends on your SciPy installation.
