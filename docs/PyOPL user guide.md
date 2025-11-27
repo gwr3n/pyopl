@@ -23,6 +23,7 @@
   - [Multi-indexed and Tuple-indexed Constraints](#multi-indexed-and-tuple-indexed-constraints)
   - [`forall` Constraints](#forall-constraints)
   - [`sum` Expressions](#sum-expressions)
+  - [If/Else Constraints](#ifelse-constraints)
 - [Expressions](#expressions)
 - [Comments](#comments)
 - [Example Models](#example-models)
@@ -70,7 +71,7 @@ Decision variables are the unknowns to be determined by the optimizer. They can 
     ```
     Declares `flow` as a 2D array, `assign` as a 1D array, and shows use of named ranges/sets and multi-indexing.
 
-- New: Index expressions in variable/parameter indexing can be integer expressions (e.g., t-1, (i+j), -k) and tuple field access, provided the expression is integer-valued by type inference.
+- Index expressions in variable/parameter indexing can be integer expressions (e.g., t-1, (i+j), -k) and tuple field access, provided the expression is integer-valued by type inference.
 
 - New: Tuple arrays are supported as first-class data (see “Tuple arrays” below).
 
@@ -82,6 +83,7 @@ range MyRange = 10..(N-1);
 ```
 Important:
 - Named ranges must be declared in the model with explicit bounds (inline). Model-time “external ranges” declared as `range T;` are parsed but not supported by the code generators at loop sites. Always provide bounds in the model (e.g., `range T = 1..N;`). Data files can still provide scalar parameters N used in range expressions.
+- Bounds must be non-negative literals when they are literal numbers. Negative literal bounds (e.g., `-1..10`) are rejected; use expressions like `(1 - k)..N` if you need a computed negative.
 
 ### Parameters (`param`)
 Parameters are known values provided to the model. They can be scalar or indexed, and can be declared as external (value from `.dat`) either implicitly or explicitly.
@@ -115,7 +117,7 @@ set Cities = {"A", "B", "C"}; // Set assignment with explicit values
 ```
 Sets can be used as indices for variables and parameters. When declared without assignment, the set values must be provided in a `.dat` file. When assigned in the model, the set is immediately available.
 
-- New: Typed scalar sets (e.g., strings) are supported:
+- Typed scalar sets (e.g., strings) are supported:
 ```opl
 {string} Cities = { "A", "B", "C" };
 {string} Warehouses;         // external typed set
@@ -127,6 +129,7 @@ Typed scalar sets can be used as indices for variables/parameters; parameters in
 
 Note:
 - Code generation emits a helper index map `<SetName>_index` for typed scalar sets to support list-backed parameters internally. This is not part of the OPL syntax, but may appear in generated code.
+- In addition to `{string}`, typed scalar sets `{int}`, `{float}`, and `{boolean}` are also supported.
 
 ### Tuple Types and Sets of Tuples
 
@@ -183,6 +186,8 @@ Additional supported forms:
 ```opl
 Items = 1..5;            // creates a range_data entry (used for validation/data, not for loops)
 ```
+Note: range bounds in .dat must be non-negative integers.
+
 - Key-value arrays supporting string or tuple keys, mapping to scalar or array values:
 ```opl
 v = [
@@ -271,6 +276,14 @@ The objective defines the function to optimize. Only one objective is allowed.
 - Note: Backends expect linear objectives. To use boolean/comparison logic in an objective, linearize via sums of reified comparisons or explicit binaries. For example:
   - Preferred: `minimize sum(i in I) (x[i] >= 1);` (compiled via auxiliary binaries)
   - Avoid raw comparison as the entire objective (e.g., `minimize (x > 0);`) with Gurobi; instead reify or sum indicators.
+
+- min/max aggregates (convex forms)                             
+  - In objectives: supported as convex forms only:
+    - `minimize max(i in I) expr(i)` and `maximize min(i in I) expr(i)` are rewritten with an auxiliary and epigraph/hypograph constraints.
+  - In constraints: supported convex placements:
+    - `max(i in I) expr(i) <= rhs`, `lhs >= max(i in I) expr(i)`,
+      `min(i in I) expr(i) >= rhs`, `lhs <= min(i in I) expr(i)`.
+  - Other placements (equality with max/min, nested non-convex uses) are not supported.
 
 ---
 
@@ -429,6 +442,22 @@ minimize sum (o in nested) (o.value * y[o]);
 ```
 - Tuple field access is supported in the sum/forall body, objectives, and constraints.
 
+### If/Else Constraints
+You can guard groups of constraints with a ground (non-decision) condition:
+```opl
+subject to {
+  if (N >= 5) {
+    x <= 10;
+  } else {
+    x <= 7;
+  }
+  // Inside forall, the condition can reference the iterators:
+  forall(t in 1..T)
+    if (t >= 2) { x[t] >= x[t-1]; }
+}
+```
+Conditions must not reference decision variables. Inside `forall`, iterator variables are allowed.
+
 ---
 
 ## Expressions
@@ -445,6 +474,9 @@ Expressions can include:
     - `a.cost` (where `a` is a tuple of type `Arc`)
     - `o.pair.i` (nested tuple field access)
     - Supported in sum/forall, objectives, and constraints.
+- **Functions:**
+  - `sqrt(x)` (float result)
+  - `minl(a, b, c, ...)`, `maxl(a, b, c, ...)` over a list of numeric arguments (ground in parameters/computed expressions).
 
 Additional notes:
 - Index expressions can be arithmetic or field accesses as long as they are integer-typed:
