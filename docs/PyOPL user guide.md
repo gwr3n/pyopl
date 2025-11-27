@@ -29,6 +29,7 @@
 - [Error Handling](#error-handling)
 - [Solving a Model](#solving-a-model)
 - [Limitations](#limitations)
+- [GenAI Assistants (experimental)](#genai-assistants-experimental)
 - [PyOPL IDE](#pyopl-ide)
   - [Launching the IDE](#launching-the-ide)
 
@@ -436,7 +437,7 @@ Expressions can include:
 - **Numbers:** `10`, `3.14`, `1e-3`
 - **Variable Names:** `x`, `my_param`
 - **Indexed Variables:** `flow[i][j]`, `weight[k]`, `x[i in Items, j in Cities]`, `x[a]` where `a` is a tuple, `y[o]` where `o` is a nested tuple
-- **Operators:** `+`, `-`, `*`, `/`, `==`, `!=`, `<=`, `>=`, `<`, `>`
+- **Operators:** `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<=`, `>=`, `<`, `>`
 - **Unary Minus:** `-x`
 - **Parentheses:** `(x + y)`
 - **Boolean values:** `true`, `false` (converted to `1` or `0` in arithmetic)
@@ -544,6 +545,8 @@ subject to {
 
 PyOPL provides robust semantic error messages for undeclared symbols, type mismatches, illegal operations, and more. Errors include line numbers when available, and diagnostics are shown in both the API and IDE output.
 
+- .dat file diagnostics include precise line numbers for unexpected EOF and token-context errors.  
+
 ---
 
 ## Solving a Model
@@ -592,13 +595,66 @@ Solver specifics:
 
 ---
 
+## GenAI Assistants
+
+PyOPL includes optional generative assistants that can scaffold OPL models and `.dat` files from natural‑language descriptions and iteratively refine drafts. These helpers live under `pyopl/genai/` and use retrieval over bundled examples and grammar to keep outputs close to valid PyOPL/OPL.
+
+What they do:
+- Turn a problem description into a first model/data draft.
+- Refine or repair a draft based on errors or feedback.
+- Ground generation with the bundled example models (`pyopl/opl_models/`) and grammar artifacts (`pyopl/grammars/`).
+
+Available strategies (choose based on preference):
+- pyopl_standard: Single‑pass baseline generation.
+- pyopl_chain_of_thought: Multi‑step rationale before emitting code.
+- pyopl_tree_of_thoughts: Explore multiple alternatives and pick the best draft.
+- pyopl_reflexion: Generate → critique → revise in short loops.
+- pyopl_cafa: Single‑shot generation with optional few‑shot retrieval; compiles and writes files, with optional alignment assessment and usage/cost tracking.
+- pyopl_chain_of_experts: Specialist prompts (modeling, data, validation) with aggregation.
+- pyopl_generative: Iterative model/data synthesis with few‑shot retrieval, compile‑and‑revise loops, optional alignment check.
+
+All strategies feature OpenAI/Gemini/Ollama support.
+
+Typical usage (Python):
+```python
+from pyopl.pyopl_generative import generative_solve
+
+prompt = """
+Formulate a simple binary knapsack model with capacity 10 and 4 items.
+Return both model (.mod) and data (.dat).
+"""
+
+prompt = (
+        "A small inventory routing problem involves a company that must deliver a single product "
+        "from a central warehouse to several retail stores over a planning horizon. "
+        "Each store has a limited storage capacity and a known demand for each period. "
+        "The company must decide how much inventory to deliver to each store and when, "
+        "while minimizing the total cost of transportation and inventory holding, "
+        "and ensuring that no store runs out of stock or exceeds its storage capacity."
+    )
+model_file = "/content/gen_pyopl_model.mod"
+data_file = "/content/gen_pyopl_data.dat"
+
+assessment = generative_solve(prompt, model_file, data_file, "gpt-5", llm_provider="openai")
+print("Assessment of alignment:", assessment)
+```
+
+Notes and tips:
+- These assistants generate text; compile and solve using the usual API (`solve(...)`) and fix any semantic errors the compiler reports.
+- Retrieval grounding uses:
+  - Example models: `pyopl/opl_models/*/*.mod`
+  - Grammar files: `pyopl/grammars/PyOPL_GBNF`, `pyopl/grammars/JSON_SCHEMA_AST.json`
+- LLM provider setup is external to PyOPL; configure your preferred client/credentials as required by your environment before calling these helpers.
+
+---
+
 ## PyOPL IDE
 
 PyOPL includes a graphical IDE for editing, running, and debugging OPL models and data files. The IDE features:
 
 - Syntax highlighting for OPL models and data files
 - Side-by-side model and data editors
-- Output panel for solver results, errors, and messages
+- Output panel for solver results, errors, messages, and detailed solver statistics (the 'stats' field)
 - File tree for easy switching between model and data
 - Solver selection (Gurobi or SciPy/HiGHS) — choose your preferred solver from the menu
 - Font size adjustment and modern UI
