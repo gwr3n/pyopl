@@ -647,6 +647,11 @@ Available strategies (choose based on preference):
 
 All strategies feature OpenAI/Gemini/Ollama support.
 
+To enable GenAI features, set at least one of the following environment variables before launching Rhetor:
+- ```OPENAI_API_KEY``` — for OpenAI models
+- ```GEMINI_API_KEY``` — for Google Gemini
+- or install and run ollama locally.
+
 Typical usage (Python):
 ```python
 from pyopl.pyopl_generative import generative_solve
