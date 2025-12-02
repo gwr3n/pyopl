@@ -902,7 +902,9 @@ def _run_chain_of_experts(
 
     experts_catalog = list(COE_DEFAULT_EXPERTS)
 
+    trials_run = 0
     for trial in range(1, max_trials + 1):
+        trials_run = trial
         _notify(progress, f"[CoE] Trial {trial}/{max_trials}: forward-thought construction")
         comments: List[Dict[str, str]] = []
         expert_stack: List[str] = []
@@ -1090,7 +1092,7 @@ def _run_chain_of_experts(
             _notify(progress, "[CoE] Compiled ✓ after reflection (alignment disabled)")
             break
 
-    return model_code, data_code, assessment_text, syntax_errors, total_usage
+    return model_code, data_code, assessment_text, syntax_errors, total_usage, trials_run
 
 
 # ---------- Public API ----------
@@ -1138,7 +1140,7 @@ def generative_solve(
     )
 
     # Run Chain-of-Experts
-    model_code, data_code, assessment_text, syntax_errors, usage_totals = _run_chain_of_experts(
+    model_code, data_code, assessment_text, syntax_errors, usage_totals, trials_run = _run_chain_of_experts(
         problem=prompt,
         grammar_implementation=grammar_implementation,
         provider=provider,
@@ -1214,7 +1216,7 @@ def generative_solve(
     if return_statistics:
         # iterations reflects trials attempted (best-effort)
         return {
-            "iterations": int(iterations),
+            "iterations": int(trials_run),
             "assessment": (assessment_text or "").strip(),
             "syntax_errors": syntax_errors,
             "cost": cost,
