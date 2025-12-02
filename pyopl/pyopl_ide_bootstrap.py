@@ -1399,6 +1399,15 @@ class OPLIDE(tk.Tk):
                         # Derive model base name and extension from model_path
                         m_base_name, m_ext = os.path.splitext(os.path.basename(model_path))
                         m_ext = m_ext or ".mod"
+
+                        # If a timestamp suffix already exists, strip it before appending a new one
+                        def _strip_ts_suffix(name: str) -> str:
+                            import re
+                            m = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?$", name)
+                            return m.group(1) if m and m.group(1) else name
+
+                        m_base_name = _strip_ts_suffix(m_base_name)
+
                         model_base = os.path.join(tmp_dir, f"{m_base_name}_{safe_ts}")
                         model_tgt = model_base + m_ext
                         i = 1
@@ -1419,6 +1428,9 @@ class OPLIDE(tk.Tk):
                                 d_ext = d_ext or ".dat"
                             else:
                                 d_base_name, d_ext = m_base_name, ".dat"
+
+                            # Strip existing timestamp suffix if present
+                            d_base_name = _strip_ts_suffix(d_base_name)
 
                             data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
                             data_tgt = data_base + d_ext
