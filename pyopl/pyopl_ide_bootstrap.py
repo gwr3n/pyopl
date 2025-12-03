@@ -340,17 +340,23 @@ class OPLIDE(tk.Tk):
             self,
             orient=tk.VERTICAL,
             sashrelief=tk.FLAT,
-            bd=2,
-            bg="#e9ecef",
+            bd=0,  # Remove bevels
+            bg="#e9ecef",  # Will be overridden by _apply_theme_colors
+            sashwidth=6,  # Thin, modern sash
+            showhandle=False,
+            relief=tk.FLAT,
         )
         editor_output_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+
+        # Keep a reference for theme updates
+        self.editor_output_paned = editor_output_paned
 
         self._setup_editors(editor_output_paned)
         self._setup_output(editor_output_paned)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
         """Create model and data editor frames inside a Notebook."""
-        editor_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
+        editor_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=0)
         parent.add(editor_frame, stretch="always")
 
         # Notebook
@@ -425,7 +431,7 @@ class OPLIDE(tk.Tk):
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
         """Create the output panel with a request history list on the right."""
-        output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=1)
+        output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=0)
 
         # Split Output (left) and Requests list (right)
         container = ttk.Frame(output_frame)
@@ -1404,6 +1410,7 @@ class OPLIDE(tk.Tk):
                         # If a timestamp suffix already exists, strip it before appending a new one
                         def _strip_ts_suffix(name: str) -> str:
                             import re
+
                             m = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?$", name)
                             return m.group(1) if m and m.group(1) else name
 
@@ -1498,27 +1505,44 @@ class OPLIDE(tk.Tk):
         """Apply text widget colors based on theme."""
         theme = self.theme_var.get()
         if theme == "darkly":
+            root_bg = "#212529"
             editor_bg = "#2b3035"
             editor_fg = "#e9ecef"
             caret_fg = "#e9ecef"
             output_bg = "#212529"
             output_fg = "#e9ecef"
             error_fg = "white"
+            paned_bg = "#2b3035"
         else:
+            root_bg = "#f8f9fa"
             editor_bg = "#ffffff"
             editor_fg = "#212529"
             caret_fg = "#212529"
             output_bg = "#f8f9fa"
             output_fg = "#212529"
             error_fg = "black"
+            paned_bg = "#e9ecef"
+
+        # Root background
+        try:
+            self.configure(bg=root_bg)
+        except Exception:
+            pass
+
+        # Paned background (and keep it flat)
+        if hasattr(self, "editor_output_paned") and self.editor_output_paned.winfo_exists():
+            try:
+                self.editor_output_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+            except Exception:
+                pass
 
         # Apply to editors
         if hasattr(self, "model_text"):
-            self.model_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg)
+            self.model_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
         if hasattr(self, "data_text"):
-            self.data_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg)
+            self.data_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
         if hasattr(self, "output_text"):
-            self.output_text.config(bg=output_bg, fg=output_fg)
+            self.output_text.config(bg=output_bg, fg=output_fg, relief=tk.FLAT, bd=0)
 
         # Adjust ERROR tag for contrast
         if hasattr(self, "model_text"):
