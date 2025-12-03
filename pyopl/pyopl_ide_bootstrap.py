@@ -460,7 +460,8 @@ class OPLIDE(tk.Tk):
             exportselection=False,
             height=12,
         )
-        request_scroll = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.request_listbox.yview)
+        # Use classic tk.Scrollbar to match ScrolledText
+        request_scroll = tk.Scrollbar(right, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
