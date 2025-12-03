@@ -364,7 +364,8 @@ class OPLIDE(tk.Tk):
         self.editor_notebook.pack(fill=tk.BOTH, expand=1)
 
         # Model editor
-        self.model_frame = ttk.Frame(self.editor_notebook)
+        # Use a styled frame so we can control its background color
+        self.model_frame = ttk.Frame(self.editor_notebook, style="Editor.TFrame")
         self.model_text = scrolledtext.ScrolledText(
             self.model_frame,
             wrap=tk.NONE,
@@ -390,7 +391,8 @@ class OPLIDE(tk.Tk):
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
         # Data editor
-        self.data_frame = ttk.Frame(self.editor_notebook)
+        # Use the same styled frame for consistent background
+        self.data_frame = ttk.Frame(self.editor_notebook, style="Editor.TFrame")
         self.data_text = scrolledtext.ScrolledText(
             self.data_frame,
             wrap=tk.NONE,
@@ -1543,6 +1545,12 @@ class OPLIDE(tk.Tk):
             self.data_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
         if hasattr(self, "output_text"):
             self.output_text.config(bg=output_bg, fg=output_fg, relief=tk.FLAT, bd=0)
+
+        # Ensure the editor frames share the same background as the text area
+        try:
+            self.style.configure("Editor.TFrame", background=editor_bg)
+        except Exception:
+            pass
 
         # Adjust ERROR tag for contrast
         if hasattr(self, "model_text"):
