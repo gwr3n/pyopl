@@ -27,7 +27,6 @@ jobs:
     - name: Free up disk space
       run: |
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-        docker rmi $(docker images -q) || true
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
