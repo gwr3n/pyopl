@@ -29,7 +29,9 @@ dependencies = [
   "google-generativeai>=0.8.5",
   "ollama>=0.6.0",
   "tensorflow>=2.16.2",
-  "sentence-transformers>=5.1.1"
+  "sentence-transformers>=5.1.1",
+  "tf-keras>=2.16.0",
+  "tiktoken>=0.12.0"
 ]
 
 [project.urls]
