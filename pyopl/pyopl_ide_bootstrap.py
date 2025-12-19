@@ -2,14 +2,14 @@
 import json
 import logging
 import multiprocessing
-import queue
-import traceback
 import os
+import queue
 import sys
 import threading
 
 # --- Third-Party Imports ---
 import tkinter as tk
+import traceback
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +28,7 @@ from .genai.pyopl_generative import (
 from .gurobi_codegen import GurobiCodeGenerator
 
 # --- Local Imports ---
-from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, solve
+from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
 from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 # Settings storage (same strategy as sample.py)
@@ -81,9 +81,7 @@ TOKEN_COLORS = {
 }
 
 
-def _solve_wrapper(
-    model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue
-) -> None:
+def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue) -> None:
     """Wrapper to run solve in a separate process."""
     try:
         try:
@@ -129,8 +127,8 @@ class OPLIDE(tk.Tk):
         self._run_status_base: str = "Running model..."
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
-        self._highlight_debounce_ms = 150          # fast pass while typing
-        self._highlight_validate_idle_ms = 800     # expensive lex/parse after idle
+        self._highlight_debounce_ms = 150  # fast pass while typing
+        self._highlight_validate_idle_ms = 800  # expensive lex/parse after idle
         self._highlight_after_ids: dict[tuple[int, str], str] = {}
 
         # Track last syntax error per editor (prevents cross-editor contamination)
@@ -372,7 +370,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             return None
         return None
-    
+
     def _set_run_menu_running(self, running: bool) -> None:
         """Toggle Run/Stop menu item."""
         idx = self._find_run_stop_menu_index()
@@ -598,7 +596,7 @@ class OPLIDE(tk.Tk):
         self._update_caret_position(text_widget)
         # Debounce highlighting so we don't re-lex/parse on every keystroke
         self._schedule_highlight(text_widget, is_data)
-    
+
     def _cancel_scheduled_highlight(self, text_widget: tk.Text, kind: str) -> None:
         key = (id(text_widget), kind)
         after_id = self._highlight_after_ids.pop(key, None)
@@ -607,7 +605,7 @@ class OPLIDE(tk.Tk):
                 self.after_cancel(after_id)
             except Exception:
                 pass
-    
+
     def _schedule_highlight(self, text_widget: tk.Text, is_data: bool) -> None:
         """Debounce highlight work to keep typing responsive."""
         if getattr(self, "_shutting_down", False):
@@ -882,7 +880,6 @@ class OPLIDE(tk.Tk):
                 end = self._index_from_pos(code, m.end())
                 text_widget.tag_add("NUMBER", start, end)
 
-
     def _index_from_pos(self, text: str, pos: int) -> str:
         """
         Convert a character offset in a string to a Tk Text index (line.char).
@@ -1035,6 +1032,7 @@ class OPLIDE(tk.Tk):
             self._run_started_at = self.tk.call("clock", "seconds")  # integer seconds
         except Exception:
             import time
+
             self._run_started_at = time.time()
         self._tick_run_timer()
 
@@ -1060,6 +1058,7 @@ class OPLIDE(tk.Tk):
             now = float(self.tk.call("clock", "seconds"))
         except Exception:
             import time
+
             now = time.time()
 
         started = self._run_started_at or now
@@ -1076,7 +1075,7 @@ class OPLIDE(tk.Tk):
 
         # Reschedule
         self._run_timer_after_id = self.after(1000, self._tick_run_timer)
-    
+
     # --- Model Execution ---
     def run_model(self) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
@@ -1176,7 +1175,6 @@ class OPLIDE(tk.Tk):
 
         self.after(100, self._poll_solver)
 
-
     def stop_model(self) -> None:
         p = self._solver_process
         q = self._solver_queue
@@ -1210,13 +1208,17 @@ class OPLIDE(tk.Tk):
         self._set_run_menu_running(False)
 
     def _poll_solver(self) -> None:
-        if not self._solver_process:
+        # _poll_solver is scheduled via `after()`, so it can run after `stop_model()`
+        # has already nulled these out.
+        p = self._solver_process
+        q = self._solver_queue
+        if not p or not q:
             return
 
         try:
-            kind, payload = self._solver_queue.get_nowait()
+            kind, payload = q.get_nowait()
         except queue.Empty:
-            if self._solver_process and self._solver_process.is_alive():
+            if p.is_alive():
                 self.after(100, self._poll_solver)
                 return
 
@@ -1234,8 +1236,7 @@ class OPLIDE(tk.Tk):
 
         # Got a message => process should be done
         try:
-            if self._solver_process:
-                self._solver_process.join(timeout=0.1)
+            p.join(timeout=0.1)
         except Exception:
             pass
 
@@ -1280,7 +1281,6 @@ class OPLIDE(tk.Tk):
             self._append_output(s)
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
-
 
     def export_model(self) -> None:
         """Export the current model as a standalone Python file using the selected solver's code generator."""
