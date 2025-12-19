@@ -123,6 +123,11 @@ class OPLIDE(tk.Tk):
         self._solver_queue: Optional[multiprocessing.Queue] = None
         self._current_solver_choice: str = "gurobi"
 
+        # --- Run timer (status bar elapsed time while solving) ---
+        self._run_started_at: Optional[float] = None
+        self._run_timer_after_id: Optional[str] = None
+        self._run_status_base: str = "Running model..."
+
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150          # fast pass while typing
         self._highlight_validate_idle_ms = 800     # expensive lex/parse after idle
@@ -1022,13 +1027,63 @@ class OPLIDE(tk.Tk):
             pass
         self._on_text_change(tw, is_data=(tw is self.data_text))
 
+    def _start_run_timer(self, base_msg: str = "Running model...") -> None:
+        """Start updating the status bar with elapsed solve time (every second)."""
+        self._stop_run_timer()
+        self._run_status_base = base_msg
+        try:
+            self._run_started_at = self.tk.call("clock", "seconds")  # integer seconds
+        except Exception:
+            import time
+            self._run_started_at = time.time()
+        self._tick_run_timer()
+
+    def _stop_run_timer(self) -> None:
+        """Stop elapsed-time updates."""
+        if self._run_timer_after_id:
+            try:
+                self.after_cancel(self._run_timer_after_id)
+            except Exception:
+                pass
+        self._run_timer_after_id = None
+        self._run_started_at = None
+
+    def _tick_run_timer(self) -> None:
+        """Update status bar with elapsed time so far; reschedule if still running."""
+        p = self._solver_process
+        if not (p and p.is_alive()):
+            self._stop_run_timer()
+            return
+
+        # Compute elapsed
+        try:
+            now = float(self.tk.call("clock", "seconds"))
+        except Exception:
+            import time
+            now = time.time()
+
+        started = self._run_started_at or now
+        elapsed = max(0.0, now - started)
+
+        # Format as HH:MM:SS
+        total = int(elapsed)
+        hh = total // 3600
+        mm = (total % 3600) // 60
+        ss = total % 60
+        t = f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+        self.status_var.set(f"{self._run_status_base} (elapsed {t})")
+
+        # Reschedule
+        self._run_timer_after_id = self.after(1000, self._tick_run_timer)
+    
     # --- Model Execution ---
     def run_model(self) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
         if self._solver_process and self._solver_process.is_alive():
             messagebox.showinfo("Run Model", "Model is already running.")
             return
-        
+
         import re
 
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
@@ -1115,7 +1170,10 @@ class OPLIDE(tk.Tk):
         self._solver_process.start()
 
         self._set_run_menu_running(True)
-        self.status_var.set("Running model...")
+
+        # Start elapsed-time status updates (every second)
+        self._start_run_timer("Running model...")
+
         self.after(100, self._poll_solver)
 
 
@@ -1135,6 +1193,9 @@ class OPLIDE(tk.Tk):
 
         self._solver_process = None
         self._solver_queue = None
+
+        # Stop timer updates
+        self._stop_run_timer()
 
         # Best-effort cleanup of queue resources
         try:
@@ -1162,6 +1223,10 @@ class OPLIDE(tk.Tk):
             # Process ended but no message
             self._set_run_menu_running(False)
             self._append_output("\nError: Solver process terminated unexpectedly.\n")
+
+            # Stop timer updates
+            self._stop_run_timer()
+
             self.status_var.set("Error: Solver process terminated.")
             self._solver_process = None
             self._solver_queue = None
@@ -1177,6 +1242,9 @@ class OPLIDE(tk.Tk):
         self._solver_process = None
         self._solver_queue = None
         self._set_run_menu_running(False)
+
+        # Stop timer updates
+        self._stop_run_timer()
 
         if kind == "success":
             self._display_solve_results(payload)
