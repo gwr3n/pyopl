@@ -1,6 +1,9 @@
 # --- Standard Library Imports ---
 import json
 import logging
+import multiprocessing
+import queue
+import traceback
 import os
 import sys
 import threading
@@ -78,6 +81,23 @@ TOKEN_COLORS = {
 }
 
 
+def _solve_wrapper(
+    model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue
+) -> None:
+    """Wrapper to run solve in a separate process."""
+    try:
+        try:
+            from .pyopl_core import solve  # package import
+        except Exception:
+            # Fallback if launched in a context where relative imports fail
+            from pyopl.pyopl_core import solve  # type: ignore
+
+        results = solve(model_file, data_file, solver=solver_choice)
+        q.put(("success", results))
+    except Exception as e:
+        q.put(("error", f"{e}\n\n{traceback.format_exc()}"))
+
+
 class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
@@ -97,6 +117,19 @@ class OPLIDE(tk.Tk):
         self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")
+
+        # Solver process
+        self._solver_process: Optional[multiprocessing.Process] = None
+        self._solver_queue: Optional[multiprocessing.Queue] = None
+        self._current_solver_choice: str = "gurobi"
+
+        # --- Highlight scheduling (prevents UI lag on large files) ---
+        self._highlight_debounce_ms = 150          # fast pass while typing
+        self._highlight_validate_idle_ms = 800     # expensive lex/parse after idle
+        self._highlight_after_ids: dict[tuple[int, str], str] = {}
+
+        # Track last syntax error per editor (prevents cross-editor contamination)
+        self._last_syntax_error_by_widget: dict[int, Optional[str]] = {}
 
         # GenAI selection state
         self.genai_selection_var = tk.StringVar(value="")  # format: "provider|model"
@@ -241,7 +274,12 @@ class OPLIDE(tk.Tk):
 
         # Run
         runmenu = tk.Menu(menubar, tearoff=0)
-        runmenu.add_command(label="Run Model", command=self.run_model, accelerator=self._accel("R"))
+        self.run_menu = runmenu
+        runmenu.add_command(
+            label="Run Model",
+            command=self.run_model,
+            accelerator=self._accel("R"),
+        )
         solver_menu = tk.Menu(runmenu, tearoff=0)
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi")
         solver_menu.add_radiobutton(label="Scipy (HiGHS)", variable=self.solver, value="scipy")
@@ -307,6 +345,50 @@ class OPLIDE(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.config(menu=menubar)
+
+    def _find_run_stop_menu_index(self) -> Optional[int]:
+        """
+        Find the index of the Run/Stop menu entry by its label.
+        This avoids relying on a fixed numeric index.
+        """
+        if not hasattr(self, "run_menu"):
+            return None
+        try:
+            last = self.run_menu.index("end")
+            if last is None:
+                return None
+            for i in range(int(last) + 1):
+                try:
+                    label = self.run_menu.entrycget(i, "label")
+                except Exception:
+                    continue
+                if label in ("Run Model", "Stop Model"):
+                    return i
+        except Exception:
+            return None
+        return None
+    
+    def _set_run_menu_running(self, running: bool) -> None:
+        """Toggle Run/Stop menu item."""
+        idx = self._find_run_stop_menu_index()
+        if idx is None:
+            return
+
+        if running:
+            # Requirement: Stop has no shortcut (clear displayed accelerator)
+            self.run_menu.entryconfigure(
+                idx,
+                label="Stop Model",
+                command=self.stop_model,
+                accelerator="",
+            )
+        else:
+            self.run_menu.entryconfigure(
+                idx,
+                label="Run Model",
+                command=self.run_model,
+                accelerator=self._accel("R"),
+            )
 
     def _accel(self, key: str) -> str:
         """Return platform-aware accelerator label."""
@@ -507,8 +589,75 @@ class OPLIDE(tk.Tk):
     # --- Event Handlers and Core Logic ---
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
-        self.highlight(text_widget, is_data)
+        # Keep caret responsive immediately
         self._update_caret_position(text_widget)
+        # Debounce highlighting so we don't re-lex/parse on every keystroke
+        self._schedule_highlight(text_widget, is_data)
+    
+    def _cancel_scheduled_highlight(self, text_widget: tk.Text, kind: str) -> None:
+        key = (id(text_widget), kind)
+        after_id = self._highlight_after_ids.pop(key, None)
+        if after_id:
+            try:
+                self.after_cancel(after_id)
+            except Exception:
+                pass
+    
+    def _schedule_highlight(self, text_widget: tk.Text, is_data: bool) -> None:
+        """Debounce highlight work to keep typing responsive."""
+        if getattr(self, "_shutting_down", False):
+            return
+
+        # Cancel any pending runs for this widget
+        self._cancel_scheduled_highlight(text_widget, "fast")
+        self._cancel_scheduled_highlight(text_widget, "validate")
+
+        if is_data:
+            # Data: fast regex highlight shortly after typing, then expensive validate after idle
+            self._highlight_after_ids[(id(text_widget), "fast")] = self.after(
+                self._highlight_debounce_ms,
+                self._run_scheduled_highlight,
+                text_widget,
+                True,
+                False,  # validate=False => regex-only path for .dat
+            )
+            self._highlight_after_ids[(id(text_widget), "validate")] = self.after(
+                self._highlight_validate_idle_ms,
+                self._run_scheduled_highlight,
+                text_widget,
+                True,
+                True,  # validate=True => lexer+parser
+            )
+        else:
+            # Model: skip any fast pass; only lex/parse after user pauses
+            self._highlight_after_ids[(id(text_widget), "validate")] = self.after(
+                self._highlight_validate_idle_ms,
+                self._run_scheduled_highlight,
+                text_widget,
+                False,
+                True,
+            )
+
+    def _run_scheduled_highlight(self, text_widget: tk.Text, is_data: bool, validate: bool) -> None:
+        """Run highlight if widget still exists."""
+        if getattr(self, "_shutting_down", False):
+            return
+        try:
+            if not text_widget.winfo_exists():
+                return
+        except Exception:
+            return
+
+        self.highlight(text_widget, is_data=is_data, validate=validate)
+
+        # Only refresh the status bar if this is the currently selected editor
+        try:
+            idx = self.editor_notebook.index(self.editor_notebook.select())
+            selected = self.model_text if idx == 0 else self.data_text
+            if text_widget is selected:
+                self._update_caret_position(text_widget)
+        except Exception:
+            pass
 
     def on_tree_select(self, event: Optional[tk.Event]) -> None:
         """Compatibility handler: focus Model editor (no file tree in this UI)."""
@@ -629,8 +778,11 @@ class OPLIDE(tk.Tk):
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
 
     # --- Syntax Highlighting ---
-    def highlight(self, text_widget: tk.Text, is_data: bool = False) -> None:
-        """Apply syntax highlighting to the given text widget, using lexer and parser for model and data files."""
+    def highlight(self, text_widget: tk.Text, is_data: bool = False, validate: bool = True) -> None:
+        """Apply syntax highlighting to the given text widget."""
+        if (not is_data) and (not validate):
+            return
+
         # Remove previous tags
         for previous_tag in TOKEN_COLORS.keys():
             text_widget.tag_remove(previous_tag, "1.0", tk.END)
@@ -638,7 +790,9 @@ class OPLIDE(tk.Tk):
 
         code = text_widget.get("1.0", tk.END)
 
-        # Store the most recent error for status bar display
+        # Store the most recent error for status bar display (per widget)
+        self._last_syntax_error_by_widget[id(text_widget)] = None
+        # (Keep legacy attribute too, in case other code reads it.)
         self._last_syntax_error = None
 
         if not is_data:
@@ -646,7 +800,6 @@ class OPLIDE(tk.Tk):
             parser = OPLParser()
             tokens = []
             lexer_error = None
-            # Lexical analysis
             try:
                 tokens = list(lexer.tokenize(code))
             except Exception as e:
@@ -656,8 +809,9 @@ class OPLIDE(tk.Tk):
                     lineno = 1
                 error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                 text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                self._last_syntax_error = f"Lexer Error on line {lineno}: {error_message}"
-            # Syntax analysis
+                msg = f"Lexer Error on line {lineno}: {error_message}"
+                self._last_syntax_error_by_widget[id(text_widget)] = msg
+                self._last_syntax_error = msg
             if not lexer_error:
                 try:
                     parser.parse(iter(tokens))
@@ -667,54 +821,62 @@ class OPLIDE(tk.Tk):
                         lineno = 1
                     error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                     text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                    self._last_syntax_error = f"Parser Error on line {lineno}: {error_message}"
-            # Apply highlighting
+                    msg = f"Parser Error on line {lineno}: {error_message}"
+                    self._last_syntax_error_by_widget[id(text_widget)] = msg
+                    self._last_syntax_error = msg
             for token in tokens:
                 start_idx = self._index_from_pos(code, token.index)
                 end_idx = self._index_from_pos(code, token.index + len(str(token.value)))
                 tag = token.type if token.type in TOKEN_COLORS else None
                 if tag:
                     text_widget.tag_add(tag, start_idx, end_idx)
+
         else:
-            lexer = OPLDataLexer()
-            parser = OPLDataParser()
-            tokens = []
-            lexer_error = None
-            # Lexical analysis for .dat
-            try:
-                tokens = list(lexer.tokenize(code))
-            except Exception as e:
-                lexer_error = e
-                lineno = getattr(e, "lineno", 1)
-                if not isinstance(lineno, int) or lineno is None:
-                    lineno = 1
-                error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                self._last_syntax_error = f"Lexer Error on line {lineno}: {error_message}"
-            # Syntax analysis
-            if not lexer_error:
+            import re
+
+            if validate:
+                lexer = OPLDataLexer()
+                parser = OPLDataParser()
+                tokens = []
+                lexer_error = None
                 try:
-                    parser.parse(iter(tokens), lexer=lexer)
+                    tokens = list(lexer.tokenize(code))
                 except Exception as e:
+                    lexer_error = e
                     lineno = getattr(e, "lineno", 1)
                     if not isinstance(lineno, int) or lineno is None:
                         lineno = 1
                     error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
                     text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                    self._last_syntax_error = f"Parser Error on line {lineno}: {error_message}"
-            # Apply basic highlighting for .dat
-            import re
+                    msg = f"Lexer Error on line {lineno}: {error_message}"
+                    self._last_syntax_error_by_widget[id(text_widget)] = msg
+                    self._last_syntax_error = msg
+                if not lexer_error:
+                    try:
+                        parser.parse(iter(tokens), lexer=lexer)
+                    except Exception as e:
+                        lineno = getattr(e, "lineno", 1)
+                        if not isinstance(lineno, int) or lineno is None:
+                            lineno = 1
+                        error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
+                        text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
+                        msg = f"Parser Error on line {lineno}: {error_message}"
+                        self._last_syntax_error_by_widget[id(text_widget)] = msg
+                        self._last_syntax_error = msg
 
+            # Cheap regex highlighting for .dat
             for kw in ["param", "set", "true", "false"]:
                 for m in re.finditer(r"\b" + kw + r"\b", code):
                     start = self._index_from_pos(code, m.start())
                     end = self._index_from_pos(code, m.end())
                     tag = "PARAM" if kw == "param" else "SET" if kw == "set" else "BOOLEAN"
                     text_widget.tag_add(tag, start, end)
+
             for m in re.finditer(r"\d+(\.\d+)?", code):
                 start = self._index_from_pos(code, m.start())
                 end = self._index_from_pos(code, m.end())
                 text_widget.tag_add("NUMBER", start, end)
+
 
     def _index_from_pos(self, text: str, pos: int) -> str:
         """
@@ -782,17 +944,21 @@ class OPLIDE(tk.Tk):
                         for err_line in range(tag_start_line, tag_end_line + 1):
                             error_lines.append(err_line)
 
-                # Try to get an error message for the current caret line
+                # Use per-widget last error message if available
+                last_error = None
+                try:
+                    last_error = self._last_syntax_error_by_widget.get(id(text_widget))
+                except Exception:
+                    last_error = getattr(self, "_last_syntax_error", None)
+
                 error_msg = None
                 if error_lines and caret_line in error_lines:
-                    last_error = getattr(self, "_last_syntax_error", None)
                     if last_error and f"line {caret_line}" in last_error:
                         error_msg = last_error
                     else:
                         error_msg = f"Syntax Error on line {caret_line}"
                 elif error_lines:
                     first_err_line = error_lines[0]
-                    last_error = getattr(self, "_last_syntax_error", None)
                     if last_error and f"line {first_err_line}" in last_error:
                         error_msg = last_error
                     else:
@@ -807,14 +973,7 @@ class OPLIDE(tk.Tk):
             except tk.TclError:
                 self.status_var.set("Ready")
             except Exception as e:
-                import traceback
-
-                print("[DEBUG] Exception in _update_caret_position:")
-                print(f"  Exception: {e}")
-                print(f"  type: {type(e)}")
-                print(f"  index: {locals().get('index', None)}")
-                print(f"  index_str: {locals().get('index_str', None)}")
-                print(traceback.format_exc())
+                # ...existing code...
                 self.status_var.set(f"Error updating status: {e}")
         else:
             self.status_var.set("Ready")
@@ -866,6 +1025,10 @@ class OPLIDE(tk.Tk):
     # --- Model Execution ---
     def run_model(self) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
+        if self._solver_process and self._solver_process.is_alive():
+            messagebox.showinfo("Run Model", "Model is already running.")
+            return
+        
         import re
 
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
@@ -931,56 +1094,125 @@ class OPLIDE(tk.Tk):
             self.output_text.config(state="disabled")
             return
 
-        def run():
+        # Save temp files if not saved
+        model_file = self.model_file or "temp_model.mod"
+        data_file = self.data_file or "temp_data.dat"
+        try:
+            with open(model_file, "w") as f:
+                f.write(model_code)
+            with open(data_file, "w") as f:
+                f.write(data_code)
+        except Exception as e:
+            self.status_var.set(f"Error saving temp files: {e}")
+            return
+
+        self._current_solver_choice = solver_choice
+        self._solver_queue = multiprocessing.Queue()
+        self._solver_process = multiprocessing.Process(
+            target=_solve_wrapper,
+            args=(model_file, data_file, solver_choice, self._solver_queue),
+        )
+        self._solver_process.start()
+
+        self._set_run_menu_running(True)
+        self.status_var.set("Running model...")
+        self.after(100, self._poll_solver)
+
+
+    def stop_model(self) -> None:
+        p = self._solver_process
+        q = self._solver_queue
+
+        if p and p.is_alive():
             try:
-                # Save temp files if not saved
-                model_file = self.model_file or "temp_model.mod"
-                data_file = self.data_file or "temp_data.dat"
-                with open(model_file, "w") as f:
-                    f.write(model_code)
-                with open(data_file, "w") as f:
-                    f.write(data_code)
-                results = solve(model_file, data_file, solver=solver_choice)
+                p.terminate()
+                p.join(timeout=1.0)
+                if p.is_alive() and hasattr(p, "kill"):
+                    p.kill()  # py3.7+ on Unix
+                    p.join(timeout=1.0)
+            except Exception:
+                pass
 
-                # Buffer output and append on UI thread
-                buf = []
-                buf.append(f"\nSolver: {solver_choice}\n")
-                buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
-                if "objective_value" in results and results["objective_value"] is not None:
-                    buf.append(f"Objective: {results['objective_value']}\n")
-                if "solution" in results and results["solution"]:
-                    buf.append("Solution:\n")
-                    for k, v in results["solution"].items():
-                        buf.append(f"  {k}: {v}\n")
-                if "stats" in results and results["stats"]:
-                    buf.append("\nSolver Statistics (from 'stats' field):\n")
-                    if isinstance(results["stats"], dict):
-                        for stat_key, stat_value in results["stats"].items():
-                            buf.append(f"  {stat_key}: {stat_value}\n")
-                    else:
-                        buf.append(str(results["stats"]) + "\n")
-                else:
-                    buf.append("\nNo detailed solver statistics available from pyopl.solve.\n")
-                if "message" in results:
-                    buf.append(f"Message: {results['message']}\n")
+        self._solver_process = None
+        self._solver_queue = None
 
-                def apply():
-                    for s in buf:
-                        self._append_output(s)
-                    msg = results.get("message") or results.get("status", "Done")
-                    self.status_var.set(msg)
+        # Best-effort cleanup of queue resources
+        try:
+            if q is not None:
+                q.close()
+                q.join_thread()
+        except Exception:
+            pass
 
-                self.after(0, apply)
+        self._append_output("\nExecution stopped by user.\n")
+        self.status_var.set("Execution stopped.")
+        self._set_run_menu_running(False)
 
-            except Exception as e:
+    def _poll_solver(self) -> None:
+        if not self._solver_process:
+            return
 
-                def on_err(err: Exception):
-                    self._append_output(f"\nError: {err}\n")
-                    self.status_var.set(f"Error: {err}")
+        try:
+            kind, payload = self._solver_queue.get_nowait()
+        except queue.Empty:
+            if self._solver_process and self._solver_process.is_alive():
+                self.after(100, self._poll_solver)
+                return
 
-                self.after(0, on_err, e)
+            # Process ended but no message
+            self._set_run_menu_running(False)
+            self._append_output("\nError: Solver process terminated unexpectedly.\n")
+            self.status_var.set("Error: Solver process terminated.")
+            self._solver_process = None
+            self._solver_queue = None
+            return
 
-        threading.Thread(target=run, daemon=True).start()
+        # Got a message => process should be done
+        try:
+            if self._solver_process:
+                self._solver_process.join(timeout=0.1)
+        except Exception:
+            pass
+
+        self._solver_process = None
+        self._solver_queue = None
+        self._set_run_menu_running(False)
+
+        if kind == "success":
+            self._display_solve_results(payload)
+        else:
+            self._append_output(f"\nError:\n{payload}\n")
+            self.status_var.set("Error running model")
+
+    def _display_solve_results(self, results: dict) -> None:
+        """Format and display solver results in the output pane."""
+        solver_choice = getattr(self, "_current_solver_choice", "gurobi")
+        buf = []
+        buf.append(f"\nSolver: {solver_choice}\n")
+        buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
+        if "objective_value" in results and results["objective_value"] is not None:
+            buf.append(f"Objective: {results['objective_value']}\n")
+        if "solution" in results and results["solution"]:
+            buf.append("Solution:\n")
+            for k, v in results["solution"].items():
+                buf.append(f"  {k}: {v}\n")
+        if "stats" in results and results["stats"]:
+            buf.append("\nSolver Statistics (from 'stats' field):\n")
+            if isinstance(results["stats"], dict):
+                for stat_key, stat_value in results["stats"].items():
+                    buf.append(f"  {stat_key}: {stat_value}\n")
+            else:
+                buf.append(str(results["stats"]) + "\n")
+        else:
+            buf.append("\nNo detailed solver statistics available from pyopl.solve.\n")
+        if "message" in results:
+            buf.append(f"Message: {results['message']}\n")
+
+        for s in buf:
+            self._append_output(s)
+        msg = results.get("message") or results.get("status", "Done")
+        self.status_var.set(msg)
+
 
     def export_model(self) -> None:
         """Export the current model as a standalone Python file using the selected solver's code generator."""
@@ -1601,6 +1833,10 @@ class OPLIDE(tk.Tk):
     def _on_close(self) -> None:
         """Persist settings and close the app."""
         setattr(self, "_shutting_down", True)
+        try:
+            self.stop_model()  # ensure no stray solver process
+        except Exception:
+            pass
         self._save_settings()
         try:
             self.destroy()
@@ -1632,6 +1868,9 @@ class OPLIDE(tk.Tk):
         return "break"
 
     def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        # While running, do not repurpose this shortcut for Stop (Stop has no shortcut).
+        if self._solver_process and self._solver_process.is_alive():
+            return "break"
         self.run_model()
         return "break"
 
@@ -1913,5 +2152,11 @@ class OPLIDE(tk.Tk):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError:
+        pass
+
     ide = OPLIDE()
     ide.mainloop()
