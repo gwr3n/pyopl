@@ -86,8 +86,7 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
     try:
         try:
             from .pyopl_core import solve  # package import
-        except Exception:
-            # Fallback if launched in a context where relative imports fail
+        except ImportError:
             from pyopl.pyopl_core import solve  # type: ignore
 
         results = solve(model_file, data_file, solver=solver_choice)
@@ -724,7 +723,8 @@ class OPLIDE(tk.Tk):
             if not fname:
                 return
             self.model_file = fname
-        content = self.model_text.get(1.0, tk.END).rstrip("\n")
+        # "end-1c" means "end minus 1 character" (the implicit newline)
+        content = self.model_text.get("1.0", "end-1c")
         with open(self.model_file, "w") as f:
             f.write(content)
         # Update tab title
@@ -793,6 +793,23 @@ class OPLIDE(tk.Tk):
 
         code = text_widget.get("1.0", tk.END)
 
+        # Pre-calculate line start offsets for O(1) or O(log N) lookups
+        # This avoids the O(N^2) behavior of calling text[:pos].count('\n') for every token
+        line_starts = [0] + [i + 1 for i, char in enumerate(code) if char == "\n"]
+
+        import bisect
+
+        def fast_index(pos: int) -> str:
+            if pos < 0:
+                pos = 0
+            if pos > len(code):
+                pos = len(code)
+            # Find the line number (bisect_right returns insertion point, so index is i-1)
+            line_idx = bisect.bisect_right(line_starts, pos) - 1
+            line_start = line_starts[line_idx]
+            col = pos - line_start
+            return f"{line_idx + 1}.{col}"
+
         # Store the most recent error for status bar display (per widget)
         self._last_syntax_error_by_widget[id(text_widget)] = None
         # (Keep legacy attribute too, in case other code reads it.)
@@ -827,12 +844,23 @@ class OPLIDE(tk.Tk):
                     msg = f"Parser Error on line {lineno}: {error_message}"
                     self._last_syntax_error_by_widget[id(text_widget)] = msg
                     self._last_syntax_error = msg
+
+            # Batch tag application to reduce Tcl overhead
+            tag_ranges: dict[str, list[str]] = {}
             for token in tokens:
-                start_idx = self._index_from_pos(code, token.index)
-                end_idx = self._index_from_pos(code, token.index + len(str(token.value)))
+                # Use the fast lookup instead of self._index_from_pos
+                start_idx = fast_index(token.index)
+                end_idx = fast_index(token.index + len(str(token.value)))
                 tag = token.type if token.type in TOKEN_COLORS else None
                 if tag:
-                    text_widget.tag_add(tag, start_idx, end_idx)
+                    if tag not in tag_ranges:
+                        tag_ranges[tag] = []
+                    tag_ranges[tag].extend([start_idx, end_idx])
+
+            for tag, ranges in tag_ranges.items():
+                # Apply in chunks to avoid Tcl argument limits
+                for i in range(0, len(ranges), 2000):
+                    text_widget.tag_add(tag, *ranges[i : i + 2000])
 
         else:
             import re
@@ -868,21 +896,35 @@ class OPLIDE(tk.Tk):
                         self._last_syntax_error = msg
 
             # Cheap regex highlighting for .dat
+            # Batch keyword highlighting
+            kw_ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
             for kw in ["param", "set", "true", "false"]:
+                tag = "PARAM" if kw == "param" else "SET" if kw == "set" else "BOOLEAN"
                 for m in re.finditer(r"\b" + kw + r"\b", code):
-                    start = self._index_from_pos(code, m.start())
-                    end = self._index_from_pos(code, m.end())
-                    tag = "PARAM" if kw == "param" else "SET" if kw == "set" else "BOOLEAN"
-                    text_widget.tag_add(tag, start, end)
+                    start = fast_index(m.start())
+                    end = fast_index(m.end())
+                    kw_ranges[tag].extend([start, end])
 
+            for tag, ranges in kw_ranges.items():
+                if ranges:
+                    for i in range(0, len(ranges), 2000):
+                        text_widget.tag_add(tag, *ranges[i : i + 2000])
+
+            # Batch number highlighting
+            number_ranges = []
             for m in re.finditer(r"\d+(\.\d+)?", code):
-                start = self._index_from_pos(code, m.start())
-                end = self._index_from_pos(code, m.end())
-                text_widget.tag_add("NUMBER", start, end)
+                start = fast_index(m.start())
+                end = fast_index(m.end())
+                number_ranges.extend([start, end])
+
+            if number_ranges:
+                for i in range(0, len(number_ranges), 2000):
+                    text_widget.tag_add("NUMBER", *number_ranges[i : i + 2000])
 
     def _index_from_pos(self, text: str, pos: int) -> str:
         """
         Convert a character offset in a string to a Tk Text index (line.char).
+        Kept for compatibility, though highlight() now uses an internal fast version.
         """
         if pos < 0:
             pos = 0
@@ -1199,7 +1241,9 @@ class OPLIDE(tk.Tk):
         try:
             if q is not None:
                 q.close()
-                q.join_thread()
+                # Only join if we expect the process finished cleanly.
+                # Since we just killed it, we should skip join_thread or cancel it.
+                q.cancel_join_thread()
         except Exception:
             pass
 
