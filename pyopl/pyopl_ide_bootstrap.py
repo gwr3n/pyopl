@@ -561,6 +561,16 @@ class OPLIDE(tk.Tk):
         # Selection handler to show previous output
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
+        # Context menu for deleting sessions
+        self.request_context_menu = tk.Menu(self, tearoff=0)
+        self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
+
+        # Right-click bindings (support macOS Ctrl+Click)
+        self.request_listbox.bind("<Button-3>", self._on_request_right_click)
+        if sys.platform == "darwin":
+            self.request_listbox.bind("<Button-2>", self._on_request_right_click)
+            self.request_listbox.bind("<Control-Button-1>", self._on_request_right_click)
+
         parent.add(output_frame, minsize=150)
 
     def _setup_status_bar(self) -> None:
@@ -589,6 +599,80 @@ class OPLIDE(tk.Tk):
         self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
 
     # --- Event Handlers and Core Logic ---
+    def _on_request_right_click(self, event: Optional[tk.Event]) -> None:
+        """Show context menu at right-click position and select the item."""
+        if event is None:
+            return
+        try:
+            index = self.request_listbox.nearest(event.y)
+            self.request_listbox.selection_clear(0, tk.END)
+            if index >= 0:
+                self.request_listbox.selection_set(index)
+                self.request_listbox.activate(index)
+                self._last_request_popup_index = index
+            else:
+                self._last_request_popup_index = None
+            self.request_context_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.request_context_menu.grab_release()
+            except Exception:
+                pass
+
+    def _delete_selected_request(self) -> None:
+        """Delete the currently selected output session."""
+        try:
+            sel = self.request_listbox.curselection()
+            index = None
+            if sel:
+                index = int(sel[0])
+            else:
+                index = getattr(self, "_last_request_popup_index", None)
+            if index is None or index < 0 or index >= len(self._output_session_ids):
+                return
+
+            sid = self._output_session_ids[index]
+            if not messagebox.askyesno("Delete Session", "Delete the selected session?"):
+                return
+
+            # Remove data
+            self._output_session_ids.pop(index)
+            self._output_sessions.pop(sid, None)
+            self._output_session_display.pop(sid, None)
+
+            # Update pointers
+            if self._current_output_session_id == sid:
+                self._current_output_session_id = None
+            if self._viewing_output_session_id == sid:
+                self._viewing_output_session_id = None
+
+            # Update UI list
+            try:
+                self.request_listbox.delete(index)
+            except Exception:
+                pass
+
+            # Select next available session and show it
+            count = self.request_listbox.size()
+            if count > 0:
+                new_index = min(index, count - 1)
+                self.request_listbox.selection_clear(0, tk.END)
+                self.request_listbox.selection_set(new_index)
+                self.request_listbox.activate(new_index)
+                new_sid = self._output_session_ids[new_index]
+                self._viewing_output_session_id = new_sid
+                self._show_output_session(new_sid)
+            else:
+                self._viewing_output_session_id = None
+                if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                    self.output_text.config(state="normal")
+                    self.output_text.delete("1.0", tk.END)
+                    self.output_text.config(state="disabled")
+
+            self.status_var.set("Session deleted.")
+        except Exception:
+            pass
+
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
         # Keep caret responsive immediately
