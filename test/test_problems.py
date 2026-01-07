@@ -30,6 +30,150 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_TOPSIS(self):
+        """
+        Test the TOPSIS problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                // -----------------------------
+                // Dimensions
+                // -----------------------------
+                int NA = ...;                      // number of alternatives
+                int NC = ...;                      // number of criteria
+
+                range Alternatives = 1..NA;
+                range Criteria     = 1..NC;
+
+                // Optional labels (for reporting)
+                param string AltName[Alternatives] = ...; // e.g., ["Phone A","Phone B","Phone C"]
+                param string CritName[Criteria]    = ...; // e.g., ["Price","Camera"]
+
+                // -----------------------------
+                // Inputs
+                // -----------------------------
+                param float   X[Alternatives][Criteria] = ...;   // decision matrix
+                param float   w[Criteria] = ...;                 // weights (nonnegative, typically sum to 1)
+                param boolean is_benefit[Criteria] = ...;        // true = benefit, false = cost
+
+                // -----------------------------
+                // TOPSIS computations (all ground)
+                // -----------------------------
+                // Step 2: Vector normalization denominators per criterion
+                param float denom[c in Criteria] = sqrt( sum(i in Alternatives) ( X[i][c] * X[i][c] ) );
+
+                // Normalized matrix
+                param float r[i in Alternatives][c in Criteria] = X[i][c] / denom[c];
+
+                // Step 3: Weighted normalized matrix
+                param float v[i in Alternatives][c in Criteria] = r[i][c] * w[c];
+
+                // Step 4: Per-criterion extrema of v
+                param float v_max[c in Criteria] = max( i in Alternatives ) ( v[i][c] );
+                param float v_min[c in Criteria] = min( i in Alternatives ) ( v[i][c] );
+
+                // Positive/Negative Ideal Solutions per criterion
+                param float v_plus[c in Criteria]  = (is_benefit[c]) ? v_max[c] : v_min[c];
+                param float v_minus[c in Criteria] = (is_benefit[c]) ? v_min[c] : v_max[c];
+
+                // Step 5: Distances (squared, then Euclidean) from PIS and NIS
+                param float Splus[i in Alternatives]  = sum(c in Criteria) ( (v[i][c] - v_plus[c])  * (v[i][c] - v_plus[c]) );
+                param float Sminus[i in Alternatives] = sum(c in Criteria) ( (v[i][c] - v_minus[c]) * (v[i][c] - v_minus[c]) );
+
+                param float dplus[i in Alternatives]  = sqrt( Splus[i] );
+                param float dminus[i in Alternatives] = sqrt( Sminus[i] );
+
+                // Step 6: TOPSIS performance score Ci in [0,1]
+                param float Ci[i in Alternatives] = dminus[i] / ( dplus[i] + dminus[i] );
+
+                // -----------------------------
+                // Decision variables
+                // -----------------------------
+                // y[i] = 1 if alternative i is selected
+                dvar boolean y[Alternatives];
+
+                // -----------------------------
+                // Objective: pick the alternative with the highest TOPSIS score
+                // -----------------------------
+                maximize choose_best: sum(i in Alternatives) Ci[i] * y[i];
+
+                // -----------------------------
+                // Constraints
+                // -----------------------------
+                subject to {
+                // Pick exactly one alternative
+                pick_one: sum(i in Alternatives) y[i] == 1;
+                }
+                """
+            data_code = """
+                NA = 3;
+                NC = 2;
+
+                AltName = ["Phone A", "Phone B", "Phone C"];
+                CritName = ["Price", "Camera"];
+
+                // Decision matrix X: rows are alternatives, columns are criteria
+                // Price is a cost (lower is better); Camera is a benefit (higher is better)
+                X = [ [800, 7],    // Phone A
+                    [600, 4],    // Phone B
+                    [1200, 10] ];// Phone C
+
+                // Weights: more importance on Camera
+                w = [0.4, 0.6];
+
+                // Orientation per criterion: [Price is cost -> false, Camera is benefit -> true]
+                is_benefit = [false, true];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     # @unittest.skip("reason for skipping")
     def test_asset_location(self):
         """

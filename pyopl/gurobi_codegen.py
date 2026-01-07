@@ -1,6 +1,7 @@
 # === Standard library imports ===
 import json
 import logging
+import re
 
 from .semantic_error import SemanticError
 
@@ -178,7 +179,15 @@ class GurobiCodeGenerator:
         self._add_code_line("results['status'] = f'OPTIMIZATION_STATUS_{model.status}'")
         self.indent_level -= 1
         self._add_code_line("results_container['gurobi_output'] = results")
-        return "\n".join(self.gurobi_code_lines)
+
+        code = "\n".join(self.gurobi_code_lines)
+
+        # Fix: ensure booleans are valid Python (some upstream paths may have produced JSON-like true/false)
+        # Only replace bare tokens (not inside identifiers/strings).
+        code = re.sub(r'(?<![\w"\'\\])true(?![\w"\'\\])', "True", code)
+        code = re.sub(r'(?<![\w"\'\\])false(?![\w"\'\\])', "False", code)
+
+        return code
 
     # --- Bound Collection (for big-M tightening) ---
     def _collect_variable_bounds(self, constraints):
