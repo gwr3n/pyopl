@@ -164,7 +164,7 @@ class OPLIDE(tk.Tk):
 
         # GenAI method selection (persisted)
         self._genai_methods: list[tuple[str, str]] = [
-            ("Generhetor", "pyopl_generative"),
+            ("SyntAGM", "pyopl_generative"),
             ("Standard", "pyopl_standard"),
             ("Chain of Thought", "pyopl_chain_of_thought"),
             ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
@@ -2300,7 +2300,7 @@ class OPLIDE(tk.Tk):
         for label, k in self._genai_methods:
             if k == key:
                 return label
-        return "Generhetor"
+        return "SyntAGM"
 
     def _make_select_model_cmd(self, provider_key: str, model_name: str) -> Callable[[], None]:
         """Factory for selecting a GenAI model."""

@@ -1,13 +1,10 @@
 # === Standard library imports ===
-import inspect
 import json
 import logging
 import os
 import re
 from enum import Enum, auto
-from importlib.resources import files  # NEW
 from pathlib import Path  # NEW
-from time import sleep
 from typing import (
     Any,
     Callable,  # NEW
@@ -20,9 +17,28 @@ from typing import (
 
 # === Local imports ===
 from ..pyopl_core import OPLCompiler, SemanticError
-from .genai_pricing import _extract_gemini_usage, _extract_openai_usage  # NEW
+from ._strategy_base import (
+    GenAIStrategyBase,
+)
+from ._strategy_base import (
+    Grammar as _BaseGrammar,
+)
+from ._strategy_base import (
+    LLMProvider as _BaseLLMProvider,
+)
+from ._strategy_base import (
+    list_gemini_models as _base_list_gemini_models,
+)
+from ._strategy_base import (
+    list_models as _base_list_models,
+)
+from ._strategy_base import (
+    list_ollama_models as _base_list_ollama_models,
+)
+from ._strategy_base import (
+    list_openai_models as _base_list_openai_models,
+)
 from .genai_pricing import estimate_costs as _estimate_costs  # NEW
-from .rag_helper import rank_problem_descriptions as rag_rank  # NEW
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -52,6 +68,14 @@ FEW_SHOT_TOP_K = 3
 FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
 
+_BASE = GenAIStrategyBase(
+    logger=logger,
+    max_output_tokens=MAX_OUTPUT_TOKENS,
+    few_shot_top_k=FEW_SHOT_TOP_K,
+    few_shot_max_chars=FEW_SHOT_MAX_CHARS,
+)
+
+
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
     GOOGLE = "google"
@@ -68,42 +92,28 @@ class Grammar(Enum):
 
 
 def _read_file(path: str) -> str:
-    with open(path, "r") as f:
-        return f.read()
+    return _BASE.read_file(path)
 
 
 def _read_pyopl_GBNF() -> str:
-    return (files("pyopl") / "grammars" / "PyOPL_GBNF").read_text(encoding="utf-8")
+    return _BASE.read_pyopl_GBNF()
 
 
 def _read_pyopl_grammar() -> str:
-    return (files("pyopl") / "grammars" / "PyOPL grammar.md").read_text(encoding="utf-8")
+    return _BASE.read_pyopl_grammar()
 
 
 def _read_pyopl_code() -> str:
-    code_path = os.path.join(os.path.dirname(__file__), "pyopl_core.py")
-    return _read_file(code_path)
+    return _BASE.read_pyopl_code()
 
 
 def _get_grammar_implementation(mode: Grammar) -> str:
-    if mode == Grammar.NONE:
-        return ""
-    if mode == Grammar.BNF:
-        return _read_pyopl_grammar()
-    if mode == Grammar.CODE:
-        return _read_pyopl_code()
-    raise ValueError(f"Invalid mode: {mode}")
+    return _BASE.get_grammar_implementation(_BaseGrammar[mode.name])
 
 
 # NEW: RAG few-shot helpers
 def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
-    try:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if len(text) > max_chars:
-            text = text[:max_chars]
-        return text.strip()
-    except Exception:
-        return ""
+    return _BASE.safe_read_text(path, max_chars=max_chars)
 
 
 def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path]]:
@@ -113,21 +123,7 @@ def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path
       1) Same stem: <stem>.mod and <stem>.dat
       2) First *.mod and first *.dat in folder (sorted)
     """
-    folder = desc_path.parent
-    stem = desc_path.stem
-
-    mod: Optional[Path] = folder / f"{stem}.mod"
-    dat: Optional[Path] = folder / f"{stem}.dat"
-
-    if not (mod and mod.exists() and mod.is_file()):
-        mods = sorted(folder.glob("*.mod"))
-        mod = mods[0] if mods else None
-
-    if not (dat and dat.exists() and dat.is_file()):
-        dats = sorted(folder.glob("*.dat"))
-        dat = dats[0] if dats else None
-
-    return (mod if mod and mod.exists() else None, dat if dat and dat.exists() else None)
+    return _BASE.find_pair_in_folder(desc_path)
 
 
 def _gather_few_shots(
@@ -143,75 +139,12 @@ def _gather_few_shots(
       - data (str)
       - desc_path / model_path / data_path (optional metadata)
     """
-    # Resolve default models_dir from package data
-    if models_dir is None:
-        try:
-            models_dir = files("pyopl") / "opl_models"
-        except Exception:
-            models_dir = Path(__file__).parent / "opl_models"
-    base_dir = Path(models_dir)
-
-    examples: List[Dict[str, str]] = []
-    try:
-        _notify(progress, f"Retrieving few-shot examples (k={k})")
-        hits = rag_rank(query=problem_description, models_dir=str(base_dir), top_k=k)
-        _notify(progress, f"Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
-    except Exception as e:
-        logger.debug(f"Few-shot retrieval skipped: {e}")
-        _notify(progress, "Few-shot retrieval failed; continuing without examples")
-        return examples
-
-    for hit in hits:
-        try:
-            desc_path = Path(hit["path"])
-            desc_text = _safe_read_text(desc_path)
-            mod_path, dat_path = _find_pair_in_folder(desc_path)
-            if not desc_text or not mod_path or not dat_path:
-                continue
-            mod_text = _safe_read_text(mod_path)
-            dat_text = _safe_read_text(dat_path)
-            if not mod_text or not dat_text:
-                continue
-            examples.append(
-                {
-                    "description": desc_text,
-                    "model": mod_text,
-                    "data": dat_text,
-                    "desc_path": str(desc_path),
-                    "model_path": str(mod_path),
-                    "data_path": str(dat_path),
-                }
-            )
-            if len(examples) >= k:
-                break
-        except Exception as e:
-            logger.debug(f"Skipping example due to error: {e}")
-            continue
-    return examples
+    return _BASE.gather_few_shots(problem_description, k=k, models_dir=models_dir, progress=progress)
 
 
 # NEW: central renderer for few-shot exemplars (to avoid duplication)
 def _render_few_shots_section(few_shots: Optional[List[Dict[str, str]]]) -> str:
-    if not few_shots:
-        return ""
-    blocks: List[str] = []
-    for i, ex in enumerate(few_shots, 1):
-        desc_hdr = f'<description path="{ex.get("desc_path", "")}">'
-        mod_hdr = f'<model_file path="{ex.get("model_path", "")}">'
-        dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
-        blocks.append(
-            f'<example index="{i}">\n'
-            f"{desc_hdr}\n{ex.get('description','')}\n</description>\n\n"
-            f"{mod_hdr}\n{ex.get('model','')}\n</model_file>\n\n"
-            f"{dat_hdr}\n{ex.get('data','')}\n</data_file>\n"
-            f"</example>\n"
-        )
-    return (
-        "<few_shot_examples>\n"
-        "Use these exemplars for structure and syntax only. Tailor names/indices to this problem.\n"
-        + "".join(blocks)
-        + "</few_shot_examples>\n\n"
-    )
+    return _BASE.render_few_shots_section(few_shots)
 
 
 def extract_json_from_markdown(text: str) -> str:
@@ -286,26 +219,11 @@ def _coalesce_response_text(resp) -> str:
 
 
 def _openai_client():
-    try:
-        from openai import OpenAI
-    except Exception as e:
-        raise RuntimeError("openai is not installed. pip install openai") from e
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY environment variable not set.")
-    return OpenAI(api_key=api_key)
+    return _BASE._openai_client()
 
 
 def _google_client():
-    try:
-        import google.generativeai as genai
-    except Exception as e:
-        raise RuntimeError("google.generativeai is not installed. pip install google-generativeai") from e
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY environment variable not set.")
-    genai.configure(api_key=api_key)
-    return genai
+    return _BASE._google_client()
 
 
 def _ollama_generate_text(
@@ -315,27 +233,14 @@ def _ollama_generate_text(
     Call Ollama's Python client and return the response text.
     If return_usage=True, also return a usage dict with prompt/completion token counts when available.
     """
-    try:
-        from ollama import generate as ollama_generate
-    except Exception as e:
-        raise RuntimeError("ollama package is not installed. pip install ollama") from e
-    options: Dict[str, Any] = {}
-    if num_predict is not None:
-        options["num_predict"] = num_predict
-    resp = ollama_generate(model=model_name, prompt=prompt, options=options)
-    try:
-        text = resp.get("response", "") or ""
-    except (TypeError, KeyError) as e:
-        raise RuntimeError(f"Failed to retrieve response text from Ollama response: {e}")
-    if not return_usage:
-        return text
-    prompt_tokens = resp.get("prompt_eval_count")
-    completion_tokens = resp.get("eval_count")
-    usage = {
-        "prompt_tokens": int(prompt_tokens or 0),
-        "completion_tokens": int(completion_tokens or 0),
-    }
-    return text, usage
+    # Generative strategy expects JSON-structured outputs; enforce JSON format when possible.
+    return _BASE._ollama_generate_text(
+        model_name=model_name,
+        prompt=prompt,
+        num_predict=num_predict,
+        return_usage=return_usage,
+        enforce_json=True,
+    )
 
 
 def _build_create_params(
@@ -345,35 +250,20 @@ def _build_create_params(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
 ) -> Dict[str, Any]:
-    params: Dict[str, Any] = {
-        "model": model_name,
-        "input": input_text,
-        "response_format": {"type": "json"},
-    }
-    if max_tokens is not None:
-        params["max_output_tokens"] = max_tokens
-    if temperature is not None:
-        params["temperature"] = temperature
-    if stop:
-        params["stop"] = stop
-    return params
+    # Preserve prior behavior: always request JSON from OpenAI when possible.
+    return _BASE._build_openai_create_params(
+        model_name=model_name,
+        input_text=input_text,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop,
+        expected_json=True,
+    )
 
 
 def _infer_provider(llm_provider: Optional[str], model_name: str) -> LLMProvider:
-    if llm_provider:
-        lp = llm_provider.strip().lower()
-        if lp in ("openai", "oai"):
-            return LLMProvider.OPENAI
-        if lp in ("google", "genai", "gemini", "google.generativeai"):
-            return LLMProvider.GOOGLE
-        if lp in ("ollama",):
-            return LLMProvider.OLLAMA
-    # Heuristics by model name
-    if model_name.startswith("gemini"):
-        return LLMProvider.GOOGLE
-    if "gpt-oss" in model_name or model_name.startswith(("llama", "qwen", "mistral")):
-        return LLMProvider.OLLAMA
-    return LLMProvider.OPENAI
+    base_p = _BASE.infer_provider(llm_provider, model_name)
+    return LLMProvider(base_p.value)
 
 
 def _llm_generate_text(
@@ -386,66 +276,19 @@ def _llm_generate_text(
     progress: Optional[Callable[[str], None]] = None,  # NEW
     capture_usage: bool = False,  # NEW
 ) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
-    if provider == LLMProvider.OPENAI:
-        client = _openai_client()
-        create_params = _build_create_params(
-            model_name=model_name,
-            input_text=input_text,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            stop=stop,
-        )
-        _notify(progress, f"[LLM] OpenAI • {model_name}: sending request")  # NEW
-        response = _call_openai_with_retry(client, create_params, progress=progress)  # CHANGED
-        _notify(progress, "[LLM] OpenAI: response received")  # NEW
-        response_text = _coalesce_response_text(response)
-        if not response_text:
-            raise RuntimeError(f"Empty OpenAI response: {response}.")
-        if not capture_usage:
-            return response_text
-        usage = _extract_openai_usage(response, input_text, response_text, model_name)  # NEW
-        return response_text, usage  # NEW
-
-    if provider == LLMProvider.GOOGLE:
-        genai = _google_client()
-        model = genai.GenerativeModel(model_name)
-        generation_config: Dict[str, Any] = {}
-        if max_tokens is not None:
-            generation_config["max_output_tokens"] = max_tokens
-        if temperature is not None:
-            generation_config["temperature"] = temperature
-        _notify(progress, f"[LLM] Gemini • {model_name}: sending request")  # NEW
-        resp = model.generate_content(input_text, generation_config=generation_config)
-        _notify(progress, "[LLM] Gemini: response received")  # NEW
-        text = getattr(resp, "text", None)
-        if not text and getattr(resp, "candidates", None):
-            parts = []
-            for c in resp.candidates:
-                content = getattr(c, "content", None)
-                if content and hasattr(content, "parts"):
-                    for p in content.parts:
-                        if hasattr(p, "text"):
-                            parts.append(p.text or "")
-            text = "".join(parts)
-        text = text or ""
-        if not capture_usage:
-            return text
-        usage = _extract_gemini_usage(resp, input_text, text)  # NEW
-        return text, usage  # NEW
-
-    if provider == LLMProvider.OLLAMA:
-        _notify(progress, f"[LLM] Ollama • {model_name}: generating")  # NEW
-        if not capture_usage:
-            result = _ollama_generate_text(model_name=model_name, prompt=input_text, num_predict=max_tokens)
-            _notify(progress, "[LLM] Ollama: response received")  # NEW
-            return result
-        result_text, usage = _ollama_generate_text(
-            model_name=model_name, prompt=input_text, num_predict=max_tokens, return_usage=True
-        )  # NEW
-        _notify(progress, "[LLM] Ollama: response received")  # NEW
-        return result_text, usage  # NEW
-
-    raise ValueError(f"Unsupported LLM provider: {provider}")
+    # Preserve prior behavior: always request JSON when possible (generation/alignment/revision/feedback)
+    base_provider = _BaseLLMProvider(provider.value)
+    return _BASE.llm_generate_text(
+        provider=base_provider,
+        model_name=model_name,
+        input_text=input_text,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop,
+        progress=progress,
+        capture_usage=capture_usage,
+        expected_json=True,
+    )
 
 
 def _call_openai_with_retry(
@@ -455,62 +298,13 @@ def _call_openai_with_retry(
     backoff_sec: float = 1.5,
     progress: Optional[Callable[[str], None]] = None,  # NEW
 ) -> Any:
-    """
-    Call Responses API with simple exponential backoff.
-    Falls back by stripping newer/unsupported kwargs not supported by older SDKs/servers/models.
-    """
-    last_err: Optional[Exception] = None
-    fallback_keys = ["response_format", "stop", "reasoning", "temperature"]
-    params = dict(create_params)  # work on a copy
-
-    # Prune params that the bound create() does not accept to avoid an initial TypeError
-    try:
-        create_callable = client.responses.create
-        sig = inspect.signature(create_callable)
-        # If create() accepts **kwargs (VAR_KEYWORD) then leave params as-is
-        if not any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            supported = set(sig.parameters.keys())
-            supported.discard("self")
-            for k in list(params.keys()):
-                if k not in supported:
-                    params.pop(k, None)
-    except Exception:
-        # If introspection fails, fall back to the existing runtime-stripping logic below
-        pass
-
-    def _strip_param_from_error_message(msg: str) -> bool:
-        removed = False
-        low = msg.lower()
-        for key in list(fallback_keys):
-            if key in params and (
-                f"unexpected keyword argument '{key}'" in low or f"unsupported parameter: '{key}'" in low or key in low
-            ):
-                params.pop(key, None)
-                removed = True
-        m = re.search(r"unsupported parameter:\s*'([^']+)'", msg, re.IGNORECASE)
-        if m and m.group(1) in params:
-            params.pop(m.group(1), None)
-            removed = True
-        m2 = re.search(r"parameter\s*'([^']+)'\s*is not supported", msg, re.IGNORECASE)
-        if m2 and m2.group(1) in params:
-            params.pop(m2.group(1), None)
-            removed = True
-        return removed
-
-    for attempt in range(retries):
-        try:
-            return client.responses.create(**params)
-        except Exception as e:
-            last_err = e
-            msg = str(e) if e else "unknown error"
-            _notify(progress, f"[LLM] OpenAI: {msg}")
-            if _strip_param_from_error_message(msg):
-                _notify(progress, "[LLM] OpenAI: retrying without unsupported parameters")  # NEW
-                continue
-            _notify(progress, f"[LLM] OpenAI: retry {attempt + 1}/{retries} after error: {msg}")  # NEW
-            sleep(backoff_sec * (2**attempt))
-    _notify(progress, f"[LLM] OpenAI: failed after {retries} attempts")  # NEW
-    raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
+    return _BASE._call_openai_with_retry(
+        client,
+        create_params,
+        retries=retries,
+        backoff_sec=backoff_sec,
+        progress=progress,
+    )
 
 
 # ---------- Prompt builders ----------
@@ -1147,23 +941,7 @@ def list_openai_models(prefix: Optional[str] = "gpt") -> list[str]:
     Return available OpenAI model IDs visible to the API key.
     Optionally filter by prefix.
     """
-    client = _openai_client()
-    try:
-        resp = client.models.list()
-    except Exception as e:
-        raise RuntimeError(f"Failed to list OpenAI models: {e}")
-
-    names: list[str] = []
-    # Support both SDK return shapes
-    data = getattr(resp, "data", None)
-    items = data if isinstance(data, list) else (list(resp) if resp is not None else [])
-    for m in items:
-        mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
-        if isinstance(mid, str):
-            names.append(mid)
-    if prefix:
-        names = [n for n in names if n.startswith(prefix)]
-    return sorted(set(names))
+    return _base_list_openai_models(prefix=prefix)
 
 
 def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:
@@ -1171,49 +949,14 @@ def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:
     Return available Google Generative AI model names.
     By default, returns models starting with 'gemini' and supporting generateContent.
     """
-    genai = _google_client()
-    try:
-        models = genai.list_models()
-    except Exception as e:
-        raise RuntimeError(f"Failed to list Gemini models: {e}")
-
-    names: list[str] = []
-    for m in models or []:
-        if "generateContent" in m.supported_generation_methods:
-            name = m.name
-            if isinstance(name, str) and name.startswith("models/"):
-                name = name[len("models/") :]
-                if prefix and name.startswith(prefix):
-                    names.append(name)
-
-    return sorted(set(names))
+    return _base_list_gemini_models(prefix=prefix)
 
 
 def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
     """
     Return available local Ollama model tags (e.g., 'llama3:8b-instruct').
     """
-    try:
-        from ollama import list as ollama_list
-    except Exception as e:
-        raise RuntimeError("ollama package is not installed. pip install ollama") from e
-
-    models: list[str] = []
-    try:
-        resp = ollama_list()
-        items = resp.get("models", []) if isinstance(resp, dict) else getattr(resp, "models", [])
-        for m in items:
-            name = (m.get("model") if isinstance(m, dict) else getattr(m, "model", None)) or (
-                m.get("name") if isinstance(m, dict) else getattr(m, "name", None)
-            )
-            if isinstance(name, str):
-                models.append(name)
-    except Exception as e:
-        raise RuntimeError(f"Failed to list Ollama models: {e}")
-
-    if prefix:
-        models = [n for n in models if n.startswith(prefix)]
-    return sorted(set(models))
+    return _base_list_ollama_models(prefix=prefix)
 
 
 def list_models(llm_provider: Optional[str] = None, model_name: str = MODEL_NAME) -> list[str]:
@@ -1221,11 +964,4 @@ def list_models(llm_provider: Optional[str] = None, model_name: str = MODEL_NAME
     Unified helper: returns models for the inferred provider.
     llm_provider: 'openai', 'google', or 'ollama' (None -> inferred from model_name).
     """
-    provider = _infer_provider(llm_provider, model_name)
-    if provider == LLMProvider.OPENAI:
-        return list_openai_models()
-    if provider == LLMProvider.GOOGLE:
-        return list_gemini_models()
-    if provider == LLMProvider.OLLAMA:
-        return list_ollama_models()
-    raise ValueError(f"Unsupported LLM provider: {provider}")
+    return _base_list_models(llm_provider=llm_provider, model_name=model_name)
