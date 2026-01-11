@@ -298,12 +298,12 @@ def main() -> int:
         valid = [g.name.lower() for g in GrammarType]
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {valid}")
 
-    # Determine alignment_check and few_shot for generative ablations
+    # Determine alignment_check and few_shot for SyntAGM ablations
     ALIGNMENT_CHECK = True
-    if args.logic == "generative" and args.no_alignment_check:
+    if args.logic == "SyntAGM" and args.no_alignment_check:
         ALIGNMENT_CHECK = False
     few_shot_opt: Optional[bool] = None
-    if args.logic == "generative" and args.no_few_shot:
+    if args.logic == "SyntAGM" and args.no_few_shot:
         few_shot_opt = False
 
     # Load dataset
@@ -326,8 +326,8 @@ def main() -> int:
     # Output directories
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     base_dir = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
-    # Add ablation tag subfolder only for generative and only when flags set
-    if args.logic == "generative":
+    # Add ablation tag subfolder only for SyntAGM and only when flags set
+    if args.logic == "SyntAGM":
         tags = []
         if args.no_few_shot:
             tags.append("fewshot_off")
