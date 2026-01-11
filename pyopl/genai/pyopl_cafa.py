@@ -3,15 +3,15 @@ import logging
 import os
 import re
 from enum import Enum, auto
-from pathlib import Path  # NEW
+from pathlib import Path
 from typing import (
     Any,
-    Callable,  # NEW
+    Callable,
     Dict,
-    List,  # NEW
+    List,
     Optional,
-    Tuple,  # NEW
-    Union,  # NEW
+    Tuple,
+    Union,
 )
 
 # === Local imports ===
@@ -25,18 +25,6 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
-from ._strategy_base import (
-    list_gemini_models as _base_list_gemini_models,
-)
-from ._strategy_base import (
-    list_models as _base_list_models,
-)
-from ._strategy_base import (
-    list_ollama_models as _base_list_ollama_models,
-)
-from ._strategy_base import (
-    list_openai_models as _base_list_openai_models,
-)
 from .genai_pricing import estimate_costs as _estimate_costs  # NEW
 
 # --- Logging Setup ---
@@ -44,7 +32,7 @@ from .genai_pricing import estimate_costs as _estimate_costs  # NEW
 logger = logging.getLogger(__name__)
 
 
-# NEW: progress notifier used by generative_solve/feedback and LLM calls
+# Progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
     try:
         if progress:
@@ -62,11 +50,11 @@ LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
-# NEW: Few-shot configuration
+# Few-shot configuration
 FEW_SHOT_TOP_K = 3
 FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
-# NEW: Reflexion memory cap
+# Reflexion memory cap
 REFLEXION_MAX_MEMORY = 5
 
 
@@ -113,7 +101,7 @@ def _get_grammar_implementation(mode: Grammar) -> str:
     return _BASE.get_grammar_implementation(_BaseGrammar[mode.name])
 
 
-# NEW: RAG few-shot helpers
+# RAG few-shot helpers
 def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
     return _BASE.safe_read_text(path, max_chars=max_chars)
 
@@ -176,7 +164,7 @@ def _google_client():
 
 def _ollama_generate_text(
     model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     """
     Call Ollama's Python client and return the response text.
     If return_usage=True, also return a usage dict with prompt/completion token counts when available.
@@ -240,7 +228,7 @@ def _call_openai_with_retry(
     create_params: Dict[str, Any],
     retries: int = 3,
     backoff_sec: float = 1.5,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Any:
     return _BASE._call_openai_with_retry(
         client,
@@ -754,49 +742,3 @@ def generative_feedback(
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
-
-
-# ---------- Model discovery ----------
-
-
-def list_openai_models(prefix: Optional[str] = "gpt") -> list[str]:
-    """
-    Return available OpenAI model IDs visible to the API key.
-    Optionally filter by prefix.
-    """
-    return _base_list_openai_models(prefix=prefix)
-
-
-def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:
-    """
-    Return available Google Generative AI model names.
-    By default, returns models starting with 'gemini' and supporting generateContent.
-    """
-    return _base_list_gemini_models(prefix=prefix)
-
-
-def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
-    """
-    Return available local Ollama model tags (e.g., 'llama3:8b-instruct').
-    """
-    return _base_list_ollama_models(prefix=prefix)
-
-
-def list_models(llm_provider: Optional[str] = None, model_name: str = MODEL_NAME) -> list[str]:
-    """
-    Unified helper: returns models for the inferred provider.
-    llm_provider: 'openai', 'google', or 'ollama' (None -> inferred from model_name).
-    """
-    return _base_list_models(llm_provider=llm_provider, model_name=model_name)
-
-
-def test():
-    """
-    Sanity test: list available models from all providers.
-    """
-    for provider in ("openai", "google", "ollama"):
-        print(f"--- {provider.upper()} MODELS ---")
-        models = list_models(provider)
-        for m in models:
-            print(f"• {m}")
-        print()

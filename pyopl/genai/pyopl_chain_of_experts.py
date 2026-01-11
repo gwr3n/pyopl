@@ -24,18 +24,6 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
-from ._strategy_base import (
-    list_gemini_models as _base_list_gemini_models,
-)
-from ._strategy_base import (
-    list_models as _base_list_models,
-)
-from ._strategy_base import (
-    list_ollama_models as _base_list_ollama_models,
-)
-from ._strategy_base import (
-    list_openai_models as _base_list_openai_models,
-)
 from .genai_pricing import estimate_costs as _estimate_costs  # NEW
 
 # --- Logging Setup ---
@@ -1030,34 +1018,3 @@ def generative_feedback(
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
-
-
-# ---------- Model discovery ----------
-
-
-def list_openai_models(prefix: Optional[str] = "gpt") -> list[str]:
-    return _base_list_openai_models(prefix=prefix)
-
-
-def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:
-    return _base_list_gemini_models(prefix=prefix)
-
-
-def list_ollama_models(prefix: Optional[str] = None) -> list[str]:
-    return _base_list_ollama_models(prefix=prefix)
-
-
-def list_models(llm_provider: Optional[str] = None, model_name: str = MODEL_NAME) -> list[str]:
-    return _base_list_models(llm_provider=llm_provider, model_name=model_name)
-
-
-def test():
-    """
-    Sanity test: list available models from all providers.
-    """
-    for provider in ("openai", "google", "ollama"):
-        print(f"--- {provider.upper()} MODELS ---")
-        models = list_models(provider)
-        for m in models:
-            print(f"• {m}")
-        print()

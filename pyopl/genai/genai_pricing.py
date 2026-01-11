@@ -40,14 +40,14 @@ def _count_openai_tokens(text: str, model_name: str) -> int:
         return _approx_token_count(text)
 
 
-def _usage_dict(prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Dict[str, int]:  # NEW
+def _usage_dict(prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> Dict[str, int]:
     return {
         "prompt_tokens": int(prompt_tokens or 0),
         "completion_tokens": int(completion_tokens or 0),
     }
 
 
-def _extract_openai_usage(resp: Any, input_text: str, output_text: str, model_name: str) -> Dict[str, int]:  # NEW
+def _extract_openai_usage(resp: Any, input_text: str, output_text: str, model_name: str) -> Dict[str, int]:
     prompt_tokens = None
     completion_tokens = None
     try:
@@ -73,7 +73,7 @@ def _extract_openai_usage(resp: Any, input_text: str, output_text: str, model_na
     return _usage_dict(prompt_tokens, completion_tokens)
 
 
-def _extract_gemini_usage(resp: Any, input_text: str, output_text: str) -> Dict[str, int]:  # NEW
+def _extract_gemini_usage(resp: Any, input_text: str, output_text: str) -> Dict[str, int]:
     prompt_tokens = None
     completion_tokens = None
     try:

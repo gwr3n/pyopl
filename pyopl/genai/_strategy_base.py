@@ -50,7 +50,7 @@ class GenAIStrategyBase:
     and control-flow. Public module APIs can remain as thin wrappers.
     """
 
-    # Defaults (subclasses/modules may override via ctor args)
+    # Defaults (subclasses/modules may override)
     MAX_OUTPUT_TOKENS: Optional[int] = None
     FEW_SHOT_TOP_K: int = 3
     FEW_SHOT_MAX_CHARS: int = 2**31 - 1

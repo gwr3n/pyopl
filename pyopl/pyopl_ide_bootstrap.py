@@ -20,7 +20,7 @@ import ttkbootstrap as tb
 from platformdirs import user_config_dir
 
 # Model discovery (provider-specific)
-from .genai.pyopl_generative import (
+from .genai.model_discovery import (
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
