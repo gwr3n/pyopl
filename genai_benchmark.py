@@ -227,23 +227,28 @@ def main() -> int:
     group.add_argument("--index", type=int, help="Index of the problem in the JSON problem list (default: 0).")
     parser.add_argument(
         "--logic",
-        default="generative",
-        choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "cafa", "chain_of_experts", "generative"],
-        help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, cafa, chain_of_experts, or generative (default).",
+        default="SyntAGM",
+        choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "cafa", "chain_of_experts", "SyntAGM"],
+        help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, cafa, chain_of_experts, or SyntAGM (default).",
     )
-    # Ablation flags (only valid for --logic generative)
+    # Ablation flags (only valid for --logic SyntAGM)
     parser.add_argument(
         "--no-few-shot",
         action="store_true",
-        help="Disable few-shot prompting (generative logic only).",
+        help="Disable few-shot prompting (SyntAGM logic only).",
     )
     parser.add_argument(
         "--no-alignment-check",
         action="store_true",
-        help="Disable alignment check (generative logic only).",
+        help="Disable alignment check (SyntAGM logic only).",
     )
 
-    # Default: always check alignment in benchmark mode unless explicitly disabled for generative
+    # If called with no CLI args, default to showing help
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stdout)
+        return 0
+
+    # Default: always check alignment in benchmark mode unless explicitly disabled for SyntAGM
     args = parser.parse_args()
 
     print("Arguments:")
@@ -252,7 +257,7 @@ def main() -> int:
 
     # Select implementation based on --logic
     logic_to_module = {
-        "generative": "pyopl.genai.pyopl_generative",
+        "SyntAGM": "pyopl.genai.pyopl_generative",
         "reflexion": "pyopl.genai.pyopl_reflexion",
         "tree_of_thoughts": "pyopl.genai.pyopl_tree_of_thoughts",
         "chain_of_thought": "pyopl.genai.pyopl_chain_of_thought",
@@ -264,9 +269,9 @@ def main() -> int:
     if not mod_name:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
-    # Enforce ablation flags only for generative
-    if args.logic != "generative" and (args.no_few_shot or args.no_alignment_check):
-        print("--no-few-shot and --no-alignment-check are only allowed with --logic generative.", file=sys.stderr)
+    # Enforce ablation flags only for SyntAGM
+    if args.logic != "SyntAGM" and (args.no_few_shot or args.no_alignment_check):
+        print("--no-few-shot and --no-alignment-check are only allowed with --logic SyntAGM.", file=sys.stderr)
         return 2
 
     impl = importlib.import_module(mod_name)
