@@ -1101,7 +1101,6 @@ class OPLIDE(tk.Tk):
             except tk.TclError:
                 self.status_var.set("Ready")
             except Exception as e:
-                # ...existing code...
                 self.status_var.set(f"Error updating status: {e}")
         else:
             self.status_var.set("Ready")

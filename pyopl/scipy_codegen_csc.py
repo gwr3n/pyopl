@@ -3027,7 +3027,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if nested:
                         data_dict[name] = nested
 
-        # --- Existing: Convert 2D arrays indexed by tuple-set × range into nested dicts ---
+        # --- Convert 2D arrays indexed by tuple-set × range into nested dicts ---
         for decl in self.ast.get("declarations", []):
             if (
                 decl.get("type")
@@ -5291,7 +5291,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         # Then reuse consequent gating with that flag.
                         # Build diff = left - right
                         def _lin_eq(expr):
-                            # ...existing code...
                             if not isinstance(expr, dict):
                                 raise SemanticError("Unsupported expression in implication linearization")
                             t = expr.get("type")

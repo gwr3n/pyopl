@@ -1500,7 +1500,7 @@ class OPLParser(Parser):
         if self._is_negative_literal(start_node) or self._is_negative_literal(end_node):
             raise SemanticError("Range bounds must be non-negative literals.", lineno=p.lineno)
 
-        # Existing check: if both constant numbers, ensure start <= end
+        # If both constant numbers, ensure start <= end
         start_is_int = (
             isinstance(start_node, dict) and start_node.get("type") == "number" and isinstance(start_node.get("value"), int)
         )
@@ -4017,7 +4017,7 @@ class OPLCompiler:
                     )
                     continue
 
-                # Existing: computed indexed param
+                # Computed indexed param
                 name = decl["name"]
                 var_type = decl.get("var_type") or ""
                 dimensions = decl.get("dimensions", [])

@@ -496,8 +496,6 @@ class GurobiCodeGenerator:
                             f"but data provides an array for key {repr(bad_key)}. Use scalar values (e.g., 2.0), not [2.0]."
                         )
 
-        # (redefine param_decl_map later as in original code; leave existing logic intact)
-        # ...existing code...
         param_decl_map = {
             d["name"]: d
             for d in self.ast.get("declarations", [])
@@ -514,7 +512,6 @@ class GurobiCodeGenerator:
 
         # --- helpers for evaluating bounds and normalizing set elements ---
         def _eval_expr_bound(expr):
-            # ...existing code but use working_data instead of data_dict...
             if isinstance(expr, dict):
                 t = expr.get("type")
                 if t == "number":
@@ -858,7 +855,6 @@ class GurobiCodeGenerator:
 
                 start, end = get_range_bounds(range_dim)
                 expected_len = end - start + 1
-                # ...existing code...
                 dict_val = {}
                 for k, row in value.items():
                     if len(row) != expected_len:
