@@ -101,6 +101,7 @@ def rank_problem_descriptions(
     # Equivalent to (doc_embs @ query_emb)
     import torch
 
+    # Compute similarity scores
     sims = torch.matmul(doc_embs, query_emb)
     scores = sims.cpu().tolist()
 
