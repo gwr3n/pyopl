@@ -7,10 +7,10 @@ import sys
 from .genai.pyopl_generative import generative_feedback, generative_solve
 from .pyopl_core import solve
 
-__version__ = "0.6.0"
+__version__ = "1.2.1"
 __author__ = "Roberto Rossi"
 __email__ = "robros@gmail.com"
-__description__ = "A Python interface for OPL models with support for multiple solvers."
+__description__ = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
 __license__ = "MIT"
 __url__ = "https://github.com/gwr3n/pyopl"
 
