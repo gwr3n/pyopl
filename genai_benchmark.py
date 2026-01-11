@@ -5,19 +5,20 @@ import os
 import re
 import sys
 import time
-from pathlib import Path  # NEW
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pyopl import solve
 
 
+# Ensure parent directory exists
 def _ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
 
 
-# NEW: atomic JSON write to avoid partial files on crash
+# Atomic JSON write to avoid partial files on crash
 def _dump_json_atomic(path: str, payload: Any) -> None:
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -25,12 +26,13 @@ def _dump_json_atomic(path: str, payload: Any) -> None:
     os.replace(tmp, path)
 
 
-# NEW: resolve dataset file path relative to this script
+# Resolve dataset file path relative to this script
 def _dataset_file(dataset_name: str) -> Path:
     root = Path(__file__).resolve().parent
     return root / "gen_ai" / "datasets" / dataset_name / f"{dataset_name}.json"
 
 
+# Extract a float number from various formats
 def _extract_number(value: Any) -> Optional[float]:
     # Try to coerce to float directly
     try:
@@ -48,6 +50,7 @@ def _extract_number(value: Any) -> Optional[float]:
     return None
 
 
+# Extract objective value from result object
 def _extract_objective(result: Any) -> Optional[float]:
     # Common dict keys
     if isinstance(result, dict):
@@ -73,6 +76,7 @@ def _extract_objective(result: Any) -> Optional[float]:
     return None
 
 
+# Infer optimization direction from model file content
 def _get_direction_from_model(model_file: str):
     try:
         with open(model_file, "r", encoding="utf-8") as f:
@@ -86,7 +90,7 @@ def _get_direction_from_model(model_file: str):
     return None
 
 
-# NEW: unify single/batch processing into one function
+# Unify single/batch processing into one function
 def _process_item(
     index: int,
     item: Any,
@@ -95,7 +99,7 @@ def _process_item(
     solve_fn: Callable[..., Any],
     models_dir: str,
     alignment_check: bool,
-    few_shot: Optional[bool] = None,  # NEW
+    few_shot: Optional[bool] = None,
 ) -> tuple[dict, bool]:
     entry: dict[str, Any] = {
         "index": index,
@@ -133,7 +137,7 @@ def _process_item(
     # Step 1-2: Generate model and data
     t0 = time.perf_counter()
     try:
-        # NEW: Build kwargs so we can conditionally add few_shot without breaking non-generative signatures
+        # Build kwargs so we can conditionally add few_shot without breaking non-generative signatures
         gen_kwargs: dict[str, Any] = dict(
             llm_provider=args.provider,
             model_name=args.gpt,
@@ -203,6 +207,7 @@ def _process_item(
     return entry, ok
 
 
+# Main entry point
 def main() -> int:
     import logging
 
@@ -227,7 +232,7 @@ def main() -> int:
         choices=["standard", "chain_of_thought", "tree_of_thoughts", "reflexion", "cafa", "chain_of_experts", "generative"],
         help="Generative logic to use: standard, chain_of_thought, tree_of_thoughts, reflexion, cafa, chain_of_experts, or generative (default).",
     )
-    # NEW: ablation flags (only valid for --logic generative)
+    # Ablation flags (only valid for --logic generative)
     parser.add_argument(
         "--no-few-shot",
         action="store_true",
@@ -260,7 +265,7 @@ def main() -> int:
     if not mod_name:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
-    # NEW: enforce ablation flags only for generative
+    # Enforce ablation flags only for generative
     if args.logic != "generative" and (args.no_few_shot or args.no_alignment_check):
         print("--no-few-shot and --no-alignment-check are only allowed with --logic generative.", file=sys.stderr)
         return 2
@@ -289,7 +294,7 @@ def main() -> int:
         valid = [g.name.lower() for g in GrammarType]
         raise ValueError(f"Unknown grammar: {args.grammar}. Valid options: {valid}")
 
-    # NEW: determine alignment_check and few_shot for generative ablations
+    # Determine alignment_check and few_shot for generative ablations
     ALIGNMENT_CHECK = True
     if args.logic == "generative" and args.no_alignment_check:
         ALIGNMENT_CHECK = False
@@ -317,7 +322,7 @@ def main() -> int:
     # Output directories
     timestamp = time.strftime("%Y%m%dT%H%M%S")
     base_dir = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
-    # NEW: add ablation tag subfolder only for generative and only when flags set
+    # Add ablation tag subfolder only for generative and only when flags set
     if args.logic == "generative":
         tags = []
         if args.no_few_shot:
