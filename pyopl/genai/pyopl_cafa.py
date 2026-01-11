@@ -25,7 +25,7 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
-from .genai_pricing import estimate_costs as _estimate_costs  # NEW
+from .genai_pricing import estimate_costs as _estimate_costs
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -206,9 +206,9 @@ def _llm_generate_text(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
-    capture_usage: bool = False,  # NEW
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+    progress: Optional[Callable[[str], None]] = None,
+    capture_usage: bool = False,
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     expected_json = provider == LLMProvider.OPENAI
     return _BASE.llm_generate_text(
         provider=_BaseLLMProvider[provider.name],
@@ -690,7 +690,7 @@ def generative_feedback(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ):
     """Provide feedback on a given PyOPL model and data file based on a user prompt.
 
@@ -703,7 +703,7 @@ def generative_feedback(
         temperature (float|None): Sampling temperature; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).  # NEW
+        progress (callable|None): Optional function that receives progress messages (str).
 
     Raises:
         RuntimeError: If feedback generation fails irrecoverably.
@@ -722,7 +722,7 @@ def generative_feedback(
     with open(data_file, "r") as fh:
         data_code = fh.read()
 
-    _notify(progress, "Generating feedback from LLM")  # NEW
+    _notify(progress, "Generating feedback from LLM")
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
     content: str = _llm_generate_text(
@@ -732,13 +732,13 @@ def generative_feedback(
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0.0 if temperature is not None else None,
         stop=stop,
-        progress=progress,  # NEW
+        progress=progress,
         capture_usage=False,
     )
     if not content:
         raise RuntimeError("Empty model response.")
     try:
-        _notify(progress, "Feedback received; parsing")  # NEW
+        _notify(progress, "Feedback received; parsing")
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")

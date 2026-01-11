@@ -4,15 +4,15 @@ import logging
 import os
 import re
 from enum import Enum, auto
-from pathlib import Path  # NEW
+from pathlib import Path
 from typing import (
     Any,
-    Callable,  # NEW
+    Callable,
     Dict,
-    List,  # NEW
+    List,
     Optional,
-    Tuple,  # NEW
-    Union,  # NEW
+    Tuple,
+    Union,
 )
 
 # === Local imports ===
@@ -26,14 +26,14 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
-from .genai_pricing import estimate_costs as _estimate_costs  # NEW
+from .genai_pricing import estimate_costs as _estimate_costs
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
 
 
-# NEW: progress notifier used by generative_solve/feedback and LLM calls
+# Progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
     try:
         if progress:
@@ -51,7 +51,7 @@ LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
-# NEW: Few-shot configuration
+# Few-shot configuration
 FEW_SHOT_TOP_K = 3
 FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
@@ -99,7 +99,7 @@ def _get_grammar_implementation(mode: Grammar) -> str:
     return _BASE.get_grammar_implementation(_BaseGrammar[mode.name])
 
 
-# NEW: RAG few-shot helpers
+# RAG few-shot helpers
 def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
     return _BASE.safe_read_text(path, max_chars=max_chars)
 
@@ -130,7 +130,7 @@ def _gather_few_shots(
     return _BASE.gather_few_shots(problem_description, k=k, models_dir=models_dir, progress=progress)
 
 
-# NEW: central renderer for few-shot exemplars (to avoid duplication)
+# Central renderer for few-shot exemplars (to avoid duplication)
 def _render_few_shots_section(few_shots: Optional[List[Dict[str, str]]]) -> str:
     return _BASE.render_few_shots_section(few_shots)
 
@@ -216,7 +216,7 @@ def _google_client():
 
 def _ollama_generate_text(
     model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     """
     Call Ollama's Python client and return the response text.
     If return_usage=True, also return a usage dict with prompt/completion token counts when available.
@@ -261,9 +261,9 @@ def _llm_generate_text(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
-    capture_usage: bool = False,  # NEW
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+    progress: Optional[Callable[[str], None]] = None,
+    capture_usage: bool = False,
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     # Preserve prior behavior: always request JSON when possible (generation/alignment/revision/feedback)
     base_provider = _BaseLLMProvider(provider.value)
     return _BASE.llm_generate_text(
@@ -284,7 +284,7 @@ def _call_openai_with_retry(
     create_params: Dict[str, Any],
     retries: int = 3,
     backoff_sec: float = 1.5,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Any:
     return _BASE._call_openai_with_retry(
         client,
@@ -298,7 +298,7 @@ def _call_openai_with_retry(
 # ---------- Prompt builders ----------
 
 
-# NEW: shared commenting guidance for prompts
+# Shared commenting guidance for prompts
 def _commenting_guidelines() -> str:
     return (
         "Label the objective and each constraint. "
@@ -337,7 +337,7 @@ def _build_generation_prompt(
     prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
 ) -> str:
     few_shots_section = _render_few_shots_section(few_shots)
-    commenting_guidelines = _commenting_guidelines()  # NEW
+    commenting_guidelines = _commenting_guidelines()
 
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
@@ -421,7 +421,7 @@ def _build_alignment_prompt(prompt: str, grammar_implementation: str, model_code
     )
 
 
-# NEW: unified revision prompt for both syntax errors and alignment issues
+# Unified revision prompt for both syntax errors and alignment issues
 def _build_revision_prompt(
     prompt: str,
     grammar_implementation: str,
@@ -432,7 +432,7 @@ def _build_revision_prompt(
     few_shots: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     few_shots_section = _render_few_shots_section(few_shots)
-    commenting_guidelines = _commenting_guidelines()  # NEW
+    commenting_guidelines = _commenting_guidelines()
 
     errors_block = ""
     if compile_errors:
@@ -540,7 +540,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "Label the objective and each constraint. "
         "Include concise comments explaining variables, parameters, and constraints, "
         "aligned to the user's question and the problem (literate style).\n"
-    )  # NEW
+    )
 
     return (
         "<role>\n"
@@ -551,7 +551,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "Provide critical, specific feedback. If revisions are necessary for correctness,\n"
         "semantics, or consistency with the grammar reference, propose minimal changes.\n"
         "Only change what is necessary.\n"
-        f"{guidelines}"  # NEW
+        f"{guidelines}"
         "Use the following PyOPL syntax implementation as a reference for valid PyOPL syntax.\n"
         "</task>\n\n"
         "<grammar_reference>\n"
@@ -634,7 +634,7 @@ def generative_solve(
         temperature (float|None): Sampling temperature; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).  # NEW
+        progress (callable|None): Optional function that receives progress messages (str).
 
     Returns:
         str or dict: If return_statistics is False, returns the final assessment string.
@@ -642,7 +642,7 @@ def generative_solve(
                      - "iterations": number of iterations performed
                      - "assessment": final assessment string
                      - "syntax_errors": list of syntax errors encountered (if any)
-                     - "cost": { "model": str, "usage": {"prompt_tokens": int, "completion_tokens": int}, "estimated_costs": dict }  # NEW
+                     - "cost": { "model": str, "usage": {"prompt_tokens": int, "completion_tokens": int}, "estimated_costs": dict }
     Raises:
         RuntimeError: If generation or validation fails irrecoverably.
     """
@@ -659,28 +659,28 @@ def generative_solve(
     _notify(
         progress,
         f"Generating with provider={provider.value} model={model_name} iterations={iterations} alignment={'on' if do_alignment else 'off'}",
-    )  # NEW
+    )
 
-    # NEW: Retrieve few-shot examples using RAG
+    # Retrieve few-shot examples using RAG
     few_shots: List[Dict[str, str]] = (
         _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
-    user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)  # CHANGED
+    user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)
     assessment_text = ""
     syntax_errors: list[str] = []
 
-    # NEW: aggregate token usage across all LLM calls in this run
-    total_prompt_tokens = 0  # NEW
-    total_completion_tokens = 0  # NEW
+    # Aggregate token usage across all LLM calls in this run
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
 
     model_code = ""
     data_code = ""
 
     for iteration in range(iterations):
         logger.debug(f"Iteration {iteration + 1}/{iterations}")
-        _notify(progress, f"Iteration {iteration + 1}/{iterations}: prompting model")  # NEW
-        # CHANGED: capture usage and unpack directly for mypy
+        _notify(progress, f"Iteration {iteration + 1}/{iterations}: prompting model")
+        # Capture usage and unpack directly for mypy
         content, usage = _llm_generate_text(
             provider=provider,
             model_name=model_name,
@@ -688,11 +688,11 @@ def generative_solve(
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=temperature,
             stop=stop,
-            progress=progress,  # NEW
-            capture_usage=True,  # NEW
+            progress=progress,
+            capture_usage=True,
         )
-        total_prompt_tokens += usage.get("prompt_tokens", 0)  # NEW
-        total_completion_tokens += usage.get("completion_tokens", 0)  # NEW
+        total_prompt_tokens += usage.get("prompt_tokens", 0)
+        total_completion_tokens += usage.get("completion_tokens", 0)
 
         if not content:
             raise RuntimeError("Empty model response.")
@@ -700,7 +700,7 @@ def generative_solve(
             result = _json_loads_relaxed(content)
             model_code = result["model"]
             data_code = result["data"]
-            _notify(progress, "LLM response parsed (model + data)")  # NEW
+            _notify(progress, "LLM response parsed (model + data)")
             logger.debug("Model and data generated.")
         except Exception as e:
             raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
@@ -708,7 +708,7 @@ def generative_solve(
         compiler = OPLCompiler()
         syntax_errors = []
         try:
-            _notify(progress, "Compiling model and data")  # NEW
+            _notify(progress, "Compiling model and data")
             compiler.compile_model(model_code, data_code)
         except SemanticError as e:
             syntax_errors.append(str(e))
@@ -727,17 +727,17 @@ def generative_solve(
             f.write(model_code)
         with open(data_file, "w") as f:
             f.write(data_code)
-        _notify(progress, f"Wrote files: {model_file} • {data_file}")  # NEW
+        _notify(progress, f"Wrote files: {model_file} • {data_file}")
 
         if not syntax_errors:
             if not do_alignment:
-                _notify(progress, "Syntax OK; alignment check disabled. Stopping.")  # NEW
+                _notify(progress, "Syntax OK; alignment check disabled. Stopping.")
                 break
 
             logger.debug("Checking alignment with original prompt...")
-            _notify(progress, "Checking alignment with original prompt...")  # NEW
+            _notify(progress, "Checking alignment with original prompt...")
             alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
-            # CHANGED: capture usage and unpack directly for mypy
+            # Capture usage and unpack directly for mypy
             alignment_content, usage2 = _llm_generate_text(
                 provider=provider,
                 model_name=model_name,
@@ -745,11 +745,11 @@ def generative_solve(
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.0 if temperature is not None else None,
                 stop=stop,
-                progress=progress,  # NEW
-                capture_usage=True,  # NEW
+                progress=progress,
+                capture_usage=True,
             )
-            total_prompt_tokens += usage2.get("prompt_tokens", 0)  # NEW
-            total_completion_tokens += usage2.get("completion_tokens", 0)  # NEW
+            total_prompt_tokens += usage2.get("prompt_tokens", 0)
+            total_completion_tokens += usage2.get("completion_tokens", 0)
 
             if not alignment_content:
                 raise RuntimeError("Empty alignment response.")
@@ -762,7 +762,7 @@ def generative_solve(
             ):
                 assessment_text = alignment_obj.get("assessment", "").strip()
                 if alignment_obj["aligned"]:
-                    _notify(progress, "Aligned ✓ Stopping.")  # NEW
+                    _notify(progress, "Aligned ✓ Stopping.")
                     logger.debug("Model and data are syntactically valid and aligned with the prompt.")
                     break
                 else:
@@ -802,11 +802,11 @@ def generative_solve(
 
     if syntax_errors or not do_alignment:
         logger.debug("Final assessment of model and data alignment...")
-        _notify(progress, "Requesting final assessment")  # NEW
+        _notify(progress, "Requesting final assessment")
         assessment_prompt = _build_final_assessment_prompt(
             prompt, grammar_implementation, model_code, data_code, syntax_errors
         )
-        # CHANGED: capture usage and unpack directly for mypy
+        # Capture usage and unpack directly for mypy
         assessment_text_part, usage3 = _llm_generate_text(
             provider=provider,
             model_name=model_name,
@@ -814,16 +814,16 @@ def generative_solve(
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=0.0 if temperature is not None else None,
             stop=stop,
-            progress=progress,  # NEW
-            capture_usage=True,  # NEW
+            progress=progress,
+            capture_usage=True,
         )
-        total_prompt_tokens += usage3.get("prompt_tokens", 0)  # NEW
-        total_completion_tokens += usage3.get("completion_tokens", 0)  # NEW
+        total_prompt_tokens += usage3.get("prompt_tokens", 0)
+        total_completion_tokens += usage3.get("completion_tokens", 0)
         assessment_text = assessment_text_part or ""
 
-    _notify(progress, "Generation complete")  # NEW
+    _notify(progress, "Generation complete")
 
-    # NEW: pricing estimate using aggregated usage
+    # Pricing estimate using aggregated usage
     try:
         from types import SimpleNamespace
     except Exception:
@@ -845,14 +845,14 @@ def generative_solve(
         "usage": usage_summary,
         "estimated_costs": estimated_costs,
     }
-    _notify(progress, f"[LLM] Estimated costs: {cost}")  # NEW
+    _notify(progress, f"[LLM] Estimated costs: {cost}")
 
     if return_statistics:
         return {
             "iterations": iteration + 1,
             "assessment": assessment_text.strip(),
             "syntax_errors": syntax_errors,
-            "cost": cost,  # NEW
+            "cost": cost,
         }
     else:
         return assessment_text.strip()
@@ -867,7 +867,7 @@ def generative_feedback(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ):
     """Provide feedback on a given PyOPL model and data file based on a user prompt.
 
@@ -880,7 +880,7 @@ def generative_feedback(
         temperature (float|None): Sampling temperature; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).  # NEW
+        progress (callable|None): Optional function that receives progress messages (str).
 
     Raises:
         RuntimeError: If feedback generation fails irrecoverably.
@@ -899,7 +899,7 @@ def generative_feedback(
     with open(data_file, "r") as fh:
         data_code = fh.read()
 
-    _notify(progress, "Generating feedback from LLM")  # NEW
+    _notify(progress, "Generating feedback from LLM")
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
     content: str = _llm_generate_text(
@@ -909,13 +909,13 @@ def generative_feedback(
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0.0 if temperature is not None else None,
         stop=stop,
-        progress=progress,  # NEW
+        progress=progress,
         capture_usage=False,
     )
     if not content:
         raise RuntimeError("Empty model response.")
     try:
-        _notify(progress, "Feedback received; parsing")  # NEW
+        _notify(progress, "Feedback received; parsing")
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")

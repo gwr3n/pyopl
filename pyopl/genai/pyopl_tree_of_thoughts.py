@@ -4,15 +4,15 @@ import logging
 import os
 import re
 from enum import Enum, auto
-from pathlib import Path  # NEW
+from pathlib import Path
 from typing import (
     Any,
-    Callable,  # NEW
+    Callable,
     Dict,
-    List,  # NEW
+    List,
     Optional,
-    Tuple,  # NEW
-    Union,  # NEW
+    Tuple,
+    Union,
 )
 
 # === Local imports ===
@@ -26,14 +26,14 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
-from .genai_pricing import estimate_costs as _estimate_costs  # NEW
+from .genai_pricing import estimate_costs as _estimate_costs
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
 
 
-# NEW: progress notifier used by generative_solve/feedback and LLM calls
+# Progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
     try:
         if progress:
@@ -51,14 +51,14 @@ LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
-# NEW: Few-shot configuration
+# Few-shot configuration
 FEW_SHOT_TOP_K = 3
 FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
-# NEW: Reflexion memory cap
+# Reflexion memory cap
 REFLEXION_MAX_MEMORY = 5
 
-# NEW: Tree-of-Thoughts search parameters
+# Tree-of-Thoughts search parameters
 TOT_BRANCH_FACTOR = 3  # number of candidate thoughts per node (K)
 TOT_BEAM_WIDTH = 3  # number of best thoughts kept per level (B)
 
@@ -106,7 +106,7 @@ def _get_grammar_implementation(mode: Grammar) -> str:
     return _BASE.get_grammar_implementation(_BaseGrammar[mode.name])
 
 
-# NEW: RAG few-shot helpers
+# RAG few-shot helpers
 def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
     return _BASE.safe_read_text(path, max_chars=max_chars)
 
@@ -316,8 +316,8 @@ def _ollama_generate_text(
     prompt: str,
     num_predict: Optional[int] = MAX_OUTPUT_TOKENS,
     return_usage: bool = False,
-    enforce_json: bool = False,  # NEW
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+    enforce_json: bool = False,
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     """
     Call Ollama's Python client and return the response text.
     If return_usage=True, also return a usage dict with prompt/completion token counts when available.
@@ -337,7 +337,7 @@ def _build_create_params(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
-    expected_json: bool = False,  # NEW
+    expected_json: bool = False,
 ) -> Dict[str, Any]:
     return _BASE._build_openai_create_params(
         model_name=model_name,
@@ -360,10 +360,10 @@ def _llm_generate_text(
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
-    capture_usage: bool = False,  # NEW
-    expected_json: bool = False,  # NEW
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
+    progress: Optional[Callable[[str], None]] = None,
+    capture_usage: bool = False,
+    expected_json: bool = False,
+) -> Union[str, Tuple[str, Dict[str, int]]]:
     return _BASE.llm_generate_text(
         provider=_BaseLLMProvider[provider.name],
         model_name=model_name,
@@ -382,7 +382,7 @@ def _call_openai_with_retry(
     create_params: Dict[str, Any],
     retries: int = 3,
     backoff_sec: float = 1.5,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ) -> Any:
     return _BASE._call_openai_with_retry(
         client,
@@ -584,7 +584,7 @@ def generative_solve(
 
     Signatures and return shape preserved for drop-in compatibility.
     """
-    from dataclasses import dataclass  # NEW (scoped import to minimize global churn)
+    from dataclasses import dataclass  # (scoped import to minimize global churn)
 
     grammar_implementation = _get_grammar_implementation(mode)
 
@@ -651,7 +651,7 @@ def generative_solve(
                 stop=stop,
                 progress=progress,
                 capture_usage=True,
-                expected_json=True,  # NEW
+                expected_json=True,
             )
             usage_totals["prompt_tokens"] += usage.get("prompt_tokens", 0)
             usage_totals["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -695,7 +695,7 @@ def generative_solve(
             stop=stop,
             progress=progress,
             capture_usage=True,
-            expected_json=True,  # NEW
+            expected_json=True,
         )
         total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
         total_usage["completion_tokens"] += usage.get("completion_tokens", 0)
@@ -876,7 +876,7 @@ def generative_feedback(
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
     llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,  # NEW
+    progress: Optional[Callable[[str], None]] = None,
 ):
     """Provide feedback on a given PyOPL model and data file based on a user prompt.
 
@@ -889,7 +889,7 @@ def generative_feedback(
         temperature (float|None): Sampling temperature; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
         llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).  # NEW
+        progress (callable|None): Optional function that receives progress messages (str).
 
     Raises:
         RuntimeError: If feedback generation fails irrecoverably.
@@ -908,7 +908,7 @@ def generative_feedback(
     with open(data_file, "r") as fh:
         data_code = fh.read()
 
-    _notify(progress, "Generating feedback from LLM")  # NEW
+    _notify(progress, "Generating feedback from LLM")
     user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
 
     content: str = _llm_generate_text(
@@ -918,14 +918,14 @@ def generative_feedback(
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0.0 if temperature is not None else None,
         stop=stop,
-        progress=progress,  # NEW
+        progress=progress,
         capture_usage=False,
-        expected_json=True,  # NEW
+        expected_json=True,
     )
     if not content:
         raise RuntimeError("Empty model response.")
     try:
-        _notify(progress, "Feedback received; parsing")  # NEW
+        _notify(progress, "Feedback received; parsing")
         return _json_loads_relaxed(content)
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
