@@ -137,7 +137,6 @@ def _process_item(
     # Step 1-2: Generate model and data
     t0 = time.perf_counter()
     try:
-        # Build kwargs so we can conditionally add few_shot without breaking non-generative signatures
         gen_kwargs: dict[str, Any] = dict(
             llm_provider=args.provider,
             model_name=args.gpt,
