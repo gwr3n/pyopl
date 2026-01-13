@@ -3,7 +3,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-EXCLUDE_DIRS = {".venv", "__pycache__", ".mypy_cache", ".ruff_cache", "build", "dist", "tmp", "pyopl_rhetor.egg-info", "rhetor.egg-info"}
+EXCLUDE_DIRS = {
+    ".venv",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    "tmp",
+    "pyopl_rhetor.egg-info",
+    "rhetor.egg-info",
+}
 total = 0
 files = 0
 
