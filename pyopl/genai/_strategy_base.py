@@ -305,15 +305,28 @@ class GenAIStrategyBase:
 
     @staticmethod
     def _google_client():
-        try:
-            import google.generativeai as genai
-        except Exception as e:
-            raise RuntimeError("google.generativeai is not installed. pip install google-generativeai") from e
+        """
+        Prefer the new `google.genai` SDK (google-genai). Fall back to the deprecated
+        `google.generativeai` SDK only if the new one isn't available.
+        """
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("GEMINI_API_KEY environment variable not set.")
-        genai.configure(api_key=api_key)
-        return genai
+
+        # New SDK: google-genai (module: google.genai)
+        try:
+            import google.genai as genai  # type: ignore
+
+            return genai.Client(api_key=api_key)
+        except Exception:
+            # Legacy SDK fallback (deprecated)
+            try:
+                import google.generativeai as genai_legacy  # type: ignore
+            except Exception as e:
+                raise RuntimeError("google-genai is not installed. pip install google-genai") from e
+
+            genai_legacy.configure(api_key=api_key)
+            return genai_legacy
 
     @staticmethod
     def _ollama_generate_text(
@@ -485,7 +498,57 @@ class GenAIStrategyBase:
             return response_text, usage
 
         if provider == LLMProvider.GOOGLE:
-            genai = self._google_client()
+            g = self._google_client()
+
+            # New SDK path: google.genai Client has `models.generate_content`
+            if hasattr(g, "models") and hasattr(getattr(g, "models", None), "generate_content"):
+                config: Dict[str, Any] = {}
+                if mt is not None:
+                    config["max_output_tokens"] = mt
+                if temperature is not None:
+                    config["temperature"] = temperature
+                if expected_json:
+                    config["response_mime_type"] = "application/json"
+
+                self.notify(progress, f"[LLM] Gemini • {model_name}: sending request (google.genai)")
+                try:
+                    # Prefer strongly-typed config when available
+                    from google.genai import types as genai_types  # type: ignore
+
+                    resp = g.models.generate_content(
+                        model=model_name,
+                        contents=input_text,
+                        config=genai_types.GenerateContentConfig(**config),
+                    )
+                except Exception:
+                    # Fallback: pass dict config
+                    resp = g.models.generate_content(model=model_name, contents=input_text, config=config)
+
+                self.notify(progress, "[LLM] Gemini: response received")
+
+                text = getattr(resp, "text", None)
+                if not isinstance(text, str) or not text:
+                    # Best-effort extraction from candidate parts (shape varies by SDK/version)
+                    try:
+                        parts: list[str] = []
+                        for c in getattr(resp, "candidates", []) or []:
+                            content = getattr(c, "content", None)
+                            for p in getattr(content, "parts", []) or []:
+                                t = getattr(p, "text", None)
+                                if isinstance(t, str):
+                                    parts.append(t)
+                        text = "".join(parts)
+                    except Exception:
+                        text = ""
+                text = text or ""
+
+                if not capture_usage:
+                    return text
+                usage = _extract_gemini_usage(resp, input_text, text)
+                return text, usage
+
+            # Legacy SDK path: google.generativeai module
+            genai = g
             model = genai.GenerativeModel(model_name)
             generation_config: Dict[str, Any] = {}
             if mt is not None:
@@ -494,9 +557,11 @@ class GenAIStrategyBase:
                 generation_config["temperature"] = temperature
             if expected_json:
                 generation_config["response_mime_type"] = "application/json"
-            self.notify(progress, f"[LLM] Gemini • {model_name}: sending request")
+
+            self.notify(progress, f"[LLM] Gemini • {model_name}: sending request (google.generativeai legacy)")
             resp = model.generate_content(input_text, generation_config=generation_config)
             self.notify(progress, "[LLM] Gemini: response received")
+
             text = getattr(resp, "text", None)
             if not text and getattr(resp, "candidates", None):
                 parts: list[str] = []
@@ -612,7 +677,25 @@ def list_openai_models(*, prefix: Optional[str] = "gpt") -> list[str]:
 
 
 def list_gemini_models(*, prefix: Optional[str] = "gemini") -> list[str]:
-    genai = GenAIStrategyBase._google_client()
+    g = GenAIStrategyBase._google_client()
+
+    # New SDK: google.genai Client
+    if hasattr(g, "models") and hasattr(getattr(g, "models", None), "list"):
+        names: list[str] = []
+        try:
+            for m in g.models.list():
+                name = getattr(m, "name", None) or (m.get("name") if isinstance(m, dict) else None)
+                if isinstance(name, str) and name.startswith("models/"):
+                    name = name[len("models/") :]
+                if isinstance(name, str):
+                    if not prefix or name.startswith(prefix):
+                        names.append(name)
+        except Exception as e:
+            raise RuntimeError(f"Failed to list Gemini models (google.genai): {e}")
+        return sorted(set(names))
+
+    # Legacy SDK: google.generativeai module
+    genai = g
     try:
         models = genai.list_models()
     except Exception as e:

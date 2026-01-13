@@ -15,6 +15,7 @@ platformdirs>=4.1
 # Generative AI integrations
 openai>=1.99
 google-generativeai>=0.8.5
+google-genai>=1.0.0
 ollama>=0.6.0
 
 # RAG
