@@ -2045,10 +2045,21 @@ class OPLParser(Parser):
                 return [wrap_implication_if_needed(x) for x in c]
             return c
 
+        # NEW: attach a label_template to labelled constraints inside this forall
+        it_names = [it.get("iterator") for it in iterators if isinstance(it, dict) and "iterator" in it]
+
+        def attach_label_template(node):
+            if isinstance(node, dict) and "label" in node and "label_template" not in node:
+                node["label_template"] = {"name": node["label"], "iterators": list(it_names)}
+            return node
+
         if isinstance(constraint_or_block, list):
-            result["constraints"] = [wrap_implication_if_needed(x) for x in constraint_or_block]
+            wrapped = [wrap_implication_if_needed(x) for x in constraint_or_block]
+            # attach templates
+            result["constraints"] = [attach_label_template(x) for x in wrapped if isinstance(x, dict)]
         else:
-            result["constraint"] = wrap_implication_if_needed(constraint_or_block)
+            single = wrap_implication_if_needed(constraint_or_block)
+            result["constraint"] = attach_label_template(single) if isinstance(single, dict) else single
         return result
 
     # --- Forall constraints: pop iterator context after parsing inner constraint/block ---
