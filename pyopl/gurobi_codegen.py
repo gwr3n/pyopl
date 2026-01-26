@@ -86,6 +86,8 @@ class GurobiCodeGenerator:
         self.indent_level = 0
         self.gurobi_var_map = {}  # Maps OPL decision variable names to Gurobi variable objects
         self._add_code_line = self.__class__._add_code_line_impl.__get__(self)
+        # NEW: active label name expression inside forall (Python expression string or None)
+        self._active_label_name_expr = None
 
     # --- Helper for adding code lines ---
     def _add_code_line_impl(self, line):
@@ -1160,6 +1162,33 @@ class GurobiCodeGenerator:
         self._add_code_line("model.update()")
         self._add_code_line("")
 
+    # NEW: helper to format constraint name, honoring active label template if present
+    def _format_name_expr(self, base_prefix: str, suffix: str = "") -> str:
+        """
+        Returns a Python expression string for the name= argument.
+        If a label template is active, returns (label_expr + suffix), else a quoted literal.
+        """
+        if getattr(self, "_active_label_name_expr", None):
+            if suffix:
+                return f"({self._active_label_name_expr} + {repr(suffix)})"
+            return f"{self._active_label_name_expr}"
+        # Fallback: literal compile-time name
+        return repr(base_prefix + (suffix or ""))
+
+    # NEW: build a Python expression for a label template inside a forall loop
+    def _compute_label_expr(self, label_template: dict) -> str:
+        """
+        Build a Python expression string that evaluates to a constraint name at runtime:
+        'Name[i,j,...]' using current iterator variables.
+        """
+        base = label_template.get("name", "ct")
+        iters = list(label_template.get("iterators") or [])
+        if not iters:
+            return repr(base)
+        list_expr = "[" + ", ".join(iters) + "]"
+        # Join with ',' and wrap in brackets; str() handles tuples nicely
+        return f"({repr(base)} + '[' + ','.join(str(v) for v in {list_expr}) + ']')"
+    
     # === Objective and Constraints Section ===
     def _generate_objective(self, objective):
         """Generates Python code for the optimization objective."""
@@ -1177,11 +1206,19 @@ class GurobiCodeGenerator:
 
     def _generate_single_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         """Generates Python code for a single constraint or a forall block using a dispatch pattern."""
-        node_type = constraint_node["type"]
-        method = getattr(self, f"_constraint_{node_type}", None)
-        if not method:
-            raise NotImplementedError(f"Constraint type '{node_type}' is not supported by the Gurobi code generator.")
-        method(constraint_node, constr_name_prefix, current_iterators)
+        # NEW: respect top-level labels (outside forall) by pushing an active label name
+        prev = self._active_label_name_expr
+        try:
+            if isinstance(constraint_node, dict) and "label" in constraint_node and not self._active_label_name_expr:
+                # Use the literal label as the active name (no indices to substitute)
+                self._active_label_name_expr = repr(constraint_node["label"])
+            node_type = constraint_node["type"]
+            method = getattr(self, f"_constraint_{node_type}", None)
+            if not method:
+                raise NotImplementedError(f"Constraint type '{node_type}' is not supported by the Gurobi code generator.")
+            method(constraint_node, constr_name_prefix, current_iterators)
+        finally:
+            self._active_label_name_expr = prev
 
     # === Linear Bound Utilities (safe wrappers) ===
     def _var_bounds_safe(self, var_node):
@@ -1399,45 +1436,44 @@ class GurobiCodeGenerator:
             eps = 0
             if op == ">=":
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_ge_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_ge_{binvar}')})"
                 )
-                # bin=0 upper-relaxes
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name='{constr_name_prefix}_aux_ge_relax_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_ge_relax_{binvar}')})"
                 )
             elif op == ">":
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_gt_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_gt_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name='{constr_name_prefix}_aux_gt_relax_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_gt_relax_{binvar}')})"
                 )
             elif op == "<=":
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_le_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_le_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * {binvar}, name='{constr_name_prefix}_aux_le_relax_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_le_relax_{binvar}')})"
                 )
             elif op == "<":
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_lt_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_lt_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * {binvar}, name='{constr_name_prefix}_aux_lt_relax_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_lt_relax_{binvar}')})"
                 )
             elif op == "==":
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_eq1_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq1_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({right_expr} - {left_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_eq2_{binvar}')"
+                    f"model.addConstr({right_expr} - {left_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq2_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_eq3_{binvar}')"
+                    f"model.addConstr({left_expr} - {right_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq3_{binvar}')})"
                 )
                 self._add_code_line(
-                    f"model.addConstr({right_expr} - {left_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name='{constr_name_prefix}_aux_eq4_{binvar}')"
+                    f"model.addConstr({right_expr} - {left_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq4_{binvar}')})"
                 )
             else:
                 raise ValueError(f"Unsupported comparison operator in boolean linearization: {op}")
@@ -1484,35 +1520,38 @@ class GurobiCodeGenerator:
             if t == "not":
                 inner = _boolean_expr_to_binary(node["value"], iterators)
                 b = _new_bool_aux("not")
-                self._add_code_line(f"model.addConstr({b} + {inner} == 1, name='{constr_name_prefix}_notlink_{b}')")
+                self._add_code_line(f"model.addConstr({b} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{b}')} )")
                 return b
             if t == "and":
                 left = _boolean_expr_to_binary(node["left"], iterators)
                 right = _boolean_expr_to_binary(node["right"], iterators)
                 b = _new_bool_aux("and")
-                self._add_code_line(f"model.addConstr({b} <= {left}, name='{constr_name_prefix}_and1_{b}')")
-                self._add_code_line(f"model.addConstr({b} <= {right}, name='{constr_name_prefix}_and2_{b}')")
-                self._add_code_line(f"model.addConstr({b} >= {left} + {right} - 1, name='{constr_name_prefix}_and3_{b}')")
+                self._add_code_line(f"model.addConstr({b} <= {left}, name={self._format_name_expr(constr_name_prefix, f'_and1_{b}')} )")
+                self._add_code_line(f"model.addConstr({b} <= {right}, name={self._format_name_expr(constr_name_prefix, f'_and2_{b}')} )")
+                self._add_code_line(f"model.addConstr({b} >= {left} + {right} - 1, name={self._format_name_expr(constr_name_prefix, f'_and3_{b}')} )")
                 return b
             if t == "or":
                 left = _boolean_expr_to_binary(node["left"], iterators)
                 right = _boolean_expr_to_binary(node["right"], iterators)
                 b = _new_bool_aux("or")
-                self._add_code_line(f"model.addConstr({b} >= {left}, name='{constr_name_prefix}_or1_{b}')")
-                self._add_code_line(f"model.addConstr({b} >= {right}, name='{constr_name_prefix}_or2_{b}')")
-                self._add_code_line(f"model.addConstr({b} <= {left} + {right}, name='{constr_name_prefix}_or3_{b}')")
+                self._add_code_line(f"model.addConstr({b} >= {left}, name={self._format_name_expr(constr_name_prefix, f'_or1_{b}')} )")
+                self._add_code_line(f"model.addConstr({b} >= {right}, name={self._format_name_expr(constr_name_prefix, f'_or2_{b}')} )")
+                self._add_code_line(f"model.addConstr({b} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, f'_or3_{b}')} )")
                 return b
             if t == "boolean_literal":
                 b = _new_bool_aux("lit")
                 val = 1 if node.get("value") else 0
-                self._add_code_line(f"model.addConstr({b} == {val}, name='{constr_name_prefix}_lit_{b}')")
+                self._add_code_line(f"model.addConstr({b} == {val}, name={self._format_name_expr(constr_name_prefix, f'_lit_{b}')} )")
                 return b
             raise ValueError(f"Unsupported boolean expression type for auxiliary binary: {t}")
 
         if is_composite_boolean(constraint_node["antecedent"]) or is_composite_boolean(constraint_node["consequent"]):
             ant_bin = _boolean_expr_to_binary(constraint_node["antecedent"], current_iterators)
             cons_bin = _boolean_expr_to_binary(constraint_node["consequent"], current_iterators)
-            self._add_code_line(f"model.addConstr({ant_bin} <= {cons_bin}, name='{constr_name_prefix}_impl_bin')")
+            # PATCH: ensure name honors label (if any)
+            self._add_code_line(
+                f"model.addConstr({ant_bin} <= {cons_bin}, name={self._format_name_expr(constr_name_prefix, '_impl_bin')})"
+            )
             return
 
         def wrap_boolean_literal_as_constraint(node):
@@ -1599,7 +1638,7 @@ class GurobiCodeGenerator:
         ):
             # RHS is a numeric literal: use it directly
             self._add_code_line(
-                f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name='{constr_name_prefix}_indicator_contra')"
+                f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra')})"
             )
             return
 
@@ -1621,11 +1660,11 @@ class GurobiCodeGenerator:
                 c_numeric = float(ant_right.get("value", 0))
                 adjusted = c_numeric - epsilon_small
                 self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {adjusted}, name='{constr_name_prefix}_indicator_contra_ge')"
+                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {adjusted}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
                 )
             except Exception:
                 self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= ({ant_right_expr} - {epsilon_small}), name='{constr_name_prefix}_indicator_contra_ge')"
+                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= ({ant_right_expr} - {epsilon_small}), name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
                 )
             return
 
@@ -1640,21 +1679,21 @@ class GurobiCodeGenerator:
                     # Consequent must be a linear constraint
                     if cons_op in ("==", ">=", "<=", ">", "<"):
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, {binval}, {cons_left_expr} {cons_op} {cons_right_expr}, name='{constr_name_prefix}_indicator')"
+                            f"model.addGenConstrIndicator({ant_left_expr}, {binval}, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
                 elif ant_op == ">=" and rhs_val == 1:
                     # (binvar >= 1) is equivalent to (binvar == 1)
                     if cons_op in ("==", ">=", "<=", ">", "<"):
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 1, {cons_left_expr} {cons_op} {cons_right_expr}, name='{constr_name_prefix}_indicator')"
+                            f"model.addGenConstrIndicator({ant_left_expr}, 1, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
                 elif ant_op == "<=" and rhs_val == 0:
                     # (binvar <= 0) is equivalent to (binvar == 0)
                     if cons_op in ("==", ">=", "<=", ">", "<"):
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 0, {cons_left_expr} {cons_op} {cons_right_expr}, name='{constr_name_prefix}_indicator')"
+                            f"model.addGenConstrIndicator({ant_left_expr}, 0, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
             except Exception:
@@ -1678,49 +1717,44 @@ class GurobiCodeGenerator:
             # Robust split with bias against feasibility tolerance:
             # flag=1 => diff >= -eps ; flag=0 => diff <= -2*eps
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= -{eps}, name='{constr_name_prefix}_ant_ge_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= -{eps}, name={self._format_name_expr(constr_name_prefix, '_ant_ge_ind1')})"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{2*eps}, name='{constr_name_prefix}_ant_ge_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{2*eps}, name={self._format_name_expr(constr_name_prefix, '_ant_ge_ind0')})"
             )
         elif ant_op == ">":
-            # flag=1 => diff >= eps ; flag=0 => diff <= 0.0
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= {eps}, name='{constr_name_prefix}_ant_gt_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= {eps}, name={self._format_name_expr(constr_name_prefix, '_ant_gt_ind1')})"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= 0.0, name='{constr_name_prefix}_ant_gt_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= 0.0, name={self._format_name_expr(constr_name_prefix, '_ant_gt_ind0')})"
             )
         elif ant_op == "<=":
-            # Robust split with bias against feasibility tolerance:
-            # flag=1 => diff <= +eps ; flag=0 => diff >= +2*eps
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= {eps}, name='{constr_name_prefix}_ant_le_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= {eps}, name={self._format_name_expr(constr_name_prefix, '_ant_le_ind1')})"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {2*eps}, name='{constr_name_prefix}_ant_le_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {2*eps}, name={self._format_name_expr(constr_name_prefix, '_ant_le_ind0')})"
             )
         elif ant_op == "<":
-            # flag=1 => diff <= -eps ; flag=0 => diff >= 0.0
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= -{eps}, name='{constr_name_prefix}_ant_lt_ind1')"
+                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= -{eps}, name={self._format_name_expr(constr_name_prefix, '_ant_lt_ind1')})"
             )
             self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= 0.0, name='{constr_name_prefix}_ant_lt_ind0')"
+                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= 0.0, name={self._format_name_expr(constr_name_prefix, '_ant_lt_ind0')})"
             )
         elif ant_op == "==":
-            # For equality, keep existing big-M path (non-convex to split exactly without extra binaries).
             self._add_code_line(
-                f"model.addConstr({diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq1')"
+                f"model.addConstr({diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq1')})"
             )
             self._add_code_line(
-                f"model.addConstr(-{diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq2')"
+                f"model.addConstr(-{diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq2')})"
             )
             self._add_code_line(
-                f"model.addConstr({diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq3')"
+                f"model.addConstr({diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq3')})"
             )
             self._add_code_line(
-                f"model.addConstr(-{diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name='{constr_name_prefix}_ant_eq4')"
+                f"model.addConstr(-{diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq4')})"
             )
         else:
             raise ValueError(f"Unsupported antecedent operator in implication: {ant_op}")
@@ -1728,32 +1762,32 @@ class GurobiCodeGenerator:
         # 2. Enforce consequent only when flag_var == 1 (use bigM_cons)
         if cons_op == "==":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq1')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq1')})"
             )
             self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq2')"
+                f"model.addConstr({cons_right_expr} - {cons_left_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq2')})"
             )
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq3')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq3')})"
             )
             self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_eq4')"
+                f"model.addConstr({cons_right_expr} - {cons_left_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq4')})"
             )
         elif cons_op == ">=":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_ge')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_ge')})"
             )
         elif cons_op == ">":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= {eps} - {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_gt')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= {eps} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_gt')})"
             )
         elif cons_op == "<=":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_le')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_le')})"
             )
         elif cons_op == "<":
             self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= -{eps} + {bigM_cons} * (1 - {flag_var}), name='{constr_name_prefix}_cons_lt')"
+                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= -{eps} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_lt')})"
             )
         else:
             raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")
@@ -2054,11 +2088,11 @@ class GurobiCodeGenerator:
             if meta:
                 list_name = meta["list_name"]
                 if op in (">", ">="):
-                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) >= {effective_k})")
+                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) >= {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})")
                 elif op == "==":
-                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) == {effective_k})")
+                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) == {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})")
                 elif op in ("<=", "<"):
-                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) <= {effective_k})")
+                    self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) <= {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})")
                 return
         # Stage 2: detect reified cardinality equality b == (sum(comparisons) >= k)
         if op == "==" and isinstance(right_node, dict):
@@ -2099,10 +2133,8 @@ class GurobiCodeGenerator:
                         bool_var = self._traverse_expression(left_node, current_iterators)
                         self._add_code_line(f"# Reified cardinality: {bool_var} == (sum(comparisons) >= {k_val})")
                         len_var = meta.get("len_var") or f"len({list_name})"
-                        self._add_code_line(f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0)")
-                        self._add_code_line(
-                            f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0)"
-                        )
+                        self._add_code_line(f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})")
+                        self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card2')})")
                         return
             # Pattern B: right is a binop (>= or >) directly: b == ( sum(...) >= k )
             if (
@@ -2133,10 +2165,8 @@ class GurobiCodeGenerator:
                         bool_var = self._traverse_expression(left_node, current_iterators)
                         self._add_code_line(f"# Reified cardinality (binop): {bool_var} == (sum(comparisons) >= {k_val})")
                         len_var = meta.get("len_var") or f"len({list_name})"
-                        self._add_code_line(f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0)")
-                        self._add_code_line(
-                            f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0)"
-                        )
+                        self._add_code_line(f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})")
+                        self._add_code_line(f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card2')})")
                         return
         # Specialized handling for '!=' now supported
         if op == "!=":
@@ -2189,22 +2219,14 @@ class GurobiCodeGenerator:
                 bigM = bigM_default
             # Encode as specified: a - b + M*δ >= 1 ; b - a + M*(1-δ) >= 1
             self._add_code_line(
-                f"model.addConstr({left_expr_str} - {right_expr_str} + {bigM} * {delta} >= 1, name='{constr_name_prefix}_neq1')"
+                f"model.addConstr({left_expr_str} - {right_expr_str} + {bigM} * {delta} >= 1, name={self._format_name_expr(constr_name_prefix, '_neq1')})"
             )
             self._add_code_line(
-                f"model.addConstr({right_expr_str} - {left_expr_str} + {bigM} * (1 - {delta}) >= 1, name='{constr_name_prefix}_neq2')"
+                f"model.addConstr({right_expr_str} - {left_expr_str} + {bigM} * (1 - {delta}) >= 1, name={self._format_name_expr(constr_name_prefix, '_neq2')})"
             )
             return
 
         # Fast path: if both sides are comparison-free linear expressions (no need for transformation) just emit
-        def _is_simple_comparison(n):
-            return (
-                isinstance(n, dict)
-                and n.get("type") in ("constraint", "binop")
-                and n.get("op") in (">=", "<=", "==", ">", "<")
-            )
-
-        # Avoid building arithmetic over TempConstr: if op itself is comparison and neither side is a sum, emit directly
         if (
             op in (">=", "<=", "==", ">", "<")
             and not (isinstance(left_node, dict) and left_node.get("type") == "sum")
@@ -2212,12 +2234,17 @@ class GurobiCodeGenerator:
         ):
             left_expr_str = self._traverse_expression(left_node, current_iterators)
             right_expr_str = self._traverse_expression(right_node, current_iterators)
-            self._add_code_line(f"model.addConstr({left_expr_str} {op} {right_expr_str}, name='{constr_name_prefix}')")
+            self._add_code_line(
+                f"model.addConstr({left_expr_str} {op} {right_expr_str}, name={self._format_name_expr(constr_name_prefix)}"
+                f")"
+            )
             return
-        # Generic path: traverse now
+        # Generic path
         left_expr_str = self._traverse_expression(left_node, current_iterators)
         right_expr_str = self._traverse_expression(right_node, current_iterators)
-        self._add_code_line(f"model.addConstr({left_expr_str} {op} {right_expr_str}, name='{constr_name_prefix}')")
+        self._add_code_line(
+            f"model.addConstr({left_expr_str} {op} {right_expr_str}, name={self._format_name_expr(constr_name_prefix)})"
+        )
 
     def _emit_index_condition(self, node, current_iterators):
         """
@@ -2317,10 +2344,10 @@ class GurobiCodeGenerator:
         for v in loop_vars:
             new_iterators[v] = v
         if index_constraint is not None:
-            # Use Python-only condition so 'if' sees a real boolean, not a Gurobi TempConstr
             cond_str = self._emit_index_condition(index_constraint, new_iterators)
             self._add_code_line(f"if {cond_str}:")
             self.indent_level += 1
+        # Emit body
         self._emit_forall_inner_constraints(constraint_node, constr_name_prefix, loop_vars, new_iterators)
         if index_constraint is not None:
             self.indent_level -= 1
@@ -2363,20 +2390,34 @@ class GurobiCodeGenerator:
 
     def _emit_forall_inner_constraints(self, constraint_node, constr_name_prefix, loop_vars, new_iterators):
         """Helper to emit the inner constraint(s) of a forall block."""
+        def with_label_context(child_node, emit_fn):
+            # Push active label expression if label_template present on child
+            prev = self._active_label_name_expr
+            try:
+                if isinstance(child_node, dict) and "label_template" in child_node:
+                    self._active_label_name_expr = self._compute_label_expr(child_node["label_template"])
+                emit_fn()
+            finally:
+                self._active_label_name_expr = prev
+
         if "constraint" in constraint_node:
             inner_constraint = constraint_node["constraint"]
-            self._generate_single_constraint(
-                inner_constraint,
-                f"{constr_name_prefix}_{'_'.join(loop_vars)}",
-                new_iterators,
-            )
-        elif "constraints" in constraint_node:
-            for i, inner_constr in enumerate(constraint_node["constraints"]):
+            def emit_one():
                 self._generate_single_constraint(
-                    inner_constr,
-                    f"{constr_name_prefix}_{'_'.join(loop_vars)}_{i}",
+                    inner_constraint,
+                    f"{constr_name_prefix}_{'_'.join(loop_vars)}",
                     new_iterators,
                 )
+            with_label_context(inner_constraint, emit_one)
+        elif "constraints" in constraint_node:
+            for i, inner_constr in enumerate(constraint_node["constraints"]):
+                def emit_i():
+                    self._generate_single_constraint(
+                        inner_constr,
+                        f"{constr_name_prefix}_{'_'.join(loop_vars)}_{i}",
+                        new_iterators,
+                    )
+                with_label_context(inner_constr, emit_i)
         else:
             raise ValueError("Forall constraint node missing 'constraint' or 'constraints' key.")
 
@@ -2803,30 +2844,25 @@ class GurobiCodeGenerator:
         eps = EPS
         eq_tol = EQ_TOL
         if op == ">=":
-            # z=1 => diff >= 0 ; z=0 => diff <= -eps
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_ge1_{aux_sym}')} )")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_ge2_{aux_sym}')} )")
         elif op == ">":
-            # z=1 => diff >= eps ; z=0 => diff <= 0
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_gt1_{aux_sym}')} )")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_gt2_{aux_sym}')} )")
         elif op == "<=":
-            # z=1 => diff <= 0 ; z=0 => diff >= eps
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= 0 + {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_le1_{aux_sym}')} )")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_le2_{aux_sym}')} )")
         elif op == "<":
-            # z=1 => diff <= -eps ; z=0 => diff >= 0
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * {aux_sym})")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_lt1_{aux_sym}')} )")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_lt2_{aux_sym}')} )")
         elif op == "==":
-            # z=1 => |diff| <= eq_tol; z=0 => relaxed by M
-            lines.append(f"model.addConstr({left_expr} - {right_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({right_expr} - {left_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({left_expr} - {right_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}))")
-            lines.append(f"model.addConstr({right_expr} - {left_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}))")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_eq1_{aux_sym}')} )")
+            lines.append(f"model.addConstr({right_expr} - {left_expr} <= {eq_tol} + {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_eq2_{aux_sym}')} )")
+            lines.append(f"model.addConstr({left_expr} - {right_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_eq3_{aux_sym}')} )")
+            lines.append(f"model.addConstr({right_expr} - {left_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_eq4_{aux_sym}')} )")
         else:
-            lines.append(f"model.addConstr({aux_sym} == 0)")
-        return "\n".join(lines)
+            lines.append(f"model.addConstr({aux_sym} == 0, name={self._format_name_expr('aux', f'_reify_unk_{aux_sym}')} )")
+        return '\n'.join(lines)
 
     def _expr_field_access(self, expr_node, current_iterators, symbolic):
         base_str = self._traverse_expression(expr_node["base"], current_iterators)
