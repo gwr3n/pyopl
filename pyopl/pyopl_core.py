@@ -30,6 +30,9 @@ from .gurobi_codegen import GurobiCodeGenerator
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 
+# --- Reserved identifiers that must not appear as model/data names (avoid shadowing Python builtins)
+RESERVED_PY_IDENTIFIERS: set[str] = {"len"}
+
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
@@ -82,6 +85,13 @@ class SymbolTable:
         :param is_dvar: True if it's a decision variable.
         :param lineno: The line number where the symbol was declared.
         """
+        # NEW: reject reserved Python identifiers
+        if isinstance(name, str) and name in RESERVED_PY_IDENTIFIERS:
+            raise SemanticError(
+                f"Identifier '{name}' is reserved and cannot be used in the model (conflicts with Python built-ins). "
+                f"Please rename it.",
+                lineno=lineno,
+            )
         current_scope = self.scopes[-1]
         if name in current_scope:
             raise SemanticError(f"Symbol '{name}' already declared in this scope.", lineno=lineno)
@@ -3179,6 +3189,8 @@ class OPLDataParser(Parser):
         self.lexer = None
         # Track last token line for EOF diagnostics when lexer is not available
         self._last_token_lineno = 1
+        # NEW: keep a per-name line number map
+        self.name_linenos = {}
 
     def parse(self, tokens, lexer=None):
         self.lexer = lexer
@@ -3219,6 +3231,11 @@ class OPLDataParser(Parser):
         'NAME "=" key_value_array ";"',
     )  # type: ignore
     def data_declaration(self, p):
+        # NEW: remember the line for this name
+        try:
+            self.name_linenos[p.NAME] = getattr(self.lexer, "lineno", self._last_token_lineno)
+        except Exception:
+            pass
         # Handle all scalar, set, array, and key_value_array assignments
         if hasattr(p, "scalar_value"):
             self.data[p.NAME] = p.scalar_value
@@ -3231,11 +3248,7 @@ class OPLDataParser(Parser):
             return {"type": "array", "name": p.NAME, "value": p.array_value}
         elif hasattr(p, "key_value_array"):
             self.data[p.NAME] = p.key_value_array
-            return {
-                "type": "key_value_array",
-                "name": p.NAME,
-                "value": p.key_value_array,
-            }
+            return {"type": "key_value_array", "name": p.NAME, "value": p.key_value_array}
         else:
             raise Exception("Unrecognized data_declaration assignment")
 
@@ -3456,6 +3469,33 @@ class OPLCompiler:
                         "elements": elems,
                         "tuple_type": decl.get("tuple_type"),
                     }
+
+        # NEW: reserved-name guard across declarations and data keys (prevents emitting e.g. 'len = {...}')
+        def _reject_reserved_names():
+            # Check declared names
+            declared_names = {
+                d.get("name")
+                for d in (model_ast.get("declarations") or [])
+                if isinstance(d, dict) and isinstance(d.get("name"), str)
+            }
+            bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
+            if bad_decl:
+                bad = sorted(bad_decl)[0]
+                raise SemanticError(
+                    f"Identifier '{bad}' is reserved and cannot be used as a model symbol. "
+                    f"Please rename it in the .mod file."
+                )
+            # Check data keys as well, since generators may emit all keys from data_dict
+            bad_data = set(working_data.keys()) & RESERVED_PY_IDENTIFIERS
+            if bad_data:
+                bad = sorted(bad_data)[0]
+                ln = getattr(self.data_parser, "name_linenos", {}).get(bad)
+                raise SemanticError(
+                    f"Identifier '{bad}' is reserved and cannot appear as a data key (would shadow Python built-ins). "
+                    f"Please rename it in the .dat or model data.",
+                    lineno=ln,
+                )
+        _reject_reserved_names()
 
         # --- evaluate typed set-of-tuples comprehensions into concrete sets (must happen BEFORE computed params) ---
         # Local helpers used by comprehensions to evaluate integer bounds and named ranges against working_data.
