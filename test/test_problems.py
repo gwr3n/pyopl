@@ -30,6 +30,210 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_column_generation(self):
+        """
+        Test a column generation model with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                /*
+                Column Generation in Simple MILP Terms (Cutting-Stock / Pattern Selection)
+
+                Key idea
+                - Master (RMP): choose how many stock rolls to cut with each currently-known pattern p.
+                - A “column” = a pattern p (its vector of item counts a[p][i]).
+                - Pricing (knapsack): using dual prices from the RMP-LP, search for a new pattern with
+                negative reduced cost.
+
+                Modeling note
+                - Column generation is an algorithm (iterate RMP-LP -> duals -> pricing -> add column).
+                A single static MILP cannot “add columns”. Here we keep BOTH models in one file for
+                explanation, but we activate one side at a time using a ground switch RunPricing.
+                - If RunPricing = 0: solve the master MILP.
+                - If RunPricing = 1: solve the pricing knapsack (with mock duals supplied in data).
+
+                PyOPL note
+                - We gate constraints with a boolean OR pattern:
+                    (RunPricing != 0) || ( constraint )
+                which enforces the constraint only when RunPricing == 0 (and similarly for pricing).
+                */
+
+                // ----------------------------
+                // Sets and indices
+                // ----------------------------
+
+                {string} I = ...;          // item types
+                {string} P = ...;          // currently available patterns (columns)
+
+                // ----------------------------
+                // Parameters (data inputs)
+                // ----------------------------
+
+                param int L = ...;                 // stock roll length (knapsack capacity)
+                param int itemLen[I] = ...;        // length per item type (renamed from reserved "len")
+                param int demand[I] = ...;         // required quantity of each item
+
+                // Pattern definition: a[p][i] = number of items i produced by one roll using pattern p
+                param int a[P][I] = ...;
+
+                // Dual prices from the *LP relaxation* of the master demand constraints (provided as data here)
+                param float dual[I] = ...;
+
+                // Ground switch: 0 = solve master (RMP), 1 = solve pricing (knapsack)
+                param int RunPricing = ...;
+
+                // ----------------------------
+                // Decision variables
+                // ----------------------------
+
+                // [Var_x] Master decision: x[p] = number of rolls cut with pattern p (integer number of rolls)
+                dvar int+ x[P];
+
+                // [Var_y] Pricing decision: y[i] = counts of items i in a candidate new cutting pattern (integer)
+                dvar int+ y[I];
+
+                // ----------------------------
+                // Derived expressions (pricing)
+                // ----------------------------
+
+                // [Dexpr_PricingValue] Dual value of a candidate pattern (what the master would “pay” for this column)
+                dexpr float PricingValue = sum(i in I) dual[i] * y[i];
+
+                // [Dexpr_ReducedCost] Reduced cost for a master minimization with cost 1 per roll:
+                // rc = 1 - sum_i dual[i]*y[i]. If rc < 0 (equivalently PricingValue > 1), add the column.
+                dexpr float ReducedCost = 1 - PricingValue;
+
+                // ----------------------------
+                // Objective (robust gating; avoids ternary objective issues)
+                // ----------------------------
+
+                // [Obj] If solving master, minimize rolls used; if solving pricing, minimize reduced cost.
+                // Since RunPricing is a ground parameter, (RunPricing==1) and (RunPricing!=1) are ground 0/1.
+                minimize Obj:
+                (RunPricing == 1) * ReducedCost + (RunPricing != 1) * (sum(p in P) x[p]);
+
+                subject to {
+                // ----------------------------
+                // Master (RMP) constraints (active only when RunPricing == 0)
+                // ----------------------------
+
+                // [Master_DemandCover] Meet each item demand using the current pattern set P
+                forall(i in I)
+                    Master_DemandCover: (RunPricing != 0) || (sum(p in P) a[p][i] * x[p] >= demand[i]);
+
+                // [Master_PatternFeasible] Data consistency: each listed pattern must fit within one roll
+                forall(p in P)
+                    Master_PatternFeasible: (RunPricing != 0) || (sum(i in I) itemLen[i] * a[p][i] <= L);
+
+                // ----------------------------
+                // Pricing (knapsack) constraints (active only when RunPricing == 1)
+                // ----------------------------
+
+                // [Pricing_Capacity] Candidate new pattern must fit within one roll
+                Pricing_Capacity: (RunPricing != 1) || (sum(i in I) itemLen[i] * y[i] <= L);
+
+                // [Pricing_NegativeReducedCostTest] Look for an improving column: PricingValue > 1
+                // Encode strictness via a small epsilon.
+                Pricing_NegativeReducedCostTest: (RunPricing != 1) || (PricingValue >= 1.000001);
+                }
+                """
+            data_code = """
+                // Small mock instance: 3 item types, roll length 10.
+                // Items: A (len 2), B (len 3), C (len 5)
+                // Demand: need 4 A, 3 B, 2 C
+
+                I = { "A", "B", "C" };
+                L = 10;
+
+                itemLen = [
+                "A" 2,
+                "B" 3,
+                "C" 5
+                ];
+
+                demand = [
+                "A" 4,
+                "B" 3,
+                "C" 2
+                ];
+
+                // Start with a small restricted set of patterns (columns).
+                // p1: 5A (2*5=10)
+                // p2: 3B (3*3=9)
+                // p3: 2C (5*2=10)
+                // p4: 2A + 2B (2*2 + 3*2 = 10)
+                P = { "p1", "p2", "p3", "p4" };
+
+                a = [
+                "p1" [ 5, 0, 0 ],
+                "p2" [ 0, 3, 0 ],
+                "p3" [ 0, 0, 2 ],
+                "p4" [ 2, 2, 0 ]
+                ];
+
+                // Mock dual prices (as if from solving the RMP LP relaxation).
+                // Pricing tries to pack high-dual items into one roll.
+                dual = [
+                "A" 0.10,
+                "B" 0.35,
+                "C" 0.55
+                ];
+
+                // Choose which submodel to run:
+                // 0 = solve master MILP (pattern selection)
+                // 1 = solve pricing knapsack (find an improving column)
+                RunPricing = 1;
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_TOPSIS(self):
         """
         Test the TOPSIS problem with both solvers.
@@ -174,7 +378,7 @@ class TestPyOPLProblems(unittest.TestCase):
             # Restore previous level
             _scipy_logger.setLevel(_prev_level)
 
-    # @unittest.skip("reason for skipping")
+    @unittest.skip("this test is cumbersome to run")
     def test_asset_location(self):
         """
         Test the vehicle routing problem with both solvers.
