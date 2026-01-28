@@ -4355,9 +4355,18 @@ class OPLCompiler:
 
         ast = model_ast
 
+        # First, simplify any ground boolean gating/conditions to avoid emitting constant boolean rows.
+        try:
+            self._simplify_ground_booleans(ast, working_data)
+        except SemanticError as e:
+            logger.error(f"Ground boolean simplification error: {e}")
+            raise
+
         # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
+            # Simplify again in case if-constraints introduced new ground booleans
+            self._simplify_ground_booleans(ast, working_data)
             self._lower_minmax_aggregates(ast)
             self._lower_maxmin_convex(ast)
             self._split_boolean_and_constraints(ast)  # NEW: split conjunctions
@@ -4374,6 +4383,222 @@ class OPLCompiler:
             raise ValueError(f"Unsupported solver: {solver}")
 
         return ast, code, data_dict
+    
+    def _simplify_ground_booleans(self, ast: dict, env: dict) -> None:
+        """
+        Constant-fold ground boolean expressions (no decision vars, no iterators) in constraints and forall
+        index constraints. This eliminates patterns like (RunPricing != 1) || (lhs <= rhs) == true by:
+          - folding ground comparisons, and, or, not
+          - dropping tautologies
+          - reducing False || X to X, True || X to True
+          - reducing True && X to X, False && X to False
+          - simplifying (bool_expr) == true/false
+        """
+        if not isinstance(ast, dict):
+            return
+
+        dvars = self._collect_dvar_names(ast.get("declarations", []))
+
+        def is_ground_bool(node: dict) -> bool:
+            # ground if it contains no dvar and all names are in env (no iterators here)
+            if self._expr_contains_dvar(node, dvars):
+                return False
+            try:
+                # if it evaluates without error, treat as ground
+                _ = self._eval_ground_expr(node, env)
+                return True
+            except Exception:
+                return False
+
+        def as_bool_lit(v: bool) -> dict:
+            return {"type": "boolean_literal", "value": bool(v), "sem_type": "boolean"}
+
+        def simplify_bool(node: Any) -> Any:
+            if not isinstance(node, dict):
+                return node
+            t = node.get("type")
+
+            # Recurse first
+            if t in ("and", "or"):
+                left = simplify_bool(node.get("left"))
+                right = simplify_bool(node.get("right"))
+                node = {"type": t, "left": left, "right": right, "sem_type": "boolean"}
+            elif t == "not":
+                val = simplify_bool(node.get("value"))
+                node = {"type": "not", "value": val, "sem_type": "boolean"}
+            elif t == "parenthesized_expression":
+                inner = simplify_bool(node.get("expression"))
+                node = {"type": "parenthesized_expression", "expression": inner, "sem_type": inner.get("sem_type", None)}
+            elif t == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!="):
+                left = simplify_bool(node.get("left"))
+                right = simplify_bool(node.get("right"))
+                node = {"type": "binop", "op": node.get("op"), "left": left, "right": right, "sem_type": "boolean"}
+            else:
+                pass
+
+            # Constant fold ONLY boolean nodes (avoid folding numeric names like L -> true)
+            is_bool_node = (
+                isinstance(node, dict)
+                and (
+                    node.get("sem_type") == "boolean"
+                    or node.get("type") in ("and", "or", "not")
+                    or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
+                )
+            )
+            if is_bool_node and is_ground_bool(node):
+                try:
+                    val = self._eval_ground_condition(node, env)
+                    return as_bool_lit(val)
+                except Exception:
+                    pass
+
+            # Apply boolean algebra with literals
+            if isinstance(node, dict) and node.get("type") in ("and", "or"):
+                L = node.get("left")
+                R = node.get("right")
+                if isinstance(L, dict) and L.get("type") == "boolean_literal":
+                    if node["type"] == "or":
+                        return as_bool_lit(True) if L.get("value") else R
+                    else:
+                        return R if L.get("value") else as_bool_lit(False)
+                if isinstance(R, dict) and R.get("type") == "boolean_literal":
+                    if node["type"] == "or":
+                        return as_bool_lit(True) if R.get("value") else L
+                    else:
+                        return L if R.get("value") else as_bool_lit(False)
+            if isinstance(node, dict) and node.get("type") == "not":
+                V = node.get("value")
+                if isinstance(V, dict) and V.get("type") == "boolean_literal":
+                    return as_bool_lit(not V.get("value"))
+            return node
+
+        def simplify_constraint(c: dict) -> list[dict]:
+            # Returns zero or more constraints (drop tautologies)
+            if c.get("type") == "constraint":
+                op = c.get("op")
+                L = c.get("left")
+                R = c.get("right")
+
+                # Only simplify boolean-equality constraints: (bool_expr) == true/false
+                if op == "==":
+                    if isinstance(R, dict) and R.get("type") == "boolean_literal":
+                        Ls = simplify_bool(L)
+                        # NEW: unwrap parens so we see the inner comparison
+                        while isinstance(Ls, dict) and Ls.get("type") == "parenthesized_expression":
+                            Ls = Ls.get("expression")
+
+                        # If L fully reduces to boolean literal, decide
+                        if isinstance(Ls, dict) and Ls.get("type") == "boolean_literal":
+                            if Ls.get("value") == R.get("value"):
+                                return []  # tautology
+                            else:
+                                return [
+                                    {
+                                        "type": "constraint",
+                                        "op": "==",
+                                        "left": {"type": "number", "value": 0, "sem_type": "int"},
+                                        "right": {"type": "number", "value": 1, "sem_type": "int"},
+                                    }
+                                ]
+
+                        # If Ls is a comparison (binop boolean), keep or negate it properly
+                        if isinstance(Ls, dict) and Ls.get("type") == "binop" and Ls.get("sem_type") == "boolean":
+                            if R.get("value") is True:
+                                # (cmp) == true -> cmp
+                                return [{
+                                    "type": "constraint",
+                                    "op": Ls.get("op"),
+                                    "left": Ls.get("left"),
+                                    "right": Ls.get("right"),
+                                }]
+                            else:
+                                # (cmp) == false -> negate cmp
+                                neg = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
+                                return [{
+                                    "type": "constraint",
+                                    "op": neg[Ls.get("op")],
+                                    "left": Ls.get("left"),
+                                    "right": Ls.get("right"),
+                                }]
+
+                        # Non-ground boolean tree: leave for codegen to linearize
+                        return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
+
+                # Other numeric constraints unchanged
+                return [c]
+
+            if c.get("type") == "forall_constraint":
+                # Simplify index_constraint first
+                new_ic = c.get("index_constraint")
+                if isinstance(new_ic, dict):
+                    new_ic = simplify_bool(new_ic)
+                    # Drop forall if guard is false
+                    if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is False:
+                        return []  # no constraints generated
+                    # Remove guard if true
+                    if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is True:
+                        new_ic = None
+
+                out = []
+                if "constraint" in c and isinstance(c["constraint"], dict):
+                    inner = simplify_constraint(c["constraint"])
+                    if inner:
+                        if len(inner) == 1:
+                            out.append(
+                                {
+                                    "type": "forall_constraint",
+                                    "iterators": c.get("iterators", []),
+                                    "index_constraint": new_ic,
+                                    "constraint": inner[0],
+                                }
+                            )
+                        else:
+                            out.append(
+                                {
+                                    "type": "forall_constraint",
+                                    "iterators": c.get("iterators", []),
+                                    "index_constraint": new_ic,
+                                    "constraints": inner,
+                                }
+                            )
+                    return out
+                if "constraints" in c and isinstance(c["constraints"], list):
+                    inner_all = []
+                    for cc in c["constraints"]:
+                        inner_all.extend(simplify_constraint(cc))
+                    if inner_all:
+                        if len(inner_all) == 1:
+                            out.append(
+                                {
+                                    "type": "forall_constraint",
+                                    "iterators": c.get("iterators", []),
+                                    "index_constraint": new_ic,
+                                    "constraint": inner_all[0],
+                                }
+                            )
+                        else:
+                            out.append(
+                                {
+                                    "type": "forall_constraint",
+                                    "iterators": c.get("iterators", []),
+                                    "index_constraint": new_ic,
+                                    "constraints": inner_all,
+                                }
+                            )
+                    return out
+                return [c]
+
+            # Pass-through for other nodes
+            return [c]
+
+        if "constraints" in ast and isinstance(ast["constraints"], list):
+            new_list: list[dict] = []
+            for c in ast["constraints"]:
+                if isinstance(c, dict):
+                    new_list.extend(simplify_constraint(c))
+                else:
+                    new_list.append(c)
+            ast["constraints"] = new_list
 
     # NEW: split (A && B && ...) == true into multiple constraints A==true; B==true; ...
     def _split_boolean_and_constraints(self, ast: dict) -> None:
