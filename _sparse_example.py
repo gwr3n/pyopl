@@ -45,8 +45,7 @@ def get_vehicle_routing_data():
 
 def write_matrix_mod_dat(mod_path, dat_path, matrix, num_nodes):
     with open(mod_path, "w") as f:
-        f.write(
-            f"""
+        f.write(f"""
 // Matrix-based vehicle routing problem
 range Nodes = 1..{num_nodes};
 float cost[Nodes][Nodes] = ...;
@@ -58,8 +57,7 @@ subject to {{
   forall(j in Nodes)
     sum(i in Nodes) (x[i][j]) == 1;
 }}
-"""
-        )
+""")
     with open(dat_path, "w") as f:
         f.write("cost = [\n")
         for idx, row in enumerate(matrix):
@@ -72,8 +70,7 @@ subject to {{
 
 def write_tuple_mod_dat(mod_path, dat_path, arcs, num_nodes):
     with open(mod_path, "w") as f:
-        f.write(
-            f"""
+        f.write(f"""
 // Tuple-based vehicle routing problem
 tuple Arc {{ int from; int to; float cost; }};
 {{Arc}} arcs;
@@ -85,8 +82,7 @@ subject to {{
   forall(j in 1..{num_nodes})
     sum(a in arcs : a.to == j) (x[a]) == 1;
 }}
-"""
-        )
+""")
     with open(dat_path, "w") as f:
         f.write("arcs = {")
         for idx, t in enumerate(arcs):

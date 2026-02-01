@@ -3766,8 +3766,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dummy_data_file = "knapsack_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 range Items = 1..5;
                 param float weight[1..5];
                 param float value[1..5];
@@ -3780,16 +3779,13 @@ class TestPyOPLProblems(unittest.TestCase):
                 subject to {
                     sum (i in Items) (weight[i] * x[i]) <= C;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 weight = [2,3,4,5,5];
                 value = [2,3,4,5,5];
                 C = 10;
-                """
-                )
+                """)
             # Gurobi
             result_gurobi = solve(dummy_model_file, dummy_data_file)
             # SciPy
@@ -3828,8 +3824,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dummy_data_file = "knapsack_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 range Items = 1..5;
                 param float weight[1..5];
                 param float value[1..5];
@@ -3842,16 +3837,13 @@ class TestPyOPLProblems(unittest.TestCase):
                 subject to {
                     sum (i in Items) (weight[i] * x[i]) <= C;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 weight = [2,3,4,5,5];
                 value = [2,3,4,5,5];
                 C = 10;
-                """
-                )
+                """)
             ast, scipy_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
             self.assertIsInstance(ast, dict)
             self.assertIsInstance(scipy_code, str)
@@ -3904,8 +3896,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dummy_data_file = "assign_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 dvar boolean assign[1..2][1..2];
                 range Persons = 1..2;
                 range Tasks = 1..2;
@@ -3918,8 +3909,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     forall (t in Tasks)
                         sum (p in Persons) (assign[p][t]) == 1;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
                 f.write("")  # No data needed
             # Gurobi
@@ -3960,8 +3950,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dummy_data_file = "knapsack_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 range Items = 1..5;
                 param float weight[1..5];
                 param float value[1..5];
@@ -3974,16 +3963,13 @@ class TestPyOPLProblems(unittest.TestCase):
                 subject to {
                     sum (i in Items) (weight[i] * x[i]) <= C;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 weight = [2,3,4,5,5];
                 value = [2,3,4,5,5];
                 C = 10;
-                """
-                )
+                """)
             ast, gurobi_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
             self.assertIsInstance(ast, dict)
             self.assertIsInstance(gurobi_code, str)
@@ -4000,8 +3986,7 @@ class TestPyOPLProblems(unittest.TestCase):
         dummy_data_file = "knapsack_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                         range Items = 1..12;
                         range Resources = 1..7;
                         float Capacity[Items] = ...;
@@ -4017,11 +4002,9 @@ class TestPyOPLProblems(unittest.TestCase):
                             sum( i in Items )
                                 Use[r][i] * Take[i] <= Capacity[r];
                         }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                         Capacity = [ 18209, 7692, 1333, 924, 26638, 61188, 13360,
                                      18209, 7692, 1333, 924, 26638 ];
                         Value = [ 96, 76, 56, 11, 86, 10, 66, 86, 83, 12, 9, 81 ];
@@ -4032,8 +4015,7 @@ class TestPyOPLProblems(unittest.TestCase):
                             [  0,  20,   0,  4,  52,   3,   0,  0,  0,   5, 4, 0],
                             [  0,   0,  40, 70,   4,  63,   0,  0, 60,   0, 4, 0],
                             [  0,  32,   0,  0,   0,   5,   0,  3,  0, 660, 0, 9]];
-                """
-                )
+                """)
             ast, gurobi_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
             self.assertIsInstance(ast, dict)
             self.assertIsInstance(gurobi_code, str)

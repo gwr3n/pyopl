@@ -295,8 +295,7 @@ class TestPyOPLParser(TestPyOPL):
         dummy_data_file = "test_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 dvar float z;
                 param float my_param;
                 set my_set;
@@ -310,17 +309,14 @@ class TestPyOPLParser(TestPyOPL):
                     my_array[1] + my_array[2] <= 50;
                     my_2d_array[1][1] + my_2d_array[2][2] >= 5;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 my_param = 50;
                 my_set = {1, 2, 3};
                 my_array = [10, 20];
                 my_2d_array = [[1, 2], [3, 4]];
-                """
-                )
+                """)
             ast, gurobi_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
             self.assertIsInstance(ast, dict)
             self.assertIsInstance(gurobi_code, str)
@@ -339,8 +335,7 @@ class TestPyOPLParser(TestPyOPL):
         dummy_data_file = "test_data.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 dvar float z;
                 param float my_param;
                 set my_set;
@@ -354,17 +349,14 @@ class TestPyOPLParser(TestPyOPL):
                     my_array[1] + my_array[2] <= 50;
                     my_2d_array[1][1] + my_2d_array[2][2] >= 5;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 my_param = 50;
                 my_set = {1, 2, 3};
                 my_array = [10, 20];
                 my_2d_array = [[1, 2], [3, 4]];
-                """
-                )
+                """)
             ast, scipy_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file, solver="scipy")
             self.assertIsInstance(ast, dict)
             self.assertIsInstance(scipy_code, str)
@@ -876,16 +868,14 @@ class TestPyOPLCompiler(TestPyOPL):
         dummy_data_file = "infeasible.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 dvar float x;
                 maximize x;
                 subject to {
                     x >= 2;
                     x <= 1;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
                 f.write("")
             result_gurobi, result_scipy = self.run_both_solvers(dummy_model_file, dummy_data_file)
@@ -909,15 +899,13 @@ class TestPyOPLCompiler(TestPyOPL):
         dummy_data_file = "unbounded.dat"
         try:
             with open(dummy_model_file, "w") as f:
-                f.write(
-                    """
+                f.write("""
                 dvar float x;
                 maximize x;
                 subject to {
                     x >= 0;
                 }
-                """
-                )
+                """)
             with open(dummy_data_file, "w") as f:
                 f.write("")
             result_gurobi, result_scipy = self.run_both_solvers(dummy_model_file, dummy_data_file)
