@@ -790,7 +790,7 @@ class OPLParser(Parser):
             name_any = p.NAME
             if not isinstance(name_any, str):
                 raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
-            name: str = name_any
+            name = name_any
 
             # NEW: check current iterator context first (only active inside sum/forall bodies)
             if self._iterator_context_stack:
