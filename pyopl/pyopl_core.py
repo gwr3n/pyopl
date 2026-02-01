@@ -692,8 +692,10 @@ class OPLParser(Parser):
     def _subst_iterators(self, expr, mapping):
         if isinstance(expr, dict):
             # Replace plain iterator name nodes
-            if expr.get("type") == "name" and expr.get("value") in mapping:
-                return self._index_to_expr(mapping[expr["value"]])
+            if expr.get("type") == "name":
+                key = expr.get("value")
+                if isinstance(key, str) and key in mapping:
+                    return self._index_to_expr(mapping[key])
             # Recurse
             out = {}
             for k, v in expr.items():
@@ -784,12 +786,19 @@ class OPLParser(Parser):
                 "sem_type": "string",
             }
         elif hasattr(p, "NAME"):
-            name = p.NAME
+            # SLY attributes are typed as Any; narrow to str for mypy before dict indexing.
+            name_any = p.NAME
+            if not isinstance(name_any, str):
+                raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
+            name: str = name_any
+
             # NEW: check current iterator context first (only active inside sum/forall bodies)
             if self._iterator_context_stack:
                 top = self._iterator_context_stack[-1]
-                if name in top:
-                    return {"type": "name", "value": name, "sem_type": top[name]}
+                sem = top.get(name)
+                if sem is not None:
+                    return {"type": "name", "value": name, "sem_type": sem}
+
             # Fallback: regular symbol table lookup
             symbol_info = self.symbol_table.get_symbol(name)
             # Inline scalar dexpr on use
@@ -1330,32 +1339,45 @@ class OPLParser(Parser):
         self._iterator_context_stack: list[dict[str, str]] = []
 
     # Helper: build iterator type mapping from sum_index_list entries
-    def _iter_types_from_sum_index_list(self, sum_index_list: list[dict]) -> dict[str, str]:
+    def _iter_types_from_sum_index_list(self, sum_index_list: list[dict[str, Any]]) -> dict[str, str]:
         it_types: dict[str, str] = {}
+
         for it in sum_index_list or []:
-            nm = it.get("iterator")
-            rng = it.get("range") or {}
-            sem_type = "int"  # default
-            if rng.get("type") in ("named_range",):
-                # ranges iterate ints
+            iterator_obj: object = it.get("iterator")
+            if not isinstance(iterator_obj, str):
+                continue
+            iterator: str = iterator_obj  # now a real str key for mypy
+
+            rng_any = it.get("range")
+            rng: dict[str, Any] = rng_any if isinstance(rng_any, dict) else {}
+
+            sem_type: str = "int"  # default
+
+            rtype = rng.get("type")
+            if rtype in ("named_range",):
                 sem_type = "int"
-            elif rng.get("type") in ("named_set", "named_set_dimension"):
-                try:
-                    sym = self.symbol_table.get_symbol(rng.get("name"))
-                    val = sym.get("value")
-                    if sym.get("type") == "set" and isinstance(val, dict) and "tuple_type" in val:
-                        sem_type = val["tuple_type"]
-                    elif sym.get("type") == "set" and isinstance(val, dict) and "base_type" in val:
-                        sem_type = val["base_type"]
-                    else:
-                        # Unknown set details -> treat as string by default for scalar sets
+            elif rtype in ("named_set", "named_set_dimension"):
+                rng_name_obj: object = rng.get("name")
+                rng_name: Optional[str] = rng_name_obj if isinstance(rng_name_obj, str) else None
+                if rng_name:
+                    try:
+                        sym = self.symbol_table.get_symbol(rng_name)
+                        val = sym.get("value")
+                        if sym.get("type") == "set" and isinstance(val, dict) and "tuple_type" in val:
+                            sem_type = cast(str, val["tuple_type"])
+                        elif sym.get("type") == "set" and isinstance(val, dict) and "base_type" in val:
+                            sem_type = cast(str, val["base_type"])
+                        else:
+                            sem_type = "string"
+                    except SemanticError:
                         sem_type = "string"
-                except SemanticError:
-                    # Forward-declared sets: keep a conservative default for parser-time typing
+                else:
                     sem_type = "string"
-            elif rng.get("type") == "range_specifier":
+            elif rtype == "range_specifier":
                 sem_type = "int"
-            it_types[str(nm)] = sem_type
+
+            it_types[iterator] = sem_type
+
         return it_types
 
     def parse(self, tokens):
@@ -3495,6 +3517,7 @@ class OPLCompiler:
                     f"Please rename it in the .dat or model data.",
                     lineno=ln,
                 )
+
         _reject_reserved_names()
 
         # --- evaluate typed set-of-tuples comprehensions into concrete sets (must happen BEFORE computed params) ---
@@ -4383,7 +4406,7 @@ class OPLCompiler:
             raise ValueError(f"Unsupported solver: {solver}")
 
         return ast, code, data_dict
-    
+
     def _simplify_ground_booleans(self, ast: dict, env: dict) -> None:
         """
         Constant-fold ground boolean expressions (no decision vars, no iterators) in constraints and forall
@@ -4437,13 +4460,10 @@ class OPLCompiler:
                 pass
 
             # Constant fold ONLY boolean nodes (avoid folding numeric names like L -> true)
-            is_bool_node = (
-                isinstance(node, dict)
-                and (
-                    node.get("sem_type") == "boolean"
-                    or node.get("type") in ("and", "or", "not")
-                    or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
-                )
+            is_bool_node = isinstance(node, dict) and (
+                node.get("sem_type") == "boolean"
+                or node.get("type") in ("and", "or", "not")
+                or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
             )
             if is_bool_node and is_ground_bool(node):
                 try:
@@ -4503,23 +4523,35 @@ class OPLCompiler:
 
                         # If Ls is a comparison (binop boolean), keep or negate it properly
                         if isinstance(Ls, dict) and Ls.get("type") == "binop" and Ls.get("sem_type") == "boolean":
+                            op_any = Ls.get("op")
+                            if not isinstance(op_any, str):
+                                # Can't safely negate/emit a comparison op; leave as (Ls == true/false)
+                                return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
+
                             if R.get("value") is True:
                                 # (cmp) == true -> cmp
-                                return [{
-                                    "type": "constraint",
-                                    "op": Ls.get("op"),
-                                    "left": Ls.get("left"),
-                                    "right": Ls.get("right"),
-                                }]
+                                return [
+                                    {
+                                        "type": "constraint",
+                                        "op": op_any,
+                                        "left": Ls.get("left"),
+                                        "right": Ls.get("right"),
+                                    }
+                                ]
                             else:
                                 # (cmp) == false -> negate cmp
-                                neg = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
-                                return [{
-                                    "type": "constraint",
-                                    "op": neg[Ls.get("op")],
-                                    "left": Ls.get("left"),
-                                    "right": Ls.get("right"),
-                                }]
+                                neg: dict[str, str] = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
+                                neg_op = neg.get(op_any)
+                                if neg_op is None:
+                                    return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
+                                return [
+                                    {
+                                        "type": "constraint",
+                                        "op": neg_op,
+                                        "left": Ls.get("left"),
+                                        "right": Ls.get("right"),
+                                    }
+                                ]
 
                         # Non-ground boolean tree: leave for codegen to linearize
                         return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]

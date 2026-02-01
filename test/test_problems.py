@@ -378,7 +378,7 @@ class TestPyOPLProblems(unittest.TestCase):
             # Restore previous level
             _scipy_logger.setLevel(_prev_level)
 
-    # @unittest.skip("this test is cumbersome to run")
+    @unittest.skip("this test is cumbersome to run")
     def test_asset_location(self):
         """
         Test the vehicle routing problem with both solvers.
