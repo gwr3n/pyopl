@@ -1,0 +1,58 @@
+/*
+Concrete "simple" maintenance example
+
+States:
+  1 = Good
+  2 = Poor
+  3 = Failed
+
+Actions:
+  1 = Do nothing
+  2 = Repair
+  3 = Replace
+
+Allowed actions (matching the narrative variable list):
+  - In state 1: allow Do nothing and Replace (disallow Repair)
+  - In state 2: allow Do nothing, Repair, Replace
+  - In state 3: allow Replace only
+*/
+
+States = { 1, 2, 3 };
+Actions = { 1, 2, 3 };
+
+// Immediate costs C(i,a)
+cost = [
+  [ 0.0,  2.0, 10.0 ],
+  [ 0.0,  4.0, 10.0 ],
+  [50.0, 20.0, 10.0 ]
+];
+
+// Allowed action mask (true=allowed, false=disallowed)
+allowed = [
+  [ true,  false, true  ],
+  [ true,  true,  true  ],
+  [ false, false, true  ]
+];
+
+// Transition probabilities P[i][a][j] where j is next state
+P = [
+  // From state 1 (Good)
+  [
+    [ 0.7, 0.3, 0.0 ],
+    [ 1.0, 0.0, 0.0 ],
+    [ 1.0, 0.0, 0.0 ]
+  ],
+  // From state 2 (Poor)
+  [
+    [ 0.0, 0.6, 0.4 ],
+    [ 0.5, 0.5, 0.0 ],
+    [ 1.0, 0.0, 0.0 ]
+  ],
+  // From state 3 (Failed)
+  [
+    [ 0.0, 0.0, 1.0 ],
+    [ 0.0, 0.0, 1.0 ],
+    [ 1.0, 0.0, 0.0 ]
+  ]
+];
+
