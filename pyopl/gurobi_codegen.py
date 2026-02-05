@@ -612,6 +612,14 @@ class GurobiCodeGenerator:
             if name in already_emitted:
                 continue
             pdecl = param_decl_map.get(name)
+
+            # --- FIX: if .dat already provided a tuple-key dict (sparse map), emit it as-is ---
+            if pdecl is not None and isinstance(value, dict) and any(isinstance(k, tuple) for k in value.keys()):
+                self._add_code_line(f"{name} = {repr(value)}")
+                self.dict_params.add(name)
+                already_emitted.add(name)
+                continue
+
             # --- NEW: N-D param from nested dict/list keyed along declared dimensions (generalization) ---
             # Accept nested dictionaries keyed by set/range labels and/or lists (row-major) for any dimensionality >= 2.
             if pdecl is not None and isinstance(value, dict) and len(pdecl.get("dimensions", [])) >= 2:
