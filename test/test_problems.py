@@ -30,6 +30,362 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_RMAB_relaxation_tuples(self):
+        """
+        Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                /*
+                Restless Multi-Armed Bandit (RMAB) — small example via occupation-measure LP
+
+                Intent (stationary average-cost LP relaxation with an activation budget):
+                - Arms k evolve as controlled Markov chains with state i ∈ States and action a ∈ Actions.
+                - Occupation measures x[k][i][a] represent the steady-state fraction of time arm k is in state i taking action a.
+                - Per-arm constraints enforce a valid stationary distribution (normalization + flow balance).
+                - A coupling constraint limits the expected number of Active arms per step (time-average budget).
+                */
+
+                /********************
+                * Sets and indices *
+                ********************/
+                {string} Arms = ...;        // Arm identifiers (e.g., {"A1","A2"})
+                {int}    States = ...;      // State labels (here assumed {1,2,...,S})
+                {string} Actions = ...;     // Action labels (includes "Active")
+
+                /****************
+                * Input data   *
+                ****************/
+                param float cost[Arms][States][Actions] = ...;        // Immediate cost c(k,i,a)
+
+                // Transition probabilities P(k,i,a,j): probability of next-state j given (k,i,a).
+                param float P[Arms][States][Actions][States] = ...;
+
+                param float Budget = ...;                             // Expected #Active arms per step
+
+                /************************
+                * Decision variables   *
+                ************************/
+                // x[k][i][a] ≥ 0: steady-state joint probability of (state=i, action=a) for arm k.
+                dvar float+ x[Arms][States][Actions];
+
+                /****************
+                * Objective    *
+                ****************/
+                minimize AverageCost:
+                // (OBJ) Long-run expected average cost across all arms
+                sum(k in Arms, i in States, a in Actions) cost[k][i][a] * x[k][i][a];
+
+                /****************
+                * Constraints  *
+                ****************/
+                subject to {
+                // (C1) ArmNormalize: each arm's occupation measures sum to 1.
+                forall(k in Arms)
+                    ArmNormalize:
+                    sum(i in States, a in Actions) x[k][i][a] == 1;
+
+                // (C2) ArmFlowBalance: steady-state flow balance for each arm and state.
+                // Mass in state j equals mass transitioning into j.
+                forall(k in Arms, j in States)
+                    ArmFlowBalance:
+                    sum(a in Actions) x[k][j][a]
+                        ==
+                    sum(i in States, a in Actions) x[k][i][a] * P[k][i][a][j];
+
+                // (C3) BudgetActive: expected number of active arms per step is limited.
+                BudgetActive:
+                    sum(k in Arms, i in States) x[k][i]["Active"] <= Budget;
+
+                // (C4) RowStochastic: each transition row is stochastic (sums to 1 over next-state).
+                forall(k in Arms, i in States, a in Actions)
+                    RowStochastic:
+                    sum(j in States) P[k][i][a][j] == 1;
+                }
+                """
+            data_code = """
+                /*
+                Small RMAB instance
+
+                - 2 arms: A1, A2
+                - 2 states: 1 (Good), 2 (Bad)
+                - 2 actions: Passive, Active
+                - Budget = 1 means: on average, at most one arm is Active each step.
+
+                Data format note:
+                - cost is keyed by <arm,state,action> tuples.
+                - P is now a fully indexed 4D parameter keyed by <arm,state,action,next_state> tuples.
+                */
+
+                Arms = { "A1", "A2" };
+                States = { 1, 2 };
+                Actions = { "Passive", "Active" };
+
+                Budget = 1;
+
+                // Immediate cost c(k,i,a)
+                cost = [
+                <"A1",1,"Passive"> 0.0,
+                <"A1",1,"Active">  0.5,
+                <"A1",2,"Passive"> 3.0,
+                <"A1",2,"Active">  3.5,
+
+                <"A2",1,"Passive"> 0.0,
+                <"A2",1,"Active">  0.5,
+                <"A2",2,"Passive"> 4.0,
+                <"A2",2,"Active">  4.5
+                ];
+
+                // Transition probabilities P(k,i,a,j)
+                P = [
+                <"A1",1,"Passive",1> 0.80,
+                <"A1",1,"Passive",2> 0.20,
+                <"A1",1,"Active",1>  0.95,
+                <"A1",1,"Active",2>  0.05,
+                <"A1",2,"Passive",1> 0.20,
+                <"A1",2,"Passive",2> 0.80,
+                <"A1",2,"Active",1>  0.60,
+                <"A1",2,"Active",2>  0.40,
+
+                <"A2",1,"Passive",1> 0.70,
+                <"A2",1,"Passive",2> 0.30,
+                <"A2",1,"Active",1>  0.90,
+                <"A2",1,"Active",2>  0.10,
+                <"A2",2,"Passive",1> 0.10,
+                <"A2",2,"Passive",2> 0.90,
+                <"A2",2,"Active",1>  0.50,
+                <"A2",2,"Active",2>  0.50
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
+    def test_RMAB_relaxation_dense(self):
+        """
+        Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                /*
+                Restless Multi-Armed Bandit (RMAB) — small example via occupation-measure LP
+
+                Intent (stationary average-cost LP relaxation with an activation budget):
+                - Arms k evolve as controlled Markov chains with state i ∈ States and action a ∈ Actions.
+                - Occupation measures x[k][i][a] represent the steady-state fraction of time arm k is in state i taking action a.
+                - Per-arm constraints enforce a valid stationary distribution (normalization + flow balance).
+                - A coupling constraint limits the expected number of Active arms per step (time-average budget).
+                */
+
+                /********************
+                * Sets and indices *
+                ********************/
+                {string} Arms = ...;        // Arm identifiers (e.g., {"A1","A2"})
+                {int}    States = ...;      // State labels (here assumed {1,2,...,S})
+                {string} Actions = ...;     // Action labels (includes "Active")
+
+                /****************
+                * Input data   *
+                ****************/
+                param float cost[Arms][States][Actions] = ...;        // Immediate cost c(k,i,a)
+
+                // Transition probabilities P(k,i,a,j): probability of next-state j given (k,i,a).
+                param float P[Arms][States][Actions][States] = ...;
+
+                param float Budget = ...;                             // Expected #Active arms per step
+
+                /************************
+                * Decision variables   *
+                ************************/
+                // x[k][i][a] ≥ 0: steady-state joint probability of (state=i, action=a) for arm k.
+                dvar float+ x[Arms][States][Actions];
+
+                /****************
+                * Objective    *
+                ****************/
+                minimize AverageCost:
+                // (OBJ) Long-run expected average cost across all arms
+                sum(k in Arms, i in States, a in Actions) cost[k][i][a] * x[k][i][a];
+
+                /****************
+                * Constraints  *
+                ****************/
+                subject to {
+                // (C1) ArmNormalize: each arm's occupation measures sum to 1.
+                forall(k in Arms)
+                    ArmNormalize:
+                    sum(i in States, a in Actions) x[k][i][a] == 1;
+
+                // (C2) ArmFlowBalance: steady-state flow balance for each arm and state.
+                // Mass in state j equals mass transitioning into j.
+                forall(k in Arms, j in States)
+                    ArmFlowBalance:
+                    sum(a in Actions) x[k][j][a]
+                        ==
+                    sum(i in States, a in Actions) x[k][i][a] * P[k][i][a][j];
+
+                // (C3) BudgetActive: expected number of active arms per step is limited.
+                BudgetActive:
+                    sum(k in Arms, i in States) x[k][i]["Active"] <= Budget;
+
+                // (C4) RowStochastic: each transition row is stochastic (sums to 1 over next-state).
+                forall(k in Arms, i in States, a in Actions)
+                    RowStochastic:
+                    sum(j in States) P[k][i][a][j] == 1;
+                }
+                """
+            data_code = """
+                /*
+                Small RMAB instance (dense array form to match declarations)
+
+                Index orders must match the model declarations:
+                - cost[Arms][States][Actions]
+                - P[Arms][States][Actions][States]
+
+                Given:
+                Arms = {"A1","A2"} (assume this order)
+                States = {1,2}
+                Actions = {"Passive","Active"}
+                */
+
+                Arms = { "A1", "A2" };
+                States = { 1, 2 };
+                Actions = { "Passive", "Active" };
+
+                Budget = 1;
+
+                // cost[k][i][a]
+                cost = [
+                [ // A1
+                    [0.0, 0.5],  // state 1: Passive, Active
+                    [3.0, 3.5]   // state 2: Passive, Active
+                ],
+                [ // A2
+                    [0.0, 0.5],  // state 1
+                    [4.0, 4.5]   // state 2
+                ]
+                ];
+
+                // P[k][i][a][j]
+                P = [
+                [ // A1
+                    [ // state 1
+                    [0.80, 0.20], // Passive -> (j=1,j=2)
+                    [0.95, 0.05]  // Active  -> (j=1,j=2)
+                    ],
+                    [ // state 2
+                    [0.20, 0.80], // Passive
+                    [0.60, 0.40]  // Active
+                    ]
+                ],
+                [ // A2
+                    [ // state 1
+                    [0.70, 0.30], // Passive
+                    [0.90, 0.10]  // Active
+                    ],
+                    [ // state 2
+                    [0.10, 0.90], // Passive
+                    [0.50, 0.50]  // Active
+                    ]
+                ]
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_column_generation(self):
         """
         Test a column generation model with both solvers.
