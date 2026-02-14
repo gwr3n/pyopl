@@ -476,6 +476,24 @@ class GraphChainExecutor:
 
     Nodes are stateless and instantiated fresh per execution for clarity and simplicity.
     Manages iteration loop control and conditional branching explicitly in execute().
+
+    Workflow:
+
+        Generate → CheckSyntax ─→[pass]→ CheckAlignment ─→[pass]→ SaveFiles
+                       ↓                       ↓
+                     [fail]                [fail]
+                       ↓                       ↓
+                   ReviseSyntax ───────────────┘
+                        ↑
+                        └─ (loop back to CheckSyntax if iterations < max)
+
+    Iteration Control:
+    - Starts: Generate once, then refinement_iteration = 1
+    - Loop: CheckSyntax → [invalid] → ReviseSyntax → CheckSyntax (repeat while refinement_iteration < max_iterations)
+    - Then: CheckAlignment → [misaligned] → ReviseAlignment → CheckSyntax (repeat while refinement_iteration < max_iterations)
+    - Exit: syntax_valid AND (aligned OR alignment_check disabled), OR refinement_iteration >= max_iterations
+    - Optional: FinalAssessment (if unresolved errors or alignment disabled)
+    - Always: SaveFiles (final step)
     """
 
     def __init__(self, max_iterations: int = MAX_ITERATIONS):
