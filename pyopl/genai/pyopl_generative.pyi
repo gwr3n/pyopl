@@ -6,6 +6,8 @@ MAX_OUTPUT_TOKENS: Optional[int]
 LLM_PROVIDER: str
 MODEL_NAME: str
 ALIGNMENT_CHECK: bool
+FEW_SHOT_TOP_K: int
+FEW_SHOT_MAX_CHARS: int
 
 class LLMProvider(Enum):
     OPENAI = ...
@@ -17,6 +19,44 @@ class Grammar(Enum):
     BNF = ...
     CODE = ...
 
+# Private utility functions
+def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None: ...
+def _get_grammar_implementation(mode: Grammar) -> str: ...
+def _gather_few_shots(
+    problem_description: str,
+    k: int = ...,
+    models_dir: Optional[str] = ...,
+    progress: Optional[Callable[[str], None]] = ...,
+) -> List[Dict[str, str]]: ...
+def _json_loads_relaxed(text: str) -> Dict[str, Any]: ...
+def _infer_provider(llm_provider: Optional[str], model_name: str) -> LLMProvider: ...
+def _build_generation_prompt(
+    prompt: str,
+    grammar_implementation: str,
+    few_shots: Optional[List[Dict[str, str]]] = ...,
+) -> str: ...
+def _build_alignment_prompt(
+    prompt: str,
+    grammar_implementation: str,
+    model_code: str,
+    data_code: str,
+) -> str: ...
+def _build_revision_prompt(
+    prompt: str,
+    grammar_implementation: str,
+    model_code: str,
+    data_code: str,
+    compile_errors: Optional[List[str]] = ...,
+    alignment_assessment: Optional[str] = ...,
+    few_shots: Optional[List[Dict[str, str]]] = ...,
+) -> str: ...
+def _build_final_assessment_prompt(
+    prompt: str,
+    grammar_implementation: str,
+    model_code: str,
+    data_code: str,
+    syntax_errors: Optional[List[str]] = ...,
+) -> str: ...
 @overload
 def _ollama_generate_text(
     model_name: str,
@@ -68,6 +108,7 @@ def generative_solve(
     llm_provider: Optional[str] = ...,
     progress: Optional[Callable[[str], None]] = ...,
     few_shot: bool = ...,
+    use_graphchain: bool = ...,
 ) -> Dict[str, Any]: ...
 @overload
 def generative_solve(
@@ -84,6 +125,7 @@ def generative_solve(
     llm_provider: Optional[str] = ...,
     progress: Optional[Callable[[str], None]] = ...,
     few_shot: bool = ...,
+    use_graphchain: bool = ...,
 ) -> str: ...
 def generative_feedback(
     prompt,

@@ -604,6 +604,12 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
 
 # ---------- Public API ----------
 
+try:
+    from .pyopl_generative_graphchain import generative_solve_graphchain
+except ImportError:
+    # Fallback if graphchain module not yet available
+    generative_solve_graphchain = None
+
 
 def generative_solve(
     prompt,
@@ -619,6 +625,7 @@ def generative_solve(
     llm_provider: Optional[str] = LLM_PROVIDER,
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
+    use_graphchain: bool = True,  # NEW: Enable GraphChain by default
 ):
     """Generate a PyOPL model and data file from a prompt, validate with pyopl, iterate on errors, and assess alignment.
 
@@ -646,6 +653,29 @@ def generative_solve(
     Raises:
         RuntimeError: If generation or validation fails irrecoverably.
     """
+    if use_graphchain and generative_solve_graphchain is not None:
+        return generative_solve_graphchain(
+            prompt=prompt,
+            model_file=model_file,
+            data_file=data_file,
+            model_name=model_name,
+            mode=mode,
+            iterations=iterations,
+            return_statistics=return_statistics,
+            alignment_check=alignment_check,
+            temperature=temperature,
+            stop=stop,
+            llm_provider=llm_provider,
+            progress=progress,
+            few_shot=few_shot,
+        )
+
+    # Fallback to legacy implementation
+    _notify(
+        progress,
+        f"Generating with provider={_infer_provider(llm_provider, model_name).value} model={model_name} iterations={iterations} alignment={'on' if (ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)) else 'off'}",
+    )
+
     grammar_implementation = _get_grammar_implementation(mode)
 
     try:
