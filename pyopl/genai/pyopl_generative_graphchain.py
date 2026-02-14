@@ -9,7 +9,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Literal, Optional, Union, overload
+from typing import Any, Callable, Dict, List, Optional, Union
 
 from ..pyopl_core import OPLCompiler, SemanticError
 from .genai_pricing import estimate_costs as _estimate_costs
@@ -604,42 +604,6 @@ class GraphChainExecutor:
 # ============================================================================
 
 
-@overload
-async def generative_solve_async(
-    prompt: str,
-    model_file: str,
-    data_file: str,
-    model_name: str = ...,
-    mode: Grammar = ...,
-    iterations: int = ...,
-    return_statistics: Literal[True] = ...,
-    alignment_check: Optional[bool] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[List[str]] = ...,
-    llm_provider: Optional[str] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    few_shot: bool = ...,
-) -> Dict[str, Any]: ...
-
-
-@overload
-async def generative_solve_async(
-    prompt: str,
-    model_file: str,
-    data_file: str,
-    model_name: str = ...,
-    mode: Grammar = ...,
-    iterations: int = ...,
-    return_statistics: Literal[False] = ...,
-    alignment_check: Optional[bool] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[List[str]] = ...,
-    llm_provider: Optional[str] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    few_shot: bool = ...,
-) -> str: ...
-
-
 async def generative_solve_async(
     prompt: str,
     model_file: str,
@@ -746,42 +710,6 @@ async def generative_solve_async(
 # ============================================================================
 # Sync Wrapper (for backwards compatibility)
 # ============================================================================
-
-
-@overload
-def generative_solve_graphchain(
-    prompt: str,
-    model_file: str,
-    data_file: str,
-    model_name: str = ...,
-    mode: Grammar = ...,
-    iterations: int = ...,
-    return_statistics: Literal[True] = ...,
-    alignment_check: Optional[bool] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[List[str]] = ...,
-    llm_provider: Optional[str] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    few_shot: bool = ...,
-) -> Dict[str, Any]: ...
-
-
-@overload
-def generative_solve_graphchain(
-    prompt: str,
-    model_file: str,
-    data_file: str,
-    model_name: str = ...,
-    mode: Grammar = ...,
-    iterations: int = ...,
-    return_statistics: Literal[False] = ...,
-    alignment_check: Optional[bool] = ...,
-    temperature: Optional[float] = ...,
-    stop: Optional[List[str]] = ...,
-    llm_provider: Optional[str] = ...,
-    progress: Optional[Callable[[str], None]] = ...,
-    few_shot: bool = ...,
-) -> str: ...
 
 
 def generative_solve_graphchain(
