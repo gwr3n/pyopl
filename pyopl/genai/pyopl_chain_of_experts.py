@@ -247,9 +247,9 @@ def _format_few_shots_knowledge(few_shots: List[Dict[str, str]]) -> str:
     for i, ex in enumerate(few_shots, 1):
         blocks.append(
             f'<example index="{i}">\n'
-            f"<description path=\"{ex.get('desc_path','')}\">\n{ex.get('description','')}\n</description>\n"
-            f"<model_file path=\"{ex.get('model_path','')}\">\n{ex.get('model','')}\n</model_file>\n"
-            f"<data_file path=\"{ex.get('data_path','')}\">\n{ex.get('data','')}\n</data_file>\n"
+            f"<description path=\"{ex.get('desc_path', '')}\">\n{ex.get('description', '')}\n</description>\n"
+            f"<model_file path=\"{ex.get('model_path', '')}\">\n{ex.get('model', '')}\n</model_file>\n"
+            f"<data_file path=\"{ex.get('data_path', '')}\">\n{ex.get('data', '')}\n</data_file>\n"
             f"</example>\n"
         )
     return "<knowledge_base>\n" + "".join(blocks) + "</knowledge_base>\n"

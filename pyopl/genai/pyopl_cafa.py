@@ -319,9 +319,9 @@ def _build_cafa_generation_prompt(
             dat_hdr = f'<data_file path="{ex.get("data_path", "")}">'
             blocks.append(
                 f'<example index="{i}">\n'
-                f"{desc_hdr}\n{ex.get('description','')}\n</description>\n\n"
-                f"{mod_hdr}\n{ex.get('model','')}\n</model_file>\n\n"
-                f"{dat_hdr}\n{ex.get('data','')}\n</data_file>\n"
+                f"{desc_hdr}\n{ex.get('description', '')}\n</description>\n\n"
+                f"{mod_hdr}\n{ex.get('model', '')}\n</model_file>\n\n"
+                f"{dat_hdr}\n{ex.get('data', '')}\n</data_file>\n"
                 f"</example>\n"
             )
         few_shots_section = (
