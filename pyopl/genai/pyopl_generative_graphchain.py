@@ -519,7 +519,11 @@ class GraphChainExecutor:
         3. Check alignment (if enabled)
            - If aligned: save & done
            - If not aligned: revise alignment → check syntax (loop if iterations < max)
-        4. If final iteration or max iterations reached: final assessment
+        4. Final assessment (only when needed):
+           - If there are unresolved syntax errors, OR
+           - If alignment check is disabled (so we still produce a user-facing assessment)
+           NOTE: If alignment checking is enabled, the alignment check's assessment is considered sufficient,
+                 even when max iterations is reached while still misaligned.
         5. Save files
         """
 
@@ -532,19 +536,22 @@ class GraphChainExecutor:
             raise RuntimeError(f"Generation failed: {result.error}")
         context = result.context
 
-        # Step 2+: Iterative refinement loop
-        # Iteration counter is managed here for explicit control flow
+        # Step 2+: Validation/refinement loop (runs checks at least once)
         refinement_iteration = 1
-        while refinement_iteration < context.max_iterations:
+        while True:
             # Check syntax
             result = await self.check_syntax(context)
             if not result.success:
                 raise RuntimeError(f"Syntax check failed: {result.error}")
             context = result.context
 
-            # Branch A: Syntax invalid → revise & loop
+            # Branch A: Syntax invalid → revise if we still have budget
             if not context.syntax_valid:
                 _notify(context.progress, f"Iteration {refinement_iteration}/{context.max_iterations}: syntax errors found")
+
+                if refinement_iteration >= context.max_iterations:
+                    break  # out of iterations; keep errors for final assessment
+
                 result = await self.revise_syntax(context)
                 if not result.success:
                     raise RuntimeError(f"Syntax revision failed: {result.error}")
@@ -552,12 +559,12 @@ class GraphChainExecutor:
                 refinement_iteration += 1
                 continue  # Loop back to syntax check
 
-            # Branch B: Syntax valid, but alignment check disabled → exit loop
+            # Branch B: Syntax valid, but alignment check disabled → done
             if not context.do_alignment_check:
                 _notify(context.progress, "Syntax valid; alignment check disabled. Stopping.")
                 break
 
-            # Branch C: Syntax valid, check alignment
+            # Branch C: Syntax valid → check alignment
             result = await self.check_alignment(context)
             if not result.success:
                 raise RuntimeError(f"Alignment check failed: {result.error}")
@@ -568,15 +575,20 @@ class GraphChainExecutor:
                 _notify(context.progress, "Aligned ✓ Stopping.")
                 break
 
-            # If not aligned: revise & loop
+            # Not aligned → revise if we still have budget
             _notify(context.progress, f"Iteration {refinement_iteration}/{context.max_iterations}: misaligned, revising")
+
+            if refinement_iteration >= context.max_iterations:
+                break  # out of iterations; keep assessment for final assessment if you choose to run it
+
             result = await self.revise_alignment(context)
             if not result.success:
                 raise RuntimeError(f"Alignment revision failed: {result.error}")
             context = result.context
             refinement_iteration += 1
+            # loop continues; next iteration re-checks syntax
 
-        # Track final iteration count for statistics
+        # Track final iteration count for statistics (number of revision cycles completed)
         context.iteration = refinement_iteration - 1
 
         # Step 3: Final assessment (if needed)
