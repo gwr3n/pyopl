@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from ..pyopl_core import OPLCompiler, SemanticError
+from ._strategy_base import ImageInput, PromptInput
 from .genai_pricing import estimate_costs as _estimate_costs
 from .pyopl_generative import (
     FEW_SHOT_TOP_K,
@@ -29,6 +30,7 @@ from .pyopl_generative import (
     _json_loads_relaxed,
     _llm_generate_text,
     _notify,
+    _normalize_prompt_input,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,15 +43,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ExecutionContext:
-    """Shared state across all nodes in the GraphChain.
+    """Shared state across all nodes in the GraphChain."""
 
-    Tracks input parameters, state evolution, validation results, and aggregated metrics
-    throughout the generative solve workflow.
-    """
-
-    # Input parameters
-    problem_prompt: str
-    """The original problem description provided by the user."""
+    # Input parameters (NON-DEFAULT FIRST)
+    problem_text: str
+    """The text portion of the original problem description provided by the user."""
 
     model_file: str
     """Target output path for the generated .mod (PyOPL model) file."""
@@ -82,7 +80,10 @@ class ExecutionContext:
     """Callback function for progress notifications."""
 
     few_shots: List[Dict[str, str]]
-    """Few-shot examples for in-context learning (description, model, data)."""
+
+    # Optional prompt images (DEFAULTS AFTER NON-DEFAULTS)
+    problem_images: List[ImageInput] = field(default_factory=list)
+    """Optional images associated with the problem prompt."""
 
     # Grammar and utility
     grammar_implementation: str = ""
@@ -178,7 +179,7 @@ class GenerateNode(GraphNode):
         _notify(context.progress, f"[{self.name}] Generating model and data from prompt")
 
         user_prompt = _build_generation_prompt(
-            context.problem_prompt,
+            context.problem_text,
             context.grammar_implementation,
             few_shots=context.few_shots,
         )
@@ -188,6 +189,7 @@ class GenerateNode(GraphNode):
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=user_prompt,
+                images=context.problem_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=context.temperature,
                 stop=context.stop,
@@ -245,7 +247,7 @@ class CheckAlignmentNode(GraphNode):
         _notify(context.progress, f"[{self.name}] Checking alignment with prompt")
 
         alignment_prompt = _build_alignment_prompt(
-            context.problem_prompt,
+            context.problem_text,
             context.grammar_implementation,
             context.model_code,
             context.data_code,
@@ -256,6 +258,7 @@ class CheckAlignmentNode(GraphNode):
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=alignment_prompt,
+                images=context.problem_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=context.temperature,
                 stop=context.stop,
@@ -273,10 +276,7 @@ class CheckAlignmentNode(GraphNode):
             context.total_completion_tokens += usage.get("completion_tokens", 0) or 0
 
             status = "✓" if context.aligned else "✗"
-            _notify(
-                context.progress,
-                f"[{self.name}] Alignment: {status} {context.alignment_assessment[:60]}...",
-            )
+            _notify(context.progress, f"[{self.name}] Alignment: {status} {context.alignment_assessment[:60]}...")
             return NodeExecutionResult(context, success=True)
 
         except Exception as e:
@@ -290,7 +290,7 @@ class ReviseSyntaxNode(GraphNode):
         _notify(context.progress, f"[{self.name}] Revising to fix {len(context.syntax_errors)} error(s)")
 
         revision_prompt = _build_revision_prompt(
-            prompt=context.problem_prompt,
+            prompt=context.problem_text,
             grammar_implementation=context.grammar_implementation,
             model_code=context.model_code,
             data_code=context.data_code,
@@ -304,6 +304,7 @@ class ReviseSyntaxNode(GraphNode):
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=revision_prompt,
+                images=context.problem_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=context.temperature,
                 stop=context.stop,
@@ -335,7 +336,7 @@ class ReviseAlignmentNode(GraphNode):
         _notify(context.progress, f"[{self.name}] Revising to improve alignment")
 
         revision_prompt = _build_revision_prompt(
-            prompt=context.problem_prompt,
+            prompt=context.problem_text,
             grammar_implementation=context.grammar_implementation,
             model_code=context.model_code,
             data_code=context.data_code,
@@ -349,6 +350,7 @@ class ReviseAlignmentNode(GraphNode):
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=revision_prompt,
+                images=context.problem_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=context.temperature,
                 stop=context.stop,
@@ -380,7 +382,7 @@ class FinalAssessmentNode(GraphNode):
         _notify(context.progress, f"[{self.name}] Generating final assessment")
 
         assessment_prompt = _build_final_assessment_prompt(
-            context.problem_prompt,
+            context.problem_text,
             context.grammar_implementation,
             context.model_code,
             context.data_code,
@@ -392,6 +394,7 @@ class FinalAssessmentNode(GraphNode):
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=assessment_prompt,
+                images=context.problem_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=context.temperature,
                 stop=context.stop,
@@ -617,7 +620,7 @@ class GraphChainExecutor:
 
 
 async def generative_solve_async(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = "gpt-5",
@@ -636,11 +639,17 @@ async def generative_solve_async(
 
     Same signature and behavior as the original generative_solve,
     but uses explicit node-based DAG execution.
+
+    `prompt` may be:
+      - str
+      - {"text": "...", "images": [{"path": "..."} , ...]}
     """
 
     iterations = max(1, int(iterations))
     do_alignment = True if alignment_check is None else bool(alignment_check)
     provider = _infer_provider(llm_provider, model_name)
+
+    prompt_text, prompt_images = _normalize_prompt_input(prompt)
 
     _notify(
         progress,
@@ -648,14 +657,14 @@ async def generative_solve_async(
         f"alignment={'on' if do_alignment else 'off'}",
     )
 
-    # Gather few-shot examples
+    # Gather few-shot examples (text-only query)
     few_shots: List[Dict[str, str]] = (
-        _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
+        _gather_few_shots(prompt_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
     # Initialize execution context
     context = ExecutionContext(
-        problem_prompt=prompt,
+        problem_text=prompt_text,
         model_file=model_file,
         data_file=data_file,
         model_name=model_name,
@@ -667,6 +676,7 @@ async def generative_solve_async(
         stop=stop,
         progress=progress,
         few_shots=few_shots,
+        problem_images=prompt_images,
     )
 
     # Execute GraphChain
@@ -725,7 +735,7 @@ async def generative_solve_async(
 
 
 def generative_solve_graphchain(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = "gpt-5",

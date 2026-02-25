@@ -81,6 +81,13 @@ TOKEN_COLORS = {
 }
 
 
+# GenAI prompt payload shape (kept loose to avoid importing genai modules/types here).
+# Either:
+#   - str
+#   - {"text": str, "images": [{"path": str}, ...]}
+_PromptInput = Any
+
+
 def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue) -> None:
     """Wrapper to run solve in a separate process."""
     try:
@@ -1613,19 +1620,170 @@ class OPLIDE(tk.Tk):
         dlg.wait_window()
         return result["text"]
 
+    def _ask_prompt_with_images(self, title: str, prompt: str, initial_text: str = "") -> Optional[_PromptInput]:
+        """
+        Show a resizable prompt dialog that supports attaching one or more images.
+
+        Returns:
+          - None if cancelled
+          - str if OK and no images attached
+          - dict {"text": str, "images": [{"path": str}, ...]} if images attached
+        """
+        dlg = tk.Toplevel(self)
+        dlg.title(title)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(True, True)
+
+        # Center near parent
+        try:
+            self.update_idletasks()
+            x = self.winfo_rootx() + 40
+            y = self.winfo_rooty() + 40
+            dlg.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+        frm = ttk.Frame(dlg, padding=8)
+        frm.grid(sticky="nsew")
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=1)
+        frm.rowconfigure(1, weight=1)
+
+        ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        # Text input
+        txt = scrolledtext.ScrolledText(
+            frm,
+            wrap=tk.WORD,
+            width=100,
+            height=16,
+            font=(self.editor_font_family, self.current_font_size),
+        )
+        txt.grid(row=1, column=0, sticky="nsew")
+        if initial_text:
+            txt.insert("1.0", initial_text)
+        txt.focus_set()
+
+        # Attachments UI
+        attachments = ttk.Labelframe(frm, text="Attached images (optional)", padding=(8, 6))
+        attachments.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        attachments.columnconfigure(0, weight=1)
+
+        file_list = tk.Listbox(attachments, height=4, exportselection=False)
+        file_list.grid(row=0, column=0, sticky="ew")
+        yscroll = tk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
+        file_list.configure(yscrollcommand=yscroll.set)
+        yscroll.grid(row=0, column=1, sticky="ns")
+
+        btn_row = ttk.Frame(attachments)
+        btn_row.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
+
+        selected_paths: list[str] = []
+
+        def _refresh_list() -> None:
+            try:
+                file_list.delete(0, tk.END)
+                for p in selected_paths:
+                    file_list.insert(tk.END, p)
+            except Exception:
+                pass
+
+        def _add_images() -> None:
+            try:
+                paths = filedialog.askopenfilenames(
+                    title="Attach images",
+                    filetypes=[
+                        ("Image files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff"),
+                        ("All files", "*.*"),
+                    ],
+                )
+            except Exception:
+                paths = ()
+            if not paths:
+                return
+            for p in paths:
+                ps = str(p)
+                if ps and ps not in selected_paths:
+                    selected_paths.append(ps)
+            _refresh_list()
+
+        def _remove_selected() -> None:
+            try:
+                sel = file_list.curselection()
+                if not sel:
+                    return
+                idx = int(sel[0])
+                if 0 <= idx < len(selected_paths):
+                    selected_paths.pop(idx)
+                _refresh_list()
+            except Exception:
+                pass
+
+        def _clear_all() -> None:
+            selected_paths.clear()
+            _refresh_list()
+
+        add_btn = ttk.Button(btn_row, text="Attach Images...", command=_add_images)
+        rm_btn = ttk.Button(btn_row, text="Remove Selected", command=_remove_selected)
+        clr_btn = ttk.Button(btn_row, text="Clear", command=_clear_all)
+        clr_btn.grid(row=0, column=2, padx=(6, 0))
+        rm_btn.grid(row=0, column=1, padx=(6, 0))
+        add_btn.grid(row=0, column=0)
+
+        # OK / Cancel
+        btns = ttk.Frame(frm)
+        btns.grid(row=3, column=0, sticky="e", pady=(10, 0))
+        result: dict[str, Any] = {"value": None}
+
+        def on_ok(event=None) -> None:
+            text_val = txt.get("1.0", tk.END).rstrip()
+            if selected_paths:
+                result["value"] = {"text": text_val, "images": [{"path": p} for p in selected_paths]}
+            else:
+                result["value"] = text_val
+            dlg.destroy()
+
+        def on_cancel(event=None) -> None:
+            result["value"] = None
+            dlg.destroy()
+
+        ok_btn = ttk.Button(btns, text="OK", command=on_ok)
+        cancel_btn = ttk.Button(btns, text="Cancel", command=on_cancel)
+        cancel_btn.grid(row=0, column=1, padx=(6, 0))
+        ok_btn.grid(row=0, column=0)
+
+        dlg.bind("<Escape>", on_cancel)
+        dlg.bind("<Control-Return>", on_ok)
+        dlg.bind("<Command-Return>", on_ok)  # macOS
+
+        dlg.wait_window()
+        return result["value"]
+
     def genai_generate(self) -> None:
-        """Prompt for a problem description and generate model & data via GenAI."""
+        """Prompt for a problem description (and optional images) and generate model & data via GenAI."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        prompt = self._ask_multiline(
+        prompt_input = self._ask_prompt_with_images(
             "GenAI: Generate Model & Data",
-            "Describe the optimization problem:",
+            "Describe the optimization problem (optionally attach one or more images):",
             "",
         )
-        if not prompt:
+        if prompt_input is None:
             return
+
+        # Validate: allow “images-only” prompts (text may be empty) if using dict form
+        if isinstance(prompt_input, str):
+            if not prompt_input.strip():
+                return
+        elif isinstance(prompt_input, dict):
+            text_ok = bool(str(prompt_input.get("text", "")).strip())
+            images_ok = bool(prompt_input.get("images")) or bool(prompt_input.get("image"))
+            if not (text_ok or images_ok):
+                return
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
@@ -1678,9 +1836,9 @@ class OPLIDE(tk.Tk):
                     i += 1
 
                 try:
-                    # Dispatch to selected generation method
+                    # Dispatch to selected generation method (PromptInput supports images)
                     assessment = gen_module.generative_solve(
-                        prompt,
+                        prompt_input,
                         model_path,
                         data_path,
                         model_name=self.genai_model,
@@ -1734,18 +1892,28 @@ class OPLIDE(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     def genai_feedback(self) -> None:
-        """Prompt for a question and request feedback/revisions from GenAI for the current model/data."""
+        """Prompt for a question (and optional images) and request feedback/revisions from GenAI for the current model/data."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        question = self._ask_multiline(
+        prompt_input = self._ask_prompt_with_images(
             "GenAI: Ask...",
-            "Enter your question about the current model/data (e.g., improvements, changes):",
+            "Enter your question about the current model/data (optionally attach one or more images):",
             "",
         )
-        if not question:
+        if prompt_input is None:
             return
+
+        # Validate: allow “images-only” prompts (text may be empty) if using dict form
+        if isinstance(prompt_input, str):
+            if not prompt_input.strip():
+                return
+        elif isinstance(prompt_input, dict):
+            text_ok = bool(str(prompt_input.get("text", "")).strip())
+            images_ok = bool(prompt_input.get("images")) or bool(prompt_input.get("image"))
+            if not (text_ok or images_ok):
+                return
 
         # Ensure we have model/data files; save current buffers if needed
         tmp_dir = os.path.join(os.getcwd(), "tmp")
@@ -1801,8 +1969,9 @@ class OPLIDE(tk.Tk):
                     log.setLevel(logging.DEBUG)
 
                 try:
+                    # PromptInput supports images (same shape as Generate)
                     result = gen_module.generative_feedback(
-                        question,
+                        prompt_input,
                         model_path,
                         data_path,
                         model_name=self.genai_model,

@@ -19,6 +19,8 @@ from typing import (
 from ..pyopl_core import OPLCompiler, SemanticError
 from ._strategy_base import (
     GenAIStrategyBase,
+    ImageInput,
+    PromptInput,
 )
 from ._strategy_base import (
     Grammar as _BaseGrammar,
@@ -78,6 +80,16 @@ class Grammar(Enum):
 
 # ---------- Utilities ----------
 
+def _normalize_prompt_input(prompt: PromptInput) -> Tuple[str, List[ImageInput]]:
+    """
+    Normalize the public `prompt` argument into (prompt_text, prompt_images).
+
+    Supported:
+      - str
+      - {"text": "...", "images": [ImageInput|str|Path|dict]}
+      - {"text": "...", "image": ImageInput|str|Path|dict}
+    """
+    return _BASE.normalize_prompt_input(prompt)
 
 def _read_file(path: str) -> str:
     return _BASE.read_file(path)
@@ -258,6 +270,8 @@ def _llm_generate_text(
     provider: LLMProvider,
     model_name: str,
     input_text: str,
+    *,
+    images: Optional[List[ImageInput]] = None,
     max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
     temperature: Optional[float] = None,
     stop: Optional[list[str]] = None,
@@ -270,6 +284,7 @@ def _llm_generate_text(
         provider=base_provider,
         model_name=model_name,
         input_text=input_text,
+        images=images,
         max_tokens=max_tokens,
         temperature=temperature,
         stop=stop,
@@ -334,7 +349,7 @@ def _revision_guidelines_alignment() -> str:
 
 
 def _build_generation_prompt(
-    prompt: str, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
+    prompt: PromptInput, grammar_implementation: str, few_shots: Optional[List[Dict[str, str]]] = None
 ) -> str:
     few_shots_section = _render_few_shots_section(few_shots)
     commenting_guidelines = _commenting_guidelines()
@@ -472,7 +487,7 @@ def _build_revision_prompt(
         f"{errors_block}"
         f"{assess_block}"
         "<output_requirements>\n"
-        '- Return ONLY a JSON object with keys "model" and "data". Values are single strings; escape quotes/backslashes; encode newlines as \\n. No extra keys.\n'
+        '- Return ONLY a JSON object with keys "model" and "data". Values are single strings; escape quotes/backslashes; encode newlines as \\n.\n'
         "- You MAY wrap the JSON in a ```json fence containing only the JSON.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
@@ -481,8 +496,8 @@ def _build_revision_prompt(
         "</json_schema>\n"
         "<example_output>\n"
         "{\n"
-        '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to {\\n  c1: b*x >= 0;\\n}\\n",\n'
-        '  "data":  "a = 10;\\n b = 5;"\n'
+        '  "model": "// revised example\\nfloat a;\\nfloat b;\\ndvar float x >= 0;\\nminimize z: a*x;\\nsubject to { b*x >= 0; }",'
+        '  "data":  "a = 10;\\nb= 5;"\n'
         "}\n"
         "</example_output>\n"
     )
@@ -612,7 +627,7 @@ except ImportError:
 
 
 def generative_solve(
-    prompt,
+    prompt: PromptInput,
     model_file,
     data_file,
     model_name=MODEL_NAME,
@@ -625,12 +640,12 @@ def generative_solve(
     llm_provider: Optional[str] = LLM_PROVIDER,
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
-    use_graphchain: bool = True,  # NEW: Enable GraphChain by default
+    use_graphchain: bool = True,
 ):
     """Generate a PyOPL model and data file from a prompt, validate with pyopl, iterate on errors, and assess alignment.
 
     Args:
-        prompt (str): Problem description to model.
+        prompt (PromptInput): The problem description, as a string or dict with "text" and optional "images".
         model_file (str): Path to save the generated PyOPL model (.mod).
         data_file (str): Path to save the generated PyOPL data file (.dat).
         model_name (str): LLM model name, e.g. "gpt-5".
@@ -670,7 +685,8 @@ def generative_solve(
             few_shot=few_shot,
         )
 
-    # Fallback to legacy implementation
+    prompt_text, prompt_images = _normalize_prompt_input(prompt)
+
     _notify(
         progress,
         f"Generating with provider={_infer_provider(llm_provider, model_name).value} model={model_name} iterations={iterations} alignment={'on' if (ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)) else 'off'}",
@@ -691,12 +707,12 @@ def generative_solve(
         f"Generating with provider={provider.value} model={model_name} iterations={iterations} alignment={'on' if do_alignment else 'off'}",
     )
 
-    # Retrieve few-shot examples using RAG
+    # Retrieve few-shot examples using RAG (text-only query)
     few_shots: List[Dict[str, str]] = (
-        _gather_few_shots(prompt, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
+        _gather_few_shots(prompt_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
-    user_prompt = _build_generation_prompt(prompt, grammar_implementation, few_shots=few_shots)
+    user_prompt = _build_generation_prompt(prompt_text, grammar_implementation, few_shots=few_shots)
     assessment_text = ""
     syntax_errors: list[str] = []
 
@@ -710,11 +726,12 @@ def generative_solve(
     for iteration in range(iterations):
         logger.debug(f"Iteration {iteration + 1}/{iterations}")
         _notify(progress, f"Iteration {iteration + 1}/{iterations}: prompting model")
-        # Capture usage and unpack directly for mypy
+
         content, usage = _llm_generate_text(
             provider=provider,
             model_name=model_name,
             input_text=user_prompt,
+            images=prompt_images,
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=temperature,
             stop=stop,
@@ -766,12 +783,13 @@ def generative_solve(
 
             logger.debug("Checking alignment with original prompt...")
             _notify(progress, "Checking alignment with original prompt...")
-            alignment_prompt = _build_alignment_prompt(prompt, grammar_implementation, model_code, data_code)
-            # Capture usage and unpack directly for mypy
+            alignment_prompt = _build_alignment_prompt(prompt_text, grammar_implementation, model_code, data_code)
+
             alignment_content, usage2 = _llm_generate_text(
                 provider=provider,
                 model_name=model_name,
                 input_text=alignment_prompt,
+                images=prompt_images,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 temperature=0.0 if temperature is not None else None,
                 stop=stop,
@@ -801,7 +819,7 @@ def generative_solve(
                         f"Model and data are syntactically valid but NOT aligned with the prompt. Assessment: {assessment_text}"
                     )
                     user_prompt = _build_revision_prompt(
-                        prompt=prompt,
+                        prompt=prompt_text,
                         grammar_implementation=grammar_implementation,
                         model_code=model_code,
                         data_code=data_code,
@@ -815,7 +833,7 @@ def generative_solve(
             _notify(progress, f"Syntax/semantic errors found: {len(syntax_errors)}; revising...")
             logger.debug("Model or data has syntax errors; revising...")
             user_prompt = _build_revision_prompt(
-                prompt=prompt,
+                prompt=prompt_text,
                 grammar_implementation=grammar_implementation,
                 model_code=model_code,
                 data_code=data_code,
@@ -834,13 +852,14 @@ def generative_solve(
         logger.debug("Final assessment of model and data alignment...")
         _notify(progress, "Requesting final assessment")
         assessment_prompt = _build_final_assessment_prompt(
-            prompt, grammar_implementation, model_code, data_code, syntax_errors
+            prompt_text, grammar_implementation, model_code, data_code, syntax_errors
         )
         # Capture usage and unpack directly for mypy
         assessment_text_part, usage3 = _llm_generate_text(
             provider=provider,
             model_name=model_name,
             input_text=assessment_prompt,
+            images=prompt_images,
             max_tokens=MAX_OUTPUT_TOKENS,
             temperature=0.0 if temperature is not None else None,
             stop=stop,
@@ -889,7 +908,7 @@ def generative_solve(
 
 
 def generative_feedback(
-    prompt,
+    prompt: PromptInput,
     model_file,
     data_file,
     model_name=MODEL_NAME,
@@ -902,7 +921,7 @@ def generative_feedback(
     """Provide feedback on a given PyOPL model and data file based on a user prompt.
 
     Args:
-        prompt (str): User question or request regarding the model and data.
+        prompt (PromptInput): User question or request for feedback about the model/data.
         model_file (str): Path to the PyOPL model file (.mod).
         data_file (str): Path to the PyOPL data file (.dat).
         model_name (str): LLM model name, e.g. "gpt-5".
@@ -924,18 +943,21 @@ def generative_feedback(
     provider = _infer_provider(llm_provider, model_name)
     grammar_implementation = _get_grammar_implementation(mode)
 
+    prompt_text, prompt_images = _normalize_prompt_input(prompt)
+
     with open(model_file, "r") as fh:
         model_code = fh.read()
     with open(data_file, "r") as fh:
         data_code = fh.read()
 
     _notify(progress, "Generating feedback from LLM")
-    user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
+    user_prompt = _build_feedback_prompt(prompt_text, grammar_implementation, model_code, data_code)
 
     content: str = _llm_generate_text(
         provider=provider,
         model_name=model_name,
         input_text=user_prompt,
+        images=prompt_images,
         max_tokens=MAX_OUTPUT_TOKENS,
         temperature=0.0 if temperature is not None else None,
         stop=stop,

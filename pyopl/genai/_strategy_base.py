@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import logging
 import os
 import re
+import mimetypes
 from dataclasses import dataclass
 from enum import Enum, auto
 from importlib.resources import files
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union, cast, TypedDict
 
 from ..pyopl_core import OPLCompiler, SemanticError
 from .genai_pricing import _extract_gemini_usage, _extract_openai_usage
@@ -28,6 +30,35 @@ class Grammar(Enum):
     NONE = auto()
     BNF = auto()
     CODE = auto()
+
+
+class ImageInput(TypedDict, total=False):
+    """
+    A single image reference for multimodal prompts.
+
+    Supported forms:
+      - {"path": "/local/path.png", "mime_type": "image/png"}   (mime_type optional)
+      - {"url": "https://.../image.png", "mime_type": "image/png"} (mime_type optional; provider-dependent)
+      - {"data_base64": "...", "mime_type": "image/png"}       (mime_type recommended)
+    """
+    path: str
+    url: str
+    data_base64: str
+    mime_type: str
+
+
+class PromptWithImages(TypedDict, total=False):
+    """
+    Multimodal prompt:
+      - {"text": "...", "images": [<image inputs>]}
+      - {"text": "...", "image": <single image input>}  (convenience)
+    """
+    text: str
+    images: List[Any]
+    image: Any
+
+
+PromptInput = Union[str, PromptWithImages]
 
 
 @dataclass
@@ -88,6 +119,70 @@ class GenAIStrategyBase:
         except Exception:
             # Never let UI callback failures break the run
             pass
+
+    # -------- Multimodal prompt normalization --------
+
+    @staticmethod
+    def _normalize_images(images: Any) -> List[ImageInput]:
+        if not images:
+            return []
+
+        out: List[ImageInput] = []
+        if not isinstance(images, list):
+            images = [images]
+
+        for img in images:
+            if isinstance(img, Path):
+                out.append({"path": str(img)})
+                continue
+            if isinstance(img, str):
+                out.append({"path": img})
+                continue
+            if isinstance(img, dict):
+                # Accept already-normalized dicts, but only keep known keys
+                entry: ImageInput = {}
+                if isinstance(img.get("path"), str):
+                    entry["path"] = img["path"]
+                if isinstance(img.get("url"), str):
+                    entry["url"] = img["url"]
+                if isinstance(img.get("data_base64"), str):
+                    entry["data_base64"] = img["data_base64"]
+                if isinstance(img.get("mime_type"), str):
+                    entry["mime_type"] = img["mime_type"]
+                if entry:
+                    out.append(entry)
+                continue
+
+        return out
+
+    @classmethod
+    def normalize_prompt_input(cls, prompt: PromptInput) -> Tuple[str, List[ImageInput]]:
+        """
+        Returns (text, images).
+
+        Backwards compatible:
+          - prompt: str -> (prompt, [])
+          - prompt: {"text": "...", "images":[...]} or {"text":"...", "image": ...}
+        """
+        if isinstance(prompt, str):
+            return prompt, []
+
+        if isinstance(prompt, dict):
+            text = prompt.get("text", "")
+            if not isinstance(text, str):
+                text = str(text)
+
+            images_raw: Any = None
+            if "images" in prompt:
+                images_raw = prompt.get("images")
+            elif "image" in prompt:
+                images_raw = prompt.get("image")
+
+            images = cls._normalize_images(images_raw)
+            return text, images
+
+        # last resort: stringify
+        return str(prompt), []
 
     # -------- Grammar / package resources --------
 
@@ -383,11 +478,86 @@ class GenAIStrategyBase:
             return LLMProvider.OLLAMA
         return LLMProvider.OPENAI
 
+    # ---- Multimodal helpers (provider-specific payloads) ----
+
+    @staticmethod
+    def _guess_mime_type(path: str, fallback: str = "application/octet-stream") -> str:
+        mt, _ = mimetypes.guess_type(path)
+        return mt or fallback
+
+    @classmethod
+    def _image_to_openai_image_url(cls, img: ImageInput) -> str:
+        """
+        OpenAI Responses API expects image_url as a URL or a data URL.
+        """
+        if isinstance(img.get("url"), str) and img["url"]:
+            return img["url"]
+
+        if isinstance(img.get("data_base64"), str) and img["data_base64"]:
+            mime_type = img.get("mime_type") or "application/octet-stream"
+            data = img["data_base64"]
+            if data.startswith("data:"):
+                return data
+            return f"data:{mime_type};base64,{data}"
+
+        path = img.get("path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("Invalid image input for OpenAI: missing 'path', 'url', or 'data_base64'")
+
+        mime_type = img.get("mime_type") or cls._guess_mime_type(path, fallback="image/png")
+        raw = Path(path).read_bytes()
+        b64 = base64.b64encode(raw).decode("ascii")
+        return f"data:{mime_type};base64,{b64}"
+
+    @classmethod
+    def _build_openai_input(cls, *, input_text: str, images: Optional[List[ImageInput]]) -> Any:
+        if not images:
+            return input_text
+
+        content: List[Dict[str, Any]] = [{"type": "input_text", "text": input_text}]
+        for img in images:
+            content.append({"type": "input_image", "image_url": cls._image_to_openai_image_url(img)})
+
+        return [{"role": "user", "content": content}]
+
+    @classmethod
+    def _image_to_gemini_part(cls, *, img: ImageInput, genai_types: Any) -> Any:
+        """
+        For google.genai new SDK.
+        Prefer Part.from_uri when url is provided; otherwise Part.from_bytes.
+        """
+        url = img.get("url")
+        if isinstance(url, str) and url:
+            if hasattr(genai_types.Part, "from_uri"):
+                mime_type = img.get("mime_type") or "image/png"
+                return genai_types.Part.from_uri(file_uri=url, mime_type=mime_type)
+            raise RuntimeError("Gemini URL images require google.genai types.Part.from_uri support")
+
+        data_b64 = img.get("data_base64")
+        if isinstance(data_b64, str) and data_b64:
+            mime_type = img.get("mime_type") or "image/png"
+            if data_b64.startswith("data:"):
+                # data URL: data:<mime>;base64,<payload>
+                m = re.match(r"data:([^;]+);base64,(.*)$", data_b64, re.DOTALL)
+                if m:
+                    mime_type = m.group(1) or mime_type
+                    data_b64 = m.group(2)
+            raw = base64.b64decode(data_b64)
+            return genai_types.Part.from_bytes(data=raw, mime_type=mime_type)
+
+        path = img.get("path")
+        if not isinstance(path, str) or not path:
+            raise ValueError("Invalid image input for Gemini: missing 'path', 'url', or 'data_base64'")
+
+        mime_type = img.get("mime_type") or cls._guess_mime_type(path, fallback="image/png")
+        raw = Path(path).read_bytes()
+        return genai_types.Part.from_bytes(data=raw, mime_type=mime_type)
+
     @staticmethod
     def _build_openai_create_params(
         *,
         model_name: str,
-        input_text: str,
+        input_content: Any,
         max_tokens: Optional[int],
         temperature: Optional[float],
         stop: Optional[list[str]],
@@ -395,7 +565,7 @@ class GenAIStrategyBase:
     ) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "model": model_name,
-            "input": input_text,
+            "input": input_content,
         }
         if expected_json:
             params["response_format"] = {"type": "json"}
@@ -472,6 +642,7 @@ class GenAIStrategyBase:
         *,
         model_name: str,
         input_text: str,
+        images: Optional[List[ImageInput]],
         mt: Optional[int],
         temperature: Optional[float],
         stop: Optional[list[str]],
@@ -480,9 +651,10 @@ class GenAIStrategyBase:
         expected_json: bool,
     ) -> Tuple[str, Optional[Dict[str, int]]]:
         client = self._openai_client()
+        input_content = self._build_openai_input(input_text=input_text, images=images)
         create_params = self._build_openai_create_params(
             model_name=model_name,
-            input_text=input_text,
+            input_content=input_content,
             max_tokens=mt,
             temperature=temperature,
             stop=stop,
@@ -496,6 +668,7 @@ class GenAIStrategyBase:
             raise RuntimeError(f"Empty OpenAI response: {response}.")
         if not capture_usage:
             return response_text, None
+        # Note: usage estimation falls back to tokenizing input_text only (images excluded).
         usage = _extract_openai_usage(response, input_text, response_text, model_name)
         return response_text, usage
 
@@ -521,6 +694,7 @@ class GenAIStrategyBase:
         *,
         model_name: str,
         input_text: str,
+        images: Optional[List[ImageInput]],
         mt: Optional[int],
         temperature: Optional[float],
         progress: Optional[Callable[[str], None]],
@@ -531,38 +705,64 @@ class GenAIStrategyBase:
 
         self.notify(progress, f"[LLM] Gemini • {model_name}: sending request (google.genai)")
         try:
-            # Prefer strongly-typed config when available
             from google.genai import types as genai_types  # type: ignore
+
+            if images:
+                parts: List[Any] = [genai_types.Part.from_text(input_text)]
+                for img in images:
+                    parts.append(self._image_to_gemini_part(img=img, genai_types=genai_types))
+                contents: Any = [genai_types.Content(role="user", parts=parts)]
+            else:
+                contents = input_text
 
             resp = g.models.generate_content(
                 model=model_name,
-                contents=input_text,
+                contents=contents,
                 config=genai_types.GenerateContentConfig(**config),
             )
         except Exception:
-            # Fallback: pass dict config
-            resp = g.models.generate_content(model=model_name, contents=input_text, config=config)
+            # Fallback: pass dict config; if images exist and typed parts aren't available, try inline_data shape.
+            if images:
+                inline_parts: List[Dict[str, Any]] = [{"text": input_text}]
+                for img in images:
+                    # Only support bytes/base64/path in fallback
+                    if isinstance(img.get("url"), str) and img["url"]:
+                        raise RuntimeError("Gemini image URLs require google.genai typed parts (install/upgrade google-genai)")
+                    mime_type = img.get("mime_type") or "image/png"
+                    data_b64 = img.get("data_base64")
+                    if not (isinstance(data_b64, str) and data_b64):
+                        path = img.get("path")
+                        if not isinstance(path, str) or not path:
+                            raise ValueError("Invalid image input for Gemini: missing 'path' or 'data_base64'")
+                        mime_type = img.get("mime_type") or self._guess_mime_type(path, fallback="image/png")
+                        data_b64 = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+                    inline_parts.append({"inline_data": {"mime_type": mime_type, "data": data_b64}})
+                contents = [{"role": "user", "parts": inline_parts}]
+            else:
+                contents = input_text
+
+            resp = g.models.generate_content(model=model_name, contents=contents, config=config)
 
         self.notify(progress, "[LLM] Gemini: response received")
 
         text = getattr(resp, "text", None)
         if not isinstance(text, str) or not text:
-            # Best-effort extraction from candidate parts (shape varies by SDK/version)
             try:
-                parts: list[str] = []
+                parts2: list[str] = []
                 for c in getattr(resp, "candidates", []) or []:
                     content = getattr(c, "content", None)
                     for p in getattr(content, "parts", []) or []:
                         t = getattr(p, "text", None)
                         if isinstance(t, str):
-                            parts.append(t)
-                text = "".join(parts)
+                            parts2.append(t)
+                text = "".join(parts2)
             except Exception:
                 text = ""
         text = text or ""
 
         if not capture_usage:
             return text, None
+        # Note: usage estimation falls back to tokenizing input_text only (images excluded).
         usage = _extract_gemini_usage(resp, input_text, text)
         return text, usage
 
@@ -572,6 +772,7 @@ class GenAIStrategyBase:
         *,
         model_name: str,
         input_text: str,
+        images: Optional[List[ImageInput]],
         mt: Optional[int],
         temperature: Optional[float],
         progress: Optional[Callable[[str], None]],
@@ -582,19 +783,52 @@ class GenAIStrategyBase:
         generation_config = self._build_gemini_config(mt=mt, temperature=temperature, expected_json=expected_json)
 
         self.notify(progress, f"[LLM] Gemini • {model_name}: sending request (google.generativeai legacy)")
-        resp = model.generate_content(input_text, generation_config=generation_config)
+
+        if images:
+            # Legacy SDK prefers PIL.Image. Support local paths (and base64) only.
+            try:
+                from PIL import Image  # type: ignore
+                from io import BytesIO
+            except Exception as e:
+                raise RuntimeError(
+                    "Gemini legacy SDK image prompts require Pillow. Install with: pip install pillow "
+                    "or use the new google-genai SDK."
+                ) from e
+
+            parts: List[Any] = [input_text]
+            for img in images:
+                if isinstance(img.get("url"), str) and img["url"]:
+                    raise RuntimeError("Gemini legacy SDK does not support URL images in this implementation")
+                data_b64 = img.get("data_base64")
+                if isinstance(data_b64, str) and data_b64:
+                    if data_b64.startswith("data:"):
+                        m = re.match(r"data:([^;]+);base64,(.*)$", data_b64, re.DOTALL)
+                        if m:
+                            data_b64 = m.group(2)
+                    raw = base64.b64decode(data_b64)
+                    parts.append(Image.open(BytesIO(raw)))
+                    continue
+                path = img.get("path")
+                if not isinstance(path, str) or not path:
+                    raise ValueError("Invalid image input for Gemini legacy: missing 'path' or 'data_base64'")
+                parts.append(Image.open(path))
+
+            resp = model.generate_content(parts, generation_config=generation_config)
+        else:
+            resp = model.generate_content(input_text, generation_config=generation_config)
+
         self.notify(progress, "[LLM] Gemini: response received")
 
         text = getattr(resp, "text", None)
         if not text and getattr(resp, "candidates", None):
-            parts: list[str] = []
+            parts3: list[str] = []
             for c in resp.candidates:
                 content = getattr(c, "content", None)
                 if content and hasattr(content, "parts"):
                     for p in content.parts:
                         if hasattr(p, "text"):
-                            parts.append(p.text or "")
-            text = "".join(parts)
+                            parts3.append(p.text or "")
+            text = "".join(parts3)
         text = text or ""
 
         if not capture_usage:
@@ -607,11 +841,14 @@ class GenAIStrategyBase:
         *,
         model_name: str,
         input_text: str,
+        images: Optional[List[ImageInput]],
         mt: Optional[int],
         progress: Optional[Callable[[str], None]],
         capture_usage: bool,
         expected_json: bool,
     ) -> Tuple[str, Optional[Dict[str, int]]]:
+        if images:
+            raise RuntimeError("Ollama image prompts are not supported by this strategy implementation.")
         self.notify(progress, f"[LLM] Ollama • {model_name}: generating")
         if not capture_usage:
             text = cast(
@@ -644,6 +881,7 @@ class GenAIStrategyBase:
         provider: LLMProvider,
         model_name: str,
         input_text: str,
+        images: Optional[List[ImageInput]] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         stop: Optional[list[str]] = None,
@@ -657,6 +895,7 @@ class GenAIStrategyBase:
             text, usage = self._generate_openai(
                 model_name=model_name,
                 input_text=input_text,
+                images=images,
                 mt=mt,
                 temperature=temperature,
                 stop=stop,
@@ -676,6 +915,7 @@ class GenAIStrategyBase:
                     g.client,
                     model_name=model_name,
                     input_text=input_text,
+                    images=images,
                     mt=mt,
                     temperature=temperature,
                     progress=progress,
@@ -687,6 +927,7 @@ class GenAIStrategyBase:
                     g.client,
                     model_name=model_name,
                     input_text=input_text,
+                    images=images,
                     mt=mt,
                     temperature=temperature,
                     progress=progress,
@@ -702,6 +943,7 @@ class GenAIStrategyBase:
             text, usage = self._generate_ollama(
                 model_name=model_name,
                 input_text=input_text,
+                images=images,
                 mt=mt,
                 progress=progress,
                 capture_usage=capture_usage,
