@@ -1817,7 +1817,7 @@ class OPLIDE(tk.Tk):
 
         prompt_input = self._ask_prompt_with_images(
             "GenAI: Generate Model & Data",
-            "Describe the optimization problem (optionally attach one or more images):",
+            "Describe the optimization problem:",
             "",
         )
         if prompt_input is None:
@@ -1947,7 +1947,7 @@ class OPLIDE(tk.Tk):
 
         prompt_input = self._ask_prompt_with_images(
             "GenAI: Ask...",
-            "Enter your question about the current model/data (optionally attach one or more images):",
+            "Enter your question about the current model/data:",
             "",
         )
         if prompt_input is None:
