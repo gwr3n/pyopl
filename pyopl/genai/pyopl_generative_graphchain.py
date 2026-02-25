@@ -662,7 +662,7 @@ async def generative_solve_async(
             progress=progress,
         )
         if img_context:
-            _notify(progress, "[RAG] Image context: " + img_context[:50] + ("..." if len(img_context) > 50 else ""))
+            _notify(progress, "[RAG] Image context: " + img_context[:80] + ("..." if len(img_context) > 80 else ""))
             rag_query_text = f"{prompt_text}\n\n[IMAGE_CONTEXT]\n{img_context}\n"
 
     few_shots: List[Dict[str, str]] = (
