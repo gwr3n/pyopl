@@ -1651,14 +1651,11 @@ class OPLIDE(tk.Tk):
         frm.columnconfigure(0, weight=1)
         frm.rowconfigure(1, weight=1)
 
-        # ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        prompt_text = ttk.Labelframe(frm, text=prompt, padding=(8, 6))
-        prompt_text.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        prompt_text.columnconfigure(0, weight=1)
+        ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         # Text input
         txt = scrolledtext.ScrolledText(
-            prompt_text,
+            frm,
             wrap=tk.WORD,
             width=100,
             height=16,
@@ -1669,21 +1666,20 @@ class OPLIDE(tk.Tk):
             txt.insert("1.0", initial_text)
         txt.focus_set()
 
-        # Attachments UI
-        attachments = ttk.Labelframe(frm, text="Attached images (optional)", padding=(8, 6))
-        attachments.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        # Attachments UI (Label + Listbox, mirroring the prompt label style)
+        ttk.Label(frm, text="Attached images:", anchor="w", style="TLabel").grid(
+            row=2, column=0, sticky="ew", pady=(8, 4)
+        )
+
+        attachments = ttk.Frame(frm)
+        attachments.grid(row=3, column=0, sticky="ew")
         attachments.columnconfigure(0, weight=1)
 
-        # Small hint (since there are no buttons anymore)
-        # ttk.Label(attachments, text="Right-click the list to add/remove/clear.", anchor="w").grid(
-        #     row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6)
-        # )
-
         file_list = tk.Listbox(attachments, height=4, exportselection=False)
-        file_list.grid(row=1, column=0, sticky="ew")
+        file_list.grid(row=0, column=0, sticky="ew")
         yscroll = tk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
         file_list.configure(yscrollcommand=yscroll.set)
-        yscroll.grid(row=1, column=1, sticky="ns")
+        yscroll.grid(row=0, column=1, sticky="ns")
 
         selected_paths: list[str] = []
         _last_popup_index: Optional[int] = None
@@ -1748,7 +1744,6 @@ class OPLIDE(tk.Tk):
                 return
             try:
                 size = file_list.size()
-                # If list has items, select the one under the cursor (if any)
                 _last_popup_index = None
                 file_list.selection_clear(0, tk.END)
                 if size > 0:
@@ -1758,7 +1753,6 @@ class OPLIDE(tk.Tk):
                         file_list.activate(idx)
                         _last_popup_index = idx
 
-                # Enable/disable menu items based on state
                 has_any = len(selected_paths) > 0
                 has_sel = _last_popup_index is not None
                 try:
@@ -1774,7 +1768,7 @@ class OPLIDE(tk.Tk):
                 except Exception:
                     pass
 
-        # Bind right-click (and macOS Ctrl+Click) on the list (and frame for empty-space clicks)
+        # Bind right-click (and macOS Ctrl+Click) on the list (and container for empty-space clicks)
         file_list.bind("<Button-3>", _popup_ctx)
         attachments.bind("<Button-3>", _popup_ctx)
         if sys.platform == "darwin":
@@ -1785,7 +1779,7 @@ class OPLIDE(tk.Tk):
 
         # OK / Cancel
         btns = ttk.Frame(frm)
-        btns.grid(row=3, column=0, sticky="e", pady=(10, 0))
+        btns.grid(row=4, column=0, sticky="e", pady=(10, 0))
         result: dict[str, Any] = {"value": None}
 
         def on_ok(event=None) -> None:
