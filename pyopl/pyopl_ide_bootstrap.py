@@ -1671,16 +1671,19 @@ class OPLIDE(tk.Tk):
         attachments.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         attachments.columnconfigure(0, weight=1)
 
+        # Small hint (since there are no buttons anymore)
+        # ttk.Label(attachments, text="Right-click the list to add/remove/clear.", anchor="w").grid(
+        #     row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6)
+        # )
+
         file_list = tk.Listbox(attachments, height=4, exportselection=False)
-        file_list.grid(row=0, column=0, sticky="ew")
+        file_list.grid(row=1, column=0, sticky="ew")
         yscroll = tk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
         file_list.configure(yscrollcommand=yscroll.set)
-        yscroll.grid(row=0, column=1, sticky="ns")
-
-        btn_row = ttk.Frame(attachments)
-        btn_row.grid(row=1, column=0, columnspan=2, sticky="e", pady=(6, 0))
+        yscroll.grid(row=1, column=1, sticky="ns")
 
         selected_paths: list[str] = []
+        _last_popup_index: Optional[int] = None
 
         def _refresh_list() -> None:
             try:
@@ -1710,27 +1713,72 @@ class OPLIDE(tk.Tk):
             _refresh_list()
 
         def _remove_selected() -> None:
+            nonlocal _last_popup_index
             try:
                 sel = file_list.curselection()
-                if not sel:
+                idx = int(sel[0]) if sel else (_last_popup_index if _last_popup_index is not None else None)
+                if idx is None:
                     return
-                idx = int(sel[0])
                 if 0 <= idx < len(selected_paths):
                     selected_paths.pop(idx)
+                _last_popup_index = None
                 _refresh_list()
             except Exception:
                 pass
 
         def _clear_all() -> None:
+            nonlocal _last_popup_index
             selected_paths.clear()
+            _last_popup_index = None
             _refresh_list()
 
-        add_btn = ttk.Button(btn_row, text="Attach Images...", command=_add_images)
-        rm_btn = ttk.Button(btn_row, text="Remove Selected", command=_remove_selected)
-        clr_btn = ttk.Button(btn_row, text="Clear", command=_clear_all)
-        clr_btn.grid(row=0, column=2, padx=(6, 0))
-        rm_btn.grid(row=0, column=1, padx=(6, 0))
-        add_btn.grid(row=0, column=0)
+        # Right-click context menu for managing images
+        ctx = tk.Menu(dlg, tearoff=0)
+        ctx.add_command(label="Attach Images...", command=_add_images)
+        ctx.add_command(label="Remove Selected", command=_remove_selected)
+        ctx.add_separator()
+        ctx.add_command(label="Clear All", command=_clear_all)
+
+        def _popup_ctx(event: Optional[tk.Event]) -> None:
+            nonlocal _last_popup_index
+            if event is None:
+                return
+            try:
+                size = file_list.size()
+                # If list has items, select the one under the cursor (if any)
+                _last_popup_index = None
+                file_list.selection_clear(0, tk.END)
+                if size > 0:
+                    idx = int(file_list.nearest(event.y))
+                    if 0 <= idx < size:
+                        file_list.selection_set(idx)
+                        file_list.activate(idx)
+                        _last_popup_index = idx
+
+                # Enable/disable menu items based on state
+                has_any = len(selected_paths) > 0
+                has_sel = _last_popup_index is not None
+                try:
+                    ctx.entryconfigure("Remove Selected", state=("normal" if has_sel else "disabled"))
+                    ctx.entryconfigure("Clear All", state=("normal" if has_any else "disabled"))
+                except Exception:
+                    pass
+
+                ctx.tk_popup(event.x_root, event.y_root)
+            finally:
+                try:
+                    ctx.grab_release()
+                except Exception:
+                    pass
+
+        # Bind right-click (and macOS Ctrl+Click) on the list (and frame for empty-space clicks)
+        file_list.bind("<Button-3>", _popup_ctx)
+        attachments.bind("<Button-3>", _popup_ctx)
+        if sys.platform == "darwin":
+            file_list.bind("<Button-2>", _popup_ctx)
+            file_list.bind("<Control-Button-1>", _popup_ctx)
+            attachments.bind("<Button-2>", _popup_ctx)
+            attachments.bind("<Control-Button-1>", _popup_ctx)
 
         # OK / Cancel
         btns = ttk.Frame(frm)
