@@ -568,7 +568,7 @@ class GenAIStrategyBase:
             "input": input_content,
         }
         if expected_json:
-            params["response_format"] = {"type": "json"}
+            params["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             params["max_output_tokens"] = max_tokens
         if temperature is not None:
