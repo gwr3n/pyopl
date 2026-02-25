@@ -24,6 +24,7 @@ from .pyopl_generative import (
     _build_final_assessment_prompt,
     _build_generation_prompt,
     _build_revision_prompt,
+    _describe_images_for_rag,
     _gather_few_shots,
     _get_grammar_implementation,
     _infer_provider,
@@ -651,15 +652,21 @@ async def generative_solve_async(
 
     prompt_text, prompt_images = _normalize_prompt_input(prompt)
 
-    _notify(
-        progress,
-        f"GraphChain: provider={provider.value} model={model_name} iterations={iterations} "
-        f"alignment={'on' if do_alignment else 'off'}",
-    )
+    # Gather few-shot examples (text-only query) + optional image-derived context
+    rag_query_text = prompt_text
+    if prompt_images:
+        img_context = _describe_images_for_rag(
+            provider=provider,
+            model_name=model_name,
+            images=prompt_images,
+            progress=progress,
+        )
+        if img_context:
+            _notify(progress, "[RAG] Image context: " + img_context[:50] + ("..." if len(img_context) > 50 else ""))
+            rag_query_text = f"{prompt_text}\n\n[IMAGE_CONTEXT]\n{img_context}\n"
 
-    # Gather few-shot examples (text-only query)
     few_shots: List[Dict[str, str]] = (
-        _gather_few_shots(prompt_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
+        _gather_few_shots(rag_query_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
     # Initialize execution context

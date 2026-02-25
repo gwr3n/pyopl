@@ -57,6 +57,9 @@ ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 FEW_SHOT_TOP_K = 3
 FEW_SHOT_MAX_CHARS = 2**31 - 1  # soft cap per file to keep prompts manageable
 
+# New: keep image->text short; it's only for retrieval queries
+IMAGE_RAG_MAX_TOKENS = 256
+
 
 _BASE = GenAIStrategyBase(
     logger=logger,
@@ -277,8 +280,9 @@ def _llm_generate_text(
     stop: Optional[list[str]] = None,
     progress: Optional[Callable[[str], None]] = None,
     capture_usage: bool = False,
+    expected_json: bool = True,
 ) -> Union[str, Tuple[str, Dict[str, int]]]:
-    # Preserve prior behavior: always request JSON when possible (generation/alignment/revision/feedback)
+    # Preserve prior behavior by default: JSON when possible (generation/alignment/revision/feedback)
     base_provider = _BaseLLMProvider(provider.value)
     return _BASE.llm_generate_text(
         provider=base_provider,
@@ -290,24 +294,60 @@ def _llm_generate_text(
         stop=stop,
         progress=progress,
         capture_usage=capture_usage,
-        expected_json=True,
+        expected_json=expected_json,
     )
 
 
-def _call_openai_with_retry(
-    client,
-    create_params: Dict[str, Any],
-    retries: int = 3,
-    backoff_sec: float = 1.5,
+def _describe_images_for_rag(
+    *,
+    provider: LLMProvider,
+    model_name: str,
+    images: List[ImageInput],
     progress: Optional[Callable[[str], None]] = None,
-) -> Any:
-    return _BASE._call_openai_with_retry(
-        client,
-        create_params,
-        retries=retries,
-        backoff_sec=backoff_sec,
-        progress=progress,
+) -> str:
+    """
+    Produce a compact textual description of images to improve BERT-based few-shot retrieval.
+    Best-effort: failures return empty string.
+    """
+    if not images:
+        return ""
+
+    # Current strategy base does not support images for Ollama.
+    if provider == LLMProvider.OLLAMA:
+        _notify(progress, "[RAG] Image context skipped (Ollama image prompts not supported)")
+        return ""
+
+    prompt = (
+        "You will be shown one or more images that may contain an optimization problem statement.\n"
+        "Write a concise textual description to help retrieve similar example problems.\n"
+        "Priorities:\n"
+        "1) Transcribe any readable text verbatim (especially numbers, units, table headers/rows).\n"
+        "2) If tables exist, summarize their structure and key entries.\n"
+        "3) If charts/diagrams exist, describe labels, axes, and relationships.\n"
+        "Output plain text only. No JSON. No Markdown.\n"
     )
+
+    try:
+        _notify(progress, "[RAG] Generating image context for few-shot retrieval")
+        text = _llm_generate_text(
+            provider=provider,
+            model_name=model_name,
+            input_text=prompt,
+            images=images,
+            max_tokens=IMAGE_RAG_MAX_TOKENS,
+            temperature=0.0,
+            stop=None,
+            progress=progress,
+            capture_usage=False,
+            expected_json=False,
+        )
+        if isinstance(text, tuple):
+            text = text[0]
+        return (text or "").strip()
+    except Exception as e:
+        logger.debug(f"Image->text for RAG failed: {e}")
+        _notify(progress, "[RAG] Image context generation failed; continuing with text-only retrieval")
+        return ""
 
 
 # ---------- Prompt builders ----------
@@ -481,7 +521,8 @@ def _build_revision_prompt(
         "</problem_description>\n\n"
         "<previous_attempt>\n<model>\n"
         f"{model_code}\n"
-        "</model>\n\n<data>\n"
+        "</model>\n\n"
+        "<data>\n"
         f"{data_code}\n"
         "</data>\n</previous_attempt>\n\n"
         f"{errors_block}"
@@ -687,6 +728,17 @@ def generative_solve(
 
     prompt_text, prompt_images = _normalize_prompt_input(prompt)
 
+    # Progress notifier used by generative_solve/feedback and LLM calls
+    def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
+        try:
+            if progress:
+                progress(str(msg))
+            else:
+                logger.debug(str(msg))
+        except Exception:
+            # Never let UI callback failures break the run
+            pass
+
     _notify(
         progress,
         f"Generating with provider={_infer_provider(llm_provider, model_name).value} model={model_name} iterations={iterations} alignment={'on' if (ALIGNMENT_CHECK if alignment_check is None else bool(alignment_check)) else 'off'}",
@@ -707,9 +759,23 @@ def generative_solve(
         f"Generating with provider={provider.value} model={model_name} iterations={iterations} alignment={'on' if do_alignment else 'off'}",
     )
 
-    # Retrieve few-shot examples using RAG (text-only query)
+    # Retrieve few-shot examples using RAG:
+    # - Base query: prompt text
+    # - If images exist: append a compact image-derived textual context
+    rag_query_text = prompt_text
+    if prompt_images:
+        img_context = _describe_images_for_rag(
+            provider=provider,
+            model_name=model_name,
+            images=prompt_images,
+            progress=progress,
+        )
+        if img_context:
+            _notify(progress, "[RAG] Image context: " + img_context[:50] + ("..." if len(img_context) > 50 else ""))
+            rag_query_text = f"{prompt_text}\n\n[IMAGE_CONTEXT]\n{img_context}\n"
+
     few_shots: List[Dict[str, str]] = (
-        _gather_few_shots(prompt_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
+        _gather_few_shots(rag_query_text, k=FEW_SHOT_TOP_K, models_dir=None, progress=progress) if few_shot else []
     )
 
     user_prompt = _build_generation_prompt(prompt_text, grammar_implementation, few_shots=few_shots)

@@ -269,12 +269,12 @@ class GenAIStrategyBase:
 
         examples: List[Dict[str, str]] = []
         try:
-            self.notify(progress, f"Retrieving few-shot examples (k={top_k})")
+            self.notify(progress, f"[RAG] Retrieving few-shot examples (k={top_k})")
             hits = rag_rank(query=problem_description, models_dir=str(base_dir), top_k=top_k)
-            self.notify(progress, f"Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
+            self.notify(progress, f"[RAG] Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
         except Exception as e:
             self._logger.debug(f"Few-shot retrieval skipped: {e}")
-            self.notify(progress, "Few-shot retrieval failed; continuing without examples")
+            self.notify(progress, "[RAG] Few-shot retrieval failed; continuing without examples")
             return examples
 
         for hit in hits:

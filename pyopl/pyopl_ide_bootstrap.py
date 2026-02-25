@@ -1651,11 +1651,14 @@ class OPLIDE(tk.Tk):
         frm.columnconfigure(0, weight=1)
         frm.rowconfigure(1, weight=1)
 
-        ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        # ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        prompt_text = ttk.Labelframe(frm, text=prompt, padding=(8, 6))
+        prompt_text.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        prompt_text.columnconfigure(0, weight=1)
 
         # Text input
         txt = scrolledtext.ScrolledText(
-            frm,
+            prompt_text,
             wrap=tk.WORD,
             width=100,
             height=16,
