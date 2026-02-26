@@ -91,9 +91,9 @@ Clarification:
 
 Clarification:
 - Labels must be unindexed. Indexed forms like `ct[i]: ...;` are rejected.
-- Labels apply to a single constraint and may not appear before a forall statement. To label constraints produced by a forall, put the label inside the forall:
-  - Allowed (label inside forall): `forall(i in I) lbl: expr;` or `forall(i in I) { lbl: expr; }`
+- Labels apply to a single constraint and may not prefix a forall statement. To label constraints produced by a forall, put the label inside the forall:
   - Disallowed (label outside forall): `lbl: forall(i in I) expr;   // rejected`
+  - Allowed (label inside forall): `forall(i in I) lbl: expr;` or `forall(i in I) { lbl: expr; }`
 - Statement termination and whitespace:
   - Newlines are treated as whitespace by the lexer and never terminate a statement.
   - A constraint statement ends only at the first `;`, or at `}` for a block.
