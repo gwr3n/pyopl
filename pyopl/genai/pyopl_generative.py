@@ -83,6 +83,7 @@ class Grammar(Enum):
 
 # ---------- Utilities ----------
 
+
 def _normalize_prompt_input(prompt: PromptInput) -> Tuple[str, List[ImageInput]]:
     """
     Normalize the public `prompt` argument into (prompt_text, prompt_images).
@@ -93,6 +94,7 @@ def _normalize_prompt_input(prompt: PromptInput) -> Tuple[str, List[ImageInput]]
       - {"text": "...", "image": ImageInput|str|Path|dict}
     """
     return _BASE.normalize_prompt_input(prompt)
+
 
 def _read_file(path: str) -> str:
     return _BASE.read_file(path)

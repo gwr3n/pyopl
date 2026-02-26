@@ -4,15 +4,15 @@ import base64
 import inspect
 import json
 import logging
+import mimetypes
 import os
 import re
-import mimetypes
 from dataclasses import dataclass
 from enum import Enum, auto
 from importlib.resources import files
 from pathlib import Path
 from time import sleep
-from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union, cast, TypedDict
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, TypedDict, Union, cast
 
 from ..pyopl_core import OPLCompiler, SemanticError
 from .genai_pricing import _extract_gemini_usage, _extract_openai_usage
@@ -41,6 +41,7 @@ class ImageInput(TypedDict, total=False):
       - {"url": "https://.../image.png", "mime_type": "image/png"} (mime_type optional; provider-dependent)
       - {"data_base64": "...", "mime_type": "image/png"}       (mime_type recommended)
     """
+
     path: str
     url: str
     data_base64: str
@@ -53,6 +54,7 @@ class PromptWithImages(TypedDict, total=False):
       - {"text": "...", "images": [<image inputs>]}
       - {"text": "...", "image": <single image input>}  (convenience)
     """
+
     text: str
     images: List[Any]
     image: Any
@@ -708,7 +710,7 @@ class GenAIStrategyBase:
             from google.genai import types as genai_types  # type: ignore
 
             if images:
-                parts: List[Any] = [genai_types.Part.from_text(input_text)]
+                parts: List[Any] = [genai_types.Part.from_text(text=input_text)]
                 for img in images:
                     parts.append(self._image_to_gemini_part(img=img, genai_types=genai_types))
                 contents: Any = [genai_types.Content(role="user", parts=parts)]
@@ -787,8 +789,9 @@ class GenAIStrategyBase:
         if images:
             # Legacy SDK prefers PIL.Image. Support local paths (and base64) only.
             try:
-                from PIL import Image  # type: ignore
                 from io import BytesIO
+
+                from PIL import Image  # type: ignore
             except Exception as e:
                 raise RuntimeError(
                     "Gemini legacy SDK image prompts require Pillow. Install with: pip install pillow "

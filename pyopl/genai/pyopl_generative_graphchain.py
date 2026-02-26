@@ -30,8 +30,8 @@ from .pyopl_generative import (
     _infer_provider,
     _json_loads_relaxed,
     _llm_generate_text,
-    _notify,
     _normalize_prompt_input,
+    _notify,
 )
 
 logger = logging.getLogger(__name__)

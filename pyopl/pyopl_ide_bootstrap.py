@@ -1667,9 +1667,7 @@ class OPLIDE(tk.Tk):
         txt.focus_set()
 
         # Attachments UI (Label + Listbox, mirroring the prompt label style)
-        ttk.Label(frm, text="Attached images:", anchor="w", style="TLabel").grid(
-            row=2, column=0, sticky="ew", pady=(8, 4)
-        )
+        ttk.Label(frm, text="Attached images:", anchor="w", style="TLabel").grid(row=2, column=0, sticky="ew", pady=(8, 4))
 
         attachments = ttk.Frame(frm)
         attachments.grid(row=3, column=0, sticky="ew")
