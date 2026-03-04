@@ -11,8 +11,7 @@
       weight = [2, 3, 4, 5, 5]
       value  = [2, 3, 4, 5, 5]
       C      = 10
-    This model reads weight and value from the .dat file. The capacity C is currently set in the
-    model (see below), but could be read from the .dat as well.
+    This model reads weight and value from the .dat file. The capacity C is read from the .dat as well.
 
   Model outline:
   - Index set Items identifies items.
@@ -31,13 +30,12 @@
 /*
   Index set of items
   ------------------
-  The .dat file provides arrays of length 5 in this example. We mirror that with a fixed range 1..5.
   If your data size varies, you can drive this from the .dat using:
-    int N = ...;           // provided in the .dat
-    range Items = 1..N;    // then use N here
-  For the current example, we keep the explicit 1..5.
+    int N = ...;           // read number of items from .dat
+    range Items = 1..N;    // define range of items based on N
 */
-range Items = 1..5;
+int N = ...;
+range Items = 1..N;
 
 /*
   Data interface (arrays read from .dat)
@@ -56,11 +54,8 @@ float value[Items]  = ...;
   Knapsack capacity
   -----------------
   The capacity C limits the total weight of chosen items.
-  - In this model we set C = 10 explicitly to match the example.
-  - If you prefer to read C from the .dat (knapsack.dat defines C = 10), replace the line below with:
-      float C = ...;
 */
-float C = 10;
+float C = ...;
 
 /*
   Decision variables
