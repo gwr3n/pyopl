@@ -30,7 +30,7 @@
 - [Error Handling](#error-handling)
 - [Solving a Model](#solving-a-model)
 - [Limitations](#limitations)
-- [GenAI Assistants (experimental)](#genai-assistants-experimental)
+- [GenAI Assistants](#genai-assistants)
 - [PyOPL IDE](#pyopl-ide)
   - [Launching the IDE](#launching-the-ide)
 
