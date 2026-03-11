@@ -1894,21 +1894,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if isinstance(v, dict) and any(isinstance(k, tuple) for k in v.keys()):
                     # Build composite key from all indices at once
                     rem_evals = [self._eval_index(idx, env) for idx in indices]
-                    # If single evaluated index already is a tuple (from tuple_literal), use it directly
                     tuple_key = rem_evals[0] if len(rem_evals) == 1 and isinstance(rem_evals[0], tuple) else tuple(rem_evals)
                     if tuple_key in v:
                         v = v[tuple_key]
-                        # Numeric scalar or structured value
                         if isinstance(v, (int, float)):
-                            logger.debug(f"[resolve_parameter] Found tuple-keyed numeric param: {v}")
+                            logger.debug(f"[resolve_parameter] Found numeric param: {v}")
                             return False, float(v), False
+                        if isinstance(v, (str, bool)):
+                            logger.debug(f"[resolve_parameter] Found scalar indexed param: {v!r}")
+                            return False, v, False
                         if isinstance(v, dict):
-                            logger.debug(f"[resolve_parameter] Found tuple-keyed dict param: {v}")
+                            logger.debug(f"[resolve_parameter] Found dict param: {v}")
                             return False, v, False
                         if isinstance(v, (list, tuple)):
-                            logger.debug(f"[resolve_parameter] Found tuple-keyed list/tuple param: {v}")
+                            logger.debug(f"[resolve_parameter] Found list/tuple param: {v}")
                             return False, v, False
-                        # Fallback: return as-is
                         return False, v, False
                 # Fallback: stepwise lookup for nested dict/list
                 for i, idx in enumerate(indices):
@@ -1937,11 +1937,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if isinstance(v, (int, float)):
                     logger.debug(f"[resolve_parameter] Found numeric param: {v}")
                     return False, float(v), False
-                # Structured record (dict) for tuple arrays: allow field_access
+                if isinstance(v, (str, bool)):
+                    logger.debug(f"[resolve_parameter] Found scalar indexed param: {v!r}")
+                    return False, v, False
                 if isinstance(v, dict):
                     logger.debug(f"[resolve_parameter] Found dict param: {v}")
                     return False, v, False
-                # Raw tuple/list (e.g., tuple literal) pass through for positional field index fallback
                 if isinstance(v, (list, tuple)):
                     logger.debug(f"[resolve_parameter] Found list/tuple param: {v}")
                     return False, v, False
