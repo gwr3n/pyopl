@@ -25,11 +25,9 @@ from .genai.model_discovery import (
     list_ollama_models,
     list_openai_models,
 )
-from .gurobi_codegen import GurobiCodeGenerator
 
 # --- Local Imports ---
-from .pyopl_core import OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
-from .scipy_codegen_csc import SciPyCSCCodeGenerator
+from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -1417,8 +1415,10 @@ class OPLIDE(tk.Tk):
         self.status_var.set(msg)
 
     def export_model(self) -> None:
-        """Export the current model as a standalone Python file using the selected solver's code generator."""
+        """Export the current model as a standalone Python file using the selected solver."""
         try:
+            self._clear_output("Export model...")
+
             model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
             data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
@@ -1426,56 +1426,35 @@ class OPLIDE(tk.Tk):
                 messagebox.showwarning("Export model", "Model editor is empty.")
                 return
 
-            # Parse model -> AST
-            try:
-                m_lexer = OPLLexer()
-                m_parser = OPLParser()
-                m_tokens = list(m_lexer.tokenize(model_code))
-                ast = m_parser.parse(iter(m_tokens))
-                if ast is None:
-                    raise ValueError("Parser returned no AST.")
-            except Exception as e:
-                messagebox.showerror("Export model", f"Failed to parse model: {type(e).__name__}")
-                return
-
-            # Parse data -> data_dict (if any)
-            data_dict = {}
-            if data_code.strip():
-                try:
-                    d_lexer = OPLDataLexer()
-                    d_parser = OPLDataParser()
-                    d_tokens = list(d_lexer.tokenize(data_code))
-                    parsed = d_parser.parse(iter(d_tokens), lexer=d_lexer)
-                    if isinstance(parsed, dict):
-                        data_dict = parsed
-                except Exception as e:
-                    messagebox.showerror("Export model", f"Failed to parse data: {type(e).__name__}")
-                    return
-
-            # Choose generator by solver selection
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
-            generator: _CodeGenerator
-            if solver_choice == "gurobi":
-                generator = GurobiCodeGenerator(ast, data_dict)
-            else:
-                generator = SciPyCSCCodeGenerator(ast, data_dict)
 
-            # Generate Python code
+            # Compile through OPLCompiler so all AST rewrites/validation are applied
             try:
-                generated_code = generator.generate_code()
-                # Strip the last line if present
-                lines = generated_code.rstrip("\n").split("\n")
-                if lines:
-                    generated_code = "\n".join(lines[:-1])
+                compiler = OPLCompiler()
+                _ast, generated_code, _data_dict = compiler.compile_model(
+                    model_code,
+                    data_code if data_code.strip() else None,
+                    solver=solver_choice,
+                )
+                if not generated_code:
+                    raise ValueError("Compiler returned no generated code.")
             except Exception as e:
-                messagebox.showerror("Export model", f"Code generation failed: {type(e).__name__}")
+                detail = f"{type(e).__name__}: {e}"
+                self._append_output(f"\nExport failed:\n{detail}\n\n{traceback.format_exc()}\n")
+                self.status_var.set(f"Error: Export failed: {detail}")
+                messagebox.showerror("Export model", f"Export failed:\n{detail}")
                 return
 
-            # Destination file
+            # Preserve existing behavior
+            lines = generated_code.rstrip("\n").split("\n")
+            if lines:
+                generated_code = "\n".join(lines[:-1])
+
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
             if self.model_file:
                 base = os.path.splitext(os.path.basename(self.model_file))[0]
                 default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
+
             dest_path = filedialog.asksaveasfilename(
                 defaultextension=".py",
                 initialfile=default_name,
@@ -1489,8 +1468,11 @@ class OPLIDE(tk.Tk):
 
             self.status_var.set(f"Exported model to {dest_path}")
         except Exception as e:
-            messagebox.showerror("Export model", f"Unexpected error: {type(e).__name__}")
-            self.status_var.set(f"Export failed: {e}")
+            detail = f"{type(e).__name__}: {e}"
+            self._append_output(f"\nUnexpected export error:\n{detail}\n\n{traceback.format_exc()}\n")
+            self.status_var.set(f"Unexpected error during export: {detail}")
+            messagebox.showerror("Export model", f"Unexpected error:\n{detail}")
+            self.status_var.set(f"Export failed: {detail}")
 
     # --- GenAI actions ---
     def _clear_output(self, header: str = "") -> None:
