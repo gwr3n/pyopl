@@ -4003,12 +4003,18 @@ class OPLCompiler:
                         return float(lv) % float(rv)
                     # comparisons: support numeric and equality on general types
                     if op in ("<", "<=", ">", ">=", "==", "!="):
+                        if op == "<":
+                            return 1.0 if (float(lv) < float(rv)) else 0.0
+                        if op == "<=":
+                            return 1.0 if (float(lv) <= float(rv)) else 0.0
+                        if op == ">":
+                            return 1.0 if (float(lv) > float(rv)) else 0.0
+                        if op == ">=":
+                            return 1.0 if (float(lv) >= float(rv)) else 0.0
                         if op == "==":
                             return 1.0 if (lv == rv) else 0.0
                         if op == "!=":
                             return 1.0 if (lv != rv) else 0.0
-                        # numeric comparisons
-                        return 1.0 if eval(f"{float(lv)} {op} {float(rv)}") else 0.0
                     raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
                 if t == "uminus":
                     return -float(eval_expr(expr.get("value"), env))
