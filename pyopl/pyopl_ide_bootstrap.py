@@ -1278,9 +1278,12 @@ class OPLIDE(tk.Tk):
             self.output_text.config(state="disabled")
             return
 
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
         # Save temp files if not saved
-        model_file = self.model_file or "temp_model.mod"
-        data_file = self.data_file or "temp_data.dat"
+        model_file = self.model_file or os.path.join(tmp_dir, "temp_model.mod")
+        data_file = self.data_file or os.path.join(tmp_dir, "temp_data.dat")
         try:
             with open(model_file, "w") as f:
                 f.write(model_code)
