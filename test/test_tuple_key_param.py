@@ -4,7 +4,6 @@ import unittest
 
 from pyopl.pyopl_core import solve
 
-
 try:
     import pyopl  # noqa: F401
 
