@@ -622,7 +622,7 @@ class GurobiCodeGenerator:
             if pdecl is not None and isinstance(value, dict) and any(isinstance(k, (list, tuple)) for k in value.keys()):
                 dims = pdecl.get("dimensions", []) or []
                 # compute key lengths (treat scalar keys as length 1)
-                key_lengths = { (len(k) if isinstance(k, (list, tuple)) else 1) for k in value.keys() }
+                key_lengths = {(len(k) if isinstance(k, (list, tuple)) else 1) for k in value.keys()}
                 # If every dict key length matches the declared number of dimensions,
                 # treat this as a fully-keyed sparse map and normalize keys to tuples.
                 if len(key_lengths) == 1 and next(iter(key_lengths)) == len(dims):
@@ -660,7 +660,7 @@ class GurobiCodeGenerator:
 
                         if not has_list_vals and all_full:
                             # Simple case: already fully keyed scalars
-                            norm = { tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items() }
+                            norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
                             self._add_code_line(f"{name} = {repr(norm)}")
                             self.dict_params.add(name)
                             already_emitted.add(name)
@@ -676,7 +676,7 @@ class GurobiCodeGenerator:
                             # { <arc> : [v1, v2, ...], ... }
                             d0, d1 = dims[0], dims[1]
                             if d0.get("type") == "named_set_dimension" and d1.get("type") == "named_set_dimension":
-                                set0_name = d0.get("name")
+                                # set0_name = d0.get("name")
                                 set1_name = d1.get("name")
                                 # Resolve set elements for second dimension
                                 set1_elems = None
@@ -707,7 +707,7 @@ class GurobiCodeGenerator:
                                         continue
 
                         # Fallback: emit normalized keys (do not attempt to expand list-values)
-                        norm = { tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items() }
+                        norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
                         self._add_code_line(f"{name} = {repr(norm)}")
                         self.dict_params.add(name)
                         already_emitted.add(name)
