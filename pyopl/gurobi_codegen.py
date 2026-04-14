@@ -613,12 +613,108 @@ class GurobiCodeGenerator:
                 continue
             pdecl = param_decl_map.get(name)
 
-            # --- FIX: if .dat already provided a tuple-key dict (sparse map), emit it as-is ---
-            if pdecl is not None and isinstance(value, dict) and any(isinstance(k, tuple) for k in value.keys()):
-                self._add_code_line(f"{name} = {repr(value)}")
-                self.dict_params.add(name)
-                already_emitted.add(name)
-                continue
+            # If .dat provided a dict with tuple-like keys, detect whether it
+            # already encodes full keys for all declared dimensions (e.g.,
+            # cost[<k,i,a>] or P[<k,i,a,j>]) and emit a normalized tuple-key
+            # mapping in that case. Otherwise, fall through to the general
+            # N-D flattening logic which can handle dict-of-lists or nested
+            # mappings keyed by partial dimensions.
+            if pdecl is not None and isinstance(value, dict) and any(isinstance(k, (list, tuple)) for k in value.keys()):
+                dims = pdecl.get("dimensions", []) or []
+                # compute key lengths (treat scalar keys as length 1)
+                key_lengths = { (len(k) if isinstance(k, (list, tuple)) else 1) for k in value.keys() }
+                # If every dict key length matches the declared number of dimensions,
+                # treat this as a fully-keyed sparse map and normalize keys to tuples.
+                if len(key_lengths) == 1 and next(iter(key_lengths)) == len(dims):
+                    try:
+                        # Determine whether dict values are scalars or list/tuples
+                        has_list_vals = any(isinstance(v, (list, tuple)) for v in value.values())
+
+                        # Heuristic: detect "full-key" mappings where each key element corresponds
+                        # to a declared dimension. For tuple-set dimensions those key elements
+                        # should themselves be tuples. This disambiguates cases like Arc=(1,2)
+                        # vs. a full key ((1,2), 'Asset').
+                        def _is_full_key(k):
+                            if not isinstance(k, (list, tuple)):
+                                return False
+                            if len(k) != len(dims):
+                                return False
+                            for i, dim in enumerate(dims):
+                                if dim.get("type") == "named_set_dimension":
+                                    set_decl = self._find_declaration_by_name(dim.get("name"))
+                                    if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                                        # element for this dim should be a tuple
+                                        if not isinstance(k[i], (list, tuple)):
+                                            return False
+                                    else:
+                                        # element should be scalar (not tuple)
+                                        if isinstance(k[i], (list, tuple)):
+                                            return False
+                                else:
+                                    # range-indexed dims expect scalar keys
+                                    if isinstance(k[i], (list, tuple)):
+                                        return False
+                            return True
+
+                        all_full = all(_is_full_key(k) for k in value.keys())
+
+                        if not has_list_vals and all_full:
+                            # Simple case: already fully keyed scalars
+                            norm = { tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items() }
+                            self._add_code_line(f"{name} = {repr(norm)}")
+                            self.dict_params.add(name)
+                            already_emitted.add(name)
+                            continue
+
+                        # Case: keys are full-length but values are lists. This commonly
+                        # arises when the top-level dict keys represent one tuple-set
+                        # element (e.g., an Arc tuple) and the values are ordered lists
+                        # corresponding to another named set (e.g., Assets). Detect and
+                        # expand to scalar (tuple_key, elem) -> value mapping when possible.
+                        if has_list_vals and not all_full and len(dims) == 2:
+                            # Attempt expansion for 2D params e.g., param[Arc][Assets] provided as
+                            # { <arc> : [v1, v2, ...], ... }
+                            d0, d1 = dims[0], dims[1]
+                            if d0.get("type") == "named_set_dimension" and d1.get("type") == "named_set_dimension":
+                                set0_name = d0.get("name")
+                                set1_name = d1.get("name")
+                                # Resolve set elements for second dimension
+                                set1_elems = None
+                                try:
+                                    set1_elems = TupleSetHelper.get_tuple_set(set1_name, self.ast, working_data)
+                                except Exception:
+                                    set1_elems = None
+                                if set1_elems:
+                                    # Normalize elements (tuples remain tuples, scalars stay scalars)
+                                    set1_norm = [tuple(e) if isinstance(e, (list, tuple)) else e for e in set1_elems]
+                                    flat = {}
+                                    ok = True
+                                    for k, row in value.items():
+                                        key_obj = tuple(k) if isinstance(k, (list, tuple)) else (k,)
+                                        if not isinstance(row, (list, tuple)):
+                                            # Unexpected scalar at this shape; abort expansion
+                                            ok = False
+                                            break
+                                        if len(row) != len(set1_norm):
+                                            ok = False
+                                            break
+                                        for idx, lab in enumerate(set1_norm):
+                                            flat[(key_obj, lab)] = row[idx]
+                                    if ok and flat:
+                                        self._add_code_line(f"{name} = {repr(flat)}")
+                                        self.dict_params.add(name)
+                                        already_emitted.add(name)
+                                        continue
+
+                        # Fallback: emit normalized keys (do not attempt to expand list-values)
+                        norm = { tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items() }
+                        self._add_code_line(f"{name} = {repr(norm)}")
+                        self.dict_params.add(name)
+                        already_emitted.add(name)
+                        continue
+                    except Exception:
+                        # Fall through to general handling on failure
+                        pass
 
             # --- NEW: N-D param from nested dict/list keyed along declared dimensions (generalization) ---
             # Accept nested dictionaries keyed by set/range labels and/or lists (row-major) for any dimensionality >= 2.
@@ -1102,7 +1198,7 @@ class GurobiCodeGenerator:
                         self.dict_params.add(name)
                         continue
 
-        self._add_code_line("")
+                self._add_code_line("")
 
     def _generate_declarations(self, declarations):
         """Generates Python code for decision variables, ranges, and parameters declared in the .mod file."""
