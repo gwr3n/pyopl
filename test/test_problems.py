@@ -30,6 +30,186 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_portfolio_diversification(self):
+        """
+        Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                // -----------------------------------------------------------------------------
+                // Multi-stage scenario-based stochastic portfolio diversification
+                // -----------------------------------------------------------------------------
+                // A portfolio is allocated across assets over a scenario tree.
+                // Node-based decisions represent rebalancing decisions made after uncertainty
+                // is revealed up to that node, which naturally enforces nonanticipativity.
+                // The objective is to maximize expected terminal wealth at leaf nodes while
+                // limiting concentration in any single asset at nonterminal nodes.
+                // -----------------------------------------------------------------------------
+
+                // -----------------------------
+                // Sets and tuple definitions
+                // -----------------------------
+
+                {string} Assets = ...;              // Asset identifiers
+                int nbNodes = ...;                  // Number of nodes in the scenario tree
+                range Nodes = 1..nbNodes;           // Node index set
+
+                tuple Arc {                         // Directed arc from parent node to child node
+                int parent;
+                int child;
+                };
+
+                {Arc} Arcs = ...;                   // Set of arcs in the scenario tree
+
+                // -----------------------------
+                // Parameters
+                // -----------------------------
+
+                int root = ...;                     // Root node index
+                boolean isLeaf[Nodes] = ...;        // True if node n is a terminal node
+                float prob[Nodes] = ...;            // Probability of node n if terminal; 0 for nonterminal nodes
+                float ret[Arcs][Assets] = ...;      // Gross return factor for asset a along arc ar
+                float initHold[Assets] = ...;       // Initial holdings before any trading at the root
+                float transCost = ...;              // Proportional transaction cost rate
+                float maxShare = ...;               // Maximum allowed asset share at nonterminal nodes
+
+                // -----------------------------
+                // Decision variables
+                // -----------------------------
+
+                dvar float+ h[Nodes][Assets];       // Post-trade holdings at node n in asset a
+                dvar float+ buy[Nodes][Assets];     // Amount of asset a purchased at node n
+                dvar float+ sell[Nodes][Assets];    // Amount of asset a sold at node n
+                dvar float+ wealth[Nodes];          // Wealth at terminal nodes; forced to 0 at nonterminal nodes
+
+                // -----------------------------
+                // Objective
+                // -----------------------------
+
+                // Maximize expected terminal wealth over all leaf nodes.
+                maximize ExpectedTerminalWealth:
+                sum(n in Nodes : isLeaf[n]) prob[n] * wealth[n];
+
+                // -----------------------------
+                // Constraints
+                // -----------------------------
+                subject to {
+
+                // Root portfolio balance after initial rebalancing.
+                forall(a in Assets)
+                    RootHoldBalance: h[root][a] == initHold[a] + buy[root][a] - sell[root][a];
+
+                // Root self-financing with proportional transaction costs.
+                RootSelfFinancing:
+                    sum(a in Assets) ((1 + transCost) * buy[root][a])
+                    ==
+                    sum(a in Assets) ((1 - transCost) * sell[root][a]);
+
+                // Root sales cannot exceed initial holdings.
+                forall(a in Assets)
+                    RootSellLimit: sell[root][a] <= initHold[a];
+
+                // Child-node holdings equal returned parent holdings plus local trades.
+                forall(ar in Arcs, a in Assets)
+                    NodeHoldBalance: h[ar.child][a] == ret[ar][a] * h[ar.parent][a] + buy[ar.child][a] - sell[ar.child][a];
+
+                // Self-financing at each non-root node.
+                forall(ar in Arcs)
+                    NodeSelfFinancing:
+                    sum(a in Assets) ((1 + transCost) * buy[ar.child][a])
+                    ==
+                    sum(a in Assets) ((1 - transCost) * sell[ar.child][a]);
+
+                // Sales at a child node cannot exceed pre-trade available holdings.
+                forall(ar in Arcs, a in Assets)
+                    NodeSellLimit: sell[ar.child][a] <= ret[ar][a] * h[ar.parent][a];
+
+                // Diversification cap at each nonterminal node.
+                forall(n in Nodes, a in Assets : !isLeaf[n])
+                    Diversification: h[n][a] <= maxShare * sum(b in Assets) h[n][b];
+
+                // Terminal wealth at each leaf equals the value of the portfolio after the final returns.
+                forall(ar in Arcs : isLeaf[ar.child])
+                    TerminalWealthDef: wealth[ar.child] == sum(a in Assets) ret[ar][a] * h[ar.parent][a];
+
+                // Wealth variable is zero at nonterminal nodes.
+                forall(n in Nodes : !isLeaf[n])
+                    NonLeafWealthZero: wealth[n] == 0;
+                }
+                """
+            data_code = """
+                Assets = { "StockA", "StockB", "BondC" };
+                nbNodes = 7;
+                Arcs = { <1,2>, <1,3>, <2,4>, <2,5>, <3,6>, <3,7> };
+                root = 1;
+                isLeaf = [ false, false, false, true, true, true, true ];
+                prob = [ 0, 0, 0, 0.25, 0.25, 0.25, 0.25 ];
+                initHold = [
+                "StockA" 40,
+                "StockB" 35,
+                "BondC" 25
+                ];
+                transCost = 0.01;
+                maxShare = 0.60;
+                ret = [
+                <1,2> [1.08, 1.03, 1.01],
+                <1,3> [0.95, 1.06, 1.02],
+                <2,4> [1.10, 1.02, 1.01],
+                <2,5> [0.92, 1.04, 1.01],
+                <3,6> [1.07, 0.98, 1.01],
+                <3,7> [0.90, 1.08, 1.02]
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_RMAB_relaxation_tuples(self):
         """
         Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
