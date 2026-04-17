@@ -636,6 +636,28 @@ class OPLIDE(tk.Tk):
         dlg.resizable(False, False)
         dlg.grab_set()
 
+        # Allow undo/redo while the dialog is active by binding the
+        # common shortcuts to the IDE handlers on the dialog. These
+        # bindings run when focus is inside entry widgets.
+        def _dlg_undo(ev: Optional[tk.Event] = None) -> str:
+            self._undo()
+            return "break"
+
+        def _dlg_redo(ev: Optional[tk.Event] = None) -> str:
+            self._redo()
+            return "break"
+
+        dlg.bind("<Control-z>", _dlg_undo)
+        dlg.bind("<Control-Z>", _dlg_undo)
+        dlg.bind("<Control-Shift-Z>", _dlg_redo)
+        dlg.bind("<Control-y>", _dlg_redo)
+        # macOS Command variants
+        if sys.platform == "darwin":
+            dlg.bind("<Command-z>", _dlg_undo)
+            dlg.bind("<Command-Z>", _dlg_undo)
+            dlg.bind("<Command-Shift-Z>", _dlg_redo)
+            dlg.bind("<Command-y>", _dlg_redo)
+
         fg_var = tk.StringVar()
         rp_var = tk.StringVar()
         regex_var = tk.BooleanVar(value=False)
