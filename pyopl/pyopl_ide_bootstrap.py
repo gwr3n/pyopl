@@ -232,6 +232,12 @@ class OPLIDE(tk.Tk):
         if desired_theme in ("flatly", "darkly") and desired_theme != self.theme_var.get():
             self.set_theme(desired_theme)
 
+        # Load previous IDE session if present in current working directory
+        try:
+            self._load_session()
+        except Exception:
+            pass
+
         # Initial status update
         self._update_caret_position(self.model_text)
 
@@ -274,6 +280,7 @@ class OPLIDE(tk.Tk):
         # File
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="New Model", command=self.new_model, accelerator=self._accel("N"))
+        filemenu.add_command(label="New Session", command=self.new_session)
         filemenu.add_separator()
         filemenu.add_command(label="Open Model...", command=self.open_model)
         filemenu.add_command(label="Open Data...", command=self.open_data)
@@ -439,6 +446,95 @@ class OPLIDE(tk.Tk):
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, "New model created. Ready.\n")
         self.output_text.config(state="disabled")
+
+    def new_session(self) -> None:
+        """Clear saved and in-memory session history and start a fresh session."""
+        try:
+            # Also clear editors and reset file state to a blank IDE
+            try:
+                self.model_text.delete(1.0, tk.END)
+            except Exception:
+                pass
+            try:
+                self.data_text.delete(1.0, tk.END)
+            except Exception:
+                pass
+            try:
+                self.model_file = None
+            except Exception:
+                self.model_file = None
+            try:
+                self.data_file = None
+            except Exception:
+                self.data_file = None
+
+            # Reset tab labels and focus
+            try:
+                self.editor_notebook.tab(self.model_frame, text="Model")
+                self.editor_notebook.tab(self.data_frame, text="Data")
+                self.editor_notebook.select(self.model_frame)
+            except Exception:
+                pass
+
+            # Re-highlight and update caret
+            try:
+                self.highlight(self.model_text, is_data=False)
+                self.highlight(self.data_text, is_data=True)
+                self._update_caret_position(self.model_text)
+            except Exception:
+                pass
+
+            # Clear in-memory session structures
+            try:
+                self._output_sessions.clear()
+            except Exception:
+                self._output_sessions = {}
+            try:
+                self._output_session_ids.clear()
+            except Exception:
+                self._output_session_ids = []
+            try:
+                self._output_session_display.clear()
+            except Exception:
+                self._output_session_display = {}
+            self._current_output_session_id = None
+            self._viewing_output_session_id = None
+
+            # Remove persisted session file if present
+            try:
+                path = self._session_file_path()
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to remove .pyopl_session file during new_session")
+
+            # Clear UI list and output pane
+            if hasattr(self, "request_listbox"):
+                try:
+                    self.request_listbox.delete(0, tk.END)
+                except Exception:
+                    pass
+
+            # Clear output pane (do NOT create a new timestamped session entry)
+            try:
+                if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                    self.output_text.config(state="normal")
+                    self.output_text.delete("1.0", tk.END)
+                    self.output_text.insert(tk.END, "Session cleared.\n")
+                    self.output_text.config(state="disabled")
+            except Exception:
+                pass
+
+            try:
+                self.status_var.set("Session cleared.")
+            except Exception:
+                pass
+        except Exception as e:
+            logging.getLogger(__name__).exception("Error while creating new session")
+            try:
+                messagebox.showerror("Session Error", f"Failed to clear session: {e}")
+            except Exception:
+                pass
 
     def _setup_panes(self) -> None:
         """Set up the main paned window with editors on top and output below."""
@@ -1098,6 +1194,10 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         except Exception:
             pass
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
@@ -1117,6 +1217,10 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
         except Exception:
             pass
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     def save_model_as(self) -> None:
         """Save the model to a new file and update the tab title."""
@@ -1131,6 +1235,10 @@ class OPLIDE(tk.Tk):
         with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     def save_data_as(self) -> None:
         """Save the data to a new file and update the tab title."""
@@ -1145,6 +1253,10 @@ class OPLIDE(tk.Tk):
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     # --- Syntax Highlighting ---
     def highlight(self, text_widget: tk.Text, is_data: bool = False, validate: bool = True) -> None:
@@ -1828,6 +1940,11 @@ class OPLIDE(tk.Tk):
             self.output_text.insert(tk.END, text)
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
+        # Persist session after any output change
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> None:
@@ -1854,6 +1971,11 @@ class OPLIDE(tk.Tk):
         self._current_output_session_id = session_id
         self._viewing_output_session_id = session_id
         self._show_output_session(session_id)
+        # Persist new session immediately
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     def _show_output_session(self, session_id: str) -> None:
         """Display a session's content in the Output panel."""
@@ -1864,6 +1986,138 @@ class OPLIDE(tk.Tk):
             self.output_text.insert(tk.END, content)
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
+        # Remember viewing session and persist
+        try:
+            self._viewing_output_session_id = session_id
+            self._current_output_session_id = self._current_output_session_id or session_id
+            self._save_session()
+        except Exception:
+            pass
+
+    # --- Session Persistence (JSON) ---
+    def _session_file_path(self) -> str:
+        """Return the session file path in the current working directory."""
+        try:
+            return os.path.join(os.getcwd(), ".pyopl_session")
+        except Exception:
+            return ".pyopl_session"
+
+    def _save_session(self) -> None:
+        """Save the current IDE session (output history, editors, file paths) to JSON.
+
+        This is intentionally tolerant: best-effort persistence without blocking UI.
+        """
+        try:
+            path = self._session_file_path()
+            tmp_path = path + ".tmp"
+            payload = {
+                "output_sessions": self._output_sessions,
+                "output_session_ids": self._output_session_ids,
+                "output_session_display": self._output_session_display,
+                "current_output_session_id": self._current_output_session_id,
+                "viewing_output_session_id": self._viewing_output_session_id,
+                "model_file": self.model_file,
+                "data_file": self.data_file,
+                "model_text": self.model_text.get("1.0", tk.END).rstrip("\n") if hasattr(self, "model_text") else "",
+                "data_text": self.data_text.get("1.0", tk.END).rstrip("\n") if hasattr(self, "data_text") else "",
+                "saved_at": datetime.utcnow().isoformat() + "Z",
+            }
+            # Write atomically
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            try:
+                os.replace(tmp_path, path)
+            except Exception:
+                # Fallback: try remove and rename
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                    os.replace(tmp_path, path)
+                except Exception:
+                    pass
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to save .pyopl_session")
+
+    def _load_session(self) -> None:
+        """Load session JSON from cwd if present, restoring output history and editors."""
+        try:
+            path = self._session_file_path()
+            if not os.path.exists(path):
+                return
+            with open(path, "r", encoding="utf-8") as f:
+                session = json.load(f)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to read .pyopl_session")
+            return
+
+        try:
+            self._output_sessions = session.get("output_sessions", {}) or {}
+            self._output_session_ids = session.get("output_session_ids", []) or []
+            self._output_session_display = session.get("output_session_display", {}) or {}
+            self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
+            self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
+
+            # Restore listbox UI
+            if hasattr(self, "request_listbox"):
+                try:
+                    self.request_listbox.delete(0, tk.END)
+                    for sid in self._output_session_ids:
+                        display = self._output_session_display.get(sid, sid)
+                        self.request_listbox.insert(tk.END, display)
+                    # Select viewing session if available
+                    if self._viewing_output_session_id and self._viewing_output_session_id in self._output_session_ids:
+                        idx = self._output_session_ids.index(self._viewing_output_session_id)
+                        self.request_listbox.selection_clear(0, tk.END)
+                        self.request_listbox.selection_set(idx)
+                        self.request_listbox.activate(idx)
+                    elif self._output_session_ids:
+                        self.request_listbox.selection_clear(0, tk.END)
+                        self.request_listbox.selection_set(0)
+                        self.request_listbox.activate(0)
+                except Exception:
+                    pass
+
+            # Restore output_text
+            if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                try:
+                    sid = self._viewing_output_session_id or (
+                        self._output_session_ids[0] if self._output_session_ids else None
+                    )
+                    if sid:
+                        content = self._output_sessions.get(sid, "")
+                        self._current_output_session_id = self._current_output_session_id or sid
+                        self._viewing_output_session_id = sid
+                        self.output_text.config(state="normal")
+                        self.output_text.delete("1.0", tk.END)
+                        self.output_text.insert(tk.END, content)
+                        self.output_text.see(tk.END)
+                        self.output_text.config(state="disabled")
+                except Exception:
+                    pass
+
+            # Restore editors content (do not clobber if widgets missing)
+            try:
+                mtext = session.get("model_text")
+                if mtext is not None and hasattr(self, "model_text"):
+                    self.model_text.delete("1.0", tk.END)
+                    self.model_text.insert(tk.END, mtext)
+                dtext = session.get("data_text")
+                if dtext is not None and hasattr(self, "data_text"):
+                    self.data_text.delete("1.0", tk.END)
+                    self.data_text.insert(tk.END, dtext)
+            except Exception:
+                pass
+
+            # Restore file pointers if present
+            try:
+                if session.get("model_file"):
+                    self.model_file = session.get("model_file")
+                if session.get("data_file"):
+                    self.data_file = session.get("data_file")
+            except Exception:
+                pass
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to restore session state from .pyopl_session")
 
     def _ensure_model_data_saved(
         self, model_target: Optional[str] = None, data_target: Optional[str] = None
@@ -2263,6 +2517,10 @@ class OPLIDE(tk.Tk):
                     if assessment:
                         self._append_output(f"\nAssessment:\n{assessment}\n")
                     self.status_var.set("GenAI: generation complete")
+                    try:
+                        self._save_session()
+                    except Exception:
+                        pass
 
                 self.after(0, apply_results)
 
@@ -2450,6 +2708,10 @@ class OPLIDE(tk.Tk):
                         self._append_output("\nRevisions applied to editors.\n")
 
                     self.status_var.set("GenAI: feedback complete")
+                    try:
+                        self._save_session()
+                    except Exception:
+                        pass
 
                 self.after(0, after_feedback)
             except Exception as e:
@@ -2617,6 +2879,10 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
         self._save_settings()
+        try:
+            self._save_session()
+        except Exception:
+            pass
         try:
             self.destroy()
         finally:
