@@ -203,7 +203,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             # Compose a feedback prompt asking to explain the results in lay terms
             sol_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language for a user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}" 
+            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language targeting a lay user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}" 
 
             try:
                 feedback = generative_feedback(
