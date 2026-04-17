@@ -161,6 +161,34 @@ class TestCLI(unittest.TestCase):
                 txt = out_file.read_text(encoding="utf-8")
                 self.assertIn("iterations", txt)
 
+    def test_genai_insight_pipeline(self):
+        # Mock generation, solving, and feedback; verify markdown output to file
+        gen_stats = {"status": "generated"}
+        solve_res = {"status": "OPTIMAL", "objective_value": 42, "solution": {"x": 1}}
+        feedback = {"feedback": "The solver found an optimal solution with objective 42. Recommend increasing capacity."}
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            out_md = td_path / "insight.md"
+
+            with patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats) as pgen, \
+                patch("pyopl.pyopl_cli._run_solve", return_value=solve_res) as psolve, \
+                patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback) as pfb:
+
+                argv = [
+                    "genai",
+                    "insight",
+                    "Analyze the best production plan",
+                    "--out-file",
+                    str(out_md),
+                ]
+                ret = pyopl_cli.main(argv)
+                self.assertEqual(ret, 0)
+                self.assertTrue(out_md.exists())
+                mdtxt = out_md.read_text(encoding="utf-8")
+                self.assertIn("GenAI Insight", mdtxt)
+                self.assertIn("optimal", mdtxt.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

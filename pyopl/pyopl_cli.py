@@ -89,6 +89,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_genai_generate.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation")
     p_genai_generate.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
     p_genai_generate.add_argument("--out-file", help="Write generation statistics to file")
+    p_genai_insight = genai_sub.add_parser("insight", help="Generate, solve, and summarise solution in lay terms (markdown)")
+    p_genai_insight.add_argument("prompt", help="Prompt for insight generation")
+    p_genai_insight.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation/feedback")
+    p_genai_insight.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
+    p_genai_insight.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
+    p_genai_insight.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use for solving the generated model")
+    p_genai_insight.add_argument("--out-file", help="Write markdown insight to file instead of stdout")
 
     p_genai_ask = genai_sub.add_parser("ask", help="Ask for feedback on an existing model+data")
     p_genai_ask.add_argument("prompt", help="Prompt for feedback")
@@ -148,6 +155,94 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.command == "genai":
         cmd = getattr(args, "genai_cmd", None)
+        # genai insight: generate model+data -> solve -> ask for lay-summary
+        if cmd == "insight":
+            prompt = args.prompt
+            provider = getattr(args, "provider", None)
+            llm_model = getattr(args, "llm_model", None)
+            iterations = getattr(args, "iterations", 5)
+            solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "scipy"
+
+            # Build unique tmp filenames using same scheme as IDE
+            from datetime import datetime
+            import os
+
+            display_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            safe_ts = display_ts.replace(":", "-").replace(" ", "_")
+            tmp_dir = os.path.join(os.getcwd(), "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+            base = os.path.join(tmp_dir, f"gen_pyopl_{safe_ts}")
+            model_path = base + ".mod"
+            data_path = base + ".dat"
+            i = 1
+            while os.path.exists(model_path) or os.path.exists(data_path):
+                model_path = f"{base}_{i}.mod"
+                data_path = f"{base}_{i}.dat"
+                i += 1
+
+            try:
+                stats = generative_solve(
+                    prompt,
+                    model_path,
+                    data_path,
+                    model_name=llm_model,
+                    llm_provider=provider,
+                    iterations=iterations,
+                    return_statistics=True,
+                )
+            except Exception as e:
+                print(f"Error during generation: {e}", file=sys.stderr)
+                return 4
+
+            # Solve generated model
+            try:
+                results = _run_solve(Path(model_path), Path(data_path), solver_key)
+            except Exception as e:
+                print(f"Error solving generated model: {e}", file=sys.stderr)
+                return 1
+
+            # Compose a feedback prompt asking to explain the results in lay terms
+            sol_text = json.dumps(results, indent=2, sort_keys=True, default=str)
+            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language for a user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}" 
+
+            try:
+                feedback = generative_feedback(
+                    feedback_prompt,
+                    model_path,
+                    data_path,
+                    model_name=llm_model,
+                    llm_provider=provider,
+                )
+            except Exception as e:
+                print(f"Error during feedback/translation: {e}", file=sys.stderr)
+                return 4
+
+            # feedback may be a dict with 'feedback' or a string
+            summary = None
+            if isinstance(feedback, dict):
+                summary = feedback.get("feedback") or feedback.get("summary") or json.dumps(feedback, indent=2)
+            else:
+                summary = str(feedback)
+
+            # Include original problem description and format as Markdown
+            if isinstance(prompt, str):
+                prompt_text = prompt
+            else:
+                try:
+                    prompt_text = json.dumps(prompt, indent=2, sort_keys=True, default=str)
+                except Exception:
+                    prompt_text = str(prompt)
+
+            md = "# GenAI Insight\n\n"
+            md += "## Problem Description\n\n"
+            md += prompt_text + "\n\n"
+            md += "## Insight\n\n"
+            md += summary + "\n"
+            if getattr(args, "out_file", None):
+                _write_text(Path(args.out_file), md)
+            else:
+                print(md)
+            return 0
         if cmd == "list-models":
             provider = args.provider
             prefix = getattr(args, "prefix", None)
