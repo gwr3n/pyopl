@@ -18,14 +18,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import solve, generative_solve, generative_feedback
-from .pyopl_core import OPLCompiler
-from .pyopl_ide_bootstrap import OPLIDE
+from . import generative_feedback, generative_solve, solve
 from .genai._strategy_base import (
-    list_openai_models,
     list_gemini_models,
     list_ollama_models,
+    list_openai_models,
 )
+from .pyopl_core import OPLCompiler
+from .pyopl_ide_bootstrap import OPLIDE
 
 
 def _read_text(path: Path) -> str:
@@ -86,15 +86,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_genai_generate.add_argument("--model-file", required=True, help="Path to write generated model (.mod)")
     p_genai_generate.add_argument("--data-file", required=True, help="Path to write generated data (.dat)")
     p_genai_generate.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
-    p_genai_generate.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation")
+    p_genai_generate.add_argument(
+        "--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation"
+    )
     p_genai_generate.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
     p_genai_generate.add_argument("--out-file", help="Write generation statistics to file")
     p_genai_insight = genai_sub.add_parser("insight", help="Generate, solve, and summarise solution in lay terms (markdown)")
     p_genai_insight.add_argument("prompt", help="Prompt for insight generation")
-    p_genai_insight.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation/feedback")
+    p_genai_insight.add_argument(
+        "--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation/feedback"
+    )
     p_genai_insight.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
     p_genai_insight.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
-    p_genai_insight.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use for solving the generated model")
+    p_genai_insight.add_argument(
+        "--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use for solving the generated model"
+    )
     p_genai_insight.add_argument("--out-file", help="Write markdown insight to file instead of stdout")
 
     p_genai_ask = genai_sub.add_parser("ask", help="Ask for feedback on an existing model+data")
@@ -164,8 +170,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "scipy"
 
             # Build unique tmp filenames using same scheme as IDE
-            from datetime import datetime
             import os
+            from datetime import datetime
 
             display_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             safe_ts = display_ts.replace(":", "-").replace(" ", "_")
@@ -203,7 +209,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             # Compose a feedback prompt asking to explain the results in lay terms
             sol_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language targeting a lay user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}" 
+            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language targeting a lay user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}"
 
             try:
                 feedback = generative_feedback(
@@ -326,5 +332,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Unknown command
     print("Unknown command", file=sys.stderr)
     return 2
+
+
 if __name__ == "__main__":
     raise SystemExit(main())

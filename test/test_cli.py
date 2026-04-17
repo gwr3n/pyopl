@@ -1,15 +1,12 @@
 import io
 import json
-import sys
-import unittest
-from contextlib import redirect_stdout, redirect_stderr
-from pathlib import Path
 import tempfile
-
-from pyopl import pyopl_cli
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
-
+from pyopl import pyopl_cli
 
 
 class TestCLI(unittest.TestCase):
@@ -26,15 +23,17 @@ class TestCLI(unittest.TestCase):
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            ret = pyopl_cli.main([
-                "solve",
-                str(model),
-                str(data),
-                "--solver",
-                "highs",
-                "--out",
-                "json",
-            ])
+            ret = pyopl_cli.main(
+                [
+                    "solve",
+                    str(model),
+                    str(data),
+                    "--solver",
+                    "highs",
+                    "--out",
+                    "json",
+                ]
+            )
 
         self.assertEqual(ret, 0)
         out = buf.getvalue().strip()
@@ -171,9 +170,11 @@ class TestCLI(unittest.TestCase):
             td_path = Path(td)
             out_md = td_path / "insight.md"
 
-            with patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats) as pgen, \
-                patch("pyopl.pyopl_cli._run_solve", return_value=solve_res) as psolve, \
-                patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback) as pfb:
+            with (
+                patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats) as pgen,
+                patch("pyopl.pyopl_cli._run_solve", return_value=solve_res) as psolve,
+                patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback) as pfb,
+            ):
 
                 argv = [
                     "genai",
