@@ -12,7 +12,6 @@ import tkinter as tk
 import traceback
 import webbrowser
 from datetime import datetime
-import json
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Optional, Protocol
@@ -26,10 +25,10 @@ from .genai.model_discovery import (
     list_ollama_models,
     list_openai_models,
 )
+from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
 from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
-from .genai.pyopl_generative import generative_feedback
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -786,7 +785,7 @@ class OPLIDE(tk.Tk):
         """Open a model file into the model editor."""
         fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
-            with open(fname, "r") as f:
+            with open(fname, "r", encoding="utf-8") as f:
                 self.model_text.delete(1.0, tk.END)
                 self.model_text.insert(tk.END, f.read())
             self.model_file = fname
@@ -802,7 +801,7 @@ class OPLIDE(tk.Tk):
         """Open a data file into the data editor."""
         fname = filedialog.askopenfilename(filetypes=[("Data files", "*.dat"), ("All files", "*.*")])
         if fname:
-            with open(fname, "r") as f:
+            with open(fname, "r", encoding="utf-8") as f:
                 self.data_text.delete(1.0, tk.END)
                 self.data_text.insert(tk.END, f.read())
             self.data_file = fname
@@ -826,11 +825,11 @@ class OPLIDE(tk.Tk):
             self.model_file = fname
         # "end-1c" means "end minus 1 character" (the implicit newline)
         content = self.model_text.get("1.0", "end-1c")
-        with open(self.model_file, "w") as f:
+        with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
         # Update tab title
         try:
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
+            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         except Exception:
             pass
 
@@ -845,7 +844,7 @@ class OPLIDE(tk.Tk):
                 return
             self.data_file = fname
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w") as f:
+        with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
         # Update tab title
         try:
@@ -863,9 +862,9 @@ class OPLIDE(tk.Tk):
             return
         self.model_file = fname
         content = self.model_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.model_file, "w") as f:
+        with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
 
     def save_data_as(self) -> None:
         """Save the data to a new file and update the tab title."""
@@ -877,7 +876,7 @@ class OPLIDE(tk.Tk):
             return
         self.data_file = fname
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w") as f:
+        with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
 
@@ -1297,9 +1296,9 @@ class OPLIDE(tk.Tk):
         model_file = self.model_file or os.path.join(tmp_dir, "temp_model.mod")
         data_file = self.data_file or os.path.join(tmp_dir, "temp_data.dat")
         try:
-            with open(model_file, "w") as f:
+            with open(model_file, "w", encoding="utf-8") as f:
                 f.write(model_code)
-            with open(data_file, "w") as f:
+            with open(data_file, "w", encoding="utf-8") as f:
                 f.write(data_code)
         except Exception as e:
             self.status_var.set(f"Error saving temp files: {e}")
@@ -1431,8 +1430,8 @@ class OPLIDE(tk.Tk):
                                     model_name=(self.genai_model if self.genai_model else None),
                                     progress=(None),
                                 )
-                            except Exception as e:
-                                self.after(0, lambda: self._append_output(f"\n[GenAI] Error requesting explanation: {e}\n"))
+                            except Exception:
+                                self.after(0, lambda: self._append_output("\n[GenAI] Error requesting explanation:\n"))
                                 return
 
                             # Format feedback for output
@@ -1526,7 +1525,7 @@ class OPLIDE(tk.Tk):
 
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
             if self.model_file:
-                base = os.path.splitext(os.path.basename(self.model_file))[0]
+                base = os.path.splitext(os.path.basename(self.model_file or ""))[0]
                 default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
 
             dest_path = filedialog.asksaveasfilename(
@@ -1600,7 +1599,9 @@ class OPLIDE(tk.Tk):
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
 
-    def _ensure_model_data_saved(self, model_target: Optional[str] = None, data_target: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    def _ensure_model_data_saved(
+        self, model_target: Optional[str] = None, data_target: Optional[str] = None
+    ) -> tuple[Optional[str], Optional[str]]:
         """Ensure current editor buffers are saved to disk.
 
         Returns (model_path, data_path) or (None, None) on error.
@@ -1972,9 +1973,9 @@ class OPLIDE(tk.Tk):
                         except Exception:
                             pass
 
-                with open(model_path, "r") as f:
+                with open(model_path, "r", encoding="utf-8") as f:
                     model_code = f.read()
-                with open(data_path, "r") as f:
+                with open(data_path, "r", encoding="utf-8") as f:
                     data_code = f.read()
 
                 def apply_results():
@@ -2057,7 +2058,6 @@ class OPLIDE(tk.Tk):
         # Ensure a temp directory exists for any timestamped revised files
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
-
 
         def run():
             try:
@@ -2176,7 +2176,7 @@ class OPLIDE(tk.Tk):
                             self.data_file = data_tgt
 
                         # Update tabs and highlighting
-                        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
+                        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
                         if data_tgt:
                             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
                         self.highlight(self.model_text, is_data=False)
@@ -2213,8 +2213,8 @@ class OPLIDE(tk.Tk):
             self.model_file = model_path
             self.data_file = data_path
             try:
-                self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
-                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+                self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
             except Exception:
                 pass
             try:
@@ -2318,7 +2318,7 @@ class OPLIDE(tk.Tk):
         """Load settings from disk."""
         try:
             if hasattr(self, "_config_path") and self._config_path.exists():
-                with open(self._config_path, "r") as f:
+                with open(self._config_path, "r", encoding="utf-8") as f:
                     return json.load(f)
         except Exception as e:
             print(f"Warning: failed to load settings: {e}")
@@ -2338,7 +2338,7 @@ class OPLIDE(tk.Tk):
                 ),
                 "genai-method": self.genai_method_var.get() if hasattr(self, "genai_method_var") else "pyopl_generative",
             }
-            with open(self._config_path, "w") as f:
+            with open(self._config_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=4)
         except Exception as e:
             print(f"Warning: failed to save settings: {e}")
@@ -2396,7 +2396,7 @@ class OPLIDE(tk.Tk):
     def _genai_feedback_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self.genai_feedback()
         return "break"
-    
+
     def _genai_solve_and_explain_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self._genai_solve_and_explain()
         return "break"
@@ -2543,7 +2543,9 @@ class OPLIDE(tk.Tk):
 
             # Solve & Explain: solve current model/data then ask LLM to explain results
             self.genai_menu.add_separator()
-            self.genai_menu.add_command(label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E"))
+            self.genai_menu.add_command(
+                label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
+            )
 
             # Verbose LLM progress logs (only visible when launched with --debug)
             if getattr(self, "debug", False):
