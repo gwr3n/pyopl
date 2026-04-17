@@ -33,6 +33,7 @@
 - [GenAI Assistants](#genai-assistants)
 - [PyOPL IDE](#pyopl-ide)
   - [Launching the IDE](#launching-the-ide)
+- [PyOPL CLI](#pyopl-cli)
 
 This guide describes the syntax and features of the Optimisation Programming Language (OPL) as implemented in PyOPL. PyOPL is a Python library and IDE for defining and solving optimization problems. The PyOPL compiler translates OPL models into code for use with either the Gurobi Optimizer or the open-source SciPy/HiGHS solver. You can choose which solver to use. For SciPy/HiGHS, integrality is passed to `linprog` if present, but full MIP support depends on your SciPy version and solver. PyOPL now provides robust support for tuple types, sets of tuples, tuple field access, multi-indexed variables, advanced sum/forall constructs, and improved semantic error handling.
 
@@ -707,5 +708,33 @@ python -m pyopl
 This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or SciPy/HiGHS as the solver from the IDE's menu bar. The IDE provides syntax highlighting, error diagnostics, and a modern UI for rapid prototyping and learning.
 
 ---
+
+## PyOPL CLI
+
+PyOPL provides a command-line interface that complements the IDE for scripting, automation, and CI workflows. Key points:
+
+- Default behavior: running `python -m pyopl` with no arguments still launches the IDE.
+- Subcommands:
+  - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
+  - `solve <model.mod> [data.dat]`: compile and solve a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py` (use `--out-file` to write to a file).
+  - `genai`: generative AI utilities with nested commands:
+    - `list-models`: list available LLM models for a provider (openai/google/ollama).
+    - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
+    - `ask`: request feedback on an existing model/data pair.
+    - `insight`: generate model+data from a prompt, run the solver on the generated files, then ask the GenAI assistant to translate the solver results into a clear, non-technical Markdown report (writes to stdout or `--out-file`).
+
+Usage examples:
+
+```sh
+# Solve a model and print JSON
+python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out json
+
+# Generate insight (GenAI) and save to Markdown
+python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
+```
+
+Notes:
+- The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
+- CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
 
