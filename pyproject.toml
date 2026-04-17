@@ -42,6 +42,9 @@ Homepage = "https://github.com/gwr3n/pyopl"
 [tool.setuptools]
 include-package-data = true
 
+[project.scripts]
+pyopl = "pyopl.__main__:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 exclude = ["test", "test.*"]
