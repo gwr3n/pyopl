@@ -1773,63 +1773,87 @@ class OPLIDE(tk.Tk):
 
         if kind == "success":
             self._display_solve_results(payload)
-            # If user requested Solve & Explain, run generative feedback on the solution
+
+            # Determine whether the solver actually produced a usable solution.
+            success = False
+            try:
+                if isinstance(payload, dict):
+                    # Prefer an explicit solution payload
+                    if payload.get("solution"):
+                        success = True
+                    else:
+                        st = str(payload.get("status", "")).lower()
+                        if st in ("optimal", "feasible", "optimal solution", "feasible solution", "success"):
+                            success = True
+            except Exception:
+                success = False
+
+            # If user requested Solve & Explain, only run generative feedback when solve succeeded
             try:
                 if getattr(self, "_explain_after_solve", False):
-                    # reset flag
+                    # reset flag regardless so we don't attempt again later
                     self._explain_after_solve = False
 
-                    # run feedback in background thread to avoid blocking UI
-                    def _run_feedback():
+                    if not success:
+                        # Skip explanation when solve failed
                         try:
-                            # Compose solution text as JSON
-                            try:
-                                sol_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
-                            except Exception:
-                                sol_text = str(payload)
-
-                            feedback_prompt = (
-                                "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
-                                "Include key findings and suggested next steps.\n\nSolution:\n" + sol_text
+                            self._append_output(
+                                "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n"
                             )
-
-                            model_path = getattr(self, "_last_solved_model_file", None)
-                            data_path = getattr(self, "_last_solved_data_file", None)
-
-                            # Notify UI and request feedback
-                            self.after(0, lambda: self._append_output("\n[GenAI] Requesting explanation...\n"))
-
-                            try:
-                                fb = generative_feedback(
-                                    feedback_prompt,
-                                    model_path,
-                                    data_path,
-                                    llm_provider=(self.genai_provider if self.genai_provider else None),
-                                    model_name=(self.genai_model if self.genai_model else None),
-                                    progress=(None),
-                                )
-                            except Exception:
-                                self.after(0, lambda: self._append_output("\n[GenAI] Error requesting explanation:\n"))
-                                return
-
-                            # Format feedback for output
-                            try:
-                                if isinstance(fb, dict):
-                                    out = fb.get("feedback") or json.dumps(fb, indent=2, sort_keys=True, default=str)
-                                else:
-                                    out = str(fb)
-                            except Exception:
-                                out = str(fb)
-
-                            self.after(0, lambda: self._append_output("\n[GenAI] Explanation:\n" + out + "\n"))
-                            self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
                         except Exception:
+                            pass
+                    else:
+                        # run feedback in background thread to avoid blocking UI
+                        def _run_feedback():
                             try:
-                                self.after(0, lambda: self._append_output("\n[GenAI] Explanation failed.\n"))
-                            except Exception:
-                                pass
+                                # Compose solution text as JSON
+                                try:
+                                    sol_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
+                                except Exception:
+                                    sol_text = str(payload)
 
-                    threading.Thread(target=_run_feedback, daemon=True).start()
+                                feedback_prompt = (
+                                    "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
+                                    "Include key findings and suggested next steps.\n\nSolution:\n" + sol_text
+                                )
+
+                                model_path = getattr(self, "_last_solved_model_file", None)
+                                data_path = getattr(self, "_last_solved_data_file", None)
+
+                                # Notify UI and request feedback
+                                self.after(0, lambda: self._append_output("\n[GenAI] Requesting explanation...\n"))
+
+                                try:
+                                    fb = generative_feedback(
+                                        feedback_prompt,
+                                        model_path,
+                                        data_path,
+                                        llm_provider=(self.genai_provider if self.genai_provider else None),
+                                        model_name=(self.genai_model if self.genai_model else None),
+                                        progress=(None),
+                                    )
+                                except Exception:
+                                    self.after(0, lambda: self._append_output("\n[GenAI] Error requesting explanation:\n"))
+                                    return
+
+                                # Format feedback for output
+                                try:
+                                    if isinstance(fb, dict):
+                                        out = fb.get("feedback") or json.dumps(fb, indent=2, sort_keys=True, default=str)
+                                    else:
+                                        out = str(fb)
+                                except Exception:
+                                    out = str(fb)
+
+                                self.after(0, lambda: self._append_output("\n[GenAI] Explanation:\n" + out + "\n"))
+                                self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
+                            except Exception:
+                                try:
+                                    self.after(0, lambda: self._append_output("\n[GenAI] Explanation failed.\n"))
+                                except Exception:
+                                    pass
+
+                        threading.Thread(target=_run_feedback, daemon=True).start()
             except Exception:
                 pass
         else:
