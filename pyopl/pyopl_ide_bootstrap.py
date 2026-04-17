@@ -289,7 +289,7 @@ class OPLIDE(tk.Tk):
         runmenu = tk.Menu(menubar, tearoff=0)
         self.run_menu = runmenu
         runmenu.add_command(
-            label="Run Model",
+            label="Solve Model",
             command=self.run_model,
             accelerator=self._accel("R"),
         )
@@ -297,7 +297,7 @@ class OPLIDE(tk.Tk):
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi")
         solver_menu.add_radiobutton(label="Scipy (HiGHS)", variable=self.solver, value="scipy")
         runmenu.add_cascade(label="Solver", menu=solver_menu)
-        menubar.add_cascade(label="Run", menu=runmenu)
+        menubar.add_cascade(label="Solve", menu=runmenu)
 
         # GenAI (populated after discovery)
         self.genai_menu = tk.Menu(menubar, tearoff=0)
@@ -398,7 +398,7 @@ class OPLIDE(tk.Tk):
         else:
             self.run_menu.entryconfigure(
                 idx,
-                label="Run Model",
+                label="Solve Model",
                 command=self.run_model,
                 accelerator=self._accel("R"),
             )
