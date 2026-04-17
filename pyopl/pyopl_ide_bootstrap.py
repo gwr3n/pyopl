@@ -12,6 +12,7 @@ import tkinter as tk
 import traceback
 import webbrowser
 from datetime import datetime
+import json
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Optional, Protocol
@@ -28,6 +29,7 @@ from .genai.model_discovery import (
 
 # --- Local Imports ---
 from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
+from .genai.pyopl_generative import generative_feedback
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -130,7 +132,7 @@ class OPLIDE(tk.Tk):
         # --- Run timer (status bar elapsed time while solving) ---
         self._run_started_at: Optional[float] = None
         self._run_timer_after_id: Optional[str] = None
-        self._run_status_base: str = "Running model..."
+        self._run_status_base: str = "Solving model..."
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -146,6 +148,10 @@ class OPLIDE(tk.Tk):
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
         self._genai_loading: bool = False
+        # Flag: when True, run generative feedback after solver finishes
+        self._explain_after_solve: bool = False
+        self._last_solved_model_file: Optional[str] = None
+        self._last_solved_data_file: Optional[str] = None
 
         # Output sessions
         self._output_sessions: dict[str, str] = {}
@@ -375,7 +381,7 @@ class OPLIDE(tk.Tk):
                     label = self.run_menu.entrycget(i, "label")
                 except Exception:
                     continue
-                if label in ("Run Model", "Stop Model"):
+                if label in ("Solve Model", "Stop Model"):
                     return i
         except Exception:
             return None
@@ -1160,7 +1166,7 @@ class OPLIDE(tk.Tk):
             pass
         self._on_text_change(tw, is_data=(tw is self.data_text))
 
-    def _start_run_timer(self, base_msg: str = "Running model...") -> None:
+    def _start_run_timer(self, base_msg: str = "Solving model...") -> None:
         """Start updating the status bar with elapsed solve time (every second)."""
         self._stop_run_timer()
         self._run_status_base = base_msg
@@ -1216,7 +1222,7 @@ class OPLIDE(tk.Tk):
     def run_model(self) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
         if self._solver_process and self._solver_process.is_alive():
-            messagebox.showinfo("Run Model", "Model is already running.")
+            messagebox.showinfo("Solve Model", "Model is already running.")
             return
 
         import re
@@ -1225,9 +1231,9 @@ class OPLIDE(tk.Tk):
         data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
         # Start a new output session
-        self._clear_output("Run: Running model...")
+        self._clear_output("Solve: Solving model...")
 
-        self.status_var.set("Running model...")
+        self.status_var.set("Solving model...")
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
         # Data file checks
@@ -1310,7 +1316,7 @@ class OPLIDE(tk.Tk):
         self._set_run_menu_running(True)
 
         # Start elapsed-time status updates (every second)
-        self._start_run_timer("Running model...")
+        self._start_run_timer("Solving model...")
 
         self.after(100, self._poll_solver)
 
@@ -1390,6 +1396,65 @@ class OPLIDE(tk.Tk):
 
         if kind == "success":
             self._display_solve_results(payload)
+            # If user requested Solve & Explain, run generative feedback on the solution
+            try:
+                if getattr(self, "_explain_after_solve", False):
+                    # reset flag
+                    self._explain_after_solve = False
+
+                    # run feedback in background thread to avoid blocking UI
+                    def _run_feedback():
+                        try:
+                            # Compose solution text as JSON
+                            try:
+                                sol_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
+                            except Exception:
+                                sol_text = str(payload)
+
+                            feedback_prompt = (
+                                "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
+                                "Include key findings and suggested next steps.\n\nSolution:\n" + sol_text
+                            )
+
+                            model_path = getattr(self, "_last_solved_model_file", None)
+                            data_path = getattr(self, "_last_solved_data_file", None)
+
+                            # Notify UI and request feedback
+                            self.after(0, lambda: self._append_output("\n[GenAI] Requesting explanation...\n"))
+
+                            try:
+                                fb = generative_feedback(
+                                    feedback_prompt,
+                                    model_path,
+                                    data_path,
+                                    llm_provider=(self.genai_provider if self.genai_provider else None),
+                                    model_name=(self.genai_model if self.genai_model else None),
+                                    progress=(None),
+                                )
+                            except Exception as e:
+                                self.after(0, lambda: self._append_output(f"\n[GenAI] Error requesting explanation: {e}\n"))
+                                return
+
+                            # Format feedback for output
+                            try:
+                                if isinstance(fb, dict):
+                                    out = fb.get("feedback") or json.dumps(fb, indent=2, sort_keys=True, default=str)
+                                else:
+                                    out = str(fb)
+                            except Exception:
+                                out = str(fb)
+
+                            self.after(0, lambda: self._append_output("\n[GenAI] Explanation:\n" + out + "\n"))
+                            self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
+                        except Exception:
+                            try:
+                                self.after(0, lambda: self._append_output("\n[GenAI] Explanation failed.\n"))
+                            except Exception:
+                                pass
+
+                    threading.Thread(target=_run_feedback, daemon=True).start()
+            except Exception:
+                pass
         else:
             self._append_output(f"\nError:\n{payload}\n")
             self.status_var.set("Error running model")
@@ -1534,6 +1599,26 @@ class OPLIDE(tk.Tk):
             self.output_text.insert(tk.END, content)
             self.output_text.see(tk.END)
             self.output_text.config(state="disabled")
+
+    def _ensure_model_data_saved(self, model_target: Optional[str] = None, data_target: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+        """Ensure current editor buffers are saved to disk.
+
+        Returns (model_path, data_path) or (None, None) on error.
+        Does not change `self.model_file`/`self.data_file` — caller may choose to.
+        """
+        try:
+            tmp_dir = os.path.join(os.getcwd(), "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+            model_path = model_target or self.model_file or os.path.join(tmp_dir, "current_model.mod")
+            data_path = data_target or self.data_file or os.path.join(tmp_dir, "current_data.dat")
+            with open(model_path, "w", encoding="utf-8") as f:
+                f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
+            with open(data_path, "w", encoding="utf-8") as f:
+                f.write(self.data_text.get(1.0, tk.END).rstrip("\n"))
+            return model_path, data_path
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Failed to write temp files: {e}")
+            return None, None
 
     def _on_request_select(self, event: Optional[tk.Event]) -> None:
         """Handle selection in the Requests list."""
@@ -1949,18 +2034,12 @@ class OPLIDE(tk.Tk):
             if not (text_ok or images_ok):
                 return
 
-        # Ensure we have model/data files; save current buffers if needed
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-        model_path = self.model_file or os.path.join(tmp_dir, "current_model.mod")
-        data_path = self.data_file or os.path.join(tmp_dir, "current_data.dat")
-        try:
-            with open(model_path, "w") as f:
-                f.write(self.model_text.get("1.0", tk.END))
-            with open(data_path, "w") as f:
-                f.write(self.data_text.get("1.0", tk.END))
-        except Exception as e:
-            messagebox.showerror("GenAI Error", f"Failed to save current model/data: {type(e).__name__}")
+        # Track if a data file actually existed before this request
+        had_data_file = bool(self.data_file and os.path.exists(self.data_file))
+
+        # Ensure model/data are saved and get paths
+        model_path, data_path = self._ensure_model_data_saved()
+        if not model_path:
             return
 
         # Resolve selected generator module
@@ -1975,8 +2054,10 @@ class OPLIDE(tk.Tk):
         display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
-        # Track if a data file actually existed before this request
-        had_data_file = bool(self.data_file and os.path.exists(self.data_file))
+        # Ensure a temp directory exists for any timestamped revised files
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
 
         def run():
             try:
@@ -2116,6 +2197,40 @@ class OPLIDE(tk.Tk):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _genai_solve_and_explain(self) -> None:
+        """Solve the current model/data and ask GenAI to explain the solution in lay terms."""
+        # Ensure model/data are saved to files and get paths
+        model_path, data_path = self._ensure_model_data_saved()
+        if not model_path:
+            return
+
+        # Remember which files were used so feedback can reference them
+        self._last_solved_model_file = model_path
+        self._last_solved_data_file = data_path
+
+        # Ensure run_model uses these exact files and update tabs/highlighting
+        try:
+            self.model_file = model_path
+            self.data_file = data_path
+            try:
+                self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file)}")
+                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+            except Exception:
+                pass
+            try:
+                self.highlight(self.model_text, is_data=False)
+                self.highlight(self.data_text, is_data=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Set flag so _poll_solver will trigger feedback after finishing
+        self._explain_after_solve = True
+
+        # Start solve using existing run_model flow (re-uses multiprocessing and UI updates)
+        self.run_model()
+
     # --- Theme ---
     def set_theme(self, theme_name: str) -> None:
         """Switch ttkbootstrap theme and reapply widget colors."""
@@ -2252,6 +2367,7 @@ class OPLIDE(tk.Tk):
         self.bind_all("<Control-r>", self._run_model_shortcut)
         self.bind_all("<Control-g>", self._genai_generate_shortcut)
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
+        self.bind_all("<Control-e>", self._genai_solve_and_explain_shortcut)
 
         if sys.platform == "darwin":
             self.bind_all("<Command-s>", self.save_current_buffer)
@@ -2259,6 +2375,7 @@ class OPLIDE(tk.Tk):
             self.bind_all("<Command-r>", self._run_model_shortcut)
             self.bind_all("<Command-g>", self._genai_generate_shortcut)
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
+            self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
@@ -2278,6 +2395,10 @@ class OPLIDE(tk.Tk):
 
     def _genai_feedback_shortcut(self, event: Optional[tk.Event] = None) -> str:
         self.genai_feedback()
+        return "break"
+    
+    def _genai_solve_and_explain_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self._genai_solve_and_explain()
         return "break"
 
     def _undo_shortcut(self, event: Optional[tk.Event] = None) -> str:
@@ -2419,6 +2540,10 @@ class OPLIDE(tk.Tk):
                 label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G")
             )
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
+
+            # Solve & Explain: solve current model/data then ask LLM to explain results
+            self.genai_menu.add_separator()
+            self.genai_menu.add_command(label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E"))
 
             # Verbose LLM progress logs (only visible when launched with --debug)
             if getattr(self, "debug", False):
