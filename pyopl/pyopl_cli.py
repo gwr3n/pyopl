@@ -194,8 +194,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     gen_kwargs["llm_provider"] = provider
                 stats = generative_solve(
                     prompt,
-                    model_path,
-                    data_path,
+                    str(model_path),
+                    str(data_path),
                     iterations=iterations,
                     return_statistics=True,
                     **gen_kwargs,
@@ -223,8 +223,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     fb_kwargs["llm_provider"] = provider
                 feedback = generative_feedback(
                     feedback_prompt,
-                    model_path,
-                    data_path,
+                    str(model_path),
+                    str(data_path),
                     **fb_kwargs,
                 )
             except Exception as e:
