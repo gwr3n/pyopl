@@ -16,4 +16,5 @@ venv*
 
 .DS_Store
 .coverage
+.pyopl_session
 docs/dev_notes.md
