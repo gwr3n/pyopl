@@ -1036,6 +1036,28 @@ def generative_feedback(
         raise RuntimeError("Empty model response.")
     try:
         _notify(progress, "Feedback received; parsing")
-        return _json_loads_relaxed(content)
+        parsed = _json_loads_relaxed(content)
+
+        # Normalize common string-escaping issues: some LLMs return JSON
+        # where newline/tab sequences are double-escaped (literal "\\n").
+        # If we detect that pattern (escaped sequences present but no real
+        # newlines), attempt a safe unescape for the common fields so the
+        # UI receives readable text.
+        def _maybe_unescape(s: Any) -> Any:
+            if not isinstance(s, str):
+                return s
+            # Only attempt when we see escaped sequences but no real ones
+            if "\\n" in s and "\n" not in s:
+                try:
+                    return s.encode("utf-8").decode("unicode_escape")
+                except Exception:
+                    return s.replace("\\n", "\n").replace("\\t", "\t")
+            return s
+
+        if isinstance(parsed, dict):
+            for key in ("feedback", "revised_model", "revised_data", "assessment", "message"):
+                if key in parsed:
+                    parsed[key] = _maybe_unescape(parsed[key])
+        return parsed
     except Exception as e:
         raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
