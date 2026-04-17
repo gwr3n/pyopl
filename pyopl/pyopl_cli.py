@@ -2,14 +2,14 @@
 
 Behavior:
 - Running with no CLI flags launches the IDE (preserves current behavior).
-- Use `--solve model.mod [data.dat]` to run a model from the command-line.
-- Solver selection: default is HiGHS (`--highs`) which maps to the `scipy` backend.
-  Use `--gurobi` to select Gurobi.
+- Use `solve model.mod [data.dat]` to run a model from the command-line.
+- Solver selection: `--solver highs` (default) or `--solver gurobi`.
 - Output: `--out json` (default) prints JSON result to stdout (or file with `--out-file`).
   Use `--out py` to export the compiled model code as a Python module.
 
 This module intentionally avoids extra dependencies and uses `argparse`.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,9 +18,14 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from . import solve
+from . import solve, generative_solve, generative_feedback
 from .pyopl_core import OPLCompiler
 from .pyopl_ide_bootstrap import OPLIDE
+from .genai._strategy_base import (
+    list_openai_models,
+    list_gemini_models,
+    list_ollama_models,
+)
 
 
 def _read_text(path: Path) -> str:
@@ -34,16 +39,14 @@ def _write_text(path: Path, text: str) -> None:
 
 
 def _run_solve(model_path: Path, data_path: Optional[Path], solver_key: str):
-    # solver_key is 'scipy' or 'gurobi'
     try:
         results = solve(str(model_path), str(data_path) if data_path else None, solver=solver_key)
         return results
-    except Exception as e:
+    except Exception:
         raise
 
 
 def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> str:
-    # compile_model expects code strings
     model_code = _read_text(model_path)
     data_code = _read_text(data_path) if data_path else None
     compiler = OPLCompiler()
@@ -54,80 +57,179 @@ def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="pyopl", description="PyOPL command-line interface")
 
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode / verbose logging")
+    subparsers = parser.add_subparsers(dest="command")
 
-    parser.add_argument(
-        "--solve",
-        nargs="+",
-        metavar=("MODEL", "DATA"),
-        help="Solve a model: provide Model.mod and optional Data.dat",
-    )
+    # ide subcommand (explicit debug only available here)
+    p_ide = subparsers.add_parser("ide", help="Launch the PyOPL IDE")
+    p_ide.add_argument("--debug", action="store_true", help="Enable debug mode / verbose logging")
 
-    solver_group = parser.add_mutually_exclusive_group()
-    solver_group.add_argument("--highs", action="store_true", help="Use HiGHS (scipy) solver (default)")
-    solver_group.add_argument("--gurobi", action="store_true", help="Use Gurobi solver")
+    # solve subcommand
+    p_solve = subparsers.add_parser("solve", help="Solve a model")
+    p_solve.add_argument("model", help="Path to model (.mod)")
+    p_solve.add_argument("data", nargs="?", help="Optional data (.dat)")
+    p_solve.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
+    p_solve.add_argument("--out", choices=["json", "py"], default="json", help="Output format")
+    p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
 
-    parser.add_argument(
-        "--out",
-        choices=["json", "py"],
-        default="json",
-        help="Output format for --solve: json (results) or py (export compiled code)",
-    )
-    parser.add_argument("--out-file", help="Write output to file instead of stdout")
+    # genai group
+    p_genai = subparsers.add_parser("genai", help="Generative AI utilities")
+    genai_sub = p_genai.add_subparsers(dest="genai_cmd")
+
+    p_genai_list = genai_sub.add_parser("list-models", help="List LLM models")
+    p_genai_list.add_argument("provider", nargs="?", choices=["openai", "google", "ollama"], default="openai")
+    p_genai_list.add_argument("--prefix", dest="prefix", help="Optional prefix filter for model listing")
+
+    p_genai_methods = genai_sub.add_parser("list-methods", help="List generative methods")
+
+    p_genai_generate = genai_sub.add_parser("generate", help="Generate model+data from a prompt")
+    p_genai_generate.add_argument("prompt", help="Prompt for generation")
+    p_genai_generate.add_argument("--model-file", required=True, help="Path to write generated model (.mod)")
+    p_genai_generate.add_argument("--data-file", required=True, help="Path to write generated data (.dat)")
+    p_genai_generate.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
+    p_genai_generate.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation")
+    p_genai_generate.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
+    p_genai_generate.add_argument("--out-file", help="Write generation statistics to file")
+
+    p_genai_ask = genai_sub.add_parser("ask", help="Ask for feedback on an existing model+data")
+    p_genai_ask.add_argument("prompt", help="Prompt for feedback")
+    p_genai_ask.add_argument("--model-file", required=True, help="Path to model (.mod)")
+    p_genai_ask.add_argument("--data-file", required=True, help="Path to data (.dat)")
+    p_genai_ask.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
+    p_genai_ask.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use")
+    p_genai_ask.add_argument("--out-file", help="Write feedback JSON to file")
 
     args = parser.parse_args(argv)
 
-    # If no --solve provided, launch the IDE (preserve existing behaviour)
-    if not args.solve:
-        ide = OPLIDE(debug=args.debug)
+    # Default/no-command => launch IDE (preserve existing behaviour)
+    if not args.command:
+        ide = OPLIDE(debug=False)
         ide.mainloop()
         return 0
 
-    # Solve path
-    files = args.solve
-    if len(files) < 1:
-        print("Error: --solve requires at least a model file", file=sys.stderr)
-        return 2
+    # HANDLE IDE SUBCOMMAND (explicit IDE launch)
+    if args.command == "ide":
+        ide = OPLIDE(debug=getattr(args, "debug", False))
+        ide.mainloop()
+        return 0
 
-    model_path = Path(files[0])
-    data_path = Path(files[1]) if len(files) > 1 else None
+    # HANDLE OTHER SUBCOMMANDS
+    if args.command == "solve":
+        model_path = Path(args.model)
+        data_path = Path(args.data) if args.data else None
+        if not model_path.exists():
+            print(f"Error: model file not found: {model_path}", file=sys.stderr)
+            return 2
+        if data_path and not data_path.exists():
+            print(f"Error: data file not found: {data_path}", file=sys.stderr)
+            return 2
 
-    if not model_path.exists():
-        print(f"Error: model file not found: {model_path}", file=sys.stderr)
-        return 2
-    if data_path and not data_path.exists():
-        print(f"Error: data file not found: {data_path}", file=sys.stderr)
-        return 2
+        solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
 
-    # Map flags to solver key
-    if args.gurobi:
-        solver_key = "gurobi"
-    else:
-        # default to HiGHS/scipy
-        solver_key = "scipy"
+        try:
+            if args.out == "json":
+                results = _run_solve(model_path, data_path, solver_key)
+                out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
+                if args.out_file:
+                    _write_text(Path(args.out_file), out_text)
+                else:
+                    print(out_text)
+                return 0
 
-    try:
-        if args.out == "json":
-            results = _run_solve(model_path, data_path, solver_key)
-            out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-            if args.out_file:
-                _write_text(Path(args.out_file), out_text)
-            else:
-                print(out_text)
+            if args.out == "py":
+                code = _export_py(model_path, data_path, solver_key)
+                if args.out_file:
+                    _write_text(Path(args.out_file), code)
+                else:
+                    print(code)
+                return 0
+        except Exception as e:
+            print(f"Error during solve/export: {e}", file=sys.stderr)
+            return 1
+
+    if args.command == "genai":
+        cmd = getattr(args, "genai_cmd", None)
+        if cmd == "list-models":
+            provider = args.provider
+            prefix = getattr(args, "prefix", None)
+            try:
+                if provider == "openai":
+                    models = list_openai_models(prefix=prefix) if prefix else list_openai_models()
+                elif provider == "google":
+                    models = list_gemini_models(prefix=prefix) if prefix else list_gemini_models()
+                else:
+                    models = list_ollama_models(prefix=prefix) if prefix else list_ollama_models()
+                print("\n".join(models))
+                return 0
+            except Exception as e:
+                print(f"Error listing models for {provider}: {e}", file=sys.stderr)
+                return 3
+
+        if cmd == "list-methods":
+            methods = [
+                ("SyntAGM", "pyopl_generative"),
+                ("Standard", "pyopl_standard"),
+                ("Chain of Thought", "pyopl_chain_of_thought"),
+                ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+                ("CAFA", "pyopl_cafa"),
+                ("Chain of Experts", "pyopl_chain_of_experts"),
+                ("Reflexion", "pyopl_reflexion"),
+            ]
+            for label, key in methods:
+                print(f"{label}: {key}")
             return 0
 
-        if args.out == "py":
-            code = _export_py(model_path, data_path, solver_key)
-            if args.out_file:
-                _write_text(Path(args.out_file), code)
-            else:
-                print(code)
-            return 0
+        if cmd == "generate":
+            prompt = args.prompt
+            model_out = args.model_file
+            data_out = args.data_file
+            try:
+                stats = generative_solve(
+                    prompt,
+                    model_out,
+                    data_out,
+                    model_name=(args.llm_model if getattr(args, "llm_model", None) else None),
+                    iterations=getattr(args, "iterations", 5),
+                    llm_provider=(args.provider if getattr(args, "provider", None) else None),
+                    return_statistics=True,
+                )
+                out_text = json.dumps(stats, indent=2, sort_keys=True, default=str)
+                if getattr(args, "out_file", None):
+                    _write_text(Path(args.out_file), out_text)
+                else:
+                    print(out_text)
+                return 0
+            except Exception as e:
+                print(f"Error during generative_solve: {e}", file=sys.stderr)
+                return 4
 
-    except Exception as e:
-        print(f"Error during solve/export: {e}", file=sys.stderr)
-        return 1
+        if cmd == "ask":
+            prompt = args.prompt
+            model_file = args.model_file
+            data_file = args.data_file
+            try:
+                feedback = generative_feedback(
+                    prompt,
+                    model_file,
+                    data_file,
+                    model_name=(args.llm_model if getattr(args, "llm_model", None) else None),
+                    llm_provider=(args.provider if getattr(args, "provider", None) else None),
+                )
+                out_text = json.dumps(feedback, indent=2, sort_keys=True, default=str)
+                if getattr(args, "out_file", None):
+                    _write_text(Path(args.out_file), out_text)
+                else:
+                    print(out_text)
+                return 0
+            except Exception as e:
+                print(f"Error during generative_feedback: {e}", file=sys.stderr)
+                return 4
 
+    # Unknown command
+    print("Unknown command", file=sys.stderr)
+    return 2
 
+    # Unknown command
+    print("Unknown command", file=sys.stderr)
+    return 2
 if __name__ == "__main__":
     raise SystemExit(main())
