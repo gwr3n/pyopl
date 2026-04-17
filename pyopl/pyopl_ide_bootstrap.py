@@ -1845,6 +1845,9 @@ class OPLIDE(tk.Tk):
                                 except Exception:
                                     out = str(fb)
 
+                                # Note: unescaping of double-escaped sequences is handled centrally
+                                # in `pyopl.genai.pyopl_generative.generative_feedback`.
+
                                 self.after(0, lambda: self._append_output("\n[GenAI] Explanation:\n" + out + "\n"))
                                 self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
                             except Exception:
@@ -2138,6 +2141,21 @@ class OPLIDE(tk.Tk):
                     self.model_file = session.get("model_file")
                 if session.get("data_file"):
                     self.data_file = session.get("data_file")
+                # If files were restored, update tab titles to show filenames
+                try:
+                    if hasattr(self, "editor_notebook"):
+                        try:
+                            self.editor_notebook.tab(
+                                self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}"
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             except Exception:
                 pass
         except Exception:
