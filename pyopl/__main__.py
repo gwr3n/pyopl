@@ -4,20 +4,13 @@ import logging
 from .pyopl_ide_bootstrap import OPLIDE
 
 
+from .pyopl_cli import main as cli_main
+
 def main():
-    parser = argparse.ArgumentParser(description="pyopl IDE")
-    parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
-    args = parser.parse_args()
+    # Delegate to the CLI entrypoint which preserves the IDE-as-default behaviour
+    return cli_main()
 
-    if args.debug:
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            force=True,  # ensure DEBUG is applied even if logging was configured earlier
-        )
 
-    ide = OPLIDE(debug=args.debug)
-    ide.mainloop()
 
 
 if __name__ == "__main__":
