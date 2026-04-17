@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 import queue
+import re
 import sys
 import threading
 
@@ -288,6 +289,11 @@ class OPLIDE(tk.Tk):
         editmenu = tk.Menu(menubar, tearoff=0)
         editmenu.add_command(label="Undo", command=self._undo, accelerator=self._accel("Z"))
         editmenu.add_command(label="Redo", command=self._redo, accelerator=f"Shift+{self._accel('Z')}")
+        editmenu.add_separator()
+        editmenu.add_command(label="Find...", command=self._open_find_replace_dialog, accelerator=self._accel("F"))
+        editmenu.add_command(
+            label="Replace...", command=lambda: self._open_find_replace_dialog(replace=True), accelerator=self._accel("H")
+        )
         menubar.add_cascade(label="Edit", menu=editmenu)
 
         # Run
@@ -613,6 +619,244 @@ class OPLIDE(tk.Tk):
         self.data_text.tag_configure("ERROR", background="#e06c75", foreground="black")
         # Comments
         self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
+
+    def _get_active_editor(self) -> scrolledtext.ScrolledText:
+        """Return the currently active editor widget (model or data)."""
+        try:
+            idx = self.editor_notebook.index(self.editor_notebook.select())
+            return self.model_text if idx == 0 else self.data_text
+        except Exception:
+            return self.model_text
+
+    def _open_find_replace_dialog(self, replace: bool = False) -> None:
+        """Open a modal Find/Replace dialog with optional regex support."""
+        dlg = tk.Toplevel(self)
+        dlg.title("Find and Replace")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        fg_var = tk.StringVar()
+        rp_var = tk.StringVar()
+        regex_var = tk.BooleanVar(value=False)
+        case_var = tk.BooleanVar(value=False)
+
+        ttk.Label(dlg, text="Find:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 2))
+        find_entry = ttk.Entry(dlg, textvariable=fg_var, width=40)
+        find_entry.grid(row=0, column=1, columnspan=3, padx=6, pady=(8, 2))
+
+        ttk.Label(dlg, text="Replace:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        replace_entry = ttk.Entry(dlg, textvariable=rp_var, width=40)
+        replace_entry.grid(row=1, column=1, columnspan=3, padx=6, pady=2)
+
+        regex_cb = ttk.Checkbutton(dlg, text="Regex", variable=regex_var)
+        regex_cb.grid(row=2, column=1, sticky="w", padx=6)
+        case_cb = ttk.Checkbutton(dlg, text="Case sensitive", variable=case_var)
+        case_cb.grid(row=2, column=2, sticky="w", padx=6)
+
+        # Buttons
+        def _highlight_match(start_idx: str, end_idx: str) -> None:
+            w = self._get_active_editor()
+            # Clear previous highlights and selection, then mark this match
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            w.tag_add("find_match", start_idx, end_idx)
+            w.tag_add("sel", start_idx, end_idx)
+            w.tag_configure("find_match", background="#ffe58f")
+            w.mark_set("insert", end_idx)
+            w.see(start_idx)
+
+        def _find_next(ev: Optional[tk.Event] = None) -> str:
+            pattern = find_entry.get()
+            if not pattern:
+                return "break"
+            w = self._get_active_editor()
+            text = w.get("1.0", "end-1c")
+            # Choose a sensible start index: after current highlighted match,
+            # or the widget's insert if it has focus, otherwise start of buffer.
+            if w.tag_ranges("find_match"):
+                start = w.index(w.tag_ranges("find_match")[1])
+            elif w.focus_get() is w:
+                start = w.index("insert")
+            else:
+                start = "1.0"
+            # Convert start to integer offset (chars from 1.0)
+            if regex_var.get():
+                flags = 0 if case_var.get() else re.IGNORECASE
+                try:
+                    for m in re.finditer(pattern, text, flags):
+                        s_off = m.start()
+                        cnt = w.count("1.0", start, "chars")
+                        if s_off >= (cnt[0] if cnt else 0):
+                            # compute indices
+                            s = w.index(f"1.0 + {m.start()} chars")
+                            e = w.index(f"1.0 + {m.end()} chars")
+                            _highlight_match(s, e)
+                            return "break"
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return "break"
+            else:
+                # use Tk text search
+                if case_var.get():
+                    res = w.search(pattern, start, tk.END)
+                    if not res:
+                        res = w.search(pattern, "1.0", start)
+                else:
+                    res = w.search(pattern, start, tk.END, nocase=True)
+                    if not res:
+                        res = w.search(pattern, "1.0", start, nocase=True)
+                if res:
+                    end = f"{res}+{len(pattern)}c"
+                    _highlight_match(res, end)
+            return "break"
+
+        def _find_prev(ev: Optional[tk.Event] = None) -> str:
+            # For simplicity, search from top up to current insert and pick last match
+            pattern = find_entry.get()
+            if not pattern:
+                return "break"
+            w = self._get_active_editor()
+            text = w.get("1.0", "end-1c")
+            # Determine the boundary offset.
+            # Prefer the highlighted match start, then a selection start,
+            # then the widget insert (if focused), else start of buffer.
+            ranges = w.tag_ranges("find_match")
+            if ranges:
+                start_idx = str(ranges[0])
+            else:
+                if w.tag_ranges("sel"):
+                    start_idx = str(w.index("sel.first"))
+                elif w.focus_get() is w:
+                    start_idx = str(w.index("insert"))
+                else:
+                    start_idx = "1.0"
+            sc = w.count("1.0", start_idx, "chars")
+            boundary_off = sc[0] if sc else 0
+
+            matches: list[tuple[int, int]] = []
+            if regex_var.get():
+                flags = 0 if case_var.get() else re.IGNORECASE
+                try:
+                    for m in re.finditer(pattern, text, flags):
+                        matches.append((m.start(), m.end()))
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return "break"
+            else:
+                # Literal search; use re for case-insensitive, otherwise simple find loop
+                if case_var.get():
+                    start_pos = 0
+                    while True:
+                        idx = text.find(pattern, start_pos)
+                        if idx == -1:
+                            break
+                        matches.append((idx, idx + len(pattern)))
+                        start_pos = idx + max(1, len(pattern))
+                else:
+                    esc = re.escape(pattern)
+                    for m in re.finditer(esc, text, re.IGNORECASE):
+                        matches.append((m.start(), m.end()))
+
+            # Pick the last match strictly before boundary_off; wrap to last match if none
+            prev_match: Optional[tuple[int, int]] = None
+            for s_off, e_off in matches:
+                if s_off < boundary_off:
+                    prev_match = (s_off, e_off)
+                else:
+                    break
+            if prev_match is None and matches:
+                prev_match = matches[-1]
+
+            if prev_match:
+                s_idx = w.index(f"1.0 + {prev_match[0]} chars")
+                e_idx = w.index(f"1.0 + {prev_match[1]} chars")
+                _highlight_match(s_idx, e_idx)
+            return "break"
+
+        def _replace_one() -> None:
+            w = self._get_active_editor()
+            try:
+                sel_start = w.index("sel.first")
+                sel_end = w.index("sel.last")
+            except Exception:
+                # if nothing selected, find next and then replace
+                _find_next()
+                try:
+                    sel_start = w.index("sel.first")
+                    sel_end = w.index("sel.last")
+                except Exception:
+                    # Fallback: use the currently highlighted match if present
+                    ranges = w.tag_ranges("find_match")
+                    if ranges:
+                        sel_start = str(ranges[0])
+                        sel_end = str(ranges[1])
+                    else:
+                        return
+            replacement = replace_entry.get()
+            if regex_var.get():
+                # compute absolute offsets
+                # Replace only the selected region using Text.replace so undo groups correctly
+                segment = w.get(sel_start, sel_end)
+                try:
+                    new_segment = re.sub(find_entry.get(), replacement, segment, count=1)
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return
+                w.replace(sel_start, sel_end, new_segment)
+            else:
+                # Use Text.replace to make this a single undoable action
+                w.replace(sel_start, sel_end, replacement)
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            # Notify change so UI state (dirty flag) updates
+            try:
+                self._on_text_change(w, is_data=(w is self.data_text))
+            except Exception:
+                pass
+            w.tag_remove("sel", "1.0", tk.END)
+
+        def _replace_all() -> None:
+            w = self._get_active_editor()
+            full = w.get("1.0", "end-1c")
+            if regex_var.get():
+                try:
+                    flags = 0 if case_var.get() else re.IGNORECASE
+                    new = re.sub(find_entry.get(), replace_entry.get(), full, flags=flags)
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return
+            else:
+                if case_var.get():
+                    new = full.replace(find_entry.get(), replace_entry.get())
+                else:
+                    # case-insensitive replace: do manual loop
+                    pat = find_entry.get()
+                    if not pat:
+                        return
+                    new = re.sub(re.escape(pat), lambda m: replace_entry.get(), full, flags=re.IGNORECASE)
+            # Replace entire buffer in one operation so undo/redo works as expected
+            w.replace("1.0", "end-1c", new)
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            try:
+                self._on_text_change(w, is_data=(w is self.data_text))
+            except Exception:
+                pass
+            w.tag_remove("sel", "1.0", tk.END)
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.grid(row=3, column=0, columnspan=4, pady=8)
+        ttk.Button(btn_frame, text="Prev", command=_find_prev).grid(row=0, column=0, padx=4)
+        ttk.Button(btn_frame, text="Next", command=_find_next).grid(row=0, column=1, padx=4)
+        ttk.Button(btn_frame, text="Replace", command=_replace_one).grid(row=0, column=2, padx=4)
+        ttk.Button(btn_frame, text="Replace All", command=_replace_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btn_frame, text="Close", command=dlg.destroy).grid(row=0, column=4, padx=4)
+
+        # Keyboard bindings inside dialog
+        dlg.bind("<Return>", _find_next)
+        dlg.bind("<Shift-Return>", _find_prev)
+        find_entry.focus_set()
 
     # --- Event Handlers and Core Logic ---
     def _on_request_right_click(self, event: Optional[tk.Event]) -> None:
@@ -2368,6 +2612,8 @@ class OPLIDE(tk.Tk):
         self.bind_all("<Control-g>", self._genai_generate_shortcut)
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
         self.bind_all("<Control-e>", self._genai_solve_and_explain_shortcut)
+        self.bind_all("<Control-f>", self._find_shortcut)
+        self.bind_all("<Control-h>", self._replace_shortcut)
 
         if sys.platform == "darwin":
             self.bind_all("<Command-s>", self.save_current_buffer)
@@ -2376,10 +2622,20 @@ class OPLIDE(tk.Tk):
             self.bind_all("<Command-g>", self._genai_generate_shortcut)
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
             self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
+            self.bind_all("<Command-f>", self._find_shortcut)
+            self.bind_all("<Command-h>", self._replace_shortcut)
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
         self.new_model()
+        return "break"
+
+    def _find_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self._open_find_replace_dialog(False)
+        return "break"
+
+    def _replace_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        self._open_find_replace_dialog(True)
         return "break"
 
     def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
