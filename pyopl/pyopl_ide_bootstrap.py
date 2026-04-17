@@ -109,8 +109,10 @@ class OPLIDE(tk.Tk):
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, debug: bool = False) -> None:
         super().__init__()
+        # Whether the IDE was launched with debug/verbose CLI flags
+        self.debug = bool(debug)
         self.title("Rhetor")
         self.geometry("1000x700")
         self.model_file: Optional[str] = None
@@ -162,8 +164,12 @@ class OPLIDE(tk.Tk):
                 desired_theme = loaded_settings.get("theme")
         except Exception:
             pass
-        # LLM progress logs in Output
-        self.verbose_llm_var = tk.BooleanVar(value=bool(loaded_settings.get("verbose-llm-logs", True)))
+        # LLM progress logs in Output (off by default unless launched with debug)
+        default_verbose = bool(loaded_settings.get("verbose-llm-logs", False))
+        if self.debug:
+            # If launched with debug, honor saved value but default to True for convenience
+            default_verbose = bool(loaded_settings.get("verbose-llm-logs", True))
+        self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
         # Track font size selection for menu state
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
@@ -2209,7 +2215,7 @@ class OPLIDE(tk.Tk):
             payload = {
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
-                "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else True,
+                "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else False,
                 "genai-selection": (
                     f"{self.genai_provider}|{self.genai_model}"
                     if getattr(self, "genai_provider", None) and getattr(self, "genai_model", None)
@@ -2414,15 +2420,16 @@ class OPLIDE(tk.Tk):
             )
             self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
 
-            # Verbose LLM progress logs
-            self.genai_menu.add_separator()
-            self.genai_menu.add_checkbutton(
-                label="Verbose LLM progress logs",
-                onvalue=True,
-                offvalue=False,
-                variable=self.verbose_llm_var,
-                command=self._save_settings,
-            )
+            # Verbose LLM progress logs (only visible when launched with --debug)
+            if getattr(self, "debug", False):
+                self.genai_menu.add_separator()
+                self.genai_menu.add_checkbutton(
+                    label="Verbose LLM progress logs",
+                    onvalue=True,
+                    offvalue=False,
+                    variable=self.verbose_llm_var,
+                    command=self._save_settings,
+                )
 
             # Enable GenAI cascade
             try:

@@ -16,7 +16,7 @@ def main():
             force=True,  # ensure DEBUG is applied even if logging was configured earlier
         )
 
-    ide = OPLIDE()
+    ide = OPLIDE(debug=args.debug)
     ide.mainloop()
 
 
