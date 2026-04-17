@@ -1,6 +1,3 @@
-
-
-
 from .pyopl_cli import main as cli_main
 
 

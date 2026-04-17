@@ -79,7 +79,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_genai_list.add_argument("provider", nargs="?", choices=["openai", "google", "ollama"], default="openai")
     p_genai_list.add_argument("--prefix", dest="prefix", help="Optional prefix filter for model listing")
 
-    p_genai_methods = genai_sub.add_parser("list-methods", help="List generative methods")
+    genai_sub.add_parser("list-methods", help="List generative methods")
 
     p_genai_generate = genai_sub.add_parser("generate", help="Generate model+data from a prompt")
     p_genai_generate.add_argument("prompt", help="Prompt for generation")
@@ -175,26 +175,30 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             display_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             safe_ts = display_ts.replace(":", "-").replace(" ", "_")
-            tmp_dir = os.path.join(os.getcwd(), "tmp")
-            os.makedirs(tmp_dir, exist_ok=True)
-            base = os.path.join(tmp_dir, f"gen_pyopl_{safe_ts}")
-            model_path = base + ".mod"
-            data_path = base + ".dat"
+            tmp_dir = Path(os.getcwd()) / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            base_name = f"gen_pyopl_{safe_ts}"
+            model_path = tmp_dir / f"{base_name}.mod"
+            data_path = tmp_dir / f"{base_name}.dat"
             i = 1
-            while os.path.exists(model_path) or os.path.exists(data_path):
-                model_path = f"{base}_{i}.mod"
-                data_path = f"{base}_{i}.dat"
+            while model_path.exists() or data_path.exists():
+                model_path = tmp_dir / f"{base_name}_{i}.mod"
+                data_path = tmp_dir / f"{base_name}_{i}.dat"
                 i += 1
 
             try:
+                gen_kwargs: dict = {}
+                if llm_model:
+                    gen_kwargs["model_name"] = llm_model
+                if provider:
+                    gen_kwargs["llm_provider"] = provider
                 stats = generative_solve(
                     prompt,
                     model_path,
                     data_path,
-                    model_name=llm_model,
-                    llm_provider=provider,
                     iterations=iterations,
                     return_statistics=True,
+                    **gen_kwargs,
                 )
             except Exception as e:
                 print(f"Error during generation: {e}", file=sys.stderr)
@@ -212,12 +216,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             feedback_prompt = f"Translate the following optimization solution into clear, non-technical language targeting a lay user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}"
 
             try:
+                fb_kwargs: dict = {}
+                if llm_model:
+                    fb_kwargs["model_name"] = llm_model
+                if provider:
+                    fb_kwargs["llm_provider"] = provider
                 feedback = generative_feedback(
                     feedback_prompt,
                     model_path,
                     data_path,
-                    model_name=llm_model,
-                    llm_provider=provider,
+                    **fb_kwargs,
                 )
             except Exception as e:
                 print(f"Error during feedback/translation: {e}", file=sys.stderr)
@@ -244,8 +252,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             md += prompt_text + "\n\n"
             md += "## Insight\n\n"
             md += summary + "\n"
-            if getattr(args, "out_file", None):
-                _write_text(Path(args.out_file), md)
+            out_file = getattr(args, "out_file", None)
+            if out_file:
+                _write_text(Path(out_file), md)
             else:
                 print(md)
             return 0
@@ -284,18 +293,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             model_out = args.model_file
             data_out = args.data_file
             try:
+                gen_kwargs2: dict = {}
+                if getattr(args, "llm_model", None):
+                    gen_kwargs2["model_name"] = getattr(args, "llm_model")
+                if getattr(args, "provider", None):
+                    gen_kwargs2["llm_provider"] = getattr(args, "provider")
                 stats = generative_solve(
                     prompt,
                     model_out,
                     data_out,
-                    model_name=(args.llm_model if getattr(args, "llm_model", None) else None),
                     iterations=getattr(args, "iterations", 5),
-                    llm_provider=(args.provider if getattr(args, "provider", None) else None),
                     return_statistics=True,
+                    **gen_kwargs2,
                 )
                 out_text = json.dumps(stats, indent=2, sort_keys=True, default=str)
-                if getattr(args, "out_file", None):
-                    _write_text(Path(args.out_file), out_text)
+                out_file = getattr(args, "out_file", None)
+                if out_file:
+                    _write_text(Path(out_file), out_text)
                 else:
                     print(out_text)
                 return 0
@@ -308,16 +322,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             model_file = args.model_file
             data_file = args.data_file
             try:
+                fb_kwargs2: dict = {}
+                if getattr(args, "llm_model", None):
+                    fb_kwargs2["model_name"] = getattr(args, "llm_model")
+                if getattr(args, "provider", None):
+                    fb_kwargs2["llm_provider"] = getattr(args, "provider")
                 feedback = generative_feedback(
                     prompt,
                     model_file,
                     data_file,
-                    model_name=(args.llm_model if getattr(args, "llm_model", None) else None),
-                    llm_provider=(args.provider if getattr(args, "provider", None) else None),
+                    **fb_kwargs2,
                 )
                 out_text = json.dumps(feedback, indent=2, sort_keys=True, default=str)
-                if getattr(args, "out_file", None):
-                    _write_text(Path(args.out_file), out_text)
+                out_file = getattr(args, "out_file", None)
+                if out_file:
+                    _write_text(Path(out_file), out_text)
                 else:
                     print(out_text)
                 return 0

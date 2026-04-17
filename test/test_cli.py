@@ -72,7 +72,7 @@ class TestCLI(unittest.TestCase):
     def test_genai_generate_and_ask(self):
         gen_stats = {"status": "ok", "iterations": 1}
         feedback = {"feedback": "looks good"}
-        with patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats) as pgen:
+        with patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats):
             buf = io.StringIO()
             argv = [
                 "genai",
@@ -89,7 +89,7 @@ class TestCLI(unittest.TestCase):
             out = buf.getvalue()
             self.assertIn("iterations", out)
 
-        with patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback) as pfb:
+        with patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback):
             buf = io.StringIO()
             argv = [
                 "genai",
@@ -171,9 +171,9 @@ class TestCLI(unittest.TestCase):
             out_md = td_path / "insight.md"
 
             with (
-                patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats) as pgen,
-                patch("pyopl.pyopl_cli._run_solve", return_value=solve_res) as psolve,
-                patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback) as pfb,
+                patch("pyopl.pyopl_cli.generative_solve", return_value=gen_stats),
+                patch("pyopl.pyopl_cli._run_solve", return_value=solve_res),
+                patch("pyopl.pyopl_cli.generative_feedback", return_value=feedback),
             ):
 
                 argv = [
