@@ -3023,9 +3023,16 @@ class OPLIDE(tk.Tk):
 
     def show_about(self) -> None:
         """About dialog."""
+        try:
+            # Import version/year from package init if available
+            from . import __version__, __year__
+        except Exception:
+            __version__ = "unknown"
+            __year__ = ""
+
         messagebox.showinfo(
             "About Rhetor",
-            "Rhetor\n\n© 2025 Roberto Rossi",
+            f"Rhetor {__version__}\n\n© {__year__} Roberto Rossi",
         )
 
     # --- GenAI model discovery ---

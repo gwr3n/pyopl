@@ -8,6 +8,7 @@ from .genai.pyopl_generative import generative_feedback, generative_solve
 from .pyopl_core import solve
 
 __version__ = "1.6.0"
+__year__ = "2026"
 __author__ = "Roberto Rossi"
 __email__ = "robros@gmail.com"
 __description__ = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
