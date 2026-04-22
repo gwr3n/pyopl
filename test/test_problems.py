@@ -1322,7 +1322,7 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
-    
+
     def test_vrp_2(self):
         """
         Test the vehicle routing problem with both solvers.
