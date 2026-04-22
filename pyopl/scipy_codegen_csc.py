@@ -1926,10 +1926,29 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         raise ValueError(
                             f"Index '{idx}' could not be resolved to int (got {idx_eval!r}) for param '{name}' with env={env}"
                         )
-                    # Support both 1-based and 0-based (OPL is 1-based)
+
+                    # If value is a Python list, determine the declared start index for this
+                    # parameter dimension (defaults to 1 to preserve existing behaviour).
                     if isinstance(v, list) and isinstance(idx_eval, int):
-                        logger.debug(f"[resolve_parameter] List lookup: v[{idx_eval - 1}] (len={len(v)})")
-                        v = v[idx_eval - 1]
+                        start_idx = 1
+                        try:
+                            decl = self._find_decl(name)
+                            if decl and decl.get("dimensions") and i < len(decl["dimensions"]):
+                                dim_decl = decl["dimensions"][i]
+                                dtyp = dim_decl.get("type")
+                                if dtyp == "range_index":
+                                    start_idx = int(self._eval_bound(dim_decl["start"]))
+                                elif dtyp == "named_range_dimension":
+                                    rng_decl = self._find_decl(dim_decl.get("name"), "range_declaration_inline")
+                                    if rng_decl:
+                                        start_idx = int(self._eval_bound(rng_decl["start"]))
+                        except Exception:
+                            # Fall back to 1-based if any error occurs while resolving declaration
+                            start_idx = 1
+
+                        offset = idx_eval - start_idx
+                        logger.debug(f"[resolve_parameter] List lookup with start={start_idx}: v[{offset}] (len={len(v)})")
+                        v = v[offset]
                     else:
                         logger.debug(f"[resolve_parameter] List/dict lookup: v[{idx_eval}] (type={type(v)})")
                         v = v[idx_eval]

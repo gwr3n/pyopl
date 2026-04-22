@@ -1322,6 +1322,112 @@ class TestPyOPLProblems(unittest.TestCase):
             results["gurobi"]["objective_value"],
             places=6,
         )
+    
+    def test_vrp_2(self):
+        """
+        Test the vehicle routing problem with both solvers.
+        Checks that both solvers produce the same objective value for the given data.
+        """
+        model_code = """
+            int n = ...;
+            range Nodes = 0..n;
+            int m = ...;
+            int Q = ...;
+            int dist[Nodes][Nodes];
+            int demand[1..n];
+
+            // Decision variables
+            dvar boolean x[Nodes][Nodes];
+            dvar int+ u[Nodes];
+
+            // Objective: minimize total distance
+            minimize
+            sum(i in Nodes, j in Nodes) dist[i][j] * x[i][j];
+
+            subject to {
+            // No self loops
+            forall(i in Nodes) x[i][i] == 0;
+
+            // Each customer visited exactly once
+            forall(i in 1..n)
+                sum(j in Nodes) x[i][j] == 1;
+            forall(j in 1..n)
+                sum(i in Nodes) x[i][j] == 1;
+
+            // Depot departures/arrivals equal to number of vehicles
+            sum(j in 1..n) x[0][j] == m;
+            sum(i in 1..n) x[i][0] == m;
+
+            // MTZ subtour elimination (Miller-Tucker-Zemlin)
+            forall(i in 1..n, j in 1..n: i != j)
+                u[i] - u[j] + Q * x[i][j] <= Q - demand[j];
+
+            // capacity bounds and depot load
+            forall(i in 1..n) {
+                demand[i] <= u[i];
+                u[i] <= Q;
+            }
+            u[0] == 0;
+            }
+            """
+        data_code = """
+            n = 4;
+            m = 2;
+            Q = 15;
+
+            // distance matrix indexed 0..n (depot = 0)
+            dist = [
+            [0, 4, 6, 9, 7],
+            [4, 0, 5, 7, 3],
+            [6, 5, 0, 4, 6],
+            [9, 7, 4, 0, 5],
+            [7, 3, 6, 5, 0]
+            ];
+
+            // demands for customers 1..n
+            // customer indices: 1..4
+
+            demand = [2, 4, 2, 5];
+            """
+        import os
+        import tempfile
+
+        from pyopl.pyopl_core import solve
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                result = solve(model_file, data_file, solver=solver)
+                self.assertNotEqual(result["status"], "FAILED")
+                results[solver] = result
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        # If both solvers are infeasible, test passes
+        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+            return  # Test passes
+
+        # Otherwise, require both to be optimal and compare objectives
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["gurobi"])
+        self.assertAlmostEqual(
+            results["scipy"]["objective_value"],
+            results["gurobi"]["objective_value"],
+            places=6,
+        )
 
     def test_stochastic_lot_sizing(self):
         """
