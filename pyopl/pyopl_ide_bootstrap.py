@@ -1628,17 +1628,6 @@ class OPLIDE(tk.Tk):
         ):
             data_vars.add(m.group(1))
 
-        # If model references data but data is missing/empty
-        if data_vars and (not self.data_file or not os.path.exists(self.data_file) or not data_code.strip()):
-            self.status_var.set("Error: Data file missing or empty for required model parameters.")
-            self.output_text.config(state="normal")
-            self.output_text.insert(
-                tk.END,
-                "\nError: Data file missing or empty for required model parameters.\n",
-            )
-            self.output_text.config(state="disabled")
-            return
-
         # Parse the data file, if present
         if self.data_file and os.path.exists(self.data_file):
             try:
