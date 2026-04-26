@@ -2034,8 +2034,6 @@ class OPLIDE(tk.Tk):
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
                 "data_file": self.data_file,
-                "model_text": self.model_text.get("1.0", tk.END).rstrip("\n") if hasattr(self, "model_text") else "",
-                "data_text": self.data_text.get("1.0", tk.END).rstrip("\n") if hasattr(self, "data_text") else "",
                 "saved_at": datetime.utcnow().isoformat() + "Z",
             }
             # Write atomically
@@ -2111,36 +2109,37 @@ class OPLIDE(tk.Tk):
                 except Exception:
                     pass
 
-            # Restore editors content (do not clobber if widgets missing)
-            try:
-                mtext = session.get("model_text")
-                if mtext is not None and hasattr(self, "model_text"):
-                    self.model_text.delete("1.0", tk.END)
-                    self.model_text.insert(tk.END, mtext)
-                dtext = session.get("data_text")
-                if dtext is not None and hasattr(self, "data_text"):
-                    self.data_text.delete("1.0", tk.END)
-                    self.data_text.insert(tk.END, dtext)
-            except Exception:
-                pass
-
             # Restore file pointers if present
             try:
                 if session.get("model_file"):
                     self.model_file = session.get("model_file")
+                    try:
+                        with open(self.model_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        self.model_text.delete("1.0", tk.END)
+                        self.model_text.insert(tk.END, content)
+                    except Exception:
+                        self.model_file = None  # Clear pointer if file can't be read
                 if session.get("data_file"):
                     self.data_file = session.get("data_file")
+                    try:
+                        with open(self.data_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        self.data_text.delete("1.0", tk.END)
+                        self.data_text.insert(tk.END, content)
+                    except Exception:
+                        self.data_file = None  # Clear pointer if file can't be read
                 # If files were restored, update tab titles to show filenames
                 try:
                     if hasattr(self, "editor_notebook"):
                         try:
-                            self.editor_notebook.tab(
-                                self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}"
-                            )
+                            model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"
+                            self.editor_notebook.tab(self.model_frame, text=model_label)
                         except Exception:
                             pass
                         try:
-                            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+                            data_label = f"Data: {os.path.basename(self.data_file)}" if self.data_file else "Data"
+                            self.editor_notebook.tab(self.data_frame, text=data_label)
                         except Exception:
                             pass
                 except Exception:
