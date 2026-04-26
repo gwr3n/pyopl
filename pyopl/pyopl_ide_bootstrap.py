@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 import traceback
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Optional, Protocol
@@ -2034,7 +2034,7 @@ class OPLIDE(tk.Tk):
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
                 "data_file": self.data_file,
-                "saved_at": datetime.utcnow().isoformat() + "Z",
+                "saved_at": datetime.now(timezone.utc).isoformat(),
             }
             # Write atomically
             with open(tmp_path, "w", encoding="utf-8") as f:
