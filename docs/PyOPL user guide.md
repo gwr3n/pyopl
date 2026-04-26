@@ -34,6 +34,8 @@
 - [PyOPL IDE](#pyopl-ide)
   - [Launching the IDE](#launching-the-ide)
 - [PyOPL CLI](#pyopl-cli)
+- [PyOPL MCP](#pyopl-mcp)
+- [Rhetor MCP](#rhetor-mcp)
 
 This guide describes the syntax and features of the Optimisation Programming Language (OPL) as implemented in PyOPL. PyOPL is a Python library and IDE for defining and solving optimization problems. The PyOPL compiler translates OPL models into code for use with either the Gurobi Optimizer or the open-source SciPy/HiGHS solver. You can choose which solver to use. For SciPy/HiGHS, integrality is passed to `linprog` if present, but full MIP support depends on your SciPy version and solver. PyOPL now provides robust support for tuple types, sets of tuples, tuple field access, multi-indexed variables, advanced sum/forall constructs, and improved semantic error handling.
 
@@ -737,4 +739,71 @@ Notes:
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
+---
 
+## PyOPL MCP
+
+PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so external clients (IDEs, editors, automation) can call compile/solve operations over stdio-based MCP servers.
+
+- **Purpose**: Provide programmatic access to compilation, solving, and Python code export for OPL models (useful for editor integrations and remote toolchains).
+- **Key tools**:
+  - **read_pyopl_grammar**: Return the bundled grammar text.
+  - **solve_files / solve_strings**: Compile and solve a model from file paths or in-memory strings.
+  - **export_py_files / export_py_strings**: Compile model/data to generated Python source and return it as a string.
+- **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
+- **Quick start (VS Code MCP example - .vscode/mcp.json)**:
+```json
+{
+  "servers": {
+    "PyOPL MCP": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/venv/bin/python",
+      "args": ["-m", "pyopl.pyopl_mcp"]
+    }
+  }
+}
+```
+- **Run locally**:
+```bash
+python -m pyopl.pyopl_mcp
+```
+- **Files**: Implementation and tool list in pyopl_mcp.py.
+- **Notes**: Errors from the compiler/solver are propagated to the caller; generated Python code is returned (not written) so the client can persist it as desired.
+
+---
+
+## Rhetor MCP
+
+Rhetor MCP exposes the Generative (GenAI) assistants and higher-level pipelines (generate, ask, insight) as MCP tools for IDEs and automation that want to request model/data synthesis, feedback, or an end‑to‑end insight workflow.
+
+- **Purpose**: Let external clients call GenAI-powered pipelines to generate OPL models/data, request feedback, list LLM models/providers, and run a combined generate→solve→summarize pipeline.
+- **Key tools**:
+  - **list_providers / list_models**: Enumerate supported LLM providers and available models.
+  - **list_methods**: Return available generative strategy identifiers (e.g., pyopl_generative, pyopl_chain_of_thought).
+  - **generate**: Produce `.mod` and `.dat` files from a natural-language prompt (writes files to provided paths).
+  - **ask**: Request feedback on an existing model/data pair.
+  - **insight**: Generate model/data from a prompt, solve it, and ask the assistant to produce a lay-language Markdown insight report (returns paths, stats, results, and markdown).
+- **Provider and model config**: `provider` aliases normalized (e.g., `gemini` → `google`). Pass `llm_model` and `provider` args to select backend.
+- **Prerequisites**:
+  - Set credentials for remote providers (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`) or run an Ollama instance for `ollama` support.
+- **Quick start (VS Code MCP example - .vscode/mcp.json)**:
+```json
+{
+  "servers": {
+    "Rhetor MCP": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/venv/bin/python",
+      "args": ["-m", "pyopl.rhetor_mcp"]
+    }
+  }
+}
+```
+- **Run locally**:
+```bash
+python -m pyopl.rhetor_mcp
+```
+- **Behavioral notes**:
+  - Long-running generation may use async/GraphChain backends when available; otherwise runs in worker threads.
+  - `insight` writes generated artifacts to a persistent temp directory (prefixed `pyopl_mcp_`) so the caller can inspect the `.mod`/`.dat` files afterwards.
+- **Files & internals**: See rhetor_mcp.py and the genai package for strategy implementations and model listing helpers.
+- **Security**: Keep API keys secret and prefer environment variables in CI/IDE launch configurations rather than embedding them in project files.
