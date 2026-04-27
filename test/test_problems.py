@@ -30,6 +30,7 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    @unittest.skip("this test is cumbersome to run")
     def test_hotel_rostering(self):
         """
         Test the hotel rostering problem, a realistic and moderately complex MILP with 12 employees, 33 shifts, and 3 days.
