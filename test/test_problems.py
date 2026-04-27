@@ -30,6 +30,361 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_hotel_rostering(self):
+        """
+        Test the hotel rostering problem, a realistic and moderately complex MILP with 12 employees, 33 shifts, and 3 days.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.INFO)
+        try:
+            model_code = """
+                // Hotel rota / staff scheduling MILP
+                //
+                // Builds a hotel rota from preprocessed employee, availability/preference, and shift-requirement CSV data.
+                // The model assigns employees to required shift records, allows penalized unfilled demand, respects
+                // role/skill eligibility, availability windows, approved hard absences, night/weekend permissions,
+                // rest conflicts, and balances coverage against preferences and fairness targets.
+
+                // -------------------- Sets and index ranges --------------------
+                int NumEmployees = ...;          // number of employees from employees.csv
+                range Employees = 1..NumEmployees;
+
+                int NumDays = ...;               // number of rota days in the planning instance
+                range Days = 1..NumDays;
+
+                int NumShifts = ...;             // number of required shift records from shift_requirements.csv
+                range Shifts = 1..NumShifts;
+
+                // -------------------- Employee parameters --------------------
+                param float contractHours[Employees] = ...;       // contractual weekly hours by employee
+                param float maxWeeklyHours[Employees] = ...;      // maximum allowed weekly hours by employee
+                param float maxDailyHours[Employees] = ...;       // daily paid-hour cap by employee
+                param float minRestHours[Employees] = ...;        // required rest hours between non-overlapping worked shifts
+                param float targetHours[Employees] = ...;         // fair target hours for this rota horizon
+
+                // Historical fairness metrics used to discourage repeatedly assigning unpopular shift types.
+                param int histWeekend[Employees] = ...;           // weekend shifts in previous 4 weeks
+                param int histLate[Employees] = ...;              // late shifts in previous 4 weeks
+                param int histNight[Employees] = ...;             // night shifts in previous 4 weeks
+
+                // Soft day-off penalty. Only soft requested-off rows remain assignable; hard absences are blocked below.
+                param float dayOffPenalty[Employees] = ...;       // penalty for assigning an approved soft requested day off
+
+                // -------------------- Shift parameters --------------------
+                param int dayIndex[Shifts] = ...;                 // rota day of each shift, in Days
+                param float shiftHours[Shifts] = ...;             // paid hours for one assignment to each shift
+                param float shiftStartAbs[Shifts] = ...;          // shift start in absolute hours from start of horizon
+                param float shiftEndAbs[Shifts] = ...;            // shift end in absolute hours; overnight shifts end next day
+                param int requiredStaff[Shifts] = ...;            // required number of employees on each shift
+                param float priorityPenalty[Shifts] = ...;        // dominant penalty per unfilled staff slot by priority
+
+                param int isWeekendShift[Shifts] = ...;           // 1 if shift is on a weekend day, else 0
+                param int isLateShift[Shifts] = ...;              // 1 if shift is late/evening, else 0
+                param int isNightShift[Shifts] = ...;             // 1 if shift is overnight, else 0
+
+                // -------------------- Preprocessed employee-shift matrices --------------------
+                param int roleEligible[Employees][Shifts] = ...;       // 1 if role, transferable skill, night, and weekend permissions allow cover
+                param int windowOK[Employees][Shifts] = ...;           // 1 if shift lies within an allowed or approved exception time window
+                param int hardUnavailable[Employees][Shifts] = ...;    // 1 if employee has a hard absence for the shift date; assignment forbidden
+                param int prefMatch[Employees][Shifts] = ...;          // 1 if shift type matches employee/request preference or approved exception
+                param int requestedOff[Employees][Shifts] = ...;       // 1 if the shift falls on a requested day off
+
+                // Combined hard eligibility: role/skill permission, time-window feasibility, and no hard absence.
+                param int eligible[e in Employees][s in Shifts] =
+                roleEligible[e][s] * windowOK[e][s] * (1 - hardUnavailable[e][s]);
+
+                // Same-employee shift conflict: overlap or insufficient rest, except for the documented
+                // housekeeping supervisor concurrent HK_AM/HK_SUP cover on each day.
+                param boolean shiftConflict[e in Employees][s in Shifts][t in Shifts] =
+                (s < t)
+                && !((e == 5) && (((s == 4) && (t == 5)) || ((s == 15) && (t == 16)) || ((s == 26) && (t == 27))))
+                && !((shiftStartAbs[t] >= shiftEndAbs[s] + minRestHours[e]) || (shiftStartAbs[s] >= shiftEndAbs[t] + minRestHours[e]));
+
+                // -------------------- Objective weights --------------------
+                param float prefMismatchPenalty = ...;            // penalty for assigning a non-preferred shift type
+                param float underTargetPenalty = ...;             // penalty per hour below targetHours
+                param float overTargetPenalty = ...;              // penalty per hour above targetHours
+                param float lateFairnessPenalty = ...;            // marginal penalty scaled by historical late count
+                param float nightFairnessPenalty = ...;           // marginal penalty scaled by historical night count
+                param float weekendFairnessPenalty = ...;         // marginal penalty scaled by historical weekend count
+
+                // -------------------- Decision variables --------------------
+                dvar boolean x[Employees][Shifts];                // 1 if employee e is assigned to shift record s
+
+                dvar int+ unfilled[Shifts];                       // shortage against requiredStaff[s]; keeps rota feasible
+
+                dvar float+ underTarget[Employees];               // hours below the fair target over this rota horizon
+                dvar float+ overTarget[Employees];                // hours above the fair target over this rota horizon
+
+                // Assigned paid hours per employee over the rota horizon.
+                dexpr float assignedHours[e in Employees] =
+                sum(s in Shifts) (shiftHours[s] * x[e][s]);
+
+                // -------------------- Objective --------------------
+                // TotalWeightedPenalty: shortage penalties are set dominantly in data so feasible coverage is preferred
+                // before soft day-off use, preference mismatch, target-hour deviation, and historical fairness costs.
+                minimize TotalWeightedPenalty =
+                    sum(s in Shifts) (priorityPenalty[s] * unfilled[s])
+                + sum(e in Employees, s in Shifts) (dayOffPenalty[e] * requestedOff[e][s] * x[e][s])
+                + sum(e in Employees, s in Shifts) (prefMismatchPenalty * (1 - prefMatch[e][s]) * x[e][s])
+                + sum(e in Employees) (underTargetPenalty * underTarget[e] + overTargetPenalty * overTarget[e])
+                + sum(e in Employees, s in Shifts)
+                    ((lateFairnessPenalty * histLate[e] * isLateShift[s]
+                    + nightFairnessPenalty * histNight[e] * isNightShift[s]
+                    + weekendFairnessPenalty * histWeekend[e] * isWeekendShift[s]) * x[e][s]);
+
+                // -------------------- Constraints --------------------
+                subject to {
+                // CoverRequired: each shift requirement is covered by assigned staff plus explicit shortage.
+                forall(s in Shifts)
+                    CoverRequired:
+                    sum(e in Employees) x[e][s] + unfilled[s] == requiredStaff[s];
+
+                // Eligibility: assignments must respect role/skill, permissions, time windows, and hard absences.
+                forall(e in Employees, s in Shifts)
+                    Eligibility:
+                    x[e][s] <= eligible[e][s];
+
+                // DailyHoursCap: keep each employee's total paid hours within the operational daily limit.
+                forall(e in Employees, d in Days)
+                    DailyHoursCap:
+                    sum(s in Shifts : dayIndex[s] == d) (shiftHours[s] * x[e][s]) <= maxDailyHours[e];
+
+                // WeeklyHoursCap: keep each employee's total rota hours within their maximum weekly hours.
+                forall(e in Employees)
+                    WeeklyHoursCap:
+                    assignedHours[e] <= maxWeeklyHours[e];
+
+                // TargetHoursBalance: define soft under/over deviations around fair horizon target hours.
+                forall(e in Employees)
+                    TargetHoursBalance:
+                    assignedHours[e] + underTarget[e] - overTarget[e] == targetHours[e];
+
+                // RestAndOverlap: prevent overlapping or too-close shifts, except preprocessed permitted concurrent cover.
+                forall(e in Employees, s in Shifts, t in Shifts : shiftConflict[e][s][t])
+                    RestAndOverlap:
+                    x[e][s] + x[e][t] <= 1;
+                }
+                """
+            data_code = """
+                NumEmployees = 12;
+                NumDays = 3;
+                NumShifts = 33;
+
+                // Employee order:
+                // 1 E001 Amy Fraser; 2 E002 Callum Reid; 3 E003 Sophie Murray; 4 E004 Leah Kerr;
+                // 5 E005 Euan McBride; 6 E006 Mina Ali; 7 E007 Daniel Ross; 8 E008 Holly Campbell;
+                // 9 E009 Jamie Stewart; 10 E010 Rory Grant; 11 E011 Isla Robertson; 12 E012 Noah Sinclair.
+
+                // Shift order by index:
+                // 1 D1_FO_EARLY; 2 D1_FO_LATE; 3 D1_FO_NIGHT; 4 D1_HK_AM; 5 D1_HK_SUP; 6 D1_FB_BREAKFAST; 7 D1_FB_LATE; 8 D1_FB_BAR; 9 D1_KIT_EARLY; 10 D1_KIT_LATE; 11 D1_MT_DAY;
+                // 12 D2_FO_EARLY; 13 D2_FO_LATE; 14 D2_FO_NIGHT; 15 D2_HK_AM; 16 D2_HK_SUP; 17 D2_FB_BREAKFAST; 18 D2_FB_LATE; 19 D2_FB_BAR; 20 D2_KIT_EARLY; 21 D2_KIT_LATE; 22 D2_MT_DAY;
+                // 23 D3_FO_EARLY; 24 D3_FO_LATE; 25 D3_FO_NIGHT; 26 D3_HK_AM; 27 D3_HK_SUP; 28 D3_FB_BREAKFAST; 29 D3_FB_LATE; 30 D3_FB_BAR; 31 D3_KIT_EARLY; 32 D3_KIT_LATE; 33 D3_MT_DAY.
+
+                contractHours = [40, 24, 40, 20, 37.5, 16, 40, 45, 24, 40, 20, 20];
+                maxWeeklyHours = [48, 30, 48, 28, 45, 24, 48, 52, 32, 45, 25, 25];
+                maxDailyHours = [12, 12, 12, 12, 14, 12, 12, 12, 12, 12, 12, 12];
+                minRestHours = [11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11];
+
+                // Three-day fair-hour targets derived from weekly contract hours.
+                targetHours = [17.14, 10.29, 17.14, 8.57, 16.07, 6.86, 17.14, 19.29, 10.29, 17.14, 8.57, 8.57];
+
+                histWeekend = [2, 1, 1, 2, 3, 1, 2, 1, 1, 0, 0, 1];
+                histLate = [1, 4, 0, 0, 0, 2, 3, 0, 2, 0, 0, 0];
+                histNight = [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+                // E011 has a lower soft day-off penalty for the approved D3 FO_EARLY cover exception.
+                dayOffPenalty = [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 400, 1000];
+
+                dayIndex = [
+                1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+                3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3
+                ];
+
+                shiftHours = [
+                8, 8, 8, 6, 8, 6, 6, 8, 8, 8, 8,
+                8, 8, 8, 6, 8, 6, 6, 8, 8, 8, 8,
+                8, 8, 8, 6, 8, 6, 6, 8, 8, 8, 8
+                ];
+
+                // Absolute hours from 2024-07-01 00:00; overnight shifts end after midnight.
+                shiftStartAbs = [
+                7, 15, 23, 8, 8, 6.5, 17, 16, 6, 15, 9,
+                31, 39, 47, 32, 32, 30.5, 41, 40, 30, 39, 33,
+                55, 63, 71, 56, 56, 54.5, 65, 64, 54, 63, 57
+                ];
+                shiftEndAbs = [
+                15, 23, 31, 14, 16, 12.5, 23, 24, 14, 23, 17,
+                39, 47, 55, 38, 40, 36.5, 47, 48, 38, 47, 41,
+                63, 71, 79, 62, 64, 60.5, 71, 72, 62, 71, 65
+                ];
+
+                requiredStaff = [
+                1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1,
+                1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1
+                ];
+
+                // Dominant shortage penalties: High=100000, Medium=80000, Low=60000.
+                priorityPenalty = [
+                100000, 100000, 100000, 100000, 80000, 80000, 100000, 80000, 100000, 80000, 60000,
+                100000, 100000, 100000, 100000, 80000, 80000, 100000, 80000, 100000, 80000, 60000,
+                100000, 100000, 100000, 100000, 80000, 80000, 100000, 80000, 100000, 80000, 60000
+                ];
+
+                isWeekendShift = [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+                ];
+
+                isLateShift = [
+                0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0,
+                0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0,
+                0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0
+                ];
+
+                isNightShift = [
+                0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0
+                ];
+
+                // roleEligible[e][s]: role, transferable skill, night permission, and weekend permission only.
+                roleEligible = [
+                [1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0],
+                [1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0],
+                [0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0],
+                [0,0,0,1,0,0,0,0,0,0,0, 0,0,0,1,0,0,0,0,0,0,0, 0,0,0,1,0,0,0,0,0,0,0],
+                [0,0,0,1,1,0,0,0,0,0,0, 0,0,0,1,1,0,0,0,0,0,0, 0,0,0,1,1,0,0,0,0,0,0],
+                [0,0,0,0,0,0,1,0,0,0,0, 0,0,0,0,0,0,1,0,0,0,0, 0,0,0,0,0,0,1,0,0,0,0],
+                [0,0,0,0,0,0,0,1,0,0,0, 0,0,0,0,0,0,0,1,0,0,0, 0,0,0,0,0,0,0,1,0,0,0],
+                [0,0,0,0,0,0,0,0,1,0,0, 0,0,0,0,0,0,0,0,1,0,0, 0,0,0,0,0,0,0,0,1,0,0],
+                [0,0,0,0,0,0,0,0,0,1,0, 0,0,0,0,0,0,0,0,0,1,0, 0,0,0,0,0,0,0,0,0,1,0],
+                [0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1],
+                [1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0, 1,1,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,0,0,0,0,0, 0,0,0,0,0,1,0,0,0,0,0, 0,0,0,0,0,1,0,0,0,0,0]
+                ];
+
+                // windowOK[e][s]: shift fits the employee's stated window, except E011 D3 FO_EARLY is an approved cover exception.
+                windowOK = [
+                [1,0,0,1,1,0,0,0,0,0,1, 1,0,0,1,1,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,1,0,0,0,0,1,0,0,1,0, 0,1,0,0,0,0,1,0,0,1,0, 0,1,0,0,0,0,1,0,0,1,0],
+                [0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0],
+                [0,0,0,1,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,1,0,0,0,0,0,0,0],
+                [1,0,0,1,1,0,0,0,0,0,1, 1,0,0,1,1,0,0,0,0,0,1, 1,0,0,1,1,0,0,0,0,0,1],
+                [0,0,0,0,0,0,1,0,0,0,0, 0,0,0,0,0,0,1,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0],
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0],
+                [0,1,0,0,0,0,1,0,0,1,0, 0,0,0,0,0,0,0,0,0,0,0, 0,1,0,0,0,0,1,0,0,1,0],
+                [0,0,0,1,1,0,0,0,0,0,1, 0,0,0,1,1,0,0,0,0,0,1, 0,0,0,1,1,0,0,0,0,0,1],
+                [0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,1,0,0,0,0,0, 0,0,0,0,0,1,0,0,0,0,0, 0,0,0,0,0,1,0,0,0,0,0]
+                ];
+
+                // hardUnavailable[e][s]: approved hard absences are forbidden. E011 D3 is soft, so it is not hard-unavailable.
+                hardUnavailable = [
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0]
+                ];
+
+                // Preference match by preferred/requested shift type, with E011 D3 FO_EARLY treated as an approved match.
+                prefMatch = [
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0],
+                [0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0],
+                [0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0, 0,0,1,0,0,0,0,0,0,0,0],
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0],
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0],
+                [0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0],
+                [0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0],
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0],
+                [0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0, 0,1,0,0,0,0,1,1,0,1,0],
+                [0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1],
+                [0,0,0,0,0,0,0,0,0,0,1, 0,0,0,0,0,0,0,0,0,0,1, 1,0,0,0,0,0,0,0,0,0,1],
+                [1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0, 1,0,0,1,1,1,0,0,1,0,0]
+                ];
+
+                // Requested day-off indicator; hard and soft requests are separated by hardUnavailable above.
+                requestedOff = [
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 1,1,1,1,1,1,1,1,1,1,1],
+                [0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,0,0,0]
+                ];
+
+                prefMismatchPenalty = 20;
+                underTargetPenalty = 2;
+                overTargetPenalty = 8;
+                lateFairnessPenalty = 3;
+                nightFairnessPenalty = 5;
+                weekendFairnessPenalty = 4;
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_portfolio_diversification(self):
         """
         Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
