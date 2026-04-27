@@ -40,7 +40,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
         _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
         _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _scipy_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // Hotel rota / staff scheduling MILP
