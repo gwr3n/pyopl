@@ -2406,24 +2406,9 @@ class GurobiCodeGenerator:
             decl = self._find_declaration_by_name(base_name)
             if decl and decl.get("type") in ("dvar", "dvar_indexed"):
                 raise ValueError("Index constraint may not reference decision variables.")
-
-            # Emit Python indexing into param/tuple arrays
-            def emit_idx(dim):
-                dt = dim.get("type")
-                if dt == "number_literal_index":
-                    return str(dim.get("value"))
-                if dt == "name_reference_index":
-                    return str(dim.get("name"))
-                if dt == "string_literal":
-                    return repr(dim.get("value"))
-                if dt == "binop" or dt == "uminus" or dt == "parenthesized_expression" or dt == "field_access":
-                    return self._traverse_expression(dim, current_iterators, symbolic=True)
-                return self._traverse_expression(dim, current_iterators, symbolic=True)
-
-            idxs = [emit_idx(d) for d in node.get("dimensions", [])]
-            if len(idxs) == 1:
-                return f"{base_name}[{idxs[0]}]"
-            return f"{base_name}[({', '.join(idxs)})]"
+            # Use the general indexed-name emitter which includes dict-vs-list
+            # fallbacks and 1-based->0-based adjustments for list indexing.
+            return self._expr_indexed_name(node, current_iterators, symbolic=False)
         if t == "parenthesized_expression":
             inner = self._emit_index_condition(node.get("expression"), current_iterators)
             return f"({inner})"
@@ -2699,7 +2684,22 @@ class GurobiCodeGenerator:
                     tuple_expr = f"({parts[0]},)"
                 else:
                     tuple_expr = f"({', '.join(parts)})"
-                return f"{base_name}[{tuple_expr}]"
+
+                # Emit tuple-key access when the data was emitted as a dict,
+                # but fallback to nested list indexing when the runtime object
+                # is a list-of-lists. For tuple-indexed declarations the
+                # corresponding list-style access uses the tuple elements as
+                # separate indices (adjusting 1-based ranges to 0-based).
+                list_index_parts = []
+                for el in idx.get("elements", []):
+                    if isinstance(el, dict):
+                        idx_code = self._traverse_expression(el, current_iterators, symbolic)
+                    else:
+                        idx_code = repr(el)
+                    # Conservatively adjust numeric/name indices to 0-based
+                    list_index_parts.append(f"(({idx_code}) - 1)")
+                list_access = base_name + "".join(f"[{p}]" for p in list_index_parts)
+                return f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) else {list_access})"
         else:
             # Decision variable case
             if base_name in self.gurobi_var_map:
@@ -2723,22 +2723,53 @@ class GurobiCodeGenerator:
 
             # Parameter / data array: choose dict vs list semantics based on emitted shape
             dims_decl = decl.get("dimensions", []) if decl is not None else []
+
+            # Normalize indexing when a single tuple literal is used as an explicit
+            # multi-index (e.g., `param[(e,s,t)]`). Treat that tuple as multiple
+            # dimensions for the subsequent logic so we can emit the proper
+            # dict-vs-list fallback behavior.
+            dims_for_indexing = expr_node.get("dimensions", [])
+            if (
+                len(dims_for_indexing) == 1
+                and isinstance(dims_for_indexing[0], dict)
+                and dims_for_indexing[0].get("type") == "tuple_literal"
+                and not is_tuple_indexed(decl)
+            ):
+                dims_for_indexing = dims_for_indexing[0].get("elements", [])
+
             container_val = self.data_dict.get(base_name)
             is_dict_param = (hasattr(self, "dict_params") and base_name in self.dict_params) or isinstance(container_val, dict)
             has_tuple_keys = isinstance(container_val, dict) and any(isinstance(k, tuple) for k in container_val.keys())
 
-            raw_idx_exprs = [emit_index_expr(dim_expr) for dim_expr in expr_node["dimensions"]]
+            raw_idx_exprs = [emit_index_expr(dim_expr) for dim_expr in dims_for_indexing]
 
             if is_dict_param:
-                # Composite dict (tuple keys) or multi-dim -> use a single tuple key
+                # Composite dict (tuple keys) or multi-dim -> prefer tuple-key access
+                # but emit a runtime fallback to nested-list indexing when the
+                # emitted data happens to be a list-of-lists (robustness for mixed
+                # data shapes coming from .dat files).
                 if has_tuple_keys or len(raw_idx_exprs) > 1:
-                    return f"{base_name}[({', '.join(raw_idx_exprs)})]"
-                # 1D dict keyed by set element or 1-based range index
-                return f"{base_name}[{raw_idx_exprs[0]}]"
+                    tuple_expr = f"({', '.join(raw_idx_exprs)})"
+                    # build a list-style access expression (adjust 1-based -> 0-based)
+                    list_index_parts = []
+                    for i, dim_expr in enumerate(dims_for_indexing):
+                        dim_decl = dims_decl[i] if i < len(dims_decl) else None
+                        idx_code = emit_index_expr(dim_expr)
+                        if dim_decl and dim_decl.get("type") == "named_set_dimension":
+                            list_index_parts.append(f"{idx_code}")
+                        else:
+                            list_index_parts.append(f"(({idx_code}) - 1)")
+                    list_access = base_name + "".join(f"[{p}]" for p in list_index_parts)
+                    return f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) else {list_access})"
+                # 1D dict keyed by set element or 1-based range index: try dict then list fallback
+                dim_decl0 = dims_decl[0] if len(dims_decl) > 0 else None
+                idx0 = raw_idx_exprs[0]
+                list_idx0 = idx0 if (dim_decl0 and dim_decl0.get("type") == "named_set_dimension") else f"(({idx0}) - 1)"
+                return f"({base_name}[{idx0}] if isinstance({base_name}, dict) else {base_name}[{list_idx0}])"
 
             # Fallback: list/list-of-lists (0-based); subtract 1 for non-set dims
             index_exprs = []
-            for i, dim_expr in enumerate(expr_node["dimensions"]):
+            for i, dim_expr in enumerate(dims_for_indexing):
                 idx_code = emit_index_expr(dim_expr)
                 dim_decl = dims_decl[i] if i < len(dims_decl) else None
                 if dim_decl and dim_decl.get("type") == "named_set_dimension":
