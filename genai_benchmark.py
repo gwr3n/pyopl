@@ -403,4 +403,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    """
+    Usage examples:
+
+    Run SyntAGM on the full dataset ReSocratic using openai/gpt-5:
+        ```
+        python genai_benchmark.py --provider openai --gpt gpt-5 --dataset StochasticOR --logic SyntAGM --all
+        ```
+    """
     raise SystemExit(main())
