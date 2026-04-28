@@ -340,7 +340,8 @@ class ExpressionEvaluator:
         # For parameters indexed by a typed scalar set whose data is stored as a Python list, convert string label to position via <Set>_index
         if decl is not None and decl.get("type", "").startswith("parameter"):
             dims_decl = decl.get("dimensions", [])
-            param_data = self.parent.data_dict.get(expr["name"])
+            # Prefer normalized mapping if present under '<name>__map'
+            param_data = self.parent.data_dict.get(f"{expr['name']}__map", self.parent.data_dict.get(expr["name"]))
             if isinstance(param_data, list) and len(dims_decl) == len(remapped_indices):
                 remapped_any = False
                 remapped_indices_work = []
@@ -506,7 +507,8 @@ class ExpressionEvaluator:
         vname_tuple = f"{expr['name']}[{repr(tuple_key)}]"
         if vname_tuple in self.parent.var_indices:
             return {vname_tuple: 1.0}, 0.0
-        param_dict = self.parent.data_dict.get(expr["name"])
+        # Prefer normalized mapping if present under '<name>__map'
+        param_dict = self.parent.data_dict.get(f"{expr['name']}__map", self.parent.data_dict.get(expr["name"]))
         if param_dict is not None and isinstance(param_dict, dict):
             if tuple_key in param_dict:
                 # Treat tuple-indexed parameter as a pure constant (no coefficients)
@@ -1850,7 +1852,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
 
         logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        val = self.data_dict.get(name)
+        # Prefer normalized mapping when available (stored as '<name>__map')
+        val = self.data_dict.get(f"{name}__map", self.data_dict.get(name))
         # Convert flat key/value list with tuple-like keys into a dict for tuple-indexed parameters
         if isinstance(val, list) and indices is not None:
             try:

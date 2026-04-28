@@ -463,6 +463,15 @@ class GurobiCodeGenerator:
                     if name not in working_data and decl.get("value") is not None:
                         working_data[name] = decl["value"]
 
+        # Preferred view: generators should prefer normalized mappings when present.
+        # Mappings are stored under the key '<name>__map' by the core normalizer.
+        working_data_pref = dict(working_data)
+        for k in list(working_data.keys()):
+            if k.endswith("__map"):
+                base = k[: -len("__map")]
+                # Allow normalized mapping to shadow the original value for generator emission
+                working_data_pref[base] = working_data[k]
+
         # Do not exit early on empty data_dict; inline params may still need emission
         self._add_code_line("# Data from .dat file")
 
@@ -486,7 +495,7 @@ class GurobiCodeGenerator:
                 "named_set_dimension",
                 "named_range_dimension",
             ):
-                val = working_data.get(name)
+                val = working_data_pref.get(name)
                 if isinstance(val, dict):
                     bad_key = next(
                         (k for k, v in val.items() if isinstance(v, (list, tuple, dict))),
@@ -546,7 +555,7 @@ class GurobiCodeGenerator:
 
         # --- Generic N-D flatten to dict with tuple keys using declared dimension semantics ---
         already_emitted = set()
-        for name, value in working_data.items():
+        for name, value in working_data_pref.items():
             pdecl = param_decl_map.get(name)
             if not (pdecl and isinstance(value, (list, tuple))):
                 continue
@@ -608,7 +617,7 @@ class GurobiCodeGenerator:
                 already_emitted.add(name)
 
         # Prevent duplicate fallback emissions for already-emitted names
-        for name, value in working_data.items():
+        for name, value in working_data_pref.items():
             if name in already_emitted:
                 continue
             pdecl = param_decl_map.get(name)
@@ -909,7 +918,7 @@ class GurobiCodeGenerator:
                     return False
             return True
 
-        for name, value in working_data.items():
+        for name, value in working_data_pref.items():
             if name in already_emitted:
                 continue
             # PATCH: 2D param with (tuple set, range) where .dat supplies dict-of-lists:

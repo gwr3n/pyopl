@@ -4160,6 +4160,109 @@ class OPLCompiler:
             # Also update data_dict since generators may consult it directly
             data_dict = dict(working_data)
 
+            # Normalize inline indexed parameter lists into dicts keyed by domain elements/tuples.
+            # This makes generated code robust: instead of relying on list-index fallbacks,
+            # generators can index parameters by labels (strings/ints/tuples) directly.
+            for decl in model_ast.get("declarations") or []:
+                if decl.get("type") != "parameter_inline_indexed":
+                    continue
+                name = decl.get("name")
+                if not name or name not in working_data:
+                    continue
+                val = working_data.get(name)
+                # Only normalize when data is a nested list/tuple (produced inline or by computed params)
+                if not isinstance(val, (list, tuple)):
+                    continue
+
+                dims = decl.get("dimensions", []) or []
+
+                # Build domains list for each declared dimension
+                domains = []
+                for d in dims:
+                    dtyp = d.get("type")
+                    if dtyp in ("named_set", "named_set_dimension"):
+                        set_name = d.get("name")
+                        set_obj = working_data.get(set_name, [])
+                        if isinstance(set_obj, dict) and "elements" in set_obj:
+                            domain_elems = list(set_obj["elements"])
+                        else:
+                            domain_elems = list(set_obj or [])
+                        domains.append(domain_elems)
+                    elif dtyp in ("named_range", "named_range_dimension"):
+                        # Try to resolve named range bounds from model declarations or working_data
+                        try:
+                            s, e = resolve_named_range(d["name"])
+                            domains.append(list(range(int(s), int(e) + 1)))
+                        except Exception:
+                            # Fallback: if a range declaration exists, evaluate its AST bounds
+                            rng_decl = next(
+                                (
+                                    x
+                                    for x in (model_ast.get("declarations") or [])
+                                    if x.get("name") == d.get("name") and x.get("type") == "range_declaration_inline"
+                                ),
+                                None,
+                            )
+                            if rng_decl:
+                                start_idx = eval_bound(rng_decl["start"])
+                                end_idx = eval_bound(rng_decl["end"])
+                                domains.append(list(range(int(start_idx), int(end_idx) + 1)))
+                            else:
+                                # As a last resort, map to 1..len(val) for this axis
+                                domains.append(list(range(1, len(val) + 1)))
+                    else:
+                        # For anonymous/range_index dims, infer positions 1..N
+                        if isinstance(val, (list, tuple)):
+                            domains.append(list(range(1, len(val) + 1)))
+                        else:
+                            domains.append([])
+
+                # Flatten nested list into a mapping keyed by domain elements or tuples
+                mapping = {}
+
+                def _rec_flat(depth: int, node, prefix: list):
+                    if depth == len(domains):
+                        # Build a hashable key for this entry. If the key element
+                        # is a list (e.g., tuple elements parsed as lists),
+                        # convert it to a tuple so it can be used as a dict key.
+                        if len(prefix) == 1:
+                            key = prefix[0]
+                            if isinstance(key, list):
+                                key = tuple(key)
+                            mapping[key] = node
+                        else:
+                            # For multi-dim keys, ensure any inner lists are
+                            # converted to tuples before forming the key tuple.
+                            safe_prefix = tuple(tuple(p) if isinstance(p, list) else p for p in prefix)
+                            mapping[safe_prefix] = node
+                        return
+                    if not isinstance(node, (list, tuple)):
+                        raise SemanticError(
+                            f"Parameter '{name}' expected nested list matching declared domains, got {type(node).__name__}"
+                        )
+                    dom = domains[depth]
+                    for i, key in enumerate(dom):
+                        if i >= len(node):
+                            raise SemanticError(
+                                f"Parameter '{name}' data length shorter than domain at dimension {depth+1}"
+                            )
+                        _rec_flat(depth + 1, node[i], prefix + [key])
+
+                try:
+                    _rec_flat(0, val, [])
+                except SemanticError:
+                    # If normalization fails, leave the original list form and continue
+                    continue
+
+                # Do NOT overwrite the original AST declaration or the
+                # canonical working_data entry (tests and SciPy expect
+                # nested lists in decl['value'] and data). Instead, keep
+                # the original list form in-place and expose a separate
+                # mapping that generators may use if desired.
+                # Store the mapping under a distinct key to avoid name
+                # collisions with user data.
+                working_data[f"{name}__map"] = mapping
+
         # --- Validate shape of multi-dimensional arrays (use merged working data) ---
         def validate_shape(param_data, dims, param_name, data_dict, dim=0):
             if not dims:
