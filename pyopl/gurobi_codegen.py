@@ -1251,6 +1251,8 @@ class GurobiCodeGenerator:
                     self._add_code_line(
                         f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg})"
                     )
+                    # Register decision variable name so expression emission treats it as a variable
+                    self.gurobi_var_map[decl['name']] = decl['name']
                     continue
             # Skip emitting parameter again if already transformed to dict form in data section
             if decl_type.startswith("parameter_") and decl.get("name") in getattr(self, "dict_params", set()):
@@ -2756,7 +2758,8 @@ class GurobiCodeGenerator:
                         dim_decl = dims_decl[i] if i < len(dims_decl) else None
                         idx_code = emit_index_expr(dim_expr)
                         if dim_decl and dim_decl.get("type") == "named_set_dimension":
-                            list_index_parts.append(f"{idx_code}")
+                            set_name = dim_decl.get("name")
+                            list_index_parts.append(f"{set_name}_index[{idx_code}]")
                         else:
                             list_index_parts.append(f"(({idx_code}) - 1)")
                     list_access = base_name + "".join(f"[{p}]" for p in list_index_parts)
@@ -2764,7 +2767,11 @@ class GurobiCodeGenerator:
                 # 1D dict keyed by set element or 1-based range index: try dict then list fallback
                 dim_decl0 = dims_decl[0] if len(dims_decl) > 0 else None
                 idx0 = raw_idx_exprs[0]
-                list_idx0 = idx0 if (dim_decl0 and dim_decl0.get("type") == "named_set_dimension") else f"(({idx0}) - 1)"
+                if dim_decl0 and dim_decl0.get("type") == "named_set_dimension":
+                    set_name0 = dim_decl0.get("name")
+                    list_idx0 = f"{set_name0}_index[{idx0}]"
+                else:
+                    list_idx0 = f"(({idx0}) - 1)"
                 return f"({base_name}[{idx0}] if isinstance({base_name}, dict) else {base_name}[{list_idx0}])"
 
             # Fallback: list/list-of-lists (0-based); subtract 1 for non-set dims
@@ -2773,7 +2780,8 @@ class GurobiCodeGenerator:
                 idx_code = emit_index_expr(dim_expr)
                 dim_decl = dims_decl[i] if i < len(dims_decl) else None
                 if dim_decl and dim_decl.get("type") == "named_set_dimension":
-                    index_exprs.append(f"{idx_code}")
+                    set_name = dim_decl.get("name")
+                    index_exprs.append(f"{set_name}_index[{idx_code}]")
                 else:
                     index_exprs.append(f"(({idx_code}) - 1)")
             out = base_name

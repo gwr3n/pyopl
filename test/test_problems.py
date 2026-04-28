@@ -30,6 +30,208 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_plane_landing(self):
+        """
+        Test the hotel rostering problem, a realistic and moderately complex MILP with 12 employees, 33 shifts, and 3 days.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                // -----------------------------------------------------------------------------
+                // Single-runway stochastic landing scheduling with schedule-retention reliability
+                // -----------------------------------------------------------------------------
+                // Here-and-now assignment of aircraft to landing slots on a single runway.
+                // The same landing schedule is used in every delay scenario.
+                //
+                // Reliability idea: in a scenario, an aircraft retains its planned landing time
+                // if its assigned slot is late enough to absorb the realized delay.
+                // The model minimizes schedule duration while requiring a minimum probability
+                // that all aircraft keep their assigned landing times.
+
+                // -----------------------------
+                // Sets and index ranges
+                // -----------------------------
+                {string} Aircraft = ...;                 // aircraft to schedule
+                param int nbSlots = ...;                 // number of discrete landing slots
+                range Slots = 1..nbSlots;                // landing slot indices
+                param int nbScenarios = ...;             // number of scenarios
+                range ScenarioIdx = 1..nbScenarios;      // integer scenario indices
+
+                // -----------------------------
+                // Parameters
+                // -----------------------------
+                param int nominalSlot[Aircraft] = ...;         // nominal landing slot for each aircraft
+                param int delay[Aircraft][ScenarioIdx] = ...;  // realized delay in slot units by scenario
+                param int avail[Aircraft][Slots] = ...;        // 1 if slot t is feasible for aircraft a
+                param float systemRetainProb = ...;            // minimum probability all aircraft keep landing times
+                param float slotTime[Slots] = ...;             // time value of each slot
+                param float probIdx[ScenarioIdx] = ...;        // scenario probabilities
+
+                // -----------------------------
+                // Derived parameters
+                // -----------------------------
+                // keepFeasible[a][t][s] = 1 iff assigning slot t to aircraft a absorbs
+                // the realized delay in scenario s, so aircraft a keeps its planned time.
+                param int keepFeasible[a in Aircraft, t in Slots, s in ScenarioIdx] =
+                (t >= nominalSlot[a] + delay[a][s]);
+
+                // Number of aircraft, used in the all-keep linking constraint.
+                param int nAircraft = sum(a in Aircraft) 1;
+
+                // -----------------------------
+                // Decision variables
+                // -----------------------------
+                dvar boolean x[Aircraft][Slots];          // 1 if aircraft a is assigned to slot t
+                dvar boolean keep[Aircraft][ScenarioIdx]; // 1 if aircraft a keeps its landing time in scenario s
+                dvar boolean allKeep[ScenarioIdx];        // 1 if all aircraft keep landing times in scenario s
+                dvar float+ makespan;                     // latest occupied slot-time in the common schedule
+
+                // -----------------------------
+                // Objective
+                // -----------------------------
+                // MinimizeMakespan: minimize the landing schedule duration induced by the here-and-now assignment.
+                minimize MinimizeMakespan:
+                makespan;
+
+                // -----------------------------
+                // Constraints
+                // -----------------------------
+                subject to {
+
+                // ProbabilityDistribution: scenario probabilities must sum to 1.
+                ProbabilityDistribution:
+                    (sum(s in ScenarioIdx) probIdx[s]) == 1;
+
+                // AssignOneSlot: each aircraft must receive exactly one landing slot.
+                forall(a in Aircraft)
+                    AssignOneSlot:
+                    sum(t in Slots) x[a][t] == 1;
+
+                // RunwayCapacity: at most one aircraft may use any slot.
+                forall(t in Slots)
+                    RunwayCapacity:
+                    sum(a in Aircraft) x[a][t] <= 1;
+
+                // Availability: aircraft may only use feasible slots.
+                forall(a in Aircraft, t in Slots)
+                    Availability:
+                    x[a][t] <= avail[a][t];
+
+                // KeepDefinition: keep[a][s] is 1 exactly when the chosen slot for aircraft a
+                // is delay-feasible in scenario s.
+                forall(a in Aircraft, s in ScenarioIdx)
+                    KeepDefinition:
+                    keep[a][s] == sum(t in Slots) keepFeasible[a][t][s] * x[a][t];
+
+                // AllKeepUpperLink: if allKeep[s] = 1, then every aircraft must keep its time.
+                forall(s in ScenarioIdx, a in Aircraft)
+                    AllKeepUpperLink:
+                    allKeep[s] <= keep[a][s];
+
+                // AllKeepLowerLink: if every aircraft keeps its time in scenario s,
+                // then allKeep[s] is forced to 1.
+                forall(s in ScenarioIdx)
+                    AllKeepLowerLink:
+                    allKeep[s] >= sum(a in Aircraft) keep[a][s] - nAircraft + 1;
+
+                // SystemRetentionProbability: require the probability of no disruption
+                // (all aircraft retain their assigned landing times) to meet the target.
+                SystemRetentionProbability:
+                    sum(s in ScenarioIdx) probIdx[s] * allKeep[s] >= systemRetainProb;
+
+                // MakespanDefinition: makespan must be at least the time value of every
+                // occupied slot in the common landing schedule.
+                forall(a in Aircraft, t in Slots)
+                    MakespanDefinition:
+                    makespan >= slotTime[t] * x[a][t];
+                }
+                """
+            data_code = """
+                Aircraft = { "A1", "A2", "A3", "A4" };
+                nbSlots = 6;
+                nbScenarios = 4;
+
+                // Scenario probabilities aligned with integer scenario indices 1..nbScenarios
+                probIdx = [ 0.25, 0.25, 0.25, 0.25 ];
+
+                // Nominal landing slots
+                nominalSlot = [
+                "A1" 1,
+                "A2" 2,
+                "A3" 3,
+                "A4" 4
+                ];
+
+                // Scenario delays measured in slot units
+                delay = [
+                "A1" [ 0, 1, 0, 2 ],
+                "A2" [ 0, 0, 1, 1 ],
+                "A3" [ 0, 1, 1, 2 ],
+                "A4" [ 0, 0, 1, 1 ]
+                ];
+
+                // Feasible landing slots for each aircraft
+                avail = [
+                "A1" [ 1, 1, 1, 0, 0, 0 ],
+                "A2" [ 0, 1, 1, 1, 0, 0 ],
+                "A3" [ 0, 0, 1, 1, 1, 0 ],
+                "A4" [ 0, 0, 0, 1, 1, 1 ]
+                ];
+
+                // Minimum probability that all aircraft simultaneously keep their assigned times
+                systemRetainProb = 0.50;
+
+                // Slot time values used in the makespan objective
+                slotTime = [ 1, 2, 3, 4, 5, 6 ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     @unittest.skip("this test is cumbersome to run")
     def test_hotel_rostering(self):
         """
