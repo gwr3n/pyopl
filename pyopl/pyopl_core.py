@@ -4243,9 +4243,7 @@ class OPLCompiler:
                     dom = domains[depth]
                     for i, key in enumerate(dom):
                         if i >= len(node):
-                            raise SemanticError(
-                                f"Parameter '{name}' data length shorter than domain at dimension {depth+1}"
-                            )
+                            raise SemanticError(f"Parameter '{name}' data length shorter than domain at dimension {depth+1}")
                         _rec_flat(depth + 1, node[i], prefix + [key])
 
                 try:

@@ -30,9 +30,340 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_multi_echelon(self):
+        """
+        Test the two-stage stochastic supply chain planning problem, a moderately complex MILP with 2 plants, 2 warehouses, 2 customers, and 3 demand scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                // -----------------------------------------------------------------------------
+                // Two-Stage Stochastic Supply Chain Planning
+                // -----------------------------------------------------------------------------
+                // Scalar sets: plants, warehouses, customers, and demand scenarios.
+                {string} Plants = ...;
+                {string} Warehouses = ...;
+                {string} Customers = ...;
+                {string} Scenarios = ...;
+
+                // Tuple types for arc and demand keys used by data.
+                tuple PlantWarehouse { string p; string w; }
+                tuple WarehouseCustomer { string w; string c; }
+                tuple ScenarioCustomer { string s; string c; }
+
+                // Tuple sets: valid plant-warehouse arcs, warehouse-customer arcs, and scenario-customer pairs.
+                {PlantWarehouse} PlantWarehouses = ...;
+                {WarehouseCustomer} WarehouseCustomers = ...;
+                {ScenarioCustomer} ScenarioCustomers = ...;
+
+                // Time sets: full horizon and recourse periods.
+                range Periods = 1..3;
+                range FuturePeriods = 2..3;
+
+                // Scenario probabilities.
+                param float prob[Scenarios];
+
+                // Unit costs by activity, location, and period.
+                param float prodCost[Plants][Periods];
+                param float shipPWCost[PlantWarehouses][Periods];
+                param float shipWCCost[WarehouseCustomers][Periods];
+                param float holdPlantCost[Plants][Periods];
+                param float holdWHCost[Warehouses][Periods];
+                param float shortageCost[Customers][Periods];
+
+                // Capacity limits by activity, location, arc, and period.
+                param float prodCap[Plants][Periods];
+                param float shipPWCap[PlantWarehouses][Periods];
+                param float shipWCCap[WarehouseCustomers][Periods];
+                param float invPlantCap[Plants][Periods];
+                param float invWHCap[Warehouses][Periods];
+
+                // Initial inventories before period 1.
+                param float initPlantInv[Plants];
+                param float initWHInv[Warehouses];
+
+                // Demand data: scenario demand and expected period-1 demand.
+                param float demand[ScenarioCustomers][Periods];
+                param float expDemandP1[Customers];
+
+                // First-stage decisions for period 1.
+                // These are common to all scenarios.
+                dvar float+ prod1[Plants];
+                dvar float+ shipPW1[PlantWarehouses];
+                dvar float+ shipWC1[WarehouseCustomers];
+                dvar float+ invPlant1[Plants];
+                dvar float+ invWH1[Warehouses];
+                dvar float+ backlog1[Customers];
+
+                // Recourse decisions for periods 2 and 3 by scenario.
+                dvar float+ prod[Plants][FuturePeriods][Scenarios];
+                dvar float+ shipPW[PlantWarehouses][FuturePeriods][Scenarios];
+                dvar float+ shipWC[WarehouseCustomers][FuturePeriods][Scenarios];
+                dvar float+ invPlant[Plants][FuturePeriods][Scenarios];
+                dvar float+ invWH[Warehouses][FuturePeriods][Scenarios];
+                dvar float+ backlog[Customers][FuturePeriods][Scenarios];
+
+                // Objective TotalExpectedCost: first-stage cost plus expected recourse cost.
+                // FirstStageCost: period-1 production, shipping, inventory, and shortage cost.
+                dexpr float FirstStageCost =
+                    sum(p in Plants) prodCost[p][1] * prod1[p]
+                + sum(pw in PlantWarehouses) shipPWCost[pw][1] * shipPW1[pw]
+                + sum(wc in WarehouseCustomers) shipWCCost[wc][1] * shipWC1[wc]
+                + sum(p in Plants) holdPlantCost[p][1] * invPlant1[p]
+                + sum(w in Warehouses) holdWHCost[w][1] * invWH1[w]
+                + sum(c in Customers) shortageCost[c][1] * backlog1[c];
+
+                // ScenarioFutureCost[s]: scenario recourse cost for periods 2 and 3.
+                dexpr float ScenarioFutureCost[s in Scenarios] =
+                    sum(p in Plants, t in FuturePeriods) prodCost[p][t] * prod[p][t][s]
+                + sum(pw in PlantWarehouses, t in FuturePeriods) shipPWCost[pw][t] * shipPW[pw][t][s]
+                + sum(wc in WarehouseCustomers, t in FuturePeriods) shipWCCost[wc][t] * shipWC[wc][t][s]
+                + sum(p in Plants, t in FuturePeriods) holdPlantCost[p][t] * invPlant[p][t][s]
+                + sum(w in Warehouses, t in FuturePeriods) holdWHCost[w][t] * invWH[w][t][s]
+                + sum(c in Customers, t in FuturePeriods) shortageCost[c][t] * backlog[c][t][s];
+
+                // ExpectedFutureCost: expected future cost across scenarios.
+                dexpr float ExpectedFutureCost =
+                    sum(s in Scenarios) prob[s] * ScenarioFutureCost[s];
+
+                minimize TotalExpectedCost:
+                    FirstStageCost + ExpectedFutureCost;
+
+                subject to {
+                // ProbabilitiesSumToOne: scenario probabilities define a distribution.
+                ProbabilitiesSumToOne: (sum(s in Scenarios) prob[s]) == 1;
+
+                // PlantBalanceP1: plant inventory conservation in period 1.
+                forall(p in Plants)
+                    PlantBalanceP1: invPlant1[p] == initPlantInv[p] + prod1[p] - sum(pw in PlantWarehouses : pw.p == p) shipPW1[pw];
+
+                // WarehouseBalanceP1: warehouse inventory conservation in period 1.
+                forall(w in Warehouses)
+                    WarehouseBalanceP1: invWH1[w] == initWHInv[w] + sum(pw in PlantWarehouses : pw.w == w) shipPW1[pw] - sum(wc in WarehouseCustomers : wc.w == w) shipWC1[wc];
+
+                // BacklogBalanceP1: period-1 unmet expected demand.
+                forall(c in Customers)
+                    BacklogBalanceP1: backlog1[c] == expDemandP1[c] - sum(wc in WarehouseCustomers : wc.c == c) shipWC1[wc];
+
+                // ProdCapacityP1: period-1 production capacity.
+                forall(p in Plants)
+                    ProdCapacityP1: prod1[p] <= prodCap[p][1];
+
+                // ShipPWCapacityP1: period-1 plant-to-warehouse arc capacity.
+                forall(pw in PlantWarehouses)
+                    ShipPWCapacityP1: shipPW1[pw] <= shipPWCap[pw][1];
+
+                // ShipWCCapacityP1: period-1 warehouse-to-customer arc capacity.
+                forall(wc in WarehouseCustomers)
+                    ShipWCCapacityP1: shipWC1[wc] <= shipWCCap[wc][1];
+
+                // PlantInventoryCapacityP1: period-1 plant inventory limit.
+                forall(p in Plants)
+                    PlantInventoryCapacityP1: invPlant1[p] <= invPlantCap[p][1];
+
+                // WarehouseInventoryCapacityP1: period-1 warehouse inventory limit.
+                forall(w in Warehouses)
+                    WarehouseInventoryCapacityP1: invWH1[w] <= invWHCap[w][1];
+
+                // PlantBalanceP2: period-2 plant balance starts from first-stage inventory.
+                forall(p in Plants, s in Scenarios)
+                    PlantBalanceP2: invPlant[p][2][s] == invPlant1[p] + prod[p][2][s] - sum(pw in PlantWarehouses : pw.p == p) shipPW[pw][2][s];
+
+                // PlantBalanceP3: period-3 plant balance carries scenario inventory forward.
+                forall(p in Plants, s in Scenarios)
+                    PlantBalanceP3: invPlant[p][3][s] == invPlant[p][2][s] + prod[p][3][s] - sum(pw in PlantWarehouses : pw.p == p) shipPW[pw][3][s];
+
+                // WarehouseBalanceP2: period-2 warehouse balance starts from first-stage inventory.
+                forall(w in Warehouses, s in Scenarios)
+                    WarehouseBalanceP2: invWH[w][2][s] == invWH1[w] + sum(pw in PlantWarehouses : pw.w == w) shipPW[pw][2][s] - sum(wc in WarehouseCustomers : wc.w == w) shipWC[wc][2][s];
+
+                // WarehouseBalanceP3: period-3 warehouse balance carries scenario inventory forward.
+                forall(w in Warehouses, s in Scenarios)
+                    WarehouseBalanceP3: invWH[w][3][s] == invWH[w][2][s] + sum(pw in PlantWarehouses : pw.w == w) shipPW[pw][3][s] - sum(wc in WarehouseCustomers : wc.w == w) shipWC[wc][3][s];
+
+                // BacklogBalanceP2: period-2 shortage includes backlog from period 1.
+                forall(c in Customers, s in Scenarios)
+                    BacklogBalanceP2: backlog[c][2][s] == backlog1[c] + demand[<s,c>][2] - sum(wc in WarehouseCustomers : wc.c == c) shipWC[wc][2][s];
+
+                // BacklogBalanceP3: period-3 shortage carries scenario backlog forward.
+                forall(c in Customers, s in Scenarios)
+                    BacklogBalanceP3: backlog[c][3][s] == backlog[c][2][s] + demand[<s,c>][3] - sum(wc in WarehouseCustomers : wc.c == c) shipWC[wc][3][s];
+
+                // ProdCapacityFuture: future production capacities.
+                forall(p in Plants, t in FuturePeriods, s in Scenarios)
+                    ProdCapacityFuture: prod[p][t][s] <= prodCap[p][t];
+
+                // ShipPWCapacityFuture: future plant-to-warehouse arc capacities.
+                forall(pw in PlantWarehouses, t in FuturePeriods, s in Scenarios)
+                    ShipPWCapacityFuture: shipPW[pw][t][s] <= shipPWCap[pw][t];
+
+                // ShipWCCapacityFuture: future warehouse-to-customer arc capacities.
+                forall(wc in WarehouseCustomers, t in FuturePeriods, s in Scenarios)
+                    ShipWCCapacityFuture: shipWC[wc][t][s] <= shipWCCap[wc][t];
+
+                // PlantInventoryCapacityFuture: future plant inventory limits.
+                forall(p in Plants, t in FuturePeriods, s in Scenarios)
+                    PlantInventoryCapacityFuture: invPlant[p][t][s] <= invPlantCap[p][t];
+
+                // WarehouseInventoryCapacityFuture: future warehouse inventory limits.
+                forall(w in Warehouses, t in FuturePeriods, s in Scenarios)
+                    WarehouseInventoryCapacityFuture: invWH[w][t][s] <= invWHCap[w][t];
+                }
+                """
+            data_code = """
+                Plants = { "P1", "P2" };
+                Warehouses = { "W1", "W2" };
+                Customers = { "C1", "C2" };
+                Scenarios = { "Low", "Base", "High" };
+
+                PlantWarehouses = { <"P1","W1">, <"P1","W2">, <"P2","W1">, <"P2","W2"> };
+                WarehouseCustomers = { <"W1","C1">, <"W1","C2">, <"W2","C1">, <"W2","C2"> };
+                ScenarioCustomers = { <"Low","C1">, <"Low","C2">, <"Base","C1">, <"Base","C2">, <"High","C1">, <"High","C2"> };
+
+                prob = [
+                "Low" 0.25,
+                "Base" 0.50,
+                "High" 0.25
+                ];
+
+                prodCost = [
+                "P1" [4.0, 4.2, 4.1],
+                "P2" [4.5, 4.4, 4.6]
+                ];
+
+                shipPWCost = [
+                <"P1","W1"> [1.0, 1.0, 1.1],
+                <"P1","W2"> [1.4, 1.4, 1.5],
+                <"P2","W1"> [1.3, 1.2, 1.2],
+                <"P2","W2"> [0.9, 0.9, 1.0]
+                ];
+
+                shipWCCost = [
+                <"W1","C1"> [2.0, 2.1, 2.1],
+                <"W1","C2"> [2.8, 2.9, 2.9],
+                <"W2","C1"> [2.7, 2.8, 2.8],
+                <"W2","C2"> [1.9, 2.0, 2.0]
+                ];
+
+                holdPlantCost = [
+                "P1" [0.5, 0.5, 0.5],
+                "P2" [0.6, 0.6, 0.6]
+                ];
+
+                holdWHCost = [
+                "W1" [0.8, 0.8, 0.8],
+                "W2" [0.8, 0.8, 0.8]
+                ];
+
+                shortageCost = [
+                "C1" [12.0, 12.0, 12.0],
+                "C2" [12.0, 12.0, 12.0]
+                ];
+
+                prodCap = [
+                "P1" [90, 95, 95],
+                "P2" [80, 85, 85]
+                ];
+
+                shipPWCap = [
+                <"P1","W1"> [70, 70, 70],
+                <"P1","W2"> [50, 50, 50],
+                <"P2","W1"> [50, 50, 50],
+                <"P2","W2"> [70, 70, 70]
+                ];
+
+                shipWCCap = [
+                <"W1","C1"> [60, 60, 60],
+                <"W1","C2"> [60, 60, 60],
+                <"W2","C1"> [60, 60, 60],
+                <"W2","C2"> [60, 60, 60]
+                ];
+
+                invPlantCap = [
+                "P1" [40, 40, 40],
+                "P2" [40, 40, 40]
+                ];
+
+                invWHCap = [
+                "W1" [50, 50, 50],
+                "W2" [50, 50, 50]
+                ];
+
+                initPlantInv = [
+                "P1" 10,
+                "P2" 8
+                ];
+
+                initWHInv = [
+                "W1" 12,
+                "W2" 10
+                ];
+
+                demand = [
+                <"Low","C1"> [45, 50, 48],
+                <"Low","C2"> [35, 38, 40],
+                <"Base","C1"> [55, 60, 58],
+                <"Base","C2"> [45, 48, 50],
+                <"High","C1"> [65, 72, 70],
+                <"High","C2"> [55, 58, 60]
+                ];
+
+                expDemandP1 = [
+                "C1" 55,
+                "C2" 45
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_stochastic_plane_landing(self):
         """
-        Test the hotel rostering problem, a realistic and moderately complex MILP with 12 employees, 33 shifts, and 3 days.
+        Test the single-runway stochastic landing scheduling problem, a compact but nontrivial MILP with 4 aircraft, 6 slots, and 4 scenarios.
         """
         # Set scipy codegen logger to INFO only for this test
         import logging

@@ -613,6 +613,8 @@ class GurobiCodeGenerator:
 
             if flat_dict is not None:
                 self._add_code_line(f"{name} = {repr(flat_dict)}")
+                # Runtime debug: show that a flattened dict was emitted
+                logger.info("Emitting flattened dict for '%s' with %d entries", name, len(flat_dict))
                 self.dict_params.add(name)
                 already_emitted.add(name)
 
@@ -671,6 +673,8 @@ class GurobiCodeGenerator:
                             # Simple case: already fully keyed scalars
                             norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
                             self._add_code_line(f"{name} = {repr(norm)}")
+                            # Runtime debug: show normalized mapping emitted
+                            logger.info("Emitting normalized scalar mapping for '%s' with %d entries", name, len(norm))
                             self.dict_params.add(name)
                             already_emitted.add(name)
                             continue
@@ -711,6 +715,8 @@ class GurobiCodeGenerator:
                                             flat[(key_obj, lab)] = row[idx]
                                     if ok and flat:
                                         self._add_code_line(f"{name} = {repr(flat)}")
+                                        # Runtime debug: show expanded flat mapping emitted
+                                        logger.info("Emitting expanded flat mapping for '%s' with %d entries", name, len(flat))
                                         self.dict_params.add(name)
                                         already_emitted.add(name)
                                         continue
@@ -718,6 +724,8 @@ class GurobiCodeGenerator:
                         # Fallback: emit normalized keys (do not attempt to expand list-values)
                         norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
                         self._add_code_line(f"{name} = {repr(norm)}")
+                        # Runtime debug: show fallback normalized mapping emitted
+                        logger.info("Emitting fallback normalized mapping for '%s' with %d entries", name, len(norm))
                         self.dict_params.add(name)
                         already_emitted.add(name)
                         continue
@@ -1045,6 +1053,28 @@ class GurobiCodeGenerator:
 
                 start, end = get_range_bounds(range_dim)
                 expected_len = end - start + 1
+                # Handle list-of-pairs form produced by .dat files:
+                # [ <tuple_key> <row_values>, ... ] where each element is [key, row]
+                if isinstance(value, (list, tuple)) and all(
+                    isinstance(item, (list, tuple)) and len(item) == 2 for item in value
+                ):
+                    ok = True
+                    dict_val = {}
+                    for item in value:
+                        key_raw, row = item[0], item[1]
+                        key_obj = tuple(key_raw) if isinstance(key_raw, (list, tuple)) else key_raw
+                        if not isinstance(row, (list, tuple)) or len(row) != expected_len:
+                            ok = False
+                            break
+                        for p_idx, cell in enumerate(row):
+                            p = start + p_idx
+                            dict_val[(key_obj, p)] = cell
+                    if ok and dict_val:
+                        self._add_code_line(f"{name} = {repr(dict_val)}")
+                        # Runtime debug: indicate emitted flattened (tuple,period) dict
+                        logger.info("Emitting tuple-range flattened dict for '%s' with %d entries", name, len(dict_val))
+                        self.dict_params.add(name)
+                        continue
 
                 # Only emit when shape matches (row-major list across set, each row length == expected_len)
                 if len(set_elems) == len(value) and all(
@@ -1054,6 +1084,8 @@ class GurobiCodeGenerator:
                         (set_elems[i], p): value[i][p - start] for i in range(len(set_elems)) for p in range(start, end + 1)
                     }
                     self._add_code_line(f"{name} = {repr(dict_val)}")
+                    # Runtime debug: indicate emitted row-major->flattened dict
+                    logger.info("Emitting row-major flattened dict for '%s' with %d entries", name, len(dict_val))
                     self.dict_params.add(name)
                     continue
             if name in param_decl_map:
@@ -1261,7 +1293,7 @@ class GurobiCodeGenerator:
                         f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg})"
                     )
                     # Register decision variable name so expression emission treats it as a variable
-                    self.gurobi_var_map[decl['name']] = decl['name']
+                    self.gurobi_var_map[decl["name"]] = decl["name"]
                     continue
             # Skip emitting parameter again if already transformed to dict form in data section
             if decl_type.startswith("parameter_") and decl.get("name") in getattr(self, "dict_params", set()):
@@ -2645,6 +2677,22 @@ class GurobiCodeGenerator:
                 return f"-({val})"
             elif t == "parenthesized_expression":
                 return f"({emit_index_expr(dim_expr['expression'])})"
+            elif t == "tuple_literal":
+                parts = []
+                for el in dim_expr.get("elements", []):
+                    if isinstance(el, dict):
+                        # Preserve boolean literals inside tuple indices
+                        if el.get("type") == "boolean_literal":
+                            parts.append("True" if el.get("value") else "False")
+                        else:
+                            parts.append(self._traverse_expression(el, current_iterators, symbolic))
+                    else:
+                        parts.append(repr(el))
+                # Ensure single-element tuples include the trailing comma
+                if len(parts) == 1:
+                    return f"({parts[0]},)"
+                else:
+                    return f"({', '.join(parts)})"
             else:
                 if "value" in dim_expr:
                     return str(dim_expr["value"])
@@ -2772,7 +2820,18 @@ class GurobiCodeGenerator:
                         else:
                             list_index_parts.append(f"(({idx_code}) - 1)")
                     list_access = base_name + "".join(f"[{p}]" for p in list_index_parts)
-                    return f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) else {list_access})"
+                    # Robust access for dict payloads:
+                    # 1) Try flattened dict keyed by the full tuple index (e.g., (pw, t))
+                    # 2) Fallback to dict keyed by the tuple-set element returning a row list, indexed by the second dim
+                    # 3) Fallback to nested list indexing (list_access)
+                    raw0 = raw_idx_exprs[0]
+                    # choose index expression for the second-level list access (or first if only one)
+                    fallback_idx = list_index_parts[1] if len(list_index_parts) > 1 else list_index_parts[0]
+                    return (
+                        f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) and ({tuple_expr}) in {base_name} "
+                        f"else ({base_name}[{raw0}][{fallback_idx}] if isinstance({base_name}, dict) and {raw0} in {base_name} and isinstance({base_name}[{raw0}], (list,tuple)) "
+                        f"else {list_access}))"
+                    )
                 # 1D dict keyed by set element or 1-based range index: try dict then list fallback
                 dim_decl0 = dims_decl[0] if len(dims_decl) > 0 else None
                 idx0 = raw_idx_exprs[0]
