@@ -2160,8 +2160,8 @@ class OPLIDE(tk.Tk):
         try:
             tmp_dir = os.path.join(os.getcwd(), "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
-            model_path = model_target or self.model_file or os.path.join(tmp_dir, "current_model.mod")
-            data_path = data_target or self.data_file or os.path.join(tmp_dir, "current_data.dat")
+            model_path = model_target or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
+            data_path = data_target or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
             with open(model_path, "w", encoding="utf-8") as f:
                 f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
             with open(data_path, "w", encoding="utf-8") as f:
