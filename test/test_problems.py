@@ -30,6 +30,205 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_multistage_stochastic_portfolio(self):
+        """
+        Test the multi-stage stochastic portfolio optimization problem with proportional transaction costs, a compact but nontrivial nonlinear program with 2 assets, 4 scenarios, and 3 stages.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                /*
+                Multi-stage stochastic portfolio optimization with proportional transaction costs
+
+                Problem summary
+                - 2 assets, 4 equally likely scenarios, 3 stages (t=1,2,3)
+                - Trading allowed at stages 1 and 2 only; stage 3 is terminal (no trades)
+                - Information structure:
+                - Stage 1: single root node (same decision across all scenarios)
+                - Stage 2: two information nodes: scenarios {1,2} share a node; scenarios {3,4} share another (identical post-trade portfolios and trades within each pair)
+                - Stage 3: scenario-specific terminal nodes
+                - Decisions per decision stage: buy, sell, and post-trade holdings (dollar amounts)
+                - Constraints:
+                - Proportional transaction costs: 1% on buys, 1% on sells
+                - No short-selling: holdings are nonnegative
+                - Self-financing: trades and costs financed only by current wealth (and initial wealth at t=1)
+                - Concentration: holding in any single asset after rebalancing cannot exceed 100% of total wealth at that stage
+                - Returns:
+                - From stage 1 to 2: given R1[a][sc]
+                - From stage 2 to 3: given R2[a][sc]
+                - Objective: maximize expected terminal wealth, with expected terminal wealth >= 99
+
+                Modeling notes
+                - All variables are in value (dollar) terms. Returns multiply these values across stages.
+                - Self-financing is enforced via: x = prev + buy - sell, and a cashflow balance with proportional costs.
+                - Stage-1 includes initial wealth W0 in the cash balance; later stages have no external cash.
+                */
+
+                // -----------------------------
+                // Sets and indices
+                // -----------------------------
+                range Assets = 1..2;         // asset index set (2 assets)
+                range Scenarios = 1..4;      // scenario index set (4 scenarios)
+
+                // -----------------------------
+                // Parameters (data inputs)
+                // -----------------------------
+                param float W0 = ...;                 // initial wealth at stage 1
+                param float tc_buy = ...;             // proportional buy cost (e.g., 0.01)
+                param float tc_sell = ...;            // proportional sell cost (e.g., 0.01)
+                param float prob[Scenarios] = ...;    // scenario probabilities (sum to 1)
+
+                // Gross returns
+                // R1[a][sc]: from stage 1 -> 2; R2[a][sc]: from stage 2 -> 3
+                param float R1[Assets][Scenarios] = ...;
+                param float R2[Assets][Scenarios] = ...;
+
+                // -----------------------------
+                // Decision variables
+                // -----------------------------
+                // Stage 1 (single information node): same decision across all scenarios
+                // x1[a] >= 0: post-trade dollar holding in asset a after stage-1 rebalancing
+                // b1[a] >= 0, s1[a] >= 0: dollar purchases and sales at stage 1
+
+                dvar float+ x1[Assets];
+                dvar float+ b1[Assets];
+                dvar float+ s1[Assets];
+
+                // Stage 2 (scenario-dependent, but constrained to be identical within {1,2} and within {3,4})
+                // x2[a][sc] >= 0: post-trade dollar holding in asset a after stage-2 rebalancing under scenario sc
+                // b2[a][sc] >= 0, s2[a][sc] >= 0: dollar purchases and sales at stage 2 under scenario sc
+
+                dvar float+ x2[Assets][Scenarios];
+                dvar float+ b2[Assets][Scenarios];
+                dvar float+ s2[Assets][Scenarios];
+
+                // -----------------------------
+                // Decision expressions (expanded on use)
+                // -----------------------------
+                // prev2[a][sc]: pre-trade holdings at stage 2 under scenario sc (after applying R1 to x1)
+                dexpr float prev2[a in Assets, sc in Scenarios] = R1[a][sc] * x1[a];
+
+                // termW[sc]: terminal wealth in scenario sc
+                // termW[sc] = sum_a R2[a][sc] * x2[a][sc]
+                dexpr float termW[sc in Scenarios] = sum(a in Assets) R2[a][sc] * x2[a][sc];
+
+                // Eterm: expected terminal wealth
+                dexpr float Eterm = sum(sc in Scenarios) prob[sc] * termW[sc];
+
+                // -----------------------------
+                // Objective: maximize expected terminal wealth
+                // -----------------------------
+                maximize ExpectedWealth: Eterm;
+
+                // -----------------------------
+                // Constraints
+                // -----------------------------
+                subject to {
+                // Flow_Stage1: stage-1 post-trade holdings equal buys minus sells
+                forall(a in Assets)
+                    Flow_Stage1: x1[a] == b1[a] - s1[a];
+
+                // Cash_Stage1: stage-1 self-financing using initial wealth
+                Cash_Stage1: W0 + (1 - tc_sell) * sum(a in Assets) s1[a]
+                                    - (1 + tc_buy)  * sum(a in Assets) b1[a] == 0;
+
+                // Concentration_Stage1: per-asset holding bounded by total stage-1 wealth
+                forall(a in Assets)
+                    Concentration_Stage1: x1[a] <= sum(i in Assets) x1[i];
+
+                // Flow_Stage2: stage-2 post-trade holdings equal pre-trade holdings plus buys minus sells
+                forall(sc in Scenarios, a in Assets)
+                    Flow_Stage2: x2[a][sc] == prev2[a][sc] + b2[a][sc] - s2[a][sc];
+
+                // Cash_Stage2: stage-2 self-financing in each scenario
+                forall(sc in Scenarios)
+                    Cash_Stage2: (1 - tc_sell) * sum(a in Assets) s2[a][sc]
+                                    - (1 + tc_buy)  * sum(a in Assets) b2[a][sc] == 0;
+
+                // Concentration_Stage2: per-asset holding bounded by total stage-2 wealth in each scenario
+                forall(sc in Scenarios, a in Assets)
+                    Concentration_Stage2: x2[a][sc] <= sum(i in Assets) x2[i][sc];
+
+                // Information links at stage 2: identical decisions within scenario pairs {1,2} and {3,4}
+                forall(a in Assets) {
+                    InfoLink12:  x2[a][1] == x2[a][2];
+                    InfoLink34:  x2[a][3] == x2[a][4];
+                    InfoLinkB12: b2[a][1] == b2[a][2];
+                    InfoLinkB34: b2[a][3] == b2[a][4];
+                    InfoLinkS12: s2[a][1] == s2[a][2];
+                    InfoLinkS34: s2[a][3] == s2[a][4];
+                }
+
+                // ExpectedWealthFloor: minimum expected terminal wealth requirement
+                ExpectedWealthFloor: Eterm >= 99;
+                }
+                """
+            data_code = """
+                W0 = 100;
+                tc_buy = 0.01;
+                tc_sell = 0.01;
+                prob = [ 0.25, 0.25, 0.25, 0.25 ];
+
+                # Returns from stage 1 to 2: rows are assets 1..2, columns are scenarios 1..4
+                R1 = [
+                [ 1.02, 1.02, 1.02, 1.02 ],
+                [ 1.05, 1.05, 0.98, 0.98 ]
+                ];
+
+                # Returns from stage 2 to 3: rows are assets 1..2, columns are scenarios 1..4
+                R2 = [
+                [ 1.01, 1.03, 1.00, 1.02 ],
+                [ 1.10, 0.95, 1.08, 0.92 ]
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_stochastic_multi_echelon(self):
         """
         Test the two-stage stochastic supply chain planning problem, a moderately complex MILP with 2 plants, 2 warehouses, 2 customers, and 3 demand scenarios.

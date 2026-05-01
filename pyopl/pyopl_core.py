@@ -696,6 +696,11 @@ class OPLParser(Parser):
                 key = expr.get("value")
                 if isinstance(key, str) and key in mapping:
                     return self._index_to_expr(mapping[key])
+            # Replace iterator references used inside indexed dimensions.
+            if expr.get("type") == "name_reference_index":
+                key = expr.get("name")
+                if isinstance(key, str) and key in mapping:
+                    return mapping[key]
             # Recurse
             out = {}
             for k, v in expr.items():
@@ -872,10 +877,12 @@ class OPLParser(Parser):
             "sem_type": result_type,
         }
 
-    # Helper nonterminals to disambiguate sum body
-    @_("primary")  # type: ignore
+    # Helper nonterminal for bare aggregate bodies.
+    # This lets `sum(i in I) a[i] * x[i]` bind the full product into the sum
+    # without greedily swallowing surrounding `+`, `-`, or comparison context.
+    @_("multiplicative")  # type: ignore
     def nonparen_expression(self, p):
-        return p.primary
+        return p.multiplicative
 
     @_('"(" expression ")"')  # type: ignore
     def parenthesized_expression(self, p):
