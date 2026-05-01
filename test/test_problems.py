@@ -30,6 +30,242 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_economic_lot_scheduling(self):
+        """
+        Test the stochastic economic lot scheduling problem with backorders and sequence-dependent setups, a complex MILP with 5 items, 4 periods, and 3 demand scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                /*
+                Stochastic Economic Lot Scheduling Problem (ELSP) with Backorders and Sequence-Dependent Setups
+                Single machine, 5 items, 4 periods, 3 demand scenarios.
+
+                Here-and-now (same across scenarios):
+                - x[i][t]   : production quantity of item i in period t (nonnegative)
+                - y[i][t]   : 1 if item i is produced in period t, 0 otherwise (selection)
+                - first[i][t]: 1 if item i is the first produced in period t, 0 otherwise
+                - a[i][j][t]: 1 if item j is produced immediately after item i in period t, 0 otherwise (no self-follow)
+                - u[i][t]   : MTZ order variable to eliminate subtours among produced items in period t
+
+                Wait-and-see (scenario-specific):
+                - inv[i][t][s] >= 0 : ending inventory of item i at end of period t under scenario s
+                - bo[i][t][s]  >= 0 : ending backorder of item i at end of period t under scenario s
+
+                Objective: Minimize expected total cost over the 4 periods, including:
+                - Production cost (here-and-now)
+                - Setup cost for the first item (dummy start to first) per period (here-and-now)
+                - Sequence-dependent setup costs between consecutive items per period (here-and-now)
+                - Expected holding and backorder penalty costs (scenario-weighted)
+                */
+
+                /* --------------------
+                Sets and indices
+                -------------------- */
+                range Items = 1..5;                 // 5 items
+                range Periods = 1..4;               // 4 periods
+                range Scenarios = 1..3;             // 3 scenarios (indexed numerically to keep data scalar-only)
+
+                /* --------------------
+                Parameters (data)
+                -------------------- */
+                param int    NItems = 5;                                 // Big-M for MTZ and bounds
+                param float  prob[Scenarios] = ...;                      // Scenario probabilities (sum to 1)
+                param float  demand[Scenarios][Items][Periods] = ...;    // Demand by scenario, item, period
+                param float  init_inv[Items] = ...;                      // Initial inventories before period 1
+
+                // Processing and capacity
+                param float  proc_time[Items] = ...;                     // Processing time per unit for each item
+                param float  capacity[Periods] = ...;                    // Machine capacity per period
+
+                // Setup times and costs
+                param float  start_setup_time[Items] = ...;              // Setup time from dummy start to first item
+                param float  start_setup_cost[Items] = ...;              // Setup cost for first item
+                param float  seq_setup_time[Items][Items] = ...;         // Seq-dependent setup time i->j (i row, j col)
+                param float  seq_setup_cost[Items][Items] = ...;         // Seq-dependent setup cost i->j
+
+                // Costs per unit
+                param float  prod_cost[Items] = ...;                     // Unit production costs
+                param float  hold_cost[Items] = ...;                     // Unit holding costs
+                param float  back_cost[Items] = ...;                     // Unit backorder penalty costs
+
+                // Production upper bound when selected (same for all periods)
+                param float  max_prod[Items] = ...;
+
+                /* --------------------
+                Decision variables (here-and-now)
+                -------------------- */
+                dvar float+  x[Items][Periods];                 // production quantity of item i in period t
+                dvar boolean y[Items][Periods];                 // 1 if item i is produced (selected) in t
+                dvar boolean first[Items][Periods];             // 1 if item i is the first produced in t
+                dvar boolean a[Items][Items][Periods];          // 1 if j immediately follows i in t (i != j)
+                dvar int+    u[Items][Periods];                 // MTZ order variable for subtour elimination
+
+                /* --------------------
+                Recourse (scenario-specific) variables
+                -------------------- */
+                dvar float+  inv[Items][Periods][Scenarios];    // ending inventory (scenario s)
+                dvar float+  bo[Items][Periods][Scenarios];     // ending backorders (scenario s)
+
+                /* --------------------
+                Objective: Expected total cost
+                -------------------- */
+                minimize MinExpectedCost:
+                    // Production cost (here-and-now)
+                    sum(i in Items, t in Periods) prod_cost[i] * x[i][t]
+                    + // First-item setup costs per period (dummy start -> first)
+                    sum(i in Items, t in Periods) start_setup_cost[i] * first[i][t]
+                    + // Sequence-dependent setup costs between consecutive produced items
+                    sum(i in Items, j in Items, t in Periods) seq_setup_cost[i][j] * a[i][j][t]
+                    + // Expected holding and backorder penalty costs (scenario-weighted)
+                    sum(s in Scenarios) prob[s] * (
+                        sum(i in Items, t in Periods) ( hold_cost[i] * inv[i][t][s] + back_cost[i] * bo[i][t][s] )
+                    );
+
+                /* --------------------
+                Constraints
+                -------------------- */
+                subject to {
+                /* Time capacity per period: processing + start setup (for the first item) + sequence-dependent setups */
+                forall(t in Periods)
+                    TimeCapacity:
+                    sum(i in Items) proc_time[i] * x[i][t]
+                    + sum(i in Items) start_setup_time[i] * first[i][t]
+                    + sum(i in Items, j in Items) seq_setup_time[i][j] * a[i][j][t]
+                    <= capacity[t];
+
+                /* Production only if selected; and upper bound when selected */
+                forall(i in Items, t in Periods) {
+                    ProdBound: x[i][t] <= max_prod[i] * y[i][t];        // x > 0 only if y = 1; cap by max_prod
+                    FirstLink: first[i][t] <= y[i][t];                  // only a selected item can be first
+                }
+
+                /* Predecessor accounting: each produced item has exactly one predecessor (or dummy start) */
+                forall(j in Items, t in Periods)
+                    InDegreeDef: sum(i in Items) a[i][j][t] + first[j][t] == y[j][t];
+
+                /* Successor limit: each produced item has at most one successor */
+                forall(i in Items, t in Periods)
+                    OutDegreeCap: sum(j in Items) a[i][j][t] <= y[i][t];
+
+                /* No self-follow arcs */
+                forall(i in Items, t in Periods)
+                    NoSelf: a[i][i][t] == 0;
+
+                /* First item selection: if at least one item is produced then exactly one is first; else none */
+                forall(t in Periods)
+                    FirstCountUB: sum(i in Items) first[i][t] <= 1;
+
+                forall(t in Periods, i in Items)
+                    FirstCountLB: sum(j in Items) first[j][t] >= y[i][t];
+
+                /* MTZ subtour elimination over the selected items (acyclic single-path sequence) */
+                forall(i in Items, t in Periods)
+                    MTZBound: u[i][t] <= NItems * y[i][t];              // deactivate u when item not selected
+
+                forall(i in Items, j in Items, t in Periods : i != j)
+                    MTZ: u[i][t] - u[j][t] + 1 <= (1 - a[i][j][t]) * NItems;  // if a[i->j]=1 then u[j] >= u[i]+1
+
+                /* Inventory and backorder flow balance per scenario */
+                // Period 1: start from initial inventory (no initial backorders)
+                forall(i in Items, s in Scenarios)
+                    InvBal_t1: inv[i][1][s] - bo[i][1][s] == init_inv[i] + x[i][1] - demand[s][i][1];
+
+                // Periods 2..T: carry net inventory (inventory minus backorders) forward
+                forall(i in Items, t in Periods, s in Scenarios : t > 1)
+                    InvBal_t: inv[i][t][s] - bo[i][t][s] == inv[i][t-1][s] - bo[i][t-1][s] + x[i][t] - demand[s][i][t];
+
+                /* Probability sanity check */
+                ProbSumToOne: (sum(s in Scenarios) prob[s]) == 1;
+                }
+                """
+            data_code = """
+                prob = [0.3, 0.5, 0.2];
+
+                demand = [
+                [ [18,15,20,16], [12,10,13,11], [20,18,22,19], [ 8, 7, 9, 8], [14,12,16,13] ],
+                [ [22,18,24,19], [14,12,16,13], [24,21,26,23], [10, 9,11,10], [17,15,19,16] ],
+                [ [20,17,22,18], [13,11,15,12], [22,20,24,21], [ 9, 8,10, 9], [16,14,18,15] ]
+                ];
+
+                init_inv = [10, 8, 12, 6, 9];
+
+                proc_time = [1.2, 1.0, 1.4, 0.9, 1.1];
+                capacity  = [120, 115, 125, 118];
+
+                start_setup_time = [4, 3, 5, 2, 4];
+                start_setup_cost = [40, 35, 45, 25, 38];
+
+                seq_setup_time = [
+                [0,3,4,2,3],
+                [3,0,2,3,2],
+                [4,2,0,4,3],
+                [2,3,4,0,2],
+                [3,2,3,2,0]
+                ];
+
+                seq_setup_cost = [
+                [ 0,22,28,18,20],
+                [21, 0,19,20,18],
+                [27,20, 0,26,23],
+                [17,19,25, 0,16],
+                [20,18,22,17, 0]
+                ];
+
+                prod_cost = [5.0, 4.5, 6.0, 3.8, 5.2];
+                hold_cost = [0.8, 0.7, 0.9, 0.6, 0.75];
+                back_cost = [7.5, 6.5, 8.0, 5.5, 7.0];
+
+                max_prod = [35, 28, 40, 22, 30];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_stochastic_job_shop_scheduling_2(self):
         """
         Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.
