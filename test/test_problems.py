@@ -30,6 +30,182 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_landing(self):
+        """
+        Test the stochastic aircraft landing problem with reliability chance constraint, a compact but nontrivial MILP with 4 aircraft, 6 slots, and 4 delay scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                // Aircraft Landing Slot Assignment with Reliability Chance Constraint (PyOPL)
+                // Goal: Assign each aircraft to exactly one landing slot (no overlap), minimize the latest occupied slot
+                // while ensuring the probability that all aircraft keep their planned times is at least alpha.
+                // Keeping planned time in scenario s means: assigned_slot[a] >= nominal[a] + delay[a][s].
+
+                // -----------------------------
+                // Sets and indices
+                // -----------------------------
+                {string} Aircraft = ...;           // e.g., {"A1","A2","A3","A4"}
+                int nbSlots = ...;                  // e.g., 6
+                range Slots = 1..nbSlots;           // discrete landing slots 1..6
+                {string} Scenarios = ...;           // e.g., {"S1","S2","S3","S4"}
+
+                // -----------------------------
+                // Parameters
+                // -----------------------------
+                // Feasibility mask: feasible[a][t] = true if aircraft a can use slot t
+                param boolean feasible[Aircraft][Slots] = ...;
+
+                // Nominal planned slot index for each aircraft (e.g., A1->1, A2->2, ...)
+                param int nominal[Aircraft] = ...;
+
+                // Scenario probabilities (must sum to 1)
+                param float prob[Scenarios] = ...;
+
+                // Delays by aircraft and scenario (in slot units)
+                param int delay[Aircraft][Scenarios] = ...;
+
+                // Required reliability level (e.g., 0.5)
+                param float alpha = ...;
+
+                // -----------------------------
+                // Decision variables
+                // -----------------------------
+                // x[a][t] = 1 if aircraft a is assigned to slot t; 0 otherwise
+                dvar boolean x[Aircraft][Slots];
+
+                // duration = latest occupied slot in the common schedule
+                dvar int+ duration;
+
+                // Convenience: assigned slot time for each aircraft (expanded on use)
+                dexpr int assigned[a in Aircraft] = sum(t in Slots) t * x[a][t];
+
+                // -----------------------------
+                // Objective: minimize the latest occupied slot (schedule duration)
+                // -----------------------------
+                minimize MinDuration: duration;
+
+                // -----------------------------
+                // Constraints
+                // -----------------------------
+                subject to {
+                // Each aircraft assigned to exactly one slot
+                forall(a in Aircraft) AssignExactlyOne:
+                    sum(t in Slots) x[a][t] == 1;
+
+                // Single-runway capacity: at most one aircraft per slot
+                forall(t in Slots) SlotCapacity:
+                    sum(a in Aircraft) x[a][t] <= 1;
+
+                // Respect individual feasibility of slots per aircraft
+                forall(a in Aircraft, t in Slots) FeasibleMask:
+                    x[a][t] <= feasible[a][t];
+
+                // Duration dominates every assigned aircraft time
+                forall(a in Aircraft) DurationDef:
+                    duration >= assigned[a];
+
+                // Probability that all aircraft retain planned landing times is at least alpha
+                // In each scenario s, all-keep event occurs iff every aircraft satisfies
+                // assigned[a] >= nominal[a] + delay[a][s]. We count that event (0/1) and take expectation.
+                Reliability:
+                    sum(s in Scenarios) prob[s] * (
+                    ( sum(a in Aircraft) ( assigned[a] >= nominal[a] + delay[a][s] ) ) == (sum(a in Aircraft) 1)
+                    ) >= alpha;
+
+                // Sanity: scenario probabilities sum to 1
+                ProbSumToOne:
+                    (sum(s in Scenarios) prob[s]) == 1;
+                }
+                """
+            data_code = """
+                Aircraft = { "A1", "A2", "A3", "A4" };
+                nbSlots = 6;
+                Scenarios = { "S1", "S2", "S3", "S4" };
+
+                // Feasible slots per aircraft (true = slot allowed)
+                feasible = [
+                "A1" [ true,  true,  true,  false, false, false ],
+                "A2" [ false, true,  true,  true,  false, false ],
+                "A3" [ false, false, true,  true,  true,  false ],
+                "A4" [ false, false, false, true,  true,  true  ]
+                ];
+
+                // Nominal planned slot indices
+                nominal = [
+                "A1" 1,
+                "A2" 2,
+                "A3" 3,
+                "A4" 4
+                ];
+
+                // Scenario probabilities (equally likely)
+                prob = [
+                "S1" 0.25,
+                "S2" 0.25,
+                "S3" 0.25,
+                "S4" 0.25
+                ];
+
+                // Delays per aircraft and scenario (slot units)
+                delay = [
+                "A1" [ 0, 1, 0, 2 ],
+                "A2" [ 0, 0, 1, 1 ],
+                "A3" [ 0, 1, 1, 2 ],
+                "A4" [ 0, 0, 1, 1 ]
+                ];
+
+                // Required reliability level
+                alpha = 0.5;
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_stochastic_vrp(self):
         """
         Test the two-stage stochastic VRP with time windows, a complex MILP with 3 customers, 2 vehicles, and 2 demand/travel scenarios.

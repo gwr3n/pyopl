@@ -3849,20 +3849,58 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         comparison_truth_cache = self._comparison_truth_cache
 
         def _comparison_key(node, env):
+            def _bound_key(part):
+                while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
+                    part = part.get("expression")
+                if not isinstance(part, dict):
+                    return ("lit", part)
+                node_type = part.get("type")
+                if node_type == "indexed_name":
+                    try:
+                        return ("indexed", self._multi_indexed_var_name(part, env))
+                    except Exception:
+                        return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
+                if node_type == "name":
+                    name = part.get("value")
+                    return ("name", env.get(name, name))
+                if node_type in ("number", "string_literal", "boolean_literal"):
+                    return (node_type, part.get("value"))
+                if node_type == "binop":
+                    return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
+                if node_type == "sum":
+                    local_iterators = {
+                        it.get("iterator")
+                        for it in (part.get("iterators") or [])
+                        if isinstance(it, dict) and it.get("iterator")
+                    }
+                    env_snapshot = tuple(
+                        sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+                    )
+                    return (
+                        "sum",
+                        str(part.get("iterators")),
+                        env_snapshot,
+                        _bound_key(part.get("expression")),
+                        _bound_key(part.get("index_constraint")),
+                    )
+                return (node_type, str(part))
+
             # Build structural key for a comparison binop (<=, >=, !=)
             op = node.get("op")
             left = node.get("left")
             right = node.get("right")
             # Normalize variable and constant ordering for symmetric ops (==, !=)
             if op in ("==", "!="):
-                # produce canonical string forms via eval dict keys order independent
-                return ("cmp", op, str(left), str(right)) if str(left) <= str(right) else ("cmp", op, str(right), str(left))
-            return ("cmp", op, str(left), str(right))
+                left_key = _bound_key(left)
+                right_key = _bound_key(right)
+                return ("cmp", op, left_key, right_key) if left_key <= right_key else ("cmp", op, right_key, left_key)
+            return ("cmp", op, _bound_key(left), _bound_key(right))
 
         def _comparison_truth_var(node, env):
             """Return a binary var name representing truth of a linear comparison (<=, >=, !=).
             Current implementation supports simple linear left/right expressions that _eval_expr can process.
             """
+            nonlocal ub_row_idx
             # nonlocal already declared at top of handle_constraint
             if not (
                 isinstance(node, dict)
@@ -3875,6 +3913,106 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if k in comparison_truth_cache:
                 return comparison_truth_cache[k]
             op = node.get("op")
+
+            def _local_unwrap_paren(expr_node):
+                while isinstance(expr_node, dict) and expr_node.get("type") == "parenthesized_expression":
+                    expr_node = expr_node.get("expression")
+                return expr_node
+
+            def _local_is_simple_comparison(expr_node):
+                return (
+                    isinstance(expr_node, dict)
+                    and expr_node.get("type") == "binop"
+                    and expr_node.get("op") in (">=", "<=", "==", ">", "<")
+                    and expr_node.get("sem_type") == "boolean"
+                )
+
+            def _ground_numeric_value(expr_node, env_local):
+                coef_dict, const_val = self._eval_expr(expr_node, dict(env_local))
+                if coef_dict:
+                    return None
+                if isinstance(const_val, bool):
+                    return 1.0 if const_val else 0.0
+                if isinstance(const_val, (int, float)):
+                    return float(const_val)
+                return None
+
+            def _sum_comparison_truth_vars(sum_node, env_local):
+                sum_node = _local_unwrap_paren(sum_node)
+                if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
+                    return None
+                inner_cmp = _local_unwrap_paren(sum_node.get("expression"))
+                if not _local_is_simple_comparison(inner_cmp):
+                    return None
+                iterators = sum_node.get("iterators", [])
+                loop_vars, loop_ranges = self._unroll_iterators(iterators)
+                z_names = []
+                for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
+                    env2 = dict(env_local)
+                    for var_name, value in zip(loop_vars, idx_tuple):
+                        env2[var_name] = value
+                    idx_constr = sum_node.get("index_constraint")
+                    if idx_constr is not None:
+                        cond_coef, cond_val = self._eval_expr(idx_constr, env2)
+                        if cond_coef or not bool(cond_val):
+                            continue
+                    comp_inst = {
+                        "type": "binop",
+                        "op": inner_cmp.get("op"),
+                        "left": inner_cmp.get("left"),
+                        "right": inner_cmp.get("right"),
+                        "sem_type": "boolean",
+                    }
+                    z_names.append(_comparison_truth_var(comp_inst, env2))
+                return z_names
+
+            if op == "==":
+                left_truths = _sum_comparison_truth_vars(node.get("left"), env)
+                right_truths = _sum_comparison_truth_vars(node.get("right"), env)
+                if left_truths is not None or right_truths is not None:
+                    z_names = left_truths if left_truths is not None else right_truths
+                    other_side = node.get("right") if left_truths is not None else node.get("left")
+                    k_value = _ground_numeric_value(other_side, env)
+                    if k_value is not None and abs(k_value - len(z_names)) < 1e-12:
+                        bname = f"cmp_flag_{len(comparison_truth_cache)}"
+                        self.var_names.append(bname)
+                        self.var_indices[bname] = len(self.var_names) - 1
+                        self.bounds.append([0, 1])
+                        if hasattr(self, "integrality"):
+                            self.integrality.append(1)
+                        else:
+                            self.integrality = [1]
+                        if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                            self.c.append(0.0)
+
+                        for z_name in z_names:
+                            row = [0.0] * len(self.var_names)
+                            row[self.var_indices[bname]] += 1.0
+                            row[self.var_indices[z_name]] -= 1.0
+                            for i, coef in enumerate(row):
+                                if abs(coef) > 1e-12:
+                                    A_ub_rows.append(ub_row_idx)
+                                    A_ub_cols.append(i)
+                                    A_ub_data.append(coef)
+                            b_ub.append(0.0)
+                            ub_row_idx += 1
+
+                        row = [0.0] * len(self.var_names)
+                        for z_name in z_names:
+                            row[self.var_indices[z_name]] += 1.0
+                        row[self.var_indices[bname]] -= 1.0
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(float(len(z_names) - 1))
+                        ub_row_idx += 1
+
+                        comparison_truth_cache[k] = bname
+                        self._add_code_line("# comparison truth var for conjunction of sum-comparisons")
+                        return bname
+
             # Evaluate both sides into dict form f(x) = lhs - rhs
             lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
             rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
@@ -3933,20 +4071,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 b_ub.append(rhs)
                 ub_row_idx += 1
 
-            def add_eq(row_coef_dict, rhs):
-                nonlocal eq_row_idx
-                row = [0.0] * len(self.var_names)
-                for vn, cf in row_coef_dict.items():
-                    if vn in self.var_indices:
-                        row[self.var_indices[vn]] += cf
-                for i, coef in enumerate(row):
-                    if abs(coef) > 1e-12:
-                        A_eq_rows.append(eq_row_idx)
-                        A_eq_cols.append(i)
-                        A_eq_data.append(coef)
-                b_eq.append(rhs)
-                eq_row_idx += 1
-
             # Build linear form value f = sum(cf*var) + expr_const.
             # For convenience treat expr_const by adding it to rhs.
             # Encode operations:
@@ -3972,9 +4096,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 row1[bname] = row1.get(bname, 0.0) + M
                 const1 = M - neg_const
                 add_ub(row1, const1)
-                row2 = {vn: -cf for vn, cf in neg_coef.items()}
-                row2[bname] = row2.get(bname, 0.0) + M
-                const2 = -neg_const - EPS
+                row2 = dict(expr_coef)
+                row2[bname] = row2.get(bname, 0.0) - M
+                const2 = -expr_const - EPS
                 add_ub(row2, const2)
             elif op == "!=":
                 # Generic numeric != encoding via two big-M inequalities (may be tightened later)
@@ -4006,8 +4130,49 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         def _bool_expr_var(node, env):
             nonlocal eq_row_idx, ub_row_idx
 
+            env_memo_key = (
+                id(node),
+                tuple(sorted((name, repr(value)) for name, value in (env or {}).items())),
+            )
+
             # Structural sharing: build a canonical key for subtree to reuse auxiliaries across constraints
             def struct_key(n):
+                def _bound_key(part):
+                    while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
+                        part = part.get("expression")
+                    if not isinstance(part, dict):
+                        return ("lit", part)
+                    node_type = part.get("type")
+                    if node_type == "indexed_name":
+                        try:
+                            return ("indexed", self._multi_indexed_var_name(part, env))
+                        except Exception:
+                            return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
+                    if node_type == "name":
+                        name = part.get("value")
+                        return ("name", env.get(name, name))
+                    if node_type in ("number", "string_literal", "boolean_literal"):
+                        return (node_type, part.get("value"))
+                    if node_type == "binop":
+                        return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
+                    if node_type == "sum":
+                        local_iterators = {
+                            it.get("iterator")
+                            for it in (part.get("iterators") or [])
+                            if isinstance(it, dict) and it.get("iterator")
+                        }
+                        env_snapshot = tuple(
+                            sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+                        )
+                        return (
+                            "sum",
+                            str(part.get("iterators")),
+                            env_snapshot,
+                            _bound_key(part.get("expression")),
+                            _bound_key(part.get("index_constraint")),
+                        )
+                    return (node_type, str(part))
+
                 # Unwrap any parenthesized_expression layers
                 while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
                     n = n.get("expression")
@@ -4073,23 +4238,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         if _is_bool_var(left) and _is_bool_composite(right):
                             return (
                                 "eq_link",
-                                str(left.get("value", left)),
+                                _bound_key(left),
                                 struct_key(right),
                             )
                         if _is_bool_var(right) and _is_bool_composite(left):
                             return (
                                 "eq_link",
-                                str(right.get("value", right)),
+                                _bound_key(right),
                                 struct_key(left),
                             )
-                    return ("cmp", n.get("op"), str(n.get("left")), str(n.get("right")))
+                    return ("cmp", n.get("op"), _bound_key(n.get("left")), _bound_key(n.get("right")))
                 return ("unknown", id(n))  # fallback prevents accidental merging
 
             sk = struct_key(node)
             if sk in subtree_var_cache:
                 return subtree_var_cache[sk]
-            if id(node) in expr_memo:
-                return expr_memo[id(node)]
+            if env_memo_key in expr_memo:
+                return expr_memo[env_memo_key]
             if not isinstance(node, dict):
                 raise SemanticError("Invalid boolean expr node (not a dict): {}".format(repr(node)))
             t = node.get("type")
@@ -4111,7 +4276,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 else:
                     logger.debug(f"[DEBUG] aux_var node already registered: {vname} (idx={self.var_indices[vname]})")
                 subtree_var_cache[sk] = vname
-                expr_memo[id(node)] = vname
+                expr_memo[env_memo_key] = vname
                 return vname
             # Unwrap parentheses early
             if t == "parenthesized_expression":
@@ -4193,7 +4358,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     b_ub.append(2.0)
                     ub_row_idx += 1
                     subtree_var_cache[sk] = z
-                    expr_memo[id(node)] = z
+                    expr_memo[env_memo_key] = z
                     return z
             # Continue with original binop logic for other ops
             if t == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
@@ -4257,21 +4422,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 b_eq.append(0.0)
                                 eq_row_idx += 1
                         subtree_var_cache[sk] = vname
-                        expr_memo[id(node)] = vname
+                        expr_memo[env_memo_key] = vname
                         return vname
                 # Fallback to generic comparison truth var
                 bcmp = _comparison_truth_var(node, env)
                 subtree_var_cache[sk] = bcmp
-                expr_memo[id(node)] = bcmp
+                expr_memo[env_memo_key] = bcmp
                 return bcmp
             if t == "constraint" and node.get("op") == "==":
                 vname, pol = _atomic_bool(node, env)
                 if pol == 1:
-                    expr_memo[id(node)] = vname
+                    expr_memo[env_memo_key] = vname
                     subtree_var_cache[sk] = vname
                     return vname
                 if vname in neg_cache:
-                    expr_memo[id(node)] = neg_cache[vname]
+                    expr_memo[env_memo_key] = neg_cache[vname]
                     subtree_var_cache[sk] = neg_cache[vname]
                     return neg_cache[vname]
                 z = _new_aux()
@@ -4286,7 +4451,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 b_eq.append(1.0)
                 eq_row_idx += 1
                 neg_cache[vname] = z
-                expr_memo[id(node)] = z
+                expr_memo[env_memo_key] = z
                 subtree_var_cache[sk] = z
                 return z
             if t == "not":
@@ -4313,7 +4478,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 sk = struct_key(node)
                 if sk in subtree_var_cache:
                     shared_aux = subtree_var_cache[sk]
-                    expr_memo[id(node)] = shared_aux
+                    expr_memo[env_memo_key] = shared_aux
                     # Tie all relevant variables to shared_aux
                     tie_vars = []
 
@@ -4425,7 +4590,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 left_v = _bool_expr_var(left_node, env)
                 right_v = _bool_expr_var(right_node, env)
                 if left_v == right_v:
-                    expr_memo[id(node)] = left_v
+                    expr_memo[env_memo_key] = left_v
                     subtree_var_cache[sk] = left_v
                     for var_node in tie_vars:
                         vname = (
@@ -4512,7 +4677,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             A_ub_data.append(coef)
                     b_ub.append(0.0)
                     ub_row_idx += 1
-                expr_memo[id(node)] = z
+                expr_memo[env_memo_key] = z
                 subtree_var_cache[sk] = z
                 for var_node in tie_vars:
                     vname = (
@@ -5663,6 +5828,99 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 left = constr["left"]
                 right = constr["right"]
                 op_sym_top = constr.get("op")
+
+                def _weighted_bool_sum_early(node):
+                    node = _unwrap_paren(node)
+                    if not (isinstance(node, dict) and node.get("type") == "sum"):
+                        return None
+                    inner = _unwrap_paren(node.get("expression"))
+                    if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
+                        return None
+
+                    def _is_composite_boolean(expr_node):
+                        return isinstance(expr_node, dict) and expr_node.get("type") not in ("name", "indexed_name")
+
+                    for weight_node, bool_node in (
+                        (inner.get("left"), inner.get("right")),
+                        (inner.get("right"), inner.get("left")),
+                    ):
+                        bool_node = _unwrap_paren(bool_node)
+                        if (
+                            isinstance(bool_node, dict)
+                            and bool_node.get("sem_type") == "boolean"
+                            and _is_composite_boolean(bool_node)
+                        ):
+                            return node, weight_node, bool_node
+                    return None
+
+                weighted_bool = _weighted_bool_sum_early(left)
+                rhs_coef_wb = None
+                rhs_const_wb = None
+                if weighted_bool is not None:
+                    try:
+                        rhs_coef_wb, rhs_const_wb = self._eval_expr(right, dict(env or {}))
+                    except Exception:
+                        rhs_coef_wb, rhs_const_wb = None, None
+                if (
+                    weighted_bool is not None
+                    and op_sym_top in (">=", "==", "<=", ">", "<")
+                    and rhs_coef_wb == {}
+                    and isinstance(rhs_const_wb, (int, float))
+                ):
+                    sum_node, weight_node, bool_node = weighted_bool
+                    rhs_value = float(rhs_const_wb)
+                    if op_sym_top == ">":
+                        rhs_value += 1e-9
+                    elif op_sym_top == "<":
+                        rhs_value -= 1e-9
+                    iterators = sum_node.get("iterators", [])
+                    loop_vars, loop_ranges = self._unroll_iterators(iterators)
+                    row = [0.0] * len(self.var_names)
+                    for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
+                        env2 = dict(env or {})
+                        for v, val in zip(loop_vars, idx_tuple):
+                            env2[v] = val
+                        idx_constr = sum_node.get("index_constraint")
+                        if idx_constr is not None:
+                            try:
+                                _, cond_val = self._eval_expr(idx_constr, env2)
+                                if not bool(cond_val):
+                                    continue
+                            except Exception:
+                                pass
+                        weight_coef, weight_const = self._eval_expr(weight_node, env2)
+                        if weight_coef or isinstance(weight_const, (str, tuple)):
+                            raise SemanticError("Weighted boolean sums require numeric weights")
+                        zvar = _bool_expr_var(bool_node, env2)
+                        if len(row) < len(self.var_names):
+                            row.extend([0.0] * (len(self.var_names) - len(row)))
+                        row[self.var_indices[zvar]] += float(weight_const)
+                    if op_sym_top in (">=", ">"):
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(-coef)
+                        b_ub.append(-rhs_value)
+                        ub_row_idx += 1
+                    elif op_sym_top in ("<=", "<"):
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(rhs_value)
+                        ub_row_idx += 1
+                    else:
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_eq_rows.append(eq_row_idx)
+                                A_eq_cols.append(i)
+                                A_eq_data.append(coef)
+                        b_eq.append(rhs_value)
+                        eq_row_idx += 1
+                    return
+
                 is_sum, inner_cmp, k_val, loop_vars, loop_ranges = _detect_sum_of_comparisons(left, right, op_sym_top)
                 if is_sum:
                     z_indices = []
@@ -6496,6 +6754,92 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # Allow parenthesized comparison inside sum
                     inner = _unwrap(inner)
                     return _is_comparison(inner)
+
+                def _weighted_bool_sum(node):
+                    if not (isinstance(node, dict) and node.get("type") == "sum"):
+                        return None
+                    inner = _unwrap(node.get("expression"))
+                    if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
+                        return None
+
+                    def _is_composite_boolean(expr_node):
+                        return isinstance(expr_node, dict) and expr_node.get("type") not in ("name", "indexed_name")
+
+                    candidates = ((inner.get("left"), inner.get("right")), (inner.get("right"), inner.get("left")))
+                    for weight_node, bool_node in candidates:
+                        bool_unwrapped = _unwrap(bool_node)
+                        if (
+                            isinstance(bool_unwrapped, dict)
+                            and bool_unwrapped.get("sem_type") == "boolean"
+                            and _is_composite_boolean(bool_unwrapped)
+                        ):
+                            return node, weight_node, bool_unwrapped
+                    return None
+
+                weighted_bool = _weighted_bool_sum(left)
+                if (
+                    constr.get("op") in (">=", "==", "<=", ">", "<")
+                    and weighted_bool is not None
+                    and isinstance(right, dict)
+                    and right.get("type") == "number"
+                ):
+                    sum_node, weight_node, bool_node = weighted_bool
+                    rhs_value = float(right.get("value"))
+                    if constr.get("op") == ">":
+                        rhs_value += 1e-9
+                    if constr.get("op") == "<":
+                        rhs_value -= 1e-9
+                    iterators = sum_node.get("iterators", [])
+                    try:
+                        loop_vars, loop_ranges = self._unroll_iterators(iterators)
+                    except SemanticError:
+                        loop_vars, loop_ranges = [], []
+                    row = [0.0] * len(self.var_names)
+                    for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
+                        env2 = dict(env or {})
+                        for v, val in zip(loop_vars, idx_tuple):
+                            env2[v] = val
+                        idx_constr = sum_node.get("index_constraint")
+                        should_include = True
+                        if idx_constr is not None:
+                            try:
+                                _, cval = self._eval_expr(idx_constr, env2)
+                                should_include = bool(cval)
+                            except Exception:
+                                should_include = True
+                        if not should_include:
+                            continue
+                        weight_coef, weight_const = self._eval_expr(weight_node, env2)
+                        if weight_coef or isinstance(weight_const, (str, tuple)):
+                            raise SemanticError("Weighted boolean sums require numeric weights")
+                        coeff = float(weight_const)
+                        zvar = _bool_expr_var(bool_node, env2)
+                        row[self.var_indices[zvar]] += coeff
+                    if constr.get("op") in (">=", ">"):
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(-coef)
+                        b_ub.append(-rhs_value)
+                        ub_row_idx += 1
+                    elif constr.get("op") in ("<=", "<"):
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(rhs_value)
+                        ub_row_idx += 1
+                    else:
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_eq_rows.append(eq_row_idx)
+                                A_eq_cols.append(i)
+                                A_eq_data.append(coef)
+                        b_eq.append(rhs_value)
+                        eq_row_idx += 1
+                    return
 
                 # Case 1: Direct cardinality constraint: sum(...) op k
                 if (
