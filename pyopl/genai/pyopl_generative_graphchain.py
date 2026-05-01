@@ -592,8 +592,8 @@ class GraphChainExecutor:
             refinement_iteration += 1
             # loop continues; next iteration re-checks syntax
 
-        # Track final iteration count for statistics (number of revision cycles completed)
-        context.iteration = refinement_iteration - 1
+        # Track final iteration count for statistics (number of attempts performed)
+        context.iteration = refinement_iteration
 
         # Step 3: Final assessment (if needed)
         # Run final assessment if:
