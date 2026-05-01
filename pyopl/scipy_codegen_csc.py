@@ -6662,7 +6662,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # --- Reified equality of a declared boolean variable and a general boolean expression ---
                 # Pattern: b == (bool_expr) where bool_expr may include comparisons (<=,>=,==,!=) and/or logical operators.
                 # We attempt both orientations (expression on left or right). Falls through silently if expression unsupported.
-                if constr.get("op") == "==":
+                if constr.get("op") in ("==", "<=", ">="):
 
                     def _is_bool_dvar(n):
                         return (
@@ -6678,6 +6678,34 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                     left_is_bool = _is_bool_dvar(left)
                     right_is_bool = _is_bool_dvar(right)
+                    rel_op = constr.get("op")
+
+                    def _emit_bool_relation(lhs_var, rhs_var):
+                        row = [0.0] * len(self.var_names)
+                        if rel_op == "==":
+                            row[self.var_indices[lhs_var]] = 1.0
+                            row[self.var_indices[rhs_var]] -= 1.0
+                            for i, coef in enumerate(row):
+                                if abs(coef) > 1e-12:
+                                    A_eq_rows.append(eq_row_idx)
+                                    A_eq_cols.append(i)
+                                    A_eq_data.append(coef)
+                            b_eq.append(0.0)
+                            return "eq"
+                        if rel_op == "<=":
+                            row[self.var_indices[lhs_var]] = 1.0
+                            row[self.var_indices[rhs_var]] -= 1.0
+                        else:  # >=
+                            row[self.var_indices[lhs_var]] = -1.0
+                            row[self.var_indices[rhs_var]] += 1.0
+                        for i, coef in enumerate(row):
+                            if abs(coef) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(coef)
+                        b_ub.append(0.0)
+                        return "ub"
+
                     # Try b == expr
                     if left_is_bool and not right_is_bool:
                         try:
@@ -6688,16 +6716,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             expr_var = _bool_expr_var(rr, env)
                             vname = left["value"] if left.get("type") == "name" else self._multi_indexed_var_name(left, env)
                             if expr_var != vname:
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[vname]] = 1.0
-                                row[self.var_indices[expr_var]] -= 1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
+                                target = _emit_bool_relation(vname, expr_var)
+                                if target == "eq":
+                                    eq_row_idx += 1
+                                else:
+                                    ub_row_idx += 1
                             return
                         except SemanticError:
                             pass
@@ -6710,16 +6733,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             expr_var = _bool_expr_var(ll, env)
                             vname = right["value"] if right.get("type") == "name" else self._multi_indexed_var_name(right, env)
                             if expr_var != vname:
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[vname]] = 1.0
-                                row[self.var_indices[expr_var]] -= 1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
+                                target = _emit_bool_relation(expr_var, vname)
+                                if target == "eq":
+                                    eq_row_idx += 1
+                                else:
+                                    ub_row_idx += 1
                             return
                         except SemanticError:
                             pass
@@ -6867,66 +6885,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         env2 = dict(env or {})
                         for v, val in zip(loop_vars, idx_tuple):
                             env2[v] = val
-                        # Clone comparison node substituting iterator variables in a shallow way via evaluation
-                        comp = comp_proto.copy()
-                        # We rely on _eval_expr later; here we just build linearization rows
-                        z_name = self._ensure_aux_binary("cmp_aux")
-                        if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                            self.c.append(0.0)
-                        # Compute diff bounds via big-M routine
-                        M = self._big_m_for_comparison(
-                            {
-                                "left": comp.get("left"),
-                                "right": comp.get("right"),
-                                "op": comp.get("op"),
-                            },
-                            env=env2,
-                        )
-                        # Build diff = (lhs - rhs)
-                        coef_lhs, const_lhs = self._eval_expr(comp.get("left"), env2)
-                        rhs_node = comp.get("right")
-                        if isinstance(rhs_node, dict):
-                            coef_rhs, const_rhs = self._eval_expr(rhs_node, env2)
-                        else:
-                            coef_rhs, const_rhs = (
-                                {},
-                                rhs_node if isinstance(rhs_node, (int, float)) else 0.0,
-                            )
-                        diff_coef = dict(coef_lhs)
-                        for vn, cf in coef_rhs.items():
-                            diff_coef[vn] = diff_coef.get(vn, 0.0) - cf
-                        diff_const = const_lhs - const_rhs
-                        # Constraints encoding z = 1 iff diff >= 0 using bounds [-M, M]
-                        # 1) diff + M*(1 - z) >= 0  -> -(diff + M*(1 - z)) <= 0
-                        row1 = [0.0] * len(self.var_names)
-                        for vn, cf in diff_coef.items():
-                            if vn in self.var_indices:
-                                row1[self.var_indices[vn]] -= cf  # multiply by -1 for <= form
-                        row1[
-                            self.var_indices[z_name]
-                        ] += M  # -diff + M*z + M*(?) but we used form -(diff + M - M*z) <= 0 -> -diff - M + M*z <=0 -> add constant by adjusting rhs
-                        # Row represents -diff - M + M*z <= 0  => -diff + M*z <= M
-                        for i, coef in enumerate(row1):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(M - diff_const)
-                        ub_row_idx += 1
-                        # 2) diff - (M+1)*z <= -1  (forces diff <= -1 when z=0, allows diff up to M when z=1)
-                        row2 = [0.0] * len(self.var_names)
-                        for vn, cf in diff_coef.items():
-                            if vn in self.var_indices:
-                                row2[self.var_indices[vn]] += cf
-                        row2[self.var_indices[z_name]] -= M + 1
-                        for i, coef in enumerate(row2):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(-1 - diff_const)
-                        ub_row_idx += 1
-                        z_vars.append(z_name)
+                        z_vars.append(_bool_expr_var(comp_proto, env2))
                     # Now apply cardinality constraint on z_vars
                     if constr.get("op") in (">=", ">"):
                         # -sum z_i <= -k
@@ -7000,57 +6959,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             env2 = dict(env or {})
                             for v, val in zip(loop_vars, idx_tuple):
                                 env2[v] = val
-                            comp = comp_proto.copy()
-                            z_name = self._ensure_aux_binary("cmp_aux")
-                            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                                self.c.append(0.0)
-                            M = self._big_m_for_comparison(
-                                {
-                                    "left": comp.get("left"),
-                                    "right": comp.get("right"),
-                                    "op": comp.get("op"),
-                                },
-                                env=env2,
-                            )
-                            coef_lhs, const_lhs = self._eval_expr(comp.get("left"), env2)
-                            rhs_node = comp.get("right")
-                            if isinstance(rhs_node, dict):
-                                coef_rhs, const_rhs = self._eval_expr(rhs_node, env2)
-                            else:
-                                coef_rhs, const_rhs = (
-                                    {},
-                                    (rhs_node if isinstance(rhs_node, (int, float)) else 0.0),
-                                )
-                            diff_coef = dict(coef_lhs)
-                            for vn, cf in coef_rhs.items():
-                                diff_coef[vn] = diff_coef.get(vn, 0.0) - cf
-                            diff_const = const_lhs - const_rhs
-                            # Two inequalities linking diff and z
-                            row1 = [0.0] * len(self.var_names)
-                            for vn, cf in diff_coef.items():
-                                if vn in self.var_indices:
-                                    row1[self.var_indices[vn]] -= cf
-                            row1[self.var_indices[z_name]] += M
-                            for i, coef in enumerate(row1):
-                                if abs(coef) > 1e-12:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(coef)
-                            b_ub.append(M - diff_const)
-                            ub_row_idx += 1
-                            row2 = [0.0] * len(self.var_names)
-                            for vn, cf in diff_coef.items():
-                                if vn in self.var_indices:
-                                    row2[self.var_indices[vn]] += cf
-                            row2[self.var_indices[z_name]] -= M + 1
-                            for i, coef in enumerate(row2):
-                                if abs(coef) > 1e-12:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(coef)
-                            b_ub.append(-1 - diff_const)
-                            ub_row_idx += 1
-                            z_vars.append(z_name)
+                            z_vars.append(_bool_expr_var(comp_proto, env2))
                         # Cardinality reification b == (sum z_i >= k)
                         # Retrieve/ensure boolean variable index
                         b_vname = (

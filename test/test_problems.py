@@ -30,6 +30,209 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_job_shop_scheduling_2(self):
+        """
+        Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                // Stochastic Here-and-Now Job Shop Scheduling (3 jobs, 3 machines, 4 scenarios)
+                // Decisions: single start time per operation (same across scenarios) and machine sequencing.
+                // Objective: minimize expected makespan over scenarios.
+                // Service-level: probability that all jobs meet due dates >= 0.25.
+
+                // -------------------------------
+                // Indices, sets, and ranges
+                // -------------------------------
+                int nbJobs = ...;                  // number of jobs (3)
+                int nbMachines = ...;              // number of machines (3)
+                int K = 3;                         // operations per job (fixed at 3)
+                range Jobs = 1..nbJobs;            // job indices
+                range Machines = 1..nbMachines;    // machine indices
+                range Ops = 1..K;                  // operation positions within a job
+                {string} Scenarios;                // scenario labels
+
+                // -------------------------------
+                // Parameters (data)
+                // -------------------------------
+                param float prob[Scenarios] = ...;           // scenario probabilities (sum to 1)
+                param int due[Jobs] = ...;                   // due dates per job
+
+                // Routing: route[j][k] = machine used by job j at operation position k (1..K)
+                param int route[Jobs][Ops] = ...;
+
+                // Processing times: p[s][j][k] = duration of operation k of job j in scenario s
+                param int p[Scenarios][Jobs][Ops] = ...;
+
+                // Global worst-case durations, used to derive a safe disjunctive Big-M.
+                // A machine-local M is not sufficient because the relaxed branch may need to absorb
+                // waiting caused by earlier operations on other machines in the route.
+                param int pmax[j in Jobs][k in Ops] = max(s in Scenarios) ( p[s][j][k] );
+
+                // Safe global Big-M for no-overlap disjunctions
+                param int M = sum(j in Jobs, k in Ops) pmax[j][k];
+
+                // A conservative horizon upper bound H for starts and makespans
+                param int H = sum(j in Jobs, k in Ops) ( max(s in Scenarios) ( p[s][j][k] ) );
+
+                // -------------------------------
+                // Decision variables (here-and-now starts; common across scenarios)
+                // -------------------------------
+                // start[j][k] = start time of operation k of job j (nonnegative integer time)
+                dvar int+ start[Jobs][Ops];
+
+                // z[j1][j2][m] = 1 if, on machine m, job j2's operation precedes job j1's operation (j1 != j2)
+                // Declared over all ordered pairs; antisymmetry ties opposite directions.
+                dvar boolean z[Jobs][Jobs][Machines];
+
+                // Scenario-specific makespan variable (for objective aggregation)
+                dvar int+ Cmax[Scenarios];
+
+                // Scenario satisfaction indicator: 1 if all jobs meet due dates in scenario s; 0 otherwise
+                dvar boolean sat[Scenarios];
+
+                // -------------------------------
+                // Objective: minimize expected makespan
+                // -------------------------------
+                minimize ExpectedMakespan = sum(s in Scenarios) prob[s] * Cmax[s];
+
+                // -------------------------------
+                // Constraints
+                // -------------------------------
+                subject to {
+                // Start and makespan upper bounds (tightening)
+                forall(j in Jobs, k in Ops) StartUB: start[j][k] <= H;
+                forall(s in Scenarios)      CmaxUB:  Cmax[s]     <= H;
+
+                // Within-job precedence: operation k+1 starts after completion of k (scenario-wise durations)
+                forall(s in Scenarios, j in Jobs, k in 1..K-1)
+                    Precedence: start[j][k+1] >= start[j][k] + p[s][j][k];
+
+                // Machine capacity (no-overlap) with here-and-now sequencing, enforced for all scenarios.
+                // For each machine m and each unordered job pair {j1,j2}, exactly one precedes the other.
+                forall(m in Machines, j1 in Jobs, j2 in Jobs : j1 < j2) {
+                    AntiSymm: z[j1][j2][m] + z[j2][j1][m] == 1;
+                }
+                // Disjunctive no-overlap using boolean masks to select the unique op on machine m for each job
+                forall(s in Scenarios, m in Machines, j1 in Jobs, j2 in Jobs : j1 < j2) {
+                    NoOverlap_1:
+                    sum(k1 in Ops) (route[j1][k1] == m) * ( start[j1][k1] + p[s][j1][k1] )
+                        <= sum(k2 in Ops) (route[j2][k2] == m) * start[j2][k2] + M * z[j1][j2][m];
+                    NoOverlap_2:
+                    sum(k2 in Ops) (route[j2][k2] == m) * ( start[j2][k2] + p[s][j2][k2] )
+                        <= sum(k1 in Ops) (route[j1][k1] == m) * start[j1][k1] + M * (1 - z[j1][j2][m]);
+                }
+
+                // Makespan linking: Cmax[s] is at least each job's completion time (its 3rd operation)
+                forall(s in Scenarios, j in Jobs)
+                    MakespanLink: Cmax[s] >= start[j][3] + p[s][j][3];
+
+                // Service-level satisfaction logic per scenario:
+                // sat[s] == 1 only if all jobs meet due dates in scenario s; and if all meet, sat[s] must be 1.
+                forall(s in Scenarios, j in Jobs)
+                    SatUpper: sat[s] <= ( start[j][3] + p[s][j][3] <= due[j] );
+                forall(s in Scenarios)
+                    SatLower: sat[s] >= sum(j in Jobs) ( start[j][3] + p[s][j][3] <= due[j] ) - (nbJobs - 1);
+
+                // Required probability of satisfactory scenarios
+                ServiceLevel: sum(s in Scenarios) prob[s] * sat[s] >= 0.25;
+
+                // Probability normalization (ground check)
+                ProbSumToOne: (sum(s in Scenarios) prob[s]) == 1;
+                }
+                """
+            data_code = """
+                nbJobs = 3;
+                nbMachines = 3;
+
+                Scenarios = { "S1", "S2", "S3", "S4" };
+
+                // Scenario probabilities
+                prob = [
+                "S1" 0.25,
+                "S2" 0.25,
+                "S3" 0.10,
+                "S4" 0.40
+                ];
+
+                // Due dates per job (J1, J2, J3)
+                due = [15, 21, 21];
+
+                // Routing: route[j][k] = machine used by job j at operation k
+                // J1: M1 -> M2 -> M3
+                // J2: M2 -> M1 -> M3
+                // J3: M1 -> M3 -> M2
+                route = [
+                [1, 2, 3],
+                [2, 1, 3],
+                [1, 3, 2]
+                ];
+
+                // Processing times p[s][j][k] per scenario s
+                // Scenario 1 (0.25):
+                //   J1: [3,2,4]; J2: [2,4,3]; J3: [4,3,2]
+                // Scenario 2 (0.25):
+                //   J1: [4,3,5]; J2: [5,4,4]; J3: [5,3,3]
+                // Scenario 3 (0.10):
+                //   J1: [3,2,4]; J2: [4,6,4]; J3: [4,4,2]
+                // Scenario 4 (0.40):
+                //   J1: [5,3,6]; J2: [4,5,4]; J3: [6,4,3]
+                p = [
+                "S1" [ [3, 2, 4], [2, 4, 3], [4, 3, 2] ],
+                "S2" [ [4, 3, 5], [5, 4, 4], [5, 3, 3] ],
+                "S3" [ [3, 2, 4], [4, 6, 4], [4, 4, 2] ],
+                "S4" [ [5, 3, 6], [4, 5, 4], [6, 4, 3] ]
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_stochastic_job_shop_scheduling(self):
         """
         Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.

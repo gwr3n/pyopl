@@ -2225,19 +2225,19 @@ class GurobiCodeGenerator:
                 return False
             return decl is not None and decl.get("var_type") == "boolean"
 
-        if op == "==" and _is_bool_dvar_node(left_node) and _is_comparison(R):
+        if op in ("==", "<=", ">=") and _is_bool_dvar_node(left_node) and _is_comparison(R):
             bool_var = self._traverse_expression(left_node, current_iterators)
             comp_var = self._reify_scoped_comparison(R, current_iterators)
             self._add_code_line(
-                f"model.addConstr({bool_var} == {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
+                f"model.addConstr({bool_var} {op} {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
             )
             return
 
-        if op == "==" and _is_bool_dvar_node(right_node) and _is_comparison(L):
+        if op in ("==", "<=", ">=") and _is_bool_dvar_node(right_node) and _is_comparison(L):
             bool_var = self._traverse_expression(right_node, current_iterators)
             comp_var = self._reify_scoped_comparison(L, current_iterators)
             self._add_code_line(
-                f"model.addConstr({bool_var} == {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
+                f"model.addConstr({comp_var} {op} {bool_var}, name={self._format_name_expr(constr_name_prefix)})"
             )
             return
 
@@ -2541,10 +2541,13 @@ class GurobiCodeGenerator:
             cond_str = self._emit_index_condition(index_constraint, new_iterators)
             self._add_code_line(f"if {cond_str}:")
             self.indent_level += 1
+        previous_materialized_loop_depth = getattr(self, "_materialized_loop_depth", 0)
+        self._materialized_loop_depth = previous_materialized_loop_depth + 1
         try:
             # Emit body
             self._emit_forall_inner_constraints(constraint_node, constr_name_prefix, loop_vars, new_iterators)
         finally:
+            self._materialized_loop_depth = previous_materialized_loop_depth
             self._active_iterator_ranges = previous_active_ranges
         if index_constraint is not None:
             self.indent_level -= 1
@@ -2986,24 +2989,21 @@ class GurobiCodeGenerator:
         ):
             return self._traverse_expression(comp_node, current_iterators)
 
-        scope_vars, scope_ranges = self._active_scope_iterators(current_iterators)
-        cache = getattr(self, "_comparison_expr_meta", {})
-        cache_key = (id(comp_node), tuple(scope_vars))
-        if cache_key in cache:
-            return self._comparison_expr_accessor(cache[cache_key], current_iterators)
+        if not self._expr_depends_on_decision_var(comp_node):
+            cond_expr = self._emit_index_condition(comp_node, current_iterators)
+            return f"(1 if ({cond_expr}) else 0)"
 
         if not hasattr(self, "_comparison_expr_counter"):
             self._comparison_expr_counter = 0
         self._comparison_expr_counter += 1
         aux_name = f"_cmp_expr_{self._comparison_expr_counter}"
-        meta = {"name": aux_name, "scope_vars": tuple(scope_vars)}
-        cache[cache_key] = meta
-        self._comparison_expr_meta = cache
+        scope_vars, scope_ranges = self._active_scope_iterators(current_iterators)
+        in_materialized_loop = getattr(self, "_materialized_loop_depth", 0) > 0
 
         left_node = comp_node["left"]
         right_node = comp_node["right"]
         op = comp_node["op"]
-        if scope_vars:
+        if scope_vars and not in_materialized_loop:
             self._add_code_line(f"{aux_name} = {{}}")
             if len(scope_vars) == 1:
                 outer_loop_header = f"for {scope_vars[0]} in {scope_ranges[0]}:"
@@ -3029,13 +3029,15 @@ class GurobiCodeGenerator:
             for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_ref).split("\n"):
                 self._add_code_line(line)
             self.indent_level -= 1
-        else:
-            self._add_code_line(f"{aux_name} = model.addVar(vtype=GRB.BINARY)")
-            left_expr = self._traverse_expression(left_node, current_iterators)
-            right_expr = self._traverse_expression(right_node, current_iterators)
-            for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_name).split("\n"):
-                self._add_code_line(line)
-        return self._comparison_expr_accessor(meta, current_iterators)
+            key_expr = self._format_scope_key_expr(scope_vars, current_iterators)
+            return f"{aux_name}[{key_expr}]"
+
+        self._add_code_line(f"{aux_name} = model.addVar(vtype=GRB.BINARY)")
+        left_expr = self._traverse_expression(left_node, current_iterators)
+        right_expr = self._traverse_expression(right_node, current_iterators)
+        for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_name).split("\n"):
+            self._add_code_line(line)
+        return aux_name
 
     def _expr_sum(self, expr_node, current_iterators, symbolic):
         iterators = expr_node["iterators"]
@@ -3370,6 +3372,40 @@ class GurobiCodeGenerator:
             if d.get("name") == name and (types is None or d.get("type") in types):
                 return d
         return None
+
+    def _expr_depends_on_decision_var(self, node):
+        if not isinstance(node, dict):
+            return False
+        node_type = node.get("type")
+        if node_type == "name":
+            decl = self._find_declaration_by_name(node.get("value"))
+            return decl is not None and decl.get("type") in ("dvar", "dvar_indexed")
+        if node_type == "indexed_name":
+            decl = self._find_declaration_by_name(node.get("name"))
+            return decl is not None and decl.get("type") in ("dvar", "dvar_indexed")
+        if node_type == "field_access":
+            return self._expr_depends_on_decision_var(node.get("base"))
+        if node_type == "parenthesized_expression":
+            return self._expr_depends_on_decision_var(node.get("expression"))
+        if node_type in ("binop", "constraint", "and", "or"):
+            return self._expr_depends_on_decision_var(node.get("left")) or self._expr_depends_on_decision_var(
+                node.get("right")
+            )
+        if node_type in ("not", "uminus"):
+            return self._expr_depends_on_decision_var(node.get("value"))
+        if node_type == "conditional":
+            return (
+                self._expr_depends_on_decision_var(node.get("condition"))
+                or self._expr_depends_on_decision_var(node.get("then"))
+                or self._expr_depends_on_decision_var(node.get("else"))
+            )
+        if node_type in ("sum", "min_agg", "max_agg"):
+            return self._expr_depends_on_decision_var(node.get("expression")) or self._expr_depends_on_decision_var(
+                node.get("index_constraint")
+            )
+        if node_type == "tuple_literal":
+            return any(self._expr_depends_on_decision_var(el) for el in node.get("elements", []))
+        return False
 
     def _emit_range_from_declaration(self, name, current_iterators, symbolic):
         """
