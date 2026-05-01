@@ -30,6 +30,291 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_stochastic_vrp(self):
+        """
+        Test the two-stage stochastic VRP with time windows, a complex MILP with 3 customers, 2 vehicles, and 2 demand/travel scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                /*
+                Stochastic VRP with Time Windows (2-stage):
+                - Stage 1: Choose common vehicle routes (x) across all scenarios.
+                - Stage 2 (per scenario): choose which routed vehicle serves each customer (serve), delivered quantities (deliv), start times (time), and cumulative carried load (load).
+                - Objective: deterministic routing cost + expected penalty for unmet demand.
+
+                Sets and indices:
+                - Nodes = {0..N} with 0 as depot, Customers = {1..N}.
+                - Vehicles = {1..nbVeh}.
+                - Scenarios = a typed set of strings, e.g., {"S1","S2"}.
+
+                Key data:
+                - cost[i][j]: deterministic routing cost.
+                - travel[s][i][j]: scenario-dependent travel times.
+                - dem[s][i]: scenario-dependent customer demand.
+                - s_time[i]: service time at customer i.
+                - tw_open[i], tw_close[i]: time window at customer i.
+                - cap: vehicle capacity; H: time horizon; penalty; prob[s]: scenario probability.
+
+                Decisions:
+                - x[v][i][j] ∈ {0,1}: vehicle v uses arc i->j in the common route (i != j).
+                - serve[v][i][s] ∈ {0,1}: in scenario s, vehicle v serves customer i (only if i on v's route).
+                - deliv[v][i][s] ≥ 0: quantity delivered by v to i in scenario s.
+                - unmet[i][s] ≥ 0: unmet demand at i in scenario s (penalized).
+                - time[v][n][s] ≥ 0: service start time of vehicle v at node n in scenario s.
+                - load[v][n][s] ≥ 0: cumulative delivered load carried by v upon arrival at node n (prefix sum) in scenario s.
+
+                Operational rules encoded:
+                - No self-loops; depot depart/return at most once per vehicle and iff; at most one entry and one exit of each customer overall; per-vehicle flow conservation at customers to avoid disconnected cycles (reinforced by time propagation).
+                - Serving allowed only if routed; at most one vehicle serves a customer per scenario; if served then full demand is delivered (via unmet linkage), otherwise unmet is allowed (penalized).
+                - Time windows enforced only if served; time propagation along used arcs with scenario travel times and conditional service times.
+                - Load propagation ensures per-vehicle delivered total along its route never exceeds capacity.
+                */
+
+                // --------------------
+                // Sets and ranges
+                // --------------------
+                int N = ...;                         // number of customers (customers are 1..N, depot is 0)
+                range Nodes = 0..N;                  // 0 is depot
+                range Customers = 1..N;              // customers
+
+                int nbVeh = ...;                     // number of vehicles
+                range Vehicles = 1..nbVeh;           // vehicles
+
+                {string} Scenarios = ...;            // scenario labels
+
+                // --------------------
+                // Parameters (data)
+                // --------------------
+                param float cost[Nodes][Nodes] = ...;                  // deterministic routing costs
+                param float travel[Scenarios][Nodes][Nodes] = ...;     // scenario travel times
+                param float prob[Scenarios] = ...;                     // scenario probabilities
+                param float dem[Scenarios][Customers] = ...;           // scenario demands at customers
+                param float s_time[Customers] = ...;                   // service times at customers
+                param float tw_open[Customers] = ...;                  // earliest service start
+                param float tw_close[Customers] = ...;                 // latest service start
+                param float cap = ...;                                 // vehicle capacity
+                param float penalty = ...;                             // penalty per unit unmet
+                param float H = ...;                                   // time horizon (Big-M for time)
+
+                // --------------------
+                // Decision variables
+                // --------------------
+                dvar boolean x[Vehicles][Nodes][Nodes];                // route design (stage 1, common)
+                dvar boolean serve[Vehicles][Customers][Scenarios];    // serve decision (stage 2)
+                dvar float+ deliv[Vehicles][Customers][Scenarios];     // delivered quantity (stage 2)
+                dvar float+ unmet[Customers][Scenarios];               // unmet demand (stage 2)
+
+                dvar float+ time[Vehicles][Nodes][Scenarios];          // service start times (stage 2)
+                dvar float+ load[Vehicles][Nodes][Scenarios];          // cumulative delivered load (stage 2)
+
+                // --------------------
+                // Objective: routing cost + expected penalty
+                // --------------------
+                minimize TotalCost:
+                    // deterministic routing cost
+                    sum(v in Vehicles, i in Nodes, j in Nodes: i != j) cost[i][j] * x[v][i][j]
+                + // expected unmet demand penalty
+                    sum(s in Scenarios) prob[s] * ( penalty * sum(i in Customers) unmet[i][s] );
+
+                subject to {
+                // --------------------
+                // Route design constraints (common across scenarios)
+                // --------------------
+                // No self-loops
+                forall(v in Vehicles, i in Nodes)
+                    x[v][i][i] == 0;
+
+                // Depot departure/return per vehicle: at most once and iff
+                forall(v in Vehicles) {
+                    sum(j in Customers) x[v][0][j] <= 1;
+                    sum(i in Customers) x[v][i][0] <= 1;
+                    sum(j in Customers) x[v][0][j] == sum(i in Customers) x[v][i][0];
+                }
+
+                // Total depot departures cannot exceed number of vehicles
+                sum(v in Vehicles, j in Customers) x[v][0][j] <= nbVeh;
+
+                // Per-vehicle flow conservation at customers (in-degree = out-degree per vehicle)
+                forall(v in Vehicles, i in Customers)
+                    sum(j in Nodes: j != i) x[v][i][j] == sum(j in Nodes: j != i) x[v][j][i];
+
+                // Across all vehicles: each customer entered at most once and exited at most once, and totals match
+                forall(i in Customers) {
+                    sum(v in Vehicles, j in Nodes: j != i) x[v][j][i] <= 1;    // at most one entry overall
+                    sum(v in Vehicles, j in Nodes: j != i) x[v][i][j] <= 1;    // at most one exit overall
+                    sum(v in Vehicles, j in Nodes: j != i) x[v][i][j] == sum(v in Vehicles, j in Nodes: j != i) x[v][j][i];
+                }
+
+                // --------------------
+                // Serve and delivery linking (per scenario)
+                // --------------------
+                // Serving allowed only if node lies on vehicle's route (both an in and an out on that vehicle)
+                forall(s in Scenarios, v in Vehicles, i in Customers) {
+                    serve[v][i][s] <= sum(j in Nodes: j != i) x[v][i][j];
+                    serve[v][i][s] <= sum(j in Nodes: j != i) x[v][j][i];
+                }
+
+                // At most one vehicle serves any customer per scenario
+                forall(s in Scenarios, i in Customers)
+                    sum(v in Vehicles) serve[v][i][s] <= 1;
+
+                // Delivery bounds and demand balance
+                forall(s in Scenarios, v in Vehicles, i in Customers)
+                    deliv[v][i][s] <= dem[s][i] * serve[v][i][s];          // no delivery unless served; cannot exceed demand
+
+                // If served, full demand is delivered; otherwise unmet allowed
+                forall(s in Scenarios, i in Customers) {
+                    sum(v in Vehicles) deliv[v][i][s] + unmet[i][s] == dem[s][i];
+                    unmet[i][s] <= dem[s][i] * (1 - sum(v in Vehicles) serve[v][i][s]);
+                }
+
+                // --------------------
+                // Time window and propagation (per scenario)
+                // --------------------
+                // Depot time anchor
+                forall(v in Vehicles, s in Scenarios)
+                    time[v][0][s] == 0;
+
+                // Upper bound times by horizon (for stability and Big-M)
+                forall(v in Vehicles, s in Scenarios, n in Nodes)
+                    time[v][n][s] <= H;
+
+                // Time propagation from depot to first visited customer
+                forall(v in Vehicles, s in Scenarios, j in Customers)
+                    time[v][j][s] >= time[v][0][s] + travel[s][0][j] - H * (1 - x[v][0][j]);
+
+                // Time propagation between customers; service time only if served at predecessor
+                forall(v in Vehicles, s in Scenarios, i in Customers, j in Customers: i != j)
+                    time[v][j][s] >= time[v][i][s] + s_time[i] * serve[v][i][s] + travel[s][i][j] - H * (1 - x[v][i][j]);
+
+                // Time windows enforced only when served
+                forall(v in Vehicles, s in Scenarios, i in Customers) {
+                    time[v][i][s] >= tw_open[i] * serve[v][i][s];
+                    time[v][i][s] <= tw_close[i] + H * (1 - serve[v][i][s]);
+                }
+
+                // --------------------
+                // Load propagation and capacity (per scenario)
+                // --------------------
+                // Depot load anchor
+                forall(v in Vehicles, s in Scenarios)
+                    load[v][0][s] == 0;
+
+                // Capacity bounds
+                forall(v in Vehicles, s in Scenarios, n in Nodes)
+                    load[v][n][s] <= cap;
+
+                // Load propagation from depot to first customer
+                forall(v in Vehicles, s in Scenarios, j in Customers)
+                    load[v][j][s] >= load[v][0][s] + deliv[v][j][s] - cap * (1 - x[v][0][j]);
+
+                // Load propagation between customers: cumulative delivered load (prefix sum)
+                forall(v in Vehicles, s in Scenarios, i in Customers, j in Customers: i != j)
+                    load[v][j][s] >= load[v][i][s] + deliv[v][j][s] - cap * (1 - x[v][i][j]);
+                }
+                """
+            data_code = """
+                N = 3;
+                nbVeh = 2;
+                Scenarios = { "S1", "S2" };
+
+                # Deterministic routing costs (nodes 0..3)
+                cost = [
+                [0, 10, 12, 15],
+                [10, 0, 6, 8],
+                [12, 6, 0, 7],
+                [15, 8, 7, 0]
+                ];
+
+                # Scenario probabilities
+                prob = [
+                "S1" 0.5,
+                "S2" 0.5
+                ];
+
+                # Scenario-dependent travel times
+                travel = [
+                "S1" [
+                    [0, 10, 12, 15],
+                    [10, 0, 6, 8],
+                    [12, 6, 0, 7],
+                    [15, 8, 7, 0]
+                ],
+                "S2" [
+                    [0, 11, 13, 16],
+                    [11, 0, 7, 9],
+                    [13, 7, 0, 8],
+                    [16, 9, 8, 0]
+                ]
+                ];
+
+                # Scenario-dependent demands at customers 1..3
+                dem = [
+                "S1" [4, 3, 5],
+                "S2" [5, 2, 6]
+                ];
+
+                # Service times at customers 1..3
+                s_time = [5, 4, 6];
+
+                # Time windows [open, close] at customers 1..3
+                tw_open = [10, 15, 20];
+                tw_close = [40, 50, 60];
+
+                # Vehicle capacity, penalty, and time horizon
+                cap = 10;
+                penalty = 100;
+                H = 100;
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
     def test_multistage_stochastic_portfolio(self):
         """
         Test the multi-stage stochastic portfolio optimization problem with proportional transaction costs, a compact but nontrivial nonlinear program with 2 assets, 4 scenarios, and 3 stages.

@@ -10,6 +10,7 @@
 
 # === Standard library imports ===
 import json
+import keyword
 import logging
 import os
 import sys
@@ -30,8 +31,10 @@ from .gurobi_codegen import GurobiCodeGenerator
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 
-# --- Reserved identifiers that must not appear as model/data names (avoid shadowing Python builtins)
-RESERVED_PY_IDENTIFIERS: set[str] = {"len"}
+# --- Reserved identifiers that must not appear as model/data names.
+# Python keywords are invalid as generated identifiers, and a small built-in set
+# remains blocked because code generators may emit those names directly.
+RESERVED_PY_IDENTIFIERS: set[str] = set(keyword.kwlist) | set(getattr(keyword, "softkwlist", ())) | {"len"}
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -88,7 +91,7 @@ class SymbolTable:
         # NEW: reject reserved Python identifiers
         if isinstance(name, str) and name in RESERVED_PY_IDENTIFIERS:
             raise SemanticError(
-                f"Identifier '{name}' is reserved and cannot be used in the model (conflicts with Python built-ins). "
+                f"Identifier '{name}' is reserved and cannot be used in the model (conflicts with Python keywords or built-ins). "
                 f"Please rename it.",
                 lineno=lineno,
             )
@@ -3520,7 +3523,7 @@ class OPLCompiler:
                 bad = sorted(bad_data)[0]
                 ln = getattr(self.data_parser, "name_linenos", {}).get(bad)
                 raise SemanticError(
-                    f"Identifier '{bad}' is reserved and cannot appear as a data key (would shadow Python built-ins). "
+                    f"Identifier '{bad}' is reserved and cannot appear as a data key (would shadow Python keywords or built-ins). "
                     f"Please rename it in the .dat or model data.",
                     lineno=ln,
                 )

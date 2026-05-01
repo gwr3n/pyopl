@@ -88,6 +88,40 @@ class TestPyOPLLexer(TestPyOPL):
         with self.assertRaises(SemanticError):
             parser.parse(lexer.tokenize(error_code))
 
+    def test_reserved_python_keyword_names_are_rejected(self):
+        """Python keywords such as 'del' must be rejected before code generation."""
+        model_code = """
+        dvar float del;
+        maximize del;
+        subject to { del <= 1; }
+        """
+        lexer = OPLLexer()
+        parser = OPLParser()
+
+        with self.assertRaises(SemanticError) as exc:
+            parser.parse(lexer.tokenize(model_code))
+
+        self.assertIn("Identifier 'del' is reserved", str(exc.exception))
+
+    def test_reserved_python_keyword_data_keys_are_rejected(self):
+        """Data keys that are Python keywords must be rejected during model loading."""
+        model_code = """
+        param float x = ...;
+        maximize x;
+        subject to { x >= 0; }
+        """
+        data_code = """
+        del = 1;
+        x = 2;
+        """
+
+        with self.write_model_and_data(model_code, data_code) as (mod_path, dat_path):
+            ast, generated_code, data_dict = load_opl_model(mod_path, dat_path)
+
+        self.assertIsNone(ast)
+        self.assertIsNone(generated_code)
+        self.assertIsNone(data_dict)
+
     def test_semantic_error_cases_and_valid_cases(self):
         """Test that semantic errors are detected and valid cases parse successfully."""
         # Each error case should raise SemanticError
