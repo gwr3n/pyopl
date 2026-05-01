@@ -30,7 +30,198 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
-    def test_stochastic_landing(self):
+    def test_stochastic_job_shop_scheduling(self):
+        """
+        Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.
+        """
+        # Set scipy codegen logger to INFO only for this test
+        import logging
+
+        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        _prev_level = _scipy_logger.level
+        _scipy_logger.setLevel(logging.ERROR)
+        try:
+            model_code = """
+                // Stochastic Here-and-Now Job Shop Scheduling with Service-Level Constraint
+                // - 3 jobs, 3 machines, 3 operations per job with fixed routing per job
+                // - 4 processing-time scenarios with given probabilities
+                // - Here-and-now: start times and machine sequencing are identical across scenarios
+                // - Nonpreemptive: each operation runs to completion once started
+                // - Objective: minimize expected makespan (probability-weighted Cmax)
+                // - Service level: probability that all jobs meet due dates >= 0.25
+
+                // -------------------------------
+                // Sets, indices, and tuple typing
+                // -------------------------------
+                range Jobs = 1..3;                // Job indices {1,2,3}
+                range Ops  = 1..3;                // Operation positions within each job {1,2,3}
+                range Machines = 1..3;            // Machine indices {1,2,3}
+                {string} Scenarios = ...;         // Scenario labels provided in .dat
+
+                tuple Operation { int j; int o; int m; } // A job-operation mapped to a machine
+                {Operation} Operations = ...;            // All 9 operations with their machine assignment
+
+                // -------------------------------
+                // Parameters (data inputs)
+                // -------------------------------
+                param float prob[Scenarios] = ...;              // Scenario probabilities (sum to 1)
+                param int    due[Jobs] = ...;                   // Job due dates
+                param int    p[Scenarios][Jobs][Ops] = ...;     // Processing times per scenario, job, op
+
+                // Big-M tuning: use sum of worst-case durations as a safe global M
+                param int pMax[j in Jobs][o in Ops] = max(s in Scenarios) p[s][j][o];
+                param int M = sum(j in Jobs, o in Ops) pMax[j][o];
+
+                // -------------------------------
+                // Decision variables (here-and-now and per-scenario)
+                // -------------------------------
+                // start[j][o]: start time of operation o of job j (common across scenarios)
+                dvar int+ start[Jobs][Ops];
+
+                // z[e1][e2]: binary sequencing for unordered pairs of operations sharing a machine
+                // Interpretation (used only when e1.m == e2.m and (e1,e2) is lex-ordered):
+                //   z[e1][e2] = 1 => e1 scheduled before e2 on their common machine
+                //   z[e1][e2] = 0 => e2 scheduled before e1 on their common machine
+                dvar boolean z[Operations][Operations];
+
+                // Cmax[s]: makespan in scenario s (per-scenario)
+                dvar int+ Cmax[Scenarios];
+
+                // Deadline satisfaction indicators
+                // bMeet[s][j] = 1 if job j meets its due date in scenario s, else 0
+                dvar boolean bMeet[Scenarios][Jobs];
+                // sat[s] = 1 if all jobs meet due dates in scenario s (scenario satisfactory)
+                dvar boolean sat[Scenarios];
+
+                // -------------------------------
+                // Objective: minimize expected makespan
+                // -------------------------------
+                minimize ExpectedMakespan = sum(s in Scenarios) prob[s] * Cmax[s];
+
+                // -------------------------------
+                // Constraints
+                // -------------------------------
+                subject to {
+                // Nonnegativity of starts (redundant due to int+, restated for clarity)
+                forall(j in Jobs, o in Ops)
+                    StartNonneg: start[j][o] >= 0;
+
+                // Within-job precedence (for all scenarios; starts are here-and-now)
+                // op o+1 cannot start before op o completes under scenario s
+                forall(s in Scenarios, j in Jobs, o in Ops : o < 3)
+                    Precedence: start[j][o+1] >= start[j][o] + p[s][j][o];
+
+                // Machine capacity (disjunctive) for each scenario
+                // For each unordered pair of operations (e1,e2) on the same machine, enforce non-overlap
+                // using a single binary z[e1][e2] shared across scenarios.
+                forall(s in Scenarios,
+                        e1 in Operations, e2 in Operations :
+                        (e1.m == e2.m) && ( (e1.j < e2.j) || ( (e1.j == e2.j) && (e1.o < e2.o) ) ) ) {
+                    // If z[e1][e2] = 1 then e1 finishes before e2 starts; else e2 before e1
+                    Disj1: start[e1.j][e1.o] + p[s][e1.j][e1.o] <= start[e2.j][e2.o] + M * (1 - z[e1][e2]);
+                    Disj2: start[e2.j][e2.o] + p[s][e2.j][e2.o] <= start[e1.j][e1.o] + M * (z[e1][e2]);
+                }
+
+                // Makespan lower bounds (per scenario)
+                forall(s in Scenarios, j in Jobs)
+                    MakespanLB: Cmax[s] >= start[j][3] + p[s][j][3];
+
+                // Deadline satisfaction (link comparisons to binary indicators)
+                forall(s in Scenarios, j in Jobs)
+                    MeetDef: bMeet[s][j] == (start[j][3] + p[s][j][3] <= due[j]);
+
+                // Scenario satisfactory iff all three jobs meet deadlines
+                forall(s in Scenarios) {
+                    SatLE1: sat[s] <= bMeet[s][1];
+                    SatLE2: sat[s] <= bMeet[s][2];
+                    SatLE3: sat[s] <= bMeet[s][3];
+                    SatLB:  sum(j in Jobs) bMeet[s][j] >= 3 * sat[s];
+                }
+
+                // Service-level: total probability of satisfactory scenarios >= 0.25
+                ServiceLevel: sum(s in Scenarios) prob[s] * sat[s] >= 0.25;
+
+                // Probability check (ground)
+                ProbSumToOne: (sum(s in Scenarios) prob[s]) == 1;
+                }
+                """
+            data_code = """
+                Scenarios = { "S1", "S2", "S3", "S4" };
+
+                // Operations: <job j, op o, machine m>
+                Operations = {
+                <1,1,1>, <1,2,2>, <1,3,3>,
+                <2,1,2>, <2,2,1>, <2,3,3>,
+                <3,1,1>, <3,2,3>, <3,3,2>
+                };
+
+                // Due dates for jobs 1..3
+                due = [15, 21, 21];
+
+                // Scenario probabilities
+                prob = [
+                "S1" 0.25,
+                "S2" 0.25,
+                "S3" 0.10,
+                "S4" 0.40
+                ];
+
+                // Processing times p[s][j][o] where j in 1..3, o in 1..3
+                // Scenario 1: J1: [3,2,4], J2: [2,4,3], J3: [4,3,2]
+                // Scenario 2: J1: [4,3,5], J2: [5,4,4], J3: [5,3,3]
+                // Scenario 3: J1: [3,2,4], J2: [4,6,4], J3: [4,4,2]
+                // Scenario 4: J1: [5,3,6], J2: [4,5,4], J3: [6,4,3]
+                p = [
+                "S1" [ [3,2,4], [2,4,3], [4,3,2] ],
+                "S2" [ [4,3,5], [5,4,4], [5,3,3] ],
+                "S3" [ [3,2,4], [4,6,4], [4,4,2] ],
+                "S4" [ [5,3,6], [4,5,4], [6,4,3] ]
+                ];
+                """
+            import os
+            import tempfile
+
+            from pyopl.pyopl_core import solve
+
+            results = {}
+            for solver in ("scipy", "gurobi"):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+                ):
+                    tmp_mod.write(model_code)
+                    tmp_mod.flush()
+                    tmp_dat.write(data_code)
+                    tmp_dat.flush()
+                    model_file = tmp_mod.name
+                    data_file = tmp_dat.name
+                try:
+                    result = solve(model_file, data_file, solver=solver)
+                    self.assertNotEqual(result["status"], "FAILED")
+                    results[solver] = result
+                finally:
+                    os.remove(model_file)
+                    os.remove(data_file)
+
+            # If both solvers are infeasible, test passes
+            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+                return  # Test passes
+
+            # Otherwise, require both to be optimal and compare objectives
+            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["gurobi"])
+            self.assertAlmostEqual(
+                results["scipy"]["objective_value"],
+                results["gurobi"]["objective_value"],
+                places=6,
+            )
+        finally:
+            # Restore previous level
+            _scipy_logger.setLevel(_prev_level)
+
+    def test_stochastic_plane_landing_2(self):
         """
         Test the stochastic aircraft landing problem with reliability chance constraint, a compact but nontrivial MILP with 4 aircraft, 6 slots, and 4 delay scenarios.
         """

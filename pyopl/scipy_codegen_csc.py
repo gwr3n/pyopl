@@ -4083,8 +4083,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 add_ub(row1, const1)
                 # Constraint 2: ensure if f <=0 then b=1: f + EPS - M*b >= 0 -> -f - EPS + M*b <=0
                 row2 = {vn: -cf for vn, cf in expr_coef.items()}
-                row2[bname] = row2.get(bname, 0.0) + M
-                const2 = -expr_const - EPS
+                row2[bname] = row2.get(bname, 0.0) - M
+                const2 = expr_const - EPS
                 add_ub(row2, const2)
             elif op == ">=":
                 # f >=0 equivalent to -f <=0 handled like <= with -f

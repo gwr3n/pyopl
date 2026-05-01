@@ -2213,6 +2213,34 @@ class GurobiCodeGenerator:
             L = _unwrap(left_node)
             R = _unwrap(right_node)
 
+        def _is_bool_dvar_node(node):
+            if not isinstance(node, dict):
+                return False
+            node_type = node.get("type")
+            if node_type == "name":
+                decl = self._find_declaration_by_name(node.get("value"))
+            elif node_type == "indexed_name":
+                decl = self._find_declaration_by_name(node.get("name"))
+            else:
+                return False
+            return decl is not None and decl.get("var_type") == "boolean"
+
+        if op == "==" and _is_bool_dvar_node(left_node) and _is_comparison(R):
+            bool_var = self._traverse_expression(left_node, current_iterators)
+            comp_var = self._reify_scoped_comparison(R, current_iterators)
+            self._add_code_line(
+                f"model.addConstr({bool_var} == {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
+            )
+            return
+
+        if op == "==" and _is_bool_dvar_node(right_node) and _is_comparison(L):
+            bool_var = self._traverse_expression(right_node, current_iterators)
+            comp_var = self._reify_scoped_comparison(L, current_iterators)
+            self._add_code_line(
+                f"model.addConstr({bool_var} == {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
+            )
+            return
+
         # --- Direct cardinality constraint: sum(comparisons) op k (supports >, >=, ==) ---
         def _unwrap(n):
             while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
