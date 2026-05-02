@@ -165,6 +165,7 @@ class OPLIDE(tk.Tk):
         self._initial_genai_panel_width = 300
         self._side_panel_width = 300
         self._genai_panel_visible = True
+        self._panel_resize_after_id: Optional[str] = None
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -285,6 +286,7 @@ class OPLIDE(tk.Tk):
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(0, self._stabilize_initial_side_panel_width)
+        self.bind("<Configure>", self._on_window_resize, add="+")
 
     # --- UI Setup Methods ---
     def _set_icon(self) -> None:
@@ -829,6 +831,26 @@ class OPLIDE(tk.Tk):
         try:
             self.update_idletasks()
             self._sync_side_panel_width(int(self.genai_sessions_panel.winfo_width()))
+        except Exception:
+            pass
+
+    def _on_window_resize(self, event: Optional[tk.Event] = None) -> None:
+        """Reapply the current side-panel width after top-level window resizes."""
+        if event is not None and getattr(event, "widget", None) is not self:
+            return
+        if self._panel_resize_after_id is not None:
+            try:
+                self.after_cancel(self._panel_resize_after_id)
+            except Exception:
+                pass
+        self._panel_resize_after_id = self.after(10, self._apply_panel_resize_sync)
+
+    def _apply_panel_resize_sync(self) -> None:
+        """Apply the current shared side-panel width after a debounced resize."""
+        self._panel_resize_after_id = None
+        try:
+            self.update_idletasks()
+            self._sync_side_panel_width(self._side_panel_width)
         except Exception:
             pass
 
@@ -3582,7 +3604,7 @@ class OPLIDE(tk.Tk):
             output_bg = "#212529"
             output_fg = "#e9ecef"
             error_fg = "white"
-            paned_bg = "#2b3035"
+            paned_bg = root_bg
             sidebar_bg = editor_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#aab4be"
@@ -3599,7 +3621,7 @@ class OPLIDE(tk.Tk):
             output_bg = "#f8f9fa"
             output_fg = "#212529"
             error_fg = "black"
-            paned_bg = "#e9ecef"
+            paned_bg = root_bg
             sidebar_bg = editor_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#6b7785"
