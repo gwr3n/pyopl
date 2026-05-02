@@ -162,6 +162,27 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(log, [("\nOperation interrupted by user.\n", "session-1")])
         self.assertIn("interrupted", dummy.status_var.value)
 
+    def test_format_prompt_for_output_text_only(self):
+        formatted = OPLIDE._format_prompt_for_output(None, "Prompt", "Maximize profit subject to capacity.")
+
+        self.assertEqual(formatted, "\nPrompt:\nMaximize profit subject to capacity.\n\n")
+
+    def test_format_prompt_for_output_with_attachments(self):
+        formatted = OPLIDE._format_prompt_for_output(
+            None,
+            "Question",
+            {
+                "text": "Please explain the bottleneck.",
+                "images": [{"path": "/tmp/chart.png"}, {"path": "/tmp/table.png"}],
+            },
+        )
+
+        self.assertIn("\nQuestion:\n", formatted)
+        self.assertIn("Please explain the bottleneck.\n", formatted)
+        self.assertIn("Attachments:\n", formatted)
+        self.assertIn("- /tmp/chart.png\n", formatted)
+        self.assertIn("- /tmp/table.png\n", formatted)
+
 
 if __name__ == "__main__":
     unittest.main()

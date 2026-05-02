@@ -2158,6 +2158,26 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
+    def _format_prompt_for_output(self, label: str, prompt_input: _PromptInput) -> str:
+        """Format a GenAI prompt so the request is captured in the output history."""
+        if isinstance(prompt_input, dict):
+            text = str(prompt_input.get("text", "")).strip()
+            images = prompt_input.get("images") or []
+            lines = [f"\n{label}:\n"]
+            if text:
+                lines.append(text + "\n")
+            if images:
+                lines.append("Attachments:\n")
+                for image in images:
+                    path = str(image.get("path", "")).strip() if isinstance(image, dict) else str(image).strip()
+                    if path:
+                        lines.append(f"- {path}\n")
+            lines.append("\n")
+            return "".join(lines)
+
+        text = str(prompt_input).strip()
+        return f"\n{label}:\n{text}\n\n"
+
     # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
@@ -2667,6 +2687,10 @@ class OPLIDE(tk.Tk):
         )
         if operation is None:
             return
+        self._append_output(
+            self._format_prompt_for_output("Prompt", prompt_input),
+            operation.session_id,
+        )
 
         # Use the visible request timestamp for filenames
         display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -2825,6 +2849,10 @@ class OPLIDE(tk.Tk):
         )
         if operation is None:
             return
+        self._append_output(
+            self._format_prompt_for_output("Question", prompt_input),
+            operation.session_id,
+        )
 
         # Use visible request timestamp for filenames
         display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
