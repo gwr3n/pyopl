@@ -119,6 +119,20 @@ class _ForegroundOperation:
     cancel_requested: bool = False
 
 
+class _StatusVarProxy:
+    """Adapter that preserves StringVar-like status_var.set(...) writes."""
+
+    def __init__(self, setter: Callable[[str], None], getter: Callable[[], str]) -> None:
+        self._setter = setter
+        self._getter = getter
+
+    def set(self, value: str) -> None:
+        self._setter(value)
+
+    def get(self) -> str:
+        return self._getter()
+
+
 class OPLIDE(tk.Tk):
     """
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
@@ -129,7 +143,7 @@ class OPLIDE(tk.Tk):
         # Whether the IDE was launched with debug/verbose CLI flags
         self.debug = bool(debug)
         self.title("Rhetor")
-        self.geometry("1000x700")
+        self.geometry("1150x700")
         self.model_file: Optional[str] = None
         self.data_file: Optional[str] = None
         self.current_font_size = 12
@@ -146,6 +160,8 @@ class OPLIDE(tk.Tk):
         self._run_started_at: Optional[float] = None
         self._run_timer_after_id: Optional[str] = None
         self._run_status_base: str = "Solving model..."
+        self._initial_main_pane_ratio_applied = False
+        self._initial_genai_panel_width = 300
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -161,11 +177,20 @@ class OPLIDE(tk.Tk):
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
         self._genai_loading: bool = False
+        self.genai_panel_mode_var = tk.StringVar(value="generate")
+        self.genai_prompt_title_var = tk.StringVar(value="Describe the optimization problem")
+        self.genai_submit_label_var = tk.StringVar(value="Generate")
+        self.genai_context_var = tk.StringVar(value="No GenAI model selected")
+        self.genai_attachment_summary_var = tk.StringVar(value="No images attached")
+        self.genai_pending_var = tk.StringVar(value="")
+        self._genai_attachment_paths: list[str] = []
+        self._genai_pending_revisions: Optional[dict[str, Any]] = None
 
         # Output sessions
         self._output_sessions: dict[str, str] = {}
         self._output_session_ids: list[str] = []
         self._output_session_display: dict[str, str] = {}
+        self._output_session_timestamp: dict[str, str] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
         self._active_operation: Optional[_ForegroundOperation] = None
@@ -322,8 +347,10 @@ class OPLIDE(tk.Tk):
             accelerator=self._accel("R"),
         )
         solver_menu = tk.Menu(runmenu, tearoff=0)
-        solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi")
-        solver_menu.add_radiobutton(label="Scipy (HiGHS)", variable=self.solver, value="scipy")
+        solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._refresh_status_context)
+        solver_menu.add_radiobutton(
+            label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._refresh_status_context
+        )
         runmenu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Solve", menu=runmenu)
 
@@ -520,6 +547,7 @@ class OPLIDE(tk.Tk):
             return
         if hasattr(self, "genai_menu"):
             self._populate_genai_model_menus(getattr(self, "_genai_provider_models", {}))
+        self._refresh_genai_panel_state()
 
     def interrupt_active_operation(self) -> None:
         """Interrupt the current foreground operation."""
@@ -615,6 +643,10 @@ class OPLIDE(tk.Tk):
                 self._output_session_display.clear()
             except Exception:
                 self._output_session_display = {}
+            try:
+                self._output_session_timestamp.clear()
+            except Exception:
+                self._output_session_timestamp = {}
             self._current_output_session_id = None
             self._viewing_output_session_id = None
 
@@ -655,9 +687,25 @@ class OPLIDE(tk.Tk):
                 pass
 
     def _setup_panes(self) -> None:
-        """Set up the main paned window with editors on top and output below."""
-        editor_output_paned = tk.PanedWindow(
+        """Set up the main paned layout with a full-height GenAI panel on the right."""
+        main_paned = tk.PanedWindow(
             self,
+            orient=tk.HORIZONTAL,
+            sashrelief=tk.FLAT,
+            bd=0,
+            bg="#e9ecef",
+            sashwidth=6,
+            showhandle=False,
+            relief=tk.FLAT,
+        )
+        main_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        self.main_paned = main_paned
+
+        workspace_frame = ttk.Frame(main_paned, relief=tk.FLAT, borderwidth=0)
+        main_paned.add(workspace_frame, stretch="always")
+
+        editor_output_paned = tk.PanedWindow(
+            workspace_frame,
             orient=tk.VERTICAL,
             sashrelief=tk.FLAT,
             bd=0,  # Remove bevels
@@ -666,13 +714,40 @@ class OPLIDE(tk.Tk):
             showhandle=False,
             relief=tk.FLAT,
         )
-        editor_output_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        editor_output_paned.pack(fill=tk.BOTH, expand=1)
 
         # Keep a reference for theme updates
         self.editor_output_paned = editor_output_paned
 
         self._setup_editors(editor_output_paned)
         self._setup_output(editor_output_paned)
+
+        self._setup_genai_panel(main_paned)
+        self.main_paned.bind("<Configure>", self._on_main_paned_configure, add="+")
+
+    def _on_main_paned_configure(self, event: Optional[tk.Event] = None) -> None:
+        """Apply the initial horizontal pane ratio once the pane has a real size."""
+        if self._initial_main_pane_ratio_applied:
+            return
+        self._apply_initial_main_pane_ratio()
+
+    def _apply_initial_main_pane_ratio(self) -> None:
+        """Set the initial workspace/sidebar split using a fixed GenAI panel width."""
+        if not hasattr(self, "main_paned") or not self.main_paned.winfo_exists():
+            return
+        try:
+            self.update_idletasks()
+            total_width = int(self.main_paned.winfo_width())
+        except Exception:
+            return
+        if total_width <= 1:
+            return
+        workspace_width = max(200, total_width - int(self._initial_genai_panel_width))
+        try:
+            self.main_paned.sash_place(0, workspace_width, 0)
+            self._initial_main_pane_ratio_applied = True
+        except Exception:
+            pass
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
         """Create model and data editor frames inside a Notebook."""
@@ -684,7 +759,6 @@ class OPLIDE(tk.Tk):
         self.editor_notebook.pack(fill=tk.BOTH, expand=1)
 
         # Model editor
-        # Use a styled frame so we can control its background color
         self.model_frame = ttk.Frame(self.editor_notebook, style="Editor.TFrame")
         self.model_text = scrolledtext.ScrolledText(
             self.model_frame,
@@ -699,7 +773,6 @@ class OPLIDE(tk.Tk):
         )
         self.model_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
 
-        # Event handlers (typed to avoid lambda inference issues)
         def _on_model_changed(event: tk.Event) -> None:
             self._on_text_change(self.model_text, False)
 
@@ -752,14 +825,13 @@ class OPLIDE(tk.Tk):
         self.editor_frame = editor_frame
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
-        """Create the output panel with a request history list on the right."""
+        """Create the output panel."""
         output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=0)
+        self.output_frame = output_frame
 
-        # Split Output (left) and Requests list (right)
         container = ttk.Frame(output_frame)
         container.pack(fill=tk.BOTH, expand=1, padx=5, pady=(0, 5))
         container.columnconfigure(0, weight=1)
-        container.columnconfigure(1, weight=0)
         container.rowconfigure(0, weight=1)
 
         # Output text
@@ -778,50 +850,193 @@ class OPLIDE(tk.Tk):
         )
         self.output_text.pack(fill=tk.BOTH, expand=1)
 
-        # Requests list
-        right = ttk.Frame(container, width=220)
-        right.grid(row=0, column=1, sticky="ns", padx=(8, 0))
-        right.rowconfigure(0, weight=1)
+        parent.add(output_frame, minsize=150)
+        output_frame.bind("<Configure>", self._sync_sessions_panel_height)
 
-        self.request_listbox = tk.Listbox(
-            right,
-            exportselection=False,
-            height=12,
+    def _setup_genai_panel(self, parent: tk.PanedWindow) -> None:
+        """Create a persistent full-height GenAI composer panel on the right."""
+        panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(12, 10))
+        parent.add(panel, minsize=180)
+        panel.pack_propagate(False)
+        panel.columnconfigure(0, weight=1)
+        panel.rowconfigure(0, weight=1)
+        self.genai_panel = panel
+
+        sidebar = ttk.Frame(panel, style="Sidebar.TFrame")
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.columnconfigure(0, weight=1)
+        sidebar.rowconfigure(0, weight=1)
+
+        composer_panel = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(0, 0, 0, 0))
+        composer_panel.columnconfigure(0, weight=1)
+        composer_panel.grid(row=0, column=0, sticky="nsew")
+
+        sessions_panel = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(0, 10, 0, 0), height=180)
+        sessions_panel.columnconfigure(0, weight=1)
+        sessions_panel.rowconfigure(0, weight=1)
+        sessions_panel.grid(row=1, column=0, sticky="ew")
+        sessions_panel.grid_propagate(False)
+        self.genai_sessions_panel = sessions_panel
+
+        ttk.Label(composer_panel, text="GenAI", style="SidebarHeader.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(composer_panel, textvariable=self.genai_context_var, style="SidebarSubtle.TLabel", wraplength=320).grid(
+            row=1, column=0, sticky="ew", pady=(2, 10)
         )
-        # Use classic tk.Scrollbar to match ScrolledText
-        request_scroll = tk.Scrollbar(right, orient=tk.VERTICAL, command=self.request_listbox.yview)
+
+        mode_frame = ttk.Frame(composer_panel, style="Sidebar.TFrame")
+        mode_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        for idx, (label, value) in enumerate((("Generate", "generate"), ("Ask", "ask"))):
+            ttk.Radiobutton(
+                mode_frame,
+                text=label,
+                value=value,
+                variable=self.genai_panel_mode_var,
+                command=self._on_genai_mode_changed,
+            ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
+
+        composer = ttk.Frame(composer_panel, style="Sidebar.TFrame")
+        composer.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
+        composer.columnconfigure(0, weight=1)
+        composer_panel.rowconfigure(3, weight=1)
+        ttk.Label(composer, textvariable=self.genai_prompt_title_var, style="SidebarSection.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, 4)
+        )
+        self.genai_prompt_text = scrolledtext.ScrolledText(
+            composer,
+            wrap=tk.WORD,
+            height=12,
+            font=(self.editor_font_family, self.current_font_size),
+            relief=tk.FLAT,
+            bd=0,
+        )
+        self.genai_prompt_text.grid(row=1, column=0, sticky="nsew")
+        self.genai_prompt_text.bind("<Control-Return>", self._submit_genai_from_event)
+        self.genai_prompt_text.bind("<Command-Return>", self._submit_genai_from_event)
+        composer.rowconfigure(1, weight=1)
+
+        attachments = ttk.Frame(composer, style="Sidebar.TFrame")
+        attachments.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        attachments.columnconfigure(0, weight=1)
+        ttk.Label(attachments, textvariable=self.genai_attachment_summary_var, style="SidebarSubtle.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.genai_attachment_listbox = tk.Listbox(attachments, height=4, exportselection=False, activestyle="none")
+        self.genai_attachment_listbox.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.genai_attachment_menu = tk.Menu(self, tearoff=0)
+        self.genai_attachment_menu.add_command(label="Attach images...", command=self._genai_add_images)
+        self.genai_attachment_menu.add_command(label="Remove selected", command=self._genai_remove_selected_image)
+        self.genai_attachment_menu.add_separator()
+        self.genai_attachment_menu.add_command(label="Clear all", command=self._genai_clear_images)
+        self.genai_attachment_listbox.bind("<Button-3>", self._on_genai_attachment_right_click)
+        self.genai_attachment_listbox.bind("<Double-Button-1>", self._genai_add_images)
+        if sys.platform == "darwin":
+            self.genai_attachment_listbox.bind("<Button-2>", self._on_genai_attachment_right_click)
+            self.genai_attachment_listbox.bind("<Control-Button-1>", self._on_genai_attachment_right_click)
+
+        pending = ttk.Frame(composer_panel, style="Sidebar.TFrame")
+        pending.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        pending.columnconfigure(0, weight=1)
+        self.genai_pending_frame = pending
+        self.genai_pending_label = ttk.Label(pending, textvariable=self.genai_pending_var, style="SidebarSection.TLabel")
+        self.genai_pending_label.grid(row=0, column=0, sticky="w")
+        actions = ttk.Frame(pending, style="Sidebar.TFrame")
+        actions.grid(row=1, column=0, sticky="e", pady=(6, 0))
+        self.genai_apply_button = ttk.Button(actions, text="Apply revisions", command=self._apply_pending_genai_revisions)
+        self.genai_apply_button.grid(row=0, column=0)
+        self.genai_dismiss_button = ttk.Button(actions, text="Dismiss", command=self._clear_pending_genai_revisions)
+        self.genai_dismiss_button.grid(row=0, column=1, padx=(6, 0))
+
+        footer = ttk.Frame(composer_panel, style="Sidebar.TFrame")
+        footer.grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        footer.columnconfigure(0, weight=1)
+        self.genai_submit_button = ttk.Button(
+            footer, textvariable=self.genai_submit_label_var, command=self._submit_genai_request
+        )
+        self.genai_submit_button.grid(row=0, column=0, sticky="e")
+
+        sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
+        sessions_list.grid(row=0, column=0, sticky="nsew")
+        sessions_list.columnconfigure(0, weight=1)
+        sessions_list.rowconfigure(0, weight=1)
+        self.sessions_surface = sessions_list
+
+        self.request_listbox = tk.Listbox(sessions_list, exportselection=False, height=10, activestyle="none")
+        request_scroll = tk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
 
-        # Selection handler to show previous output
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
-        # Context menu for deleting sessions
         self.request_context_menu = tk.Menu(self, tearoff=0)
         self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
-
-        # Right-click bindings (support macOS Ctrl+Click)
         self.request_listbox.bind("<Button-3>", self._on_request_right_click)
         if sys.platform == "darwin":
             self.request_listbox.bind("<Button-2>", self._on_request_right_click)
             self.request_listbox.bind("<Control-Button-1>", self._on_request_right_click)
 
-        parent.add(output_frame, minsize=150)
+        self._clear_pending_genai_revisions()
+        self._refresh_genai_panel_state()
+        self.after_idle(self._sync_sessions_panel_height)
+
+    def _sync_sessions_panel_height(self, event: Optional[tk.Event] = None) -> None:
+        """Keep the session-list section visually aligned with the output pane height."""
+        sessions_panel = getattr(self, "genai_sessions_panel", None)
+        output_frame = getattr(self, "output_frame", None)
+        if sessions_panel is None or output_frame is None:
+            return
+        try:
+            output_height = int(output_frame.winfo_height())
+        except Exception:
+            return
+        if output_height <= 1:
+            return
+        target_height = max(140, output_height)
+        try:
+            sessions_panel.configure(height=target_height)
+        except Exception:
+            pass
 
     def _setup_status_bar(self) -> None:
-        """Create the status bar at the bottom of the window."""
-        self.status_var = tk.StringVar()
-        self.status_var.set("Ready")
-        status_bar = ttk.Label(
-            self,
-            textvariable=self.status_var,
-            anchor="w",
-            font=("Segoe UI", 9),
-            padding=(8, 0, 0, 2),
-            relief=tk.FLAT,
-        )
+        """Create a segmented status bar at the bottom of the window."""
+        self.status_message_var = tk.StringVar(value="Ready")
+        self.status_syntax_var = tk.StringVar(value="Syntax OK")
+        self.status_caret_var = tk.StringVar(value="Ln 1, Col 0")
+        self.status_solver_var = tk.StringVar(value="Solver: Gurobi")
+        self.status_runtime_var = tk.StringVar(value="")
+        self.status_var = _StatusVarProxy(self._set_status_message, lambda: self.status_message_var.get())
+
+        status_bar = ttk.Frame(self, style="StatusBar.TFrame", padding=(6, 1))
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        status_bar.columnconfigure(0, weight=1)
+        self.status_bar = status_bar
+
+        segments: list[tuple[tk.StringVar, str, int]] = [
+            (self.status_message_var, "w", 0),
+            (self.status_syntax_var, "w", 1),
+            (self.status_caret_var, "w", 2),
+            (self.status_solver_var, "w", 3),
+            (self.status_runtime_var, "e", 4),
+        ]
+
+        for idx, (var, anchor, column) in enumerate(segments):
+            ttk.Label(
+                status_bar,
+                textvariable=var,
+                anchor=anchor,
+                style="StatusBar.TLabel" if column == 0 else "StatusBarMeta.TLabel",
+            ).grid(row=0, column=idx, sticky=("ew" if column == 0 else "w"), padx=((0, 0) if idx == 0 else (10, 0)))
+
+        self._refresh_status_context()
+
+    def _set_status_message(self, message: str) -> None:
+        """Update the primary status message segment."""
+        self.status_message_var.set(str(message or "Ready"))
+
+    def _refresh_status_context(self) -> None:
+        """Refresh footer context segments that derive from current IDE state."""
+        solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "SciPy"
+        self.status_solver_var.set(f"Solver: {solver_name}")
 
     def _setup_tag_configs(self) -> None:
         """Configure syntax highlighting tags for editors."""
@@ -833,6 +1048,270 @@ class OPLIDE(tk.Tk):
         self.data_text.tag_configure("ERROR", background="#e06c75", foreground="black")
         # Comments
         self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
+
+    def _on_genai_mode_changed(self) -> None:
+        """Update composer copy when the GenAI panel mode changes."""
+        self._refresh_genai_panel_state()
+
+    def _refresh_genai_panel_state(self) -> None:
+        """Refresh docked GenAI panel labels and enabled state."""
+        mode = self.genai_panel_mode_var.get() if hasattr(self, "genai_panel_mode_var") else "generate"
+        if mode == "ask":
+            self.genai_prompt_title_var.set("Ask about the current model and data")
+            self.genai_submit_label_var.set("Ask")
+        else:
+            self.genai_prompt_title_var.set("Describe the optimization problem")
+            self.genai_submit_label_var.set("Generate")
+
+        provider = getattr(self, "genai_provider", None)
+        model = getattr(self, "genai_model", None)
+        method = self._label_for_method(self.genai_method_var.get()) if hasattr(self, "genai_method_var") else "SyntAGM"
+        if provider and model:
+            self.genai_context_var.set(f"{provider} • {model} • {method}")
+        else:
+            self.genai_context_var.set("No GenAI model selected. Choose one from the GenAI menu.")
+
+        attachment_count = len(getattr(self, "_genai_attachment_paths", []))
+        if attachment_count == 0:
+            self.genai_attachment_summary_var.set("No images attached")
+        elif attachment_count == 1:
+            self.genai_attachment_summary_var.set("1 image attached")
+        else:
+            self.genai_attachment_summary_var.set(f"{attachment_count} images attached")
+
+        active = getattr(self, "_active_operation", None)
+        if hasattr(self, "genai_submit_button"):
+            if active is not None and active.kind.startswith("genai"):
+                self.genai_submit_label_var.set("Interrupt")
+                self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
+            else:
+                self.genai_submit_button.configure(command=self._submit_genai_request, state=("normal" if active is None else "disabled"))
+        if hasattr(self, "status_genai_var"):
+            self._refresh_status_context()
+
+    def _open_genai_panel(self, mode: str, initial_text: str = "") -> None:
+        """Focus the docked GenAI composer and set its mode."""
+        if mode not in ("generate", "ask"):
+            mode = "generate"
+        self.genai_panel_mode_var.set(mode)
+        self._refresh_genai_panel_state()
+        if initial_text and hasattr(self, "genai_prompt_text"):
+            self.genai_prompt_text.delete("1.0", tk.END)
+            self.genai_prompt_text.insert("1.0", initial_text)
+        if hasattr(self, "genai_prompt_text"):
+            self.genai_prompt_text.focus_set()
+
+    def _clear_genai_composer(self) -> None:
+        """Clear the docked GenAI composer state."""
+        if hasattr(self, "genai_prompt_text"):
+            self.genai_prompt_text.delete("1.0", tk.END)
+        self._genai_attachment_paths.clear()
+        self._refresh_genai_attachment_list()
+
+    def _refresh_genai_attachment_list(self) -> None:
+        """Refresh the composer attachment list."""
+        if hasattr(self, "genai_attachment_listbox"):
+            self.genai_attachment_listbox.delete(0, tk.END)
+            for path in self._genai_attachment_paths:
+                self.genai_attachment_listbox.insert(tk.END, os.path.basename(path))
+        self._refresh_genai_panel_state()
+
+    def _genai_add_images(self) -> None:
+        """Attach one or more images to the docked GenAI composer."""
+        try:
+            paths = filedialog.askopenfilenames(
+                title="Attach images",
+                filetypes=[
+                    ("Image files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff"),
+                    ("All files", "*.*"),
+                ],
+            )
+        except Exception:
+            paths = ()
+        if not paths:
+            return
+        for path in paths:
+            path_str = str(path)
+            if path_str and path_str not in self._genai_attachment_paths:
+                self._genai_attachment_paths.append(path_str)
+        self._refresh_genai_attachment_list()
+
+    def _genai_remove_selected_image(self) -> None:
+        """Remove the selected attachment from the composer."""
+        if not hasattr(self, "genai_attachment_listbox"):
+            return
+        sel = self.genai_attachment_listbox.curselection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(self._genai_attachment_paths):
+            self._genai_attachment_paths.pop(idx)
+        self._refresh_genai_attachment_list()
+
+    def _genai_clear_images(self) -> None:
+        """Clear all attached images from the composer."""
+        self._genai_attachment_paths.clear()
+        self._refresh_genai_attachment_list()
+
+    def _on_genai_attachment_right_click(self, event: Optional[tk.Event]) -> None:
+        """Show attachment actions from the image list context menu."""
+        if event is None or not hasattr(self, "genai_attachment_listbox"):
+            return
+        try:
+            size = self.genai_attachment_listbox.size()
+            self.genai_attachment_listbox.selection_clear(0, tk.END)
+            selected_index: Optional[int] = None
+            if size > 0:
+                idx = int(self.genai_attachment_listbox.nearest(event.y))
+                bbox = self.genai_attachment_listbox.bbox(idx)
+                if bbox is not None:
+                    x1, y1, width, height = bbox
+                    if y1 <= event.y <= y1 + height and x1 <= event.x <= x1 + width:
+                        self.genai_attachment_listbox.selection_set(idx)
+                        self.genai_attachment_listbox.activate(idx)
+                        selected_index = idx
+
+            has_any = bool(self._genai_attachment_paths)
+            self.genai_attachment_menu.entryconfigure("Remove selected", state=("normal" if selected_index is not None else "disabled"))
+            self.genai_attachment_menu.entryconfigure("Clear all", state=("normal" if has_any else "disabled"))
+            self.genai_attachment_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                self.genai_attachment_menu.grab_release()
+            except Exception:
+                pass
+
+    def _collect_genai_prompt_input(self) -> Optional[_PromptInput]:
+        """Build PromptInput from the docked composer."""
+        if not hasattr(self, "genai_prompt_text"):
+            return None
+        text_val = self.genai_prompt_text.get("1.0", tk.END).rstrip()
+        if self._genai_attachment_paths:
+            if not text_val.strip() and not self._genai_attachment_paths:
+                return None
+            return {"text": text_val, "images": [{"path": p} for p in self._genai_attachment_paths]}
+        if not text_val.strip():
+            return None
+        return text_val
+
+    def _submit_genai_from_event(self, event: Optional[tk.Event] = None) -> str:
+        """Submit the active GenAI composer via keyboard."""
+        self._submit_genai_request()
+        return "break"
+
+    def _submit_genai_request(self) -> None:
+        """Dispatch the docked GenAI composer based on the selected mode."""
+        if not self.genai_provider or not self.genai_model:
+            messagebox.showwarning("GenAI", "No GenAI model selected.")
+            return
+
+        prompt_input = self._collect_genai_prompt_input()
+        if prompt_input is None:
+            self.status_var.set("GenAI: enter a prompt or attach an image")
+            return
+
+        if self.genai_panel_mode_var.get() == "ask":
+            self._run_genai_feedback(prompt_input)
+        else:
+            self._run_genai_generate(prompt_input)
+
+    def _set_pending_genai_revisions(self, pending: dict[str, Any]) -> None:
+        """Expose pending revised model/data through inline panel actions."""
+        self._genai_pending_revisions = pending
+        revised_model = bool(pending.get("revised_model"))
+        revised_data = bool(pending.get("revised_data"))
+        labels = []
+        if revised_model:
+            labels.append("model")
+        if revised_data:
+            labels.append("data")
+        self.genai_pending_var.set(f"Pending revised {' and '.join(labels)} from Ask")
+        if hasattr(self, "genai_pending_frame"):
+            self.genai_pending_frame.grid()
+
+    def _clear_pending_genai_revisions(self) -> None:
+        """Hide inline revision actions when no revisions are pending."""
+        self._genai_pending_revisions = None
+        self.genai_pending_var.set("")
+        if hasattr(self, "genai_pending_frame"):
+            self.genai_pending_frame.grid_remove()
+
+    def _apply_pending_genai_revisions(self) -> None:
+        """Apply pending Ask revisions from the docked GenAI panel."""
+        pending = self._genai_pending_revisions
+        if not pending:
+            return
+
+        revised_model = str(pending.get("revised_model") or "")
+        revised_data = str(pending.get("revised_data") or "")
+        model_path = str(pending.get("model_path") or self.model_file or "")
+        data_path = str(pending.get("data_path") or self.data_file or "")
+        safe_ts = str(pending.get("safe_ts") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+        had_data_file = bool(pending.get("had_data_file"))
+        session_id = pending.get("session_id")
+
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+
+        m_base_name, m_ext = os.path.splitext(os.path.basename(model_path))
+        m_ext = m_ext or ".mod"
+
+        def _strip_ts_suffix(name: str) -> str:
+            match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?$", name)
+            return match.group(1) if match and match.group(1) else name
+
+        m_base_name = _strip_ts_suffix(m_base_name)
+        model_base = os.path.join(tmp_dir, f"{m_base_name}_{safe_ts}")
+        model_tgt = model_base + m_ext
+        i = 1
+        while os.path.exists(model_tgt):
+            model_tgt = f"{model_base}_{i}{m_ext}"
+            i += 1
+
+        model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
+        with open(model_tgt, "w", encoding="utf-8") as f:
+            f.write(model_content)
+
+        data_tgt = None
+        if revised_data:
+            if had_data_file:
+                d_base_name, d_ext = os.path.splitext(os.path.basename(data_path))
+                d_ext = d_ext or ".dat"
+            else:
+                d_base_name, d_ext = m_base_name, ".dat"
+            d_base_name = _strip_ts_suffix(d_base_name)
+            data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
+            data_tgt = data_base + d_ext
+            j = 1
+            while os.path.exists(data_tgt):
+                data_tgt = f"{data_base}_{j}{d_ext}"
+                j += 1
+            with open(data_tgt, "w", encoding="utf-8") as f:
+                f.write(revised_data)
+
+        if revised_model:
+            self.model_text.delete("1.0", tk.END)
+            self.model_text.insert(tk.END, revised_model)
+        if revised_data:
+            self.data_text.delete("1.0", tk.END)
+            self.data_text.insert(tk.END, revised_data)
+
+        self.model_file = model_tgt
+        if data_tgt:
+            self.data_file = data_tgt
+
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+        if data_tgt:
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+        self.highlight(self.model_text, is_data=False)
+        self.highlight(self.data_text, is_data=True)
+        self._append_output("\nRevisions applied to editors.\n", session_id)
+        self.status_var.set("GenAI: revisions applied")
+        self._clear_pending_genai_revisions()
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
     def _get_active_editor(self) -> scrolledtext.ScrolledText:
         """Return the currently active editor widget (model or data)."""
@@ -1147,6 +1626,7 @@ class OPLIDE(tk.Tk):
             self._output_session_ids.pop(index)
             self._output_sessions.pop(sid, None)
             self._output_session_display.pop(sid, None)
+            self._output_session_timestamp.pop(sid, None)
 
             # Update pointers
             if self._current_output_session_id == sid:
@@ -1621,17 +2101,23 @@ class OPLIDE(tk.Tk):
                         error_msg = f"Syntax Error on line {first_err_line}"
 
                 caret_msg = f"Ln {caret_line}, Col {caret_col}"
+                self.status_caret_var.set(caret_msg)
+                self._refresh_status_context()
                 if error_msg:
-                    self.status_var.set(f"{error_msg} | {caret_msg}")
+                    self.status_syntax_var.set(error_msg)
                 else:
-                    self.status_var.set(f"Syntax OK | {caret_msg}")
+                    self.status_syntax_var.set("Syntax OK")
 
             except tk.TclError:
-                self.status_var.set("Ready")
+                self.status_syntax_var.set("Syntax OK")
+                self.status_caret_var.set("Ln 1, Col 0")
             except Exception as e:
+                self.status_syntax_var.set("Status error")
+                self.status_caret_var.set("Ln ?, Col ?")
                 self.status_var.set(f"Error updating status: {e}")
         else:
-            self.status_var.set("Ready")
+            self.status_syntax_var.set("Syntax OK")
+            self.status_caret_var.set("Ln 1, Col 0")
 
     # --- Editor Shortcuts ---
     def _select_all_model(self, event: Optional[tk.Event] = None) -> str:
@@ -1681,6 +2167,7 @@ class OPLIDE(tk.Tk):
         """Start updating the status bar with elapsed solve time (every second)."""
         self._stop_run_timer()
         self._run_status_base = base_msg
+        self.status_runtime_var.set("Elapsed 00:00:00")
         try:
             self._run_started_at = self.tk.call("clock", "seconds")  # integer seconds
         except Exception:
@@ -1698,6 +2185,8 @@ class OPLIDE(tk.Tk):
                 pass
         self._run_timer_after_id = None
         self._run_started_at = None
+        if hasattr(self, "status_runtime_var"):
+            self.status_runtime_var.set("")
 
     def _tick_run_timer(self) -> None:
         """Update status bar with elapsed time so far; reschedule if still running."""
@@ -1724,7 +2213,7 @@ class OPLIDE(tk.Tk):
         ss = total % 60
         t = f"{hh:02d}:{mm:02d}:{ss:02d}"
 
-        self.status_var.set(f"{self._run_status_base} (elapsed {t})")
+        self.status_runtime_var.set(f"Elapsed {t}")
 
         # Reschedule
         self._run_timer_after_id = self.after(1000, self._tick_run_timer)
@@ -2178,16 +2667,34 @@ class OPLIDE(tk.Tk):
         text = str(prompt_input).strip()
         return f"\n{label}:\n{text}\n\n"
 
+    def _label_for_output_session(self, header: str) -> str:
+        """Derive a short session label from the session header."""
+        header_lower = header.strip().lower()
+        if header_lower.startswith("genai: generating"):
+            return "Generate"
+        if header_lower.startswith("genai: requesting feedback"):
+            return "Ask"
+        if header_lower.startswith("solve:"):
+            return "Solve"
+        if header_lower.startswith("export model"):
+            return "Export"
+        if header_lower.startswith("genai:"):
+            return "GenAI"
+        return "Session"
+
     # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
         dt = datetime.now()
-        display = dt.strftime("%Y-%m-%d %H:%M:%S")
+        timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+        label = self._label_for_output_session(header)
+        display = f"{timestamp} • {label}"
         session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
         initial = (header + "\n") if header else ""
         self._output_sessions[session_id] = initial
         self._output_session_display[session_id] = display
+        self._output_session_timestamp[session_id] = timestamp
         self._output_session_ids.insert(0, session_id)
 
         # Update UI list (most recent at top)
@@ -2247,6 +2754,7 @@ class OPLIDE(tk.Tk):
                 "output_sessions": self._output_sessions,
                 "output_session_ids": self._output_session_ids,
                 "output_session_display": self._output_session_display,
+                "output_session_timestamp": self._output_session_timestamp,
                 "current_output_session_id": self._current_output_session_id,
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
@@ -2285,8 +2793,17 @@ class OPLIDE(tk.Tk):
             self._output_sessions = session.get("output_sessions", {}) or {}
             self._output_session_ids = session.get("output_session_ids", []) or []
             self._output_session_display = session.get("output_session_display", {}) or {}
+            self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
             self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
             self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
+
+            for sid in self._output_session_ids:
+                if sid not in self._output_session_timestamp:
+                    display = self._output_session_display.get(sid, sid)
+                    if " • " in display:
+                        self._output_session_timestamp[sid] = display.rsplit(" • ", 1)[-1]
+                    else:
+                        self._output_session_timestamp[sid] = display
 
             # Restore listbox UI
             if hasattr(self, "request_listbox"):
@@ -2649,28 +3166,14 @@ class OPLIDE(tk.Tk):
         return result["value"]
 
     def genai_generate(self) -> None:
-        """Prompt for a problem description (and optional images) and generate model & data via GenAI."""
+        """Open the docked GenAI composer in generation mode."""
+        self._open_genai_panel("generate")
+
+    def _run_genai_generate(self, prompt_input: _PromptInput) -> None:
+        """Generate model and data from the docked GenAI composer input."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
-
-        prompt_input = self._ask_prompt_with_images(
-            "GenAI: Generate Model & Data",
-            "Describe the optimization problem:",
-            "",
-        )
-        if prompt_input is None:
-            return
-
-        # Validate: allow “images-only” prompts (text may be empty) if using dict form
-        if isinstance(prompt_input, str):
-            if not prompt_input.strip():
-                return
-        elif isinstance(prompt_input, dict):
-            text_ok = bool(str(prompt_input.get("text", "")).strip())
-            images_ok = bool(prompt_input.get("images")) or bool(prompt_input.get("image"))
-            if not (text_ok or images_ok):
-                return
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
@@ -2691,9 +3194,10 @@ class OPLIDE(tk.Tk):
             self._format_prompt_for_output("Prompt", prompt_input),
             operation.session_id,
         )
+        self._clear_pending_genai_revisions()
 
         # Use the visible request timestamp for filenames
-        display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         def run():
@@ -2782,6 +3286,7 @@ class OPLIDE(tk.Tk):
                     if assessment:
                         self._append_output(f"\nAssessment:\n{assessment}\n", operation.session_id)
                     self.status_var.set("GenAI: generation complete")
+                    self._clear_genai_composer()
                     try:
                         self._save_session()
                     except Exception:
@@ -2804,28 +3309,14 @@ class OPLIDE(tk.Tk):
         threading.Thread(target=run, daemon=True).start()
 
     def genai_feedback(self) -> None:
-        """Prompt for a question (and optional images) and request feedback/revisions from GenAI for the current model/data."""
+        """Open the docked GenAI composer in Ask mode."""
+        self._open_genai_panel("ask")
+
+    def _run_genai_feedback(self, prompt_input: _PromptInput) -> None:
+        """Request GenAI feedback from the docked composer input."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
-
-        prompt_input = self._ask_prompt_with_images(
-            "GenAI: Ask...",
-            "Enter your question about the current model/data:",
-            "",
-        )
-        if prompt_input is None:
-            return
-
-        # Validate: allow “images-only” prompts (text may be empty) if using dict form
-        if isinstance(prompt_input, str):
-            if not prompt_input.strip():
-                return
-        elif isinstance(prompt_input, dict):
-            text_ok = bool(str(prompt_input.get("text", "")).strip())
-            images_ok = bool(prompt_input.get("images")) or bool(prompt_input.get("image"))
-            if not (text_ok or images_ok):
-                return
 
         # Track if a data file actually existed before this request
         had_data_file = bool(self.data_file and os.path.exists(self.data_file))
@@ -2853,9 +3344,10 @@ class OPLIDE(tk.Tk):
             self._format_prompt_for_output("Question", prompt_input),
             operation.session_id,
         )
+        self._clear_pending_genai_revisions()
 
         # Use visible request timestamp for filenames
-        display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         # Ensure a temp directory exists for any timestamped revised files
@@ -2918,81 +3410,19 @@ class OPLIDE(tk.Tk):
                         return
                     self._finish_foreground_operation(operation)
                     self._append_output(f"\nFeedback:\n{feedback}\n", operation.session_id)
-                    apply = False
                     if revised_model or revised_data:
-                        apply = messagebox.askyesno(
-                            "Apply Revisions?",
-                            "GenAI returned revised model/data. Apply these revisions to the editors?",
+                        self._set_pending_genai_revisions(
+                            {
+                                "revised_model": revised_model,
+                                "revised_data": revised_data,
+                                "model_path": model_path,
+                                "data_path": data_path,
+                                "safe_ts": safe_ts,
+                                "had_data_file": had_data_file,
+                                "session_id": operation.session_id,
+                            }
                         )
-                    if apply:
-                        os.makedirs(tmp_dir, exist_ok=True)
-
-                        # Derive model base name and extension from model_path
-                        m_base_name, m_ext = os.path.splitext(os.path.basename(model_path))
-                        m_ext = m_ext or ".mod"
-
-                        # If a timestamp suffix already exists, strip it before appending a new one
-                        def _strip_ts_suffix(name: str) -> str:
-                            import re
-
-                            m = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?$", name)
-                            return m.group(1) if m and m.group(1) else name
-
-                        m_base_name = _strip_ts_suffix(m_base_name)
-
-                        model_base = os.path.join(tmp_dir, f"{m_base_name}_{safe_ts}")
-                        model_tgt = model_base + m_ext
-                        i = 1
-                        while os.path.exists(model_tgt):
-                            model_tgt = f"{model_base}_{i}{m_ext}"
-                            i += 1
-
-                        # Always write a timestamped model (revised or current text)
-                        model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
-                        with open(model_tgt, "w", encoding="utf-8") as f:
-                            f.write(model_content)
-
-                        # Data target only if revised_data is present
-                        data_tgt = None
-                        if revised_data:
-                            if had_data_file:
-                                d_base_name, d_ext = os.path.splitext(os.path.basename(data_path))
-                                d_ext = d_ext or ".dat"
-                            else:
-                                d_base_name, d_ext = m_base_name, ".dat"
-
-                            # Strip existing timestamp suffix if present
-                            d_base_name = _strip_ts_suffix(d_base_name)
-
-                            data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
-                            data_tgt = data_base + d_ext
-                            j = 1
-                            while os.path.exists(data_tgt):
-                                data_tgt = f"{data_base}_{j}{d_ext}"
-                                j += 1
-                            with open(data_tgt, "w", encoding="utf-8") as f:
-                                f.write(revised_data)
-
-                        # Update editors with revised content only
-                        if revised_model:
-                            self.model_text.delete("1.0", tk.END)
-                            self.model_text.insert(tk.END, revised_model)
-                        if revised_data:
-                            self.data_text.delete("1.0", tk.END)
-                            self.data_text.insert(tk.END, revised_data)
-
-                        # Point IDE to the new files
-                        self.model_file = model_tgt
-                        if data_tgt:
-                            self.data_file = data_tgt
-
-                        # Update tabs and highlighting
-                        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
-                        if data_tgt:
-                            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
-                        self.highlight(self.model_text, is_data=False)
-                        self.highlight(self.data_text, is_data=True)
-                        self._append_output("\nRevisions applied to editors.\n", operation.session_id)
+                    self._clear_genai_composer()
 
                     self.status_var.set("GenAI: feedback complete")
                     try:
@@ -3071,6 +3501,14 @@ class OPLIDE(tk.Tk):
             output_fg = "#e9ecef"
             error_fg = "white"
             paned_bg = "#2b3035"
+            sidebar_bg = editor_bg
+            sidebar_fg = editor_fg
+            sidebar_muted = "#aab4be"
+            list_select_bg = "#334155"
+            inset_border = "#495057"
+            status_bg = "#212529"
+            status_fg = "#cfd6dd"
+            status_meta_fg = "#8f9aa3"
         else:
             root_bg = "#f8f9fa"
             editor_bg = "#ffffff"
@@ -3080,6 +3518,14 @@ class OPLIDE(tk.Tk):
             output_fg = "#212529"
             error_fg = "black"
             paned_bg = "#e9ecef"
+            sidebar_bg = editor_bg
+            sidebar_fg = editor_fg
+            sidebar_muted = "#6b7785"
+            list_select_bg = "#cfe0ff"
+            inset_border = "#ced4da"
+            status_bg = "#f8f9fa"
+            status_fg = "#364152"
+            status_meta_fg = "#7b8794"
 
         # Root background
         try:
@@ -3088,6 +3534,11 @@ class OPLIDE(tk.Tk):
             pass
 
         # Paned background (and keep it flat)
+        if hasattr(self, "main_paned") and self.main_paned.winfo_exists():
+            try:
+                self.main_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+            except Exception:
+                pass
         if hasattr(self, "editor_output_paned") and self.editor_output_paned.winfo_exists():
             try:
                 self.editor_output_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
@@ -3105,8 +3556,40 @@ class OPLIDE(tk.Tk):
         # Ensure the editor frames share the same background as the text area
         try:
             self.style.configure("Editor.TFrame", background=editor_bg)
+            self.style.configure("Sidebar.TFrame", background=sidebar_bg)
+            self.style.configure("SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold"))
+            self.style.configure("SidebarSection.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 10, "bold"))
+            self.style.configure("SidebarSubtle.TLabel", background=sidebar_bg, foreground=sidebar_muted, font=("Segoe UI", 9))
+            self.style.configure("StatusBar.TFrame", background=status_bg)
+            self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 8))
+            self.style.configure("StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 8))
         except Exception:
             pass
+
+        if hasattr(self, "genai_prompt_text"):
+            self.genai_prompt_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
+        if hasattr(self, "genai_attachment_listbox"):
+            self.genai_attachment_listbox.config(
+                bg=editor_bg,
+                fg=editor_fg,
+                selectbackground=list_select_bg,
+                selectforeground=editor_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+            )
+        if hasattr(self, "sessions_surface"):
+            self.sessions_surface.config(bg=inset_border, highlightbackground=inset_border, highlightcolor=inset_border)
+        if hasattr(self, "request_listbox"):
+            self.request_listbox.config(
+                bg=editor_bg,
+                fg=editor_fg,
+                selectbackground=list_select_bg,
+                selectforeground=editor_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+            )
 
         # Adjust ERROR tag for contrast
         if hasattr(self, "model_text"):
@@ -3371,16 +3854,11 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_cascade(label="Method", menu=method_menu)
+            # Solve & Explain: solve current model/data then ask LLM to explain results
+            self.genai_menu.add_separator()
             if active is not None:
                 self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
             else:
-                self.genai_menu.add_command(
-                    label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G")
-                )
-                self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
-
-                # Solve & Explain: solve current model/data then ask LLM to explain results
-                self.genai_menu.add_separator()
                 self.genai_menu.add_command(
                     label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
                 )
@@ -3446,9 +3924,9 @@ class OPLIDE(tk.Tk):
             return
         try:
             self.genai_method_var.set(method_key)
-            self.status_var.set(f"GenAI method: {self._label_for_method(method_key)}")
         except Exception:
             pass
+        self._refresh_genai_panel_state()
         self._save_settings()
 
     def _import_selected_genai_module(self):
@@ -3512,9 +3990,9 @@ class OPLIDE(tk.Tk):
         self.genai_model = model_name
         try:
             self.genai_selection_var.set(f"{provider_key}|{model_name}")
-            self.status_var.set(f"GenAI selected: {provider_key} • {model_name}")
         except Exception:
             pass
+        self._refresh_genai_panel_state()
         self._save_settings()
 
 
