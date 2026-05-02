@@ -150,6 +150,7 @@ class OPLIDE(tk.Tk):
         self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")
+        self.show_genai_panel_var = tk.BooleanVar(value=True)
 
         # Solver process
         self._solver_process: Optional[multiprocessing.Process] = None
@@ -162,6 +163,8 @@ class OPLIDE(tk.Tk):
         self._run_status_base: str = "Solving model..."
         self._initial_main_pane_ratio_applied = False
         self._initial_genai_panel_width = 300
+        self._side_panel_width = 300
+        self._genai_panel_visible = True
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -281,6 +284,7 @@ class OPLIDE(tk.Tk):
 
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(0, self._stabilize_initial_side_panel_width)
 
     # --- UI Setup Methods ---
     def _set_icon(self) -> None:
@@ -687,9 +691,23 @@ class OPLIDE(tk.Tk):
                 pass
 
     def _setup_panes(self) -> None:
-        """Set up the main paned layout with a full-height GenAI panel on the right."""
-        main_paned = tk.PanedWindow(
+        """Set up vertical editor/output rows with independent top and bottom side panels."""
+        editor_output_paned = tk.PanedWindow(
             self,
+            orient=tk.VERTICAL,
+            sashrelief=tk.FLAT,
+            bd=0,
+            bg="#e9ecef",
+            sashwidth=6,
+            showhandle=False,
+            relief=tk.FLAT,
+        )
+        editor_output_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+
+        self.editor_output_paned = editor_output_paned
+
+        top_row_paned = tk.PanedWindow(
+            editor_output_paned,
             orient=tk.HORIZONTAL,
             sashrelief=tk.FLAT,
             bd=0,
@@ -698,54 +716,119 @@ class OPLIDE(tk.Tk):
             showhandle=False,
             relief=tk.FLAT,
         )
-        main_paned.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
-        self.main_paned = main_paned
+        self.top_row_paned = top_row_paned
+        editor_output_paned.add(top_row_paned, stretch="always")
 
-        workspace_frame = ttk.Frame(main_paned, relief=tk.FLAT, borderwidth=0)
-        main_paned.add(workspace_frame, stretch="always")
-
-        editor_output_paned = tk.PanedWindow(
-            workspace_frame,
-            orient=tk.VERTICAL,
+        bottom_row_paned = tk.PanedWindow(
+            editor_output_paned,
+            orient=tk.HORIZONTAL,
             sashrelief=tk.FLAT,
-            bd=0,  # Remove bevels
-            bg="#e9ecef",  # Will be overridden by _apply_theme_colors
-            sashwidth=6,  # Thin, modern sash
+            bd=0,
+            bg="#e9ecef",
+            sashwidth=6,
             showhandle=False,
             relief=tk.FLAT,
         )
-        editor_output_paned.pack(fill=tk.BOTH, expand=1)
+        self.bottom_row_paned = bottom_row_paned
+        editor_output_paned.add(bottom_row_paned, minsize=150)
 
-        # Keep a reference for theme updates
-        self.editor_output_paned = editor_output_paned
+        self._setup_editors(top_row_paned)
+        self._setup_genai_panel(top_row_paned)
+        self._setup_output(bottom_row_paned)
+        self._setup_sessions_panel(bottom_row_paned)
 
-        self._setup_editors(editor_output_paned)
-        self._setup_output(editor_output_paned)
-
-        self._setup_genai_panel(main_paned)
-        self.main_paned.bind("<Configure>", self._on_main_paned_configure, add="+")
+        self.top_row_paned.bind("<Configure>", self._on_main_paned_configure, add="+")
+        self.top_row_paned.bind("<ButtonRelease-1>", self._sync_side_panel_width_from_top, add="+")
+        self.bottom_row_paned.bind("<ButtonRelease-1>", self._sync_side_panel_width_from_bottom, add="+")
 
     def _on_main_paned_configure(self, event: Optional[tk.Event] = None) -> None:
-        """Apply the initial horizontal pane ratio once the pane has a real size."""
+        """Apply the initial side-panel widths once the panes have real sizes."""
         if self._initial_main_pane_ratio_applied:
             return
         self._apply_initial_main_pane_ratio()
 
     def _apply_initial_main_pane_ratio(self) -> None:
-        """Set the initial workspace/sidebar split using a fixed GenAI panel width."""
-        if not hasattr(self, "main_paned") or not self.main_paned.winfo_exists():
+        """Set the initial widths for the GenAI and session side panels."""
+        if not hasattr(self, "top_row_paned") or not self.top_row_paned.winfo_exists():
             return
         try:
             self.update_idletasks()
-            total_width = int(self.main_paned.winfo_width())
+            top_width = int(self.top_row_paned.winfo_width())
+            bottom_width = int(self.bottom_row_paned.winfo_width()) if hasattr(self, "bottom_row_paned") else top_width
+        except Exception:
+            return
+        if top_width <= 1 or bottom_width <= 1:
+            return
+        try:
+            self._sync_side_panel_width(self._initial_genai_panel_width)
+            self._initial_main_pane_ratio_applied = True
+            self.after_idle(self._stabilize_initial_side_panel_width)
+        except Exception:
+            pass
+
+    def _stabilize_initial_side_panel_width(self, attempts: int = 6) -> None:
+        """Re-apply the startup side-panel width until Tk finishes settling geometry."""
+        try:
+            self.update_idletasks()
+            self._sync_side_panel_width(self._initial_genai_panel_width)
+            top_width = int(self.genai_panel.winfo_width()) if hasattr(self, "genai_panel") else self._initial_genai_panel_width
+            bottom_width = (
+                int(self.genai_sessions_panel.winfo_width())
+                if hasattr(self, "genai_sessions_panel")
+                else self._initial_genai_panel_width
+            )
+        except Exception:
+            return
+        if attempts <= 0:
+            return
+        if top_width != self._initial_genai_panel_width or bottom_width != self._initial_genai_panel_width:
+            self.after(10, lambda: self._stabilize_initial_side_panel_width(attempts - 1))
+
+    def _place_side_panel_width(self, paned: tk.PanedWindow, side_width: int) -> None:
+        """Place a paned-window sash so the right pane gets a target width."""
+        try:
+            total_width = int(paned.winfo_width())
         except Exception:
             return
         if total_width <= 1:
             return
-        workspace_width = max(200, total_width - int(self._initial_genai_panel_width))
         try:
-            self.main_paned.sash_place(0, workspace_width, 0)
-            self._initial_main_pane_ratio_applied = True
+            sash_width = int(paned.cget("sashwidth"))
+        except Exception:
+            sash_width = 0
+        left_width = max(200, total_width - int(side_width) - sash_width)
+        try:
+            paned.sash_place(0, left_width, 0)
+        except Exception:
+            pass
+
+    def _sync_side_panel_width(self, side_width: int) -> None:
+        """Keep the GenAI and session side panels at the same width."""
+        if side_width <= 1:
+            return
+        self._side_panel_width = int(side_width)
+        if self._genai_panel_visible and hasattr(self, "top_row_paned") and self.top_row_paned.winfo_exists():
+            self._place_side_panel_width(self.top_row_paned, self._side_panel_width)
+        if hasattr(self, "bottom_row_paned") and self.bottom_row_paned.winfo_exists():
+            self._place_side_panel_width(self.bottom_row_paned, self._side_panel_width)
+
+    def _sync_side_panel_width_from_top(self, event: Optional[tk.Event] = None) -> None:
+        """After dragging the GenAI sash, mirror its width onto the session list."""
+        if not self._genai_panel_visible or not hasattr(self, "genai_panel"):
+            return
+        try:
+            self.update_idletasks()
+            self._sync_side_panel_width(int(self.genai_panel.winfo_width()))
+        except Exception:
+            pass
+
+    def _sync_side_panel_width_from_bottom(self, event: Optional[tk.Event] = None) -> None:
+        """After dragging the session-list sash, mirror its width onto the GenAI panel."""
+        if not hasattr(self, "genai_sessions_panel"):
+            return
+        try:
+            self.update_idletasks()
+            self._sync_side_panel_width(int(self.genai_sessions_panel.winfo_width()))
         except Exception:
             pass
 
@@ -851,10 +934,9 @@ class OPLIDE(tk.Tk):
         self.output_text.pack(fill=tk.BOTH, expand=1)
 
         parent.add(output_frame, minsize=150)
-        output_frame.bind("<Configure>", self._sync_sessions_panel_height)
 
     def _setup_genai_panel(self, parent: tk.PanedWindow) -> None:
-        """Create a persistent full-height GenAI composer panel on the right."""
+        """Create the GenAI composer panel for the top row."""
         panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(12, 10))
         parent.add(panel, minsize=180)
         panel.pack_propagate(False)
@@ -862,21 +944,9 @@ class OPLIDE(tk.Tk):
         panel.rowconfigure(0, weight=1)
         self.genai_panel = panel
 
-        sidebar = ttk.Frame(panel, style="Sidebar.TFrame")
-        sidebar.grid(row=0, column=0, sticky="nsew")
-        sidebar.columnconfigure(0, weight=1)
-        sidebar.rowconfigure(0, weight=1)
-
-        composer_panel = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(0, 0, 0, 0))
+        composer_panel = ttk.Frame(panel, style="Sidebar.TFrame", padding=(0, 0, 0, 0))
         composer_panel.columnconfigure(0, weight=1)
         composer_panel.grid(row=0, column=0, sticky="nsew")
-
-        sessions_panel = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=(0, 10, 0, 0), height=180)
-        sessions_panel.columnconfigure(0, weight=1)
-        sessions_panel.rowconfigure(0, weight=1)
-        sessions_panel.grid(row=1, column=0, sticky="ew")
-        sessions_panel.grid_propagate(False)
-        self.genai_sessions_panel = sessions_panel
 
         ttk.Label(composer_panel, text="GenAI", style="SidebarHeader.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(composer_panel, textvariable=self.genai_context_var, style="SidebarSubtle.TLabel", wraplength=320).grid(
@@ -954,6 +1024,15 @@ class OPLIDE(tk.Tk):
         )
         self.genai_submit_button.grid(row=0, column=0, sticky="e")
 
+    def _setup_sessions_panel(self, parent: tk.PanedWindow) -> None:
+        """Create the output-session list panel for the bottom row."""
+        sessions_panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(12, 0, 12, 5))
+        parent.add(sessions_panel, minsize=180)
+        sessions_panel.pack_propagate(False)
+        sessions_panel.columnconfigure(0, weight=1)
+        sessions_panel.rowconfigure(0, weight=1)
+        self.genai_sessions_panel = sessions_panel
+
         sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
         sessions_list.grid(row=0, column=0, sticky="nsew")
         sessions_list.columnconfigure(0, weight=1)
@@ -977,25 +1056,27 @@ class OPLIDE(tk.Tk):
 
         self._clear_pending_genai_revisions()
         self._refresh_genai_panel_state()
-        self.after_idle(self._sync_sessions_panel_height)
 
-    def _sync_sessions_panel_height(self, event: Optional[tk.Event] = None) -> None:
-        """Keep the session-list section visually aligned with the output pane height."""
-        sessions_panel = getattr(self, "genai_sessions_panel", None)
-        output_frame = getattr(self, "output_frame", None)
-        if sessions_panel is None or output_frame is None:
+    def _set_genai_panel_visible(self, visible: bool) -> None:
+        """Show or hide the top-row GenAI composer while keeping the session list visible."""
+        visible = bool(visible)
+        self.show_genai_panel_var.set(visible)
+        if visible == self._genai_panel_visible:
             return
+        self._genai_panel_visible = visible
         try:
-            output_height = int(output_frame.winfo_height())
-        except Exception:
-            return
-        if output_height <= 1:
-            return
-        target_height = max(140, output_height)
-        try:
-            sessions_panel.configure(height=target_height)
+            if visible:
+                self.top_row_paned.add(self.genai_panel, minsize=180)
+                self.update_idletasks()
+                self._sync_side_panel_width(self._side_panel_width)
+            else:
+                self.top_row_paned.forget(self.genai_panel)
         except Exception:
             pass
+
+    def _toggle_genai_panel_visibility(self) -> None:
+        """Menu command for the GenAI composer visibility toggle."""
+        self._set_genai_panel_visible(self.show_genai_panel_var.get())
 
     def _setup_status_bar(self) -> None:
         """Create a segmented status bar at the bottom of the window."""
@@ -1093,6 +1174,7 @@ class OPLIDE(tk.Tk):
         """Focus the docked GenAI composer and set its mode."""
         if mode not in ("generate", "ask"):
             mode = "generate"
+        self._set_genai_panel_visible(True)
         self.genai_panel_mode_var.set(mode)
         self._refresh_genai_panel_state()
         if initial_text and hasattr(self, "genai_prompt_text"):
@@ -3534,14 +3616,19 @@ class OPLIDE(tk.Tk):
             pass
 
         # Paned background (and keep it flat)
-        if hasattr(self, "main_paned") and self.main_paned.winfo_exists():
-            try:
-                self.main_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
-            except Exception:
-                pass
         if hasattr(self, "editor_output_paned") and self.editor_output_paned.winfo_exists():
             try:
                 self.editor_output_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+            except Exception:
+                pass
+        if hasattr(self, "top_row_paned") and self.top_row_paned.winfo_exists():
+            try:
+                self.top_row_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+            except Exception:
+                pass
+        if hasattr(self, "bottom_row_paned") and self.bottom_row_paned.winfo_exists():
+            try:
+                self.bottom_row_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
             except Exception:
                 pass
 
@@ -3854,6 +3941,13 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_cascade(label="Method", menu=method_menu)
+            self.genai_menu.add_checkbutton(
+                label="Show GenAI Panel",
+                onvalue=True,
+                offvalue=False,
+                variable=self.show_genai_panel_var,
+                command=self._toggle_genai_panel_visibility,
+            )
             # Solve & Explain: solve current model/data then ask LLM to explain results
             self.genai_menu.add_separator()
             if active is not None:
