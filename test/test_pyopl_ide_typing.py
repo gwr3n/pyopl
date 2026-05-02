@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 # Import should not fail regardless of Pillow availability
 from pyopl import pyopl_ide_bootstrap
@@ -21,6 +23,144 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(OPLIDE._index_from_pos(None, s, 6), "2.0")
         # end of string len=11 => line 2, col len('world')=5
         self.assertEqual(OPLIDE._index_from_pos(None, s, len(s)), "2.5")
+
+    def test_append_output_can_target_non_current_session(self):
+        dummy = SimpleNamespace(
+            _output_sessions={},
+            _output_session_ids=[],
+            _output_session_display={},
+            _current_output_session_id=None,
+            _viewing_output_session_id=None,
+            _save_session=lambda: None,
+            _show_output_session=lambda session_id: None,
+        )
+
+        first = OPLIDE._begin_new_output_session(dummy, "First")
+        second = OPLIDE._begin_new_output_session(dummy, "Second")
+
+        OPLIDE._append_output(dummy, "\nfirst-session-update\n", first)
+
+        self.assertIn("first-session-update", dummy._output_sessions[first])
+        self.assertNotIn("first-session-update", dummy._output_sessions[second])
+
+    def test_start_foreground_operation_blocks_overlap(self):
+        class DummyVar:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        session_ids = iter(["session-1", "session-2"])
+        dummy = SimpleNamespace(
+            _active_operation=None,
+            status_var=DummyVar(),
+            _clear_output=lambda header: next(session_ids),
+        )
+        dummy._ensure_no_active_operation = lambda label: OPLIDE._ensure_no_active_operation(dummy, label)
+        dummy._refresh_foreground_operation_ui = lambda: None
+
+        first = OPLIDE._start_foreground_operation(
+            dummy,
+            kind="solve",
+            label="Solve Model",
+            header="Solve: Solving model...",
+            status="Solving model...",
+        )
+
+        self.assertIsNotNone(first)
+        self.assertIs(dummy._active_operation, first)
+
+        with mock.patch.object(pyopl_ide_bootstrap.messagebox, "showinfo") as showinfo:
+            second = OPLIDE._start_foreground_operation(
+                dummy,
+                kind="generate",
+                label="Generate Model & Data",
+                header="GenAI: Generating model and data...",
+                status="GenAI: generating...",
+            )
+
+        self.assertIsNone(second)
+        showinfo.assert_called_once()
+        self.assertIn("already running", dummy.status_var.value)
+
+        OPLIDE._finish_foreground_operation(dummy, first)
+        self.assertIsNone(dummy._active_operation)
+
+    def test_start_and_finish_foreground_operation_toggle_editor_lock(self):
+        class DummyVar:
+            def set(self, value):
+                self.value = value
+
+        class DummyText:
+            def __init__(self):
+                self.state = "normal"
+
+            def cget(self, name):
+                self.assert_name = name
+                return self.state
+
+            def config(self, **kwargs):
+                self.state = kwargs["state"]
+
+        dummy = SimpleNamespace(
+            _active_operation=None,
+            status_var=DummyVar(),
+            model_text=DummyText(),
+            data_text=DummyText(),
+            _genai_loading=False,
+            _genai_provider_models={},
+            _clear_output=lambda header: "session-1",
+        )
+        dummy._ensure_no_active_operation = lambda label: OPLIDE._ensure_no_active_operation(dummy, label)
+        dummy._set_editors_locked = lambda locked: OPLIDE._set_editors_locked(dummy, locked)
+        dummy._refresh_foreground_operation_ui = lambda: OPLIDE._refresh_foreground_operation_ui(dummy)
+
+        op = OPLIDE._start_foreground_operation(
+            dummy,
+            kind="generate",
+            label="Generate Model & Data",
+            header="GenAI: Generating model and data...",
+            status="GenAI: generating...",
+        )
+
+        self.assertEqual(dummy.model_text.state, "disabled")
+        self.assertEqual(dummy.data_text.state, "disabled")
+
+        OPLIDE._finish_foreground_operation(dummy, op)
+
+        self.assertEqual(dummy.model_text.state, "normal")
+        self.assertEqual(dummy.data_text.state, "normal")
+
+    def test_interrupt_active_non_solve_operation_marks_cancelled(self):
+        class DummyVar:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        log = []
+        op = pyopl_ide_bootstrap._ForegroundOperation(
+            kind="genai-generate",
+            label="Generate Model & Data",
+            session_id="session-1",
+        )
+        dummy = SimpleNamespace(
+            _active_operation=op,
+            _solver_process=None,
+            status_var=DummyVar(),
+        )
+        dummy._append_output = lambda text, session_id=None: log.append((text, session_id))
+        dummy._finish_foreground_operation = lambda operation: OPLIDE._finish_foreground_operation(dummy, operation)
+        dummy._refresh_foreground_operation_ui = lambda: None
+
+        OPLIDE.interrupt_active_operation(dummy)
+
+        self.assertTrue(op.cancel_requested)
+        self.assertIsNone(dummy._active_operation)
+        self.assertEqual(log, [("\nOperation interrupted by user.\n", "session-1")])
+        self.assertIn("interrupted", dummy.status_var.value)
 
 
 if __name__ == "__main__":

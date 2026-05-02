@@ -12,6 +12,7 @@ import threading
 import tkinter as tk
 import traceback
 import webbrowser
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -106,6 +107,18 @@ class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
 
+@dataclass
+class _ForegroundOperation:
+    kind: str
+    label: str
+    session_id: str
+    solver_choice: Optional[str] = None
+    model_file: Optional[str] = None
+    data_file: Optional[str] = None
+    explain_after_solve: bool = False
+    cancel_requested: bool = False
+
+
 class OPLIDE(tk.Tk):
     """
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
@@ -148,10 +161,6 @@ class OPLIDE(tk.Tk):
         self.genai_model: Optional[str] = None
         self._genai_provider_models: dict[str, list[str]] = {}
         self._genai_loading: bool = False
-        # Flag: when True, run generative feedback after solver finishes
-        self._explain_after_solve: bool = False
-        self._last_solved_model_file: Optional[str] = None
-        self._last_solved_data_file: Optional[str] = None
 
         # Output sessions
         self._output_sessions: dict[str, str] = {}
@@ -159,6 +168,7 @@ class OPLIDE(tk.Tk):
         self._output_session_display: dict[str, str] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
+        self._active_operation: Optional[_ForegroundOperation] = None
 
         # Settings
         self._init_settings_storage()
@@ -421,12 +431,118 @@ class OPLIDE(tk.Tk):
                 accelerator=self._accel("R"),
             )
 
+    def _ensure_no_active_operation(self, requested_label: str) -> bool:
+        """Return True when no foreground operation is active; otherwise notify the user."""
+        active = getattr(self, "_active_operation", None)
+        if active is None:
+            return True
+
+        msg = f"{active.label} is already running. Wait for it to finish before starting {requested_label}."
+        try:
+            self.status_var.set(msg)
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo(requested_label, msg)
+        except Exception:
+            pass
+        return False
+
+    def _start_foreground_operation(
+        self,
+        *,
+        kind: str,
+        label: str,
+        header: str,
+        status: str,
+        solver_choice: Optional[str] = None,
+        model_file: Optional[str] = None,
+        data_file: Optional[str] = None,
+        explain_after_solve: bool = False,
+    ) -> Optional[_ForegroundOperation]:
+        """Create a new output session and bind it to a single foreground operation."""
+        if not self._ensure_no_active_operation(label):
+            return None
+
+        session_id = self._clear_output(header)
+        operation = _ForegroundOperation(
+            kind=kind,
+            label=label,
+            session_id=session_id,
+            solver_choice=solver_choice,
+            model_file=model_file,
+            data_file=data_file,
+            explain_after_solve=explain_after_solve,
+        )
+        self._active_operation = operation
+        self.status_var.set(status)
+        self._refresh_foreground_operation_ui()
+        return operation
+
+    def _finish_foreground_operation(self, operation: Optional[_ForegroundOperation]) -> None:
+        """Clear the active foreground operation when the matching request completes."""
+        if operation is None:
+            return
+        if getattr(self, "_active_operation", None) is operation:
+            self._active_operation = None
+            self._refresh_foreground_operation_ui()
+
+    def _set_editors_locked(self, locked: bool) -> None:
+        """Toggle the editor widgets between editable and read-only states."""
+        desired = "disabled" if locked else "normal"
+        for widget_name in ("model_text", "data_text"):
+            widget = getattr(self, widget_name, None)
+            if widget is None:
+                continue
+            try:
+                if str(widget.cget("state")) != desired:
+                    widget.config(state=desired)
+            except Exception:
+                pass
+
+    def _refresh_foreground_operation_ui(self) -> None:
+        """Refresh UI elements that depend on foreground-operation state."""
+        self._set_editors_locked(getattr(self, "_active_operation", None) is not None)
+        if getattr(self, "_genai_loading", False) and not getattr(self, "_genai_provider_models", None):
+            try:
+                self.genai_menu.delete(0, tk.END)
+            except Exception:
+                pass
+            try:
+                self.genai_menu.add_command(label="Loading models...", state="disabled")
+                active = getattr(self, "_active_operation", None)
+                if active is not None:
+                    self.genai_menu.add_separator()
+                    self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
+                self.menubar.entryconfig("GenAI", state="normal")
+            except Exception:
+                pass
+            return
+        if hasattr(self, "genai_menu"):
+            self._populate_genai_model_menus(getattr(self, "_genai_provider_models", {}))
+
+    def interrupt_active_operation(self) -> None:
+        """Interrupt the current foreground operation."""
+        active = getattr(self, "_active_operation", None)
+        if active is None:
+            return
+        if active.kind == "solve" and self._solver_process and self._solver_process.is_alive():
+            self.stop_model()
+            return
+
+        active.cancel_requested = True
+        self._append_output("\nOperation interrupted by user.\n", active.session_id)
+        self.status_var.set(f"{active.label} interrupted.")
+        self._finish_foreground_operation(active)
+
     def _accel(self, key: str) -> str:
         """Return platform-aware accelerator label."""
         return f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+{key}"
 
     def new_model(self) -> None:
         """Clear editors, reset file paths, and prepare for a new model."""
+        if not self._ensure_no_active_operation("New Model"):
+            return
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
         self.model_file = None
@@ -449,6 +565,8 @@ class OPLIDE(tk.Tk):
 
     def new_session(self) -> None:
         """Clear saved and in-memory session history and start a fresh session."""
+        if not self._ensure_no_active_operation("New Session"):
+            return
         try:
             # Also clear editors and reset file state to a blank IDE
             try:
@@ -726,6 +844,8 @@ class OPLIDE(tk.Tk):
 
     def _open_find_replace_dialog(self, replace: bool = False) -> None:
         """Open a modal Find/Replace dialog with optional regex support."""
+        if not self._ensure_no_active_operation("Find and Replace"):
+            return
         dlg = tk.Toplevel(self)
         dlg.title("Find and Replace")
         dlg.transient(self)
@@ -1010,6 +1130,16 @@ class OPLIDE(tk.Tk):
                 return
 
             sid = self._output_session_ids[index]
+            active = getattr(self, "_active_operation", None)
+            if active is not None and active.session_id == sid:
+                try:
+                    messagebox.showinfo(
+                        "Delete Session",
+                        "The active output session cannot be deleted while its operation is running.",
+                    )
+                except Exception:
+                    pass
+                return
             if not messagebox.askyesno("Delete Session", "Delete the selected session?"):
                 return
 
@@ -1145,6 +1275,8 @@ class OPLIDE(tk.Tk):
     # --- File Operations ---
     def open_model(self) -> None:
         """Open a model file into the model editor."""
+        if not self._ensure_no_active_operation("Open Model"):
+            return
         fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
             with open(fname, "r", encoding="utf-8") as f:
@@ -1161,6 +1293,8 @@ class OPLIDE(tk.Tk):
 
     def open_data(self) -> None:
         """Open a data file into the data editor."""
+        if not self._ensure_no_active_operation("Open Data"):
+            return
         fname = filedialog.askopenfilename(filetypes=[("Data files", "*.dat"), ("All files", "*.*")])
         if fname:
             with open(fname, "r", encoding="utf-8") as f:
@@ -1596,7 +1730,12 @@ class OPLIDE(tk.Tk):
         self._run_timer_after_id = self.after(1000, self._tick_run_timer)
 
     # --- Model Execution ---
-    def run_model(self) -> None:
+    def run_model(
+        self,
+        explain_after_solve: bool = False,
+        model_file_override: Optional[str] = None,
+        data_file_override: Optional[str] = None,
+    ) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
         if self._solver_process and self._solver_process.is_alive():
             messagebox.showinfo("Solve Model", "Model is already running.")
@@ -1607,11 +1746,19 @@ class OPLIDE(tk.Tk):
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
         data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
-        # Start a new output session
-        self._clear_output("Solve: Solving model...")
-
-        self.status_var.set("Solving model...")
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
+        operation = self._start_foreground_operation(
+            kind="solve",
+            label="Solve Model",
+            header="Solve: Solving model...",
+            status="Solving model...",
+            solver_choice=solver_choice,
+            model_file=model_file_override,
+            data_file=data_file_override,
+            explain_after_solve=explain_after_solve,
+        )
+        if operation is None:
+            return
 
         # Data file checks
         data_vars = set()
@@ -1639,9 +1786,8 @@ class OPLIDE(tk.Tk):
                 parser.parse(iter(tokens), lexer=lexer)
             except Exception as e:
                 self.status_var.set(f"Error: Data file failed to parse: {e}")
-                self.output_text.config(state="normal")
-                self.output_text.insert(tk.END, f"\nError: Data file failed to parse: {e}\n")
-                self.output_text.config(state="disabled")
+                self._append_output(f"\nError: Data file failed to parse: {e}\n", operation.session_id)
+                self._finish_foreground_operation(operation)
                 return
 
         # Check that all required data variables are present
@@ -1651,17 +1797,16 @@ class OPLIDE(tk.Tk):
                 missing_vars.append(var)
         if missing_vars:
             self.status_var.set(f"Error: Data missing for: {', '.join(missing_vars)}")
-            self.output_text.config(state="normal")
-            self.output_text.insert(tk.END, f"\nError: Data missing for: {', '.join(missing_vars)}\n")
-            self.output_text.config(state="disabled")
+            self._append_output(f"\nError: Data missing for: {', '.join(missing_vars)}\n", operation.session_id)
+            self._finish_foreground_operation(operation)
             return
 
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
         # Save temp files if not saved
-        model_file = self.model_file or os.path.join(tmp_dir, "temp_model.mod")
-        data_file = self.data_file or os.path.join(tmp_dir, "temp_data.dat")
+        model_file = model_file_override or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
+        data_file = data_file_override or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
         try:
             with open(model_file, "w", encoding="utf-8") as f:
                 f.write(model_code)
@@ -1669,22 +1814,34 @@ class OPLIDE(tk.Tk):
                 f.write(data_code)
         except Exception as e:
             self.status_var.set(f"Error saving temp files: {e}")
+            self._append_output(f"\nError saving temp files: {e}\n", operation.session_id)
+            self._finish_foreground_operation(operation)
             return
 
         self._current_solver_choice = solver_choice
-        self._solver_queue = multiprocessing.Queue()
-        self._solver_process = multiprocessing.Process(
-            target=_solve_wrapper,
-            args=(model_file, data_file, solver_choice, self._solver_queue),
-        )
-        self._solver_process.start()
+        operation.model_file = model_file
+        operation.data_file = data_file
+        try:
+            self._solver_queue = multiprocessing.Queue()
+            self._solver_process = multiprocessing.Process(
+                target=_solve_wrapper,
+                args=(model_file, data_file, solver_choice, self._solver_queue),
+            )
+            self._solver_process.start()
+        except Exception as e:
+            self.status_var.set(f"Error starting solve: {e}")
+            self._append_output(f"\nError starting solve: {e}\n", operation.session_id)
+            self._solver_process = None
+            self._solver_queue = None
+            self._finish_foreground_operation(operation)
+            return
 
         self._set_run_menu_running(True)
 
         # Start elapsed-time status updates (every second)
         self._start_run_timer("Solving model...")
 
-        self.after(100, self._poll_solver)
+        self.after(100, self._poll_solver, operation)
 
     def stop_model(self) -> None:
         p = self._solver_process
@@ -1716,11 +1873,13 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        self._append_output("\nExecution stopped by user.\n")
+        active = getattr(self, "_active_operation", None)
+        self._append_output("\nExecution stopped by user.\n", active.session_id if active is not None else None)
         self.status_var.set("Execution stopped.")
         self._set_run_menu_running(False)
+        self._finish_foreground_operation(active)
 
-    def _poll_solver(self) -> None:
+    def _poll_solver(self, operation: Optional[_ForegroundOperation] = None) -> None:
         # _poll_solver is scheduled via `after()`, so it can run after `stop_model()`
         # has already nulled these out.
         p = self._solver_process
@@ -1732,12 +1891,15 @@ class OPLIDE(tk.Tk):
             kind, payload = q.get_nowait()
         except queue.Empty:
             if p.is_alive():
-                self.after(100, self._poll_solver)
+                self.after(100, self._poll_solver, operation)
                 return
 
             # Process ended but no message
             self._set_run_menu_running(False)
-            self._append_output("\nError: Solver process terminated unexpectedly.\n")
+            self._append_output(
+                "\nError: Solver process terminated unexpectedly.\n",
+                operation.session_id if operation is not None else None,
+            )
 
             # Stop timer updates
             self._stop_run_timer()
@@ -1745,6 +1907,7 @@ class OPLIDE(tk.Tk):
             self.status_var.set("Error: Solver process terminated.")
             self._solver_process = None
             self._solver_queue = None
+            self._finish_foreground_operation(operation)
             return
 
         # Got a message => process should be done
@@ -1761,7 +1924,11 @@ class OPLIDE(tk.Tk):
         self._stop_run_timer()
 
         if kind == "success":
-            self._display_solve_results(payload)
+            self._display_solve_results(
+                payload,
+                session_id=operation.session_id if operation is not None else None,
+                solver_choice=operation.solver_choice if operation is not None else None,
+            )
 
             # Determine whether the solver actually produced a usable solution.
             success = False
@@ -1779,22 +1946,23 @@ class OPLIDE(tk.Tk):
 
             # If user requested Solve & Explain, only run generative feedback when solve succeeded
             try:
-                if getattr(self, "_explain_after_solve", False):
-                    # reset flag regardless so we don't attempt again later
-                    self._explain_after_solve = False
-
+                if operation is not None and operation.explain_after_solve:
                     if not success:
                         # Skip explanation when solve failed
                         try:
                             self._append_output(
-                                "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n"
+                                "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n",
+                                operation.session_id,
                             )
                         except Exception:
                             pass
+                        self._finish_foreground_operation(operation)
                     else:
                         # run feedback in background thread to avoid blocking UI
                         def _run_feedback():
                             try:
+                                if operation.cancel_requested:
+                                    return
                                 # Compose solution text as JSON
                                 try:
                                     sol_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
@@ -1806,11 +1974,15 @@ class OPLIDE(tk.Tk):
                                     "Include key findings and suggested next steps.\n\nSolution:\n" + sol_text
                                 )
 
-                                model_path = getattr(self, "_last_solved_model_file", None)
-                                data_path = getattr(self, "_last_solved_data_file", None)
+                                model_path = operation.model_file
+                                data_path = operation.data_file
 
                                 # Notify UI and request feedback
-                                self.after(0, lambda: self._append_output("\n[GenAI] Requesting explanation...\n"))
+                                if operation.cancel_requested:
+                                    return
+                                self.after(
+                                    0, self._append_output, "\n[GenAI] Requesting explanation...\n", operation.session_id
+                                )
 
                                 try:
                                     fb = generative_feedback(
@@ -1822,7 +1994,17 @@ class OPLIDE(tk.Tk):
                                         progress=(None),
                                     )
                                 except Exception:
-                                    self.after(0, lambda: self._append_output("\n[GenAI] Error requesting explanation:\n"))
+                                    self.after(
+                                        0,
+                                        self._append_output,
+                                        "\n[GenAI] Error requesting explanation:\n",
+                                        operation.session_id,
+                                    )
+                                    self.after(0, self._finish_foreground_operation, operation)
+                                    return
+
+                                if operation.cancel_requested:
+                                    self.after(0, self._finish_foreground_operation, operation)
                                     return
 
                                 # Format feedback for output
@@ -1837,24 +2019,36 @@ class OPLIDE(tk.Tk):
                                 # Note: unescaping of double-escaped sequences is handled centrally
                                 # in `pyopl.genai.pyopl_generative.generative_feedback`.
 
-                                self.after(0, lambda: self._append_output("\n[GenAI] Explanation:\n" + out + "\n"))
+                                self.after(
+                                    0, self._append_output, "\n[GenAI] Explanation:\n" + out + "\n", operation.session_id
+                                )
                                 self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
+                                self.after(0, self._finish_foreground_operation, operation)
                             except Exception:
                                 try:
-                                    self.after(0, lambda: self._append_output("\n[GenAI] Explanation failed.\n"))
+                                    self.after(0, self._append_output, "\n[GenAI] Explanation failed.\n", operation.session_id)
                                 except Exception:
                                     pass
+                                self.after(0, self._finish_foreground_operation, operation)
 
                         threading.Thread(target=_run_feedback, daemon=True).start()
+                        return
             except Exception:
                 pass
+            self._finish_foreground_operation(operation)
         else:
-            self._append_output(f"\nError:\n{payload}\n")
+            self._append_output(f"\nError:\n{payload}\n", operation.session_id if operation is not None else None)
             self.status_var.set("Error running model")
+            self._finish_foreground_operation(operation)
 
-    def _display_solve_results(self, results: dict) -> None:
+    def _display_solve_results(
+        self,
+        results: dict,
+        session_id: Optional[str] = None,
+        solver_choice: Optional[str] = None,
+    ) -> None:
         """Format and display solver results in the output pane."""
-        solver_choice = getattr(self, "_current_solver_choice", "gurobi")
+        solver_choice = solver_choice or getattr(self, "_current_solver_choice", "gurobi")
         buf = []
         buf.append(f"\nSolver: {solver_choice}\n")
         buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
@@ -1877,12 +2071,14 @@ class OPLIDE(tk.Tk):
             buf.append(f"Message: {results['message']}\n")
 
         for s in buf:
-            self._append_output(s)
+            self._append_output(s, session_id)
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
 
     def export_model(self) -> None:
         """Export the current model as a standalone Python file using the selected solver."""
+        if not self._ensure_no_active_operation("Export model"):
+            return
         try:
             self._clear_output("Export model...")
 
@@ -1942,13 +2138,13 @@ class OPLIDE(tk.Tk):
             self.status_var.set(f"Export failed: {detail}")
 
     # --- GenAI actions ---
-    def _clear_output(self, header: str = "") -> None:
+    def _clear_output(self, header: str = "") -> str:
         """Start a new output request session and display its header."""
-        self._begin_new_output_session(header)
+        return self._begin_new_output_session(header)
 
-    def _append_output(self, text: str) -> None:
+    def _append_output(self, text: str, session_id: Optional[str] = None) -> None:
         """Append text to the current output session and update the Output panel if visible."""
-        sid = getattr(self, "_current_output_session_id", None)
+        sid = session_id or getattr(self, "_current_output_session_id", None)
         if sid:
             self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
         if sid and getattr(self, "_viewing_output_session_id", None) == sid and self.output_text.winfo_exists():
@@ -1963,7 +2159,7 @@ class OPLIDE(tk.Tk):
             pass
 
     # Output sessions (history)
-    def _begin_new_output_session(self, header: str = "") -> None:
+    def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
         dt = datetime.now()
         display = dt.strftime("%Y-%m-%d %H:%M:%S")
@@ -1992,6 +2188,7 @@ class OPLIDE(tk.Tk):
             self._save_session()
         except Exception:
             pass
+        return session_id
 
     def _show_output_session(self, session_id: str) -> None:
         """Display a session's content in the Output panel."""
@@ -2459,21 +2656,29 @@ class OPLIDE(tk.Tk):
         gen_module = self._import_selected_genai_module()
         module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
-        self.status_var.set(
-            f"GenAI: generating with {self.genai_provider} • {self.genai_model} • method={self._label_for_method(self.genai_method_var.get())} ..."
+        operation = self._start_foreground_operation(
+            kind="genai-generate",
+            label="Generate Model & Data",
+            header="GenAI: Generating model and data...",
+            status=(
+                f"GenAI: generating with {self.genai_provider} • {self.genai_model} • "
+                f"method={self._label_for_method(self.genai_method_var.get())} ..."
+            ),
         )
-        self._clear_output("GenAI: Generating model and data...")
+        if operation is None:
+            return
 
         # Use the visible request timestamp for filenames
-        sid = self._current_output_session_id or ""
-        display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         def run():
             try:
                 # Progress hook -> Output panel
                 def progress(msg: str) -> None:
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
+                    if operation.cancel_requested:
+                        return
+                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
 
                 # Bridge module logger to progress (optional)
                 class _ProgressLogHandler(logging.Handler):
@@ -2528,7 +2733,13 @@ class OPLIDE(tk.Tk):
                 with open(data_path, "r", encoding="utf-8") as f:
                     data_code = f.read()
 
+                if operation.cancel_requested:
+                    return
+
                 def apply_results():
+                    if operation.cancel_requested:
+                        return
+                    self._finish_foreground_operation(operation)
                     # Load into editors
                     self.model_text.delete("1.0", tk.END)
                     self.model_text.insert(tk.END, model_code)
@@ -2543,9 +2754,9 @@ class OPLIDE(tk.Tk):
                     self.highlight(self.model_text, is_data=False)
                     self.highlight(self.data_text, is_data=True)
                     # Output and status
-                    self._append_output("\nGenAI: Generation complete.\n")
+                    self._append_output("\nGenAI: Generation complete.\n", operation.session_id)
                     if assessment:
-                        self._append_output(f"\nAssessment:\n{assessment}\n")
+                        self._append_output(f"\nAssessment:\n{assessment}\n", operation.session_id)
                     self.status_var.set("GenAI: generation complete")
                     try:
                         self._save_session()
@@ -2557,8 +2768,11 @@ class OPLIDE(tk.Tk):
             except Exception as e:
 
                 def on_error(e):
+                    if operation.cancel_requested:
+                        return
+                    self._finish_foreground_operation(operation)
                     messagebox.showerror("GenAI Error", type(e).__name__)
-                    self._append_output(f"\nGenAI Error: {e}\n")
+                    self._append_output(f"\nGenAI Error: {e}\n", operation.session_id)
                     self.status_var.set("GenAI: error")
 
                 self.after(0, on_error, e)
@@ -2601,12 +2815,19 @@ class OPLIDE(tk.Tk):
         gen_module = self._import_selected_genai_module()
         module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
-        self.status_var.set("GenAI: requesting feedback...")
-        self._clear_output("GenAI: Requesting feedback...")
+        operation = self._start_foreground_operation(
+            kind="genai-feedback",
+            label="Ask",
+            header="GenAI: Requesting feedback...",
+            status="GenAI: requesting feedback...",
+            model_file=model_path,
+            data_file=data_path,
+        )
+        if operation is None:
+            return
 
         # Use visible request timestamp for filenames
-        sid = self._current_output_session_id or ""
-        display_ts = self._output_session_display.get(sid, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._output_session_display.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         # Ensure a temp directory exists for any timestamped revised files
@@ -2617,7 +2838,9 @@ class OPLIDE(tk.Tk):
             try:
                 # Progress hook -> Output panel
                 def progress(msg: str) -> None:
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"))
+                    if operation.cancel_requested:
+                        return
+                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
 
                 # Bridge module logger to progress (optional)
                 class _ProgressLogHandler(logging.Handler):
@@ -2659,8 +2882,14 @@ class OPLIDE(tk.Tk):
                 revised_model = result.get("revised_model", "")
                 revised_data = result.get("revised_data", "")
 
+                if operation.cancel_requested:
+                    return
+
                 def after_feedback():
-                    self._append_output(f"\nFeedback:\n{feedback}\n")
+                    if operation.cancel_requested:
+                        return
+                    self._finish_foreground_operation(operation)
+                    self._append_output(f"\nFeedback:\n{feedback}\n", operation.session_id)
                     apply = False
                     if revised_model or revised_data:
                         apply = messagebox.askyesno(
@@ -2735,7 +2964,7 @@ class OPLIDE(tk.Tk):
                             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
                         self.highlight(self.model_text, is_data=False)
                         self.highlight(self.data_text, is_data=True)
-                        self._append_output("\nRevisions applied to editors.\n")
+                        self._append_output("\nRevisions applied to editors.\n", operation.session_id)
 
                     self.status_var.set("GenAI: feedback complete")
                     try:
@@ -2747,8 +2976,11 @@ class OPLIDE(tk.Tk):
             except Exception as e:
 
                 def on_error(e):
+                    if operation.cancel_requested:
+                        return
+                    self._finish_foreground_operation(operation)
                     messagebox.showerror("GenAI Error", str(e))
-                    self._append_output(f"\nGenAI Error: {e}\n")
+                    self._append_output(f"\nGenAI Error: {e}\n", operation.session_id)
                     self.status_var.set("GenAI: error")
 
                 self.after(0, on_error, e)
@@ -2761,10 +2993,6 @@ class OPLIDE(tk.Tk):
         model_path, data_path = self._ensure_model_data_saved()
         if not model_path:
             return
-
-        # Remember which files were used so feedback can reference them
-        self._last_solved_model_file = model_path
-        self._last_solved_data_file = data_path
 
         # Ensure run_model uses these exact files and update tabs/highlighting
         try:
@@ -2783,11 +3011,8 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        # Set flag so _poll_solver will trigger feedback after finishing
-        self._explain_after_solve = True
-
         # Start solve using existing run_model flow (re-uses multiprocessing and UI updates)
-        self.run_model()
+        self.run_model(explain_after_solve=True, model_file_override=model_path, data_file_override=data_path)
 
     # --- Theme ---
     def set_theme(self, theme_name: str) -> None:
@@ -3080,6 +3305,7 @@ class OPLIDE(tk.Tk):
 
         self._genai_provider_models = provider_models
         any_models = any(len(v) > 0 for v in provider_models.values())
+        active = getattr(self, "_active_operation", None)
         self._genai_provider_submenus: dict[str, tk.Menu] = {}
 
         if any_models:
@@ -3117,16 +3343,19 @@ class OPLIDE(tk.Tk):
             # Actions
             self.genai_menu.add_separator()
             self.genai_menu.add_cascade(label="Method", menu=method_menu)
-            self.genai_menu.add_command(
-                label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G")
-            )
-            self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
+            if active is not None:
+                self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
+            else:
+                self.genai_menu.add_command(
+                    label="Generate Model & Data...", command=self.genai_generate, accelerator=self._accel("G")
+                )
+                self.genai_menu.add_command(label="Ask...", command=self.genai_feedback, accelerator=self._accel("I"))
 
-            # Solve & Explain: solve current model/data then ask LLM to explain results
-            self.genai_menu.add_separator()
-            self.genai_menu.add_command(
-                label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
-            )
+                # Solve & Explain: solve current model/data then ask LLM to explain results
+                self.genai_menu.add_separator()
+                self.genai_menu.add_command(
+                    label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
+                )
 
             # Verbose LLM progress logs (only visible when launched with --debug)
             if getattr(self, "debug", False):
@@ -3165,10 +3394,13 @@ class OPLIDE(tk.Tk):
                         self._on_select_genai_model(pk, first)
                         break
         else:
-            # No models available
-            self.genai_menu.add_command(label="No models available", state="disabled")
+            if active is not None:
+                self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
+            else:
+                # No models available
+                self.genai_menu.add_command(label="No models available", state="disabled")
             try:
-                self.menubar.entryconfig("GenAI", state="disabled")
+                self.menubar.entryconfig("GenAI", state=("normal" if active is not None else "disabled"))
             except Exception:
                 pass
 
