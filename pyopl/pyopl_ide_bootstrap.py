@@ -1,4 +1,5 @@
 # --- Standard Library Imports ---
+import difflib
 import json
 import logging
 import multiprocessing
@@ -166,6 +167,9 @@ class OPLIDE(tk.Tk):
         self._side_panel_width = 300
         self._genai_panel_visible = True
         self._panel_resize_after_id: Optional[str] = None
+        self._genai_diff_preview_window: Optional[tk.Toplevel] = None
+        self._genai_diff_preview_notebook: Optional[ttk.Notebook] = None
+        self._genai_diff_preview_texts: dict[str, tk.Text] = {}
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -1033,10 +1037,12 @@ class OPLIDE(tk.Tk):
         self.genai_pending_label.grid(row=0, column=0, sticky="w")
         actions = ttk.Frame(pending, style="Sidebar.TFrame")
         actions.grid(row=1, column=0, sticky="e", pady=(6, 0))
-        self.genai_apply_button = ttk.Button(actions, text="Apply revisions", command=self._apply_pending_genai_revisions)
-        self.genai_apply_button.grid(row=0, column=0)
+        self.genai_preview_button = ttk.Button(actions, text="Review", command=self._show_pending_genai_diff_preview)
+        self.genai_preview_button.grid(row=0, column=0)
+        self.genai_apply_button = ttk.Button(actions, text="Apply", command=self._apply_pending_genai_revisions)
+        self.genai_apply_button.grid(row=0, column=1, padx=(6, 0))
         self.genai_dismiss_button = ttk.Button(actions, text="Dismiss", command=self._clear_pending_genai_revisions)
-        self.genai_dismiss_button.grid(row=0, column=1, padx=(6, 0))
+        self.genai_dismiss_button.grid(row=0, column=2, padx=(6, 0))
 
         footer = ttk.Frame(composer_panel, style="Sidebar.TFrame")
         footer.grid(row=5, column=0, sticky="ew", pady=(10, 0))
@@ -1332,6 +1338,7 @@ class OPLIDE(tk.Tk):
         self.genai_pending_var.set(f"Pending revised {' and '.join(labels)} from Ask")
         if hasattr(self, "genai_pending_frame"):
             self.genai_pending_frame.grid()
+        self._show_pending_genai_diff_preview()
 
     def _clear_pending_genai_revisions(self) -> None:
         """Hide inline revision actions when no revisions are pending."""
@@ -1339,6 +1346,147 @@ class OPLIDE(tk.Tk):
         self.genai_pending_var.set("")
         if hasattr(self, "genai_pending_frame"):
             self.genai_pending_frame.grid_remove()
+        self._close_pending_genai_diff_preview()
+
+    def _close_pending_genai_diff_preview(self) -> None:
+        """Close the pending Ask revision preview window if it is open."""
+        window = getattr(self, "_genai_diff_preview_window", None)
+        self._genai_diff_preview_texts = {}
+        self._genai_diff_preview_notebook = None
+        self._genai_diff_preview_window = None
+        if window is None:
+            return
+        try:
+            if window.winfo_exists():
+                window.destroy()
+        except Exception:
+            pass
+
+    def _create_diff_preview_text(self, parent: ttk.Frame) -> tk.Text:
+        """Create a read-only text widget for Ask revision previews."""
+        container = ttk.Frame(parent)
+        container.pack(fill=tk.BOTH, expand=1)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(0, weight=1)
+        text_widget = tk.Text(
+            container,
+            wrap=tk.NONE,
+            font=(self.editor_font_family, max(10, self.current_font_size - 1)),
+            relief=tk.FLAT,
+            bd=0,
+            padx=8,
+            pady=8,
+        )
+        y_scroll = ttk.Scrollbar(container, orient=tk.VERTICAL, command=text_widget.yview)
+        x_scroll = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=text_widget.xview)
+        text_widget.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        return text_widget
+
+    def _configure_diff_preview_tags(self, text_widget: tk.Text) -> None:
+        """Apply VS Code-like diff colors to the preview text widget."""
+        if self.theme_var.get() == "darkly":
+            bg = "#1f2329"
+            fg = "#e6edf3"
+            add_bg = "#12261b"
+            add_fg = "#7ee787"
+            remove_bg = "#30151b"
+            remove_fg = "#ffa198"
+            header_fg = "#8b949e"
+        else:
+            bg = "#ffffff"
+            fg = "#24292f"
+            add_bg = "#e6ffec"
+            add_fg = "#1a7f37"
+            remove_bg = "#ffebe9"
+            remove_fg = "#cf222e"
+            header_fg = "#57606a"
+        text_widget.configure(bg=bg, fg=fg, insertbackground=fg)
+        text_widget.tag_configure("diff_header", foreground=header_fg)
+        text_widget.tag_configure("diff_add", background=add_bg, foreground=add_fg)
+        text_widget.tag_configure("diff_remove", background=remove_bg, foreground=remove_fg)
+        text_widget.tag_configure("diff_context", foreground=fg)
+
+    def _populate_diff_preview_text(self, text_widget: tk.Text, original: str, revised: str) -> None:
+        """Render a line-oriented diff preview into a read-only text widget."""
+        self._configure_diff_preview_tags(text_widget)
+        original_lines = original.splitlines()
+        revised_lines = revised.splitlines()
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", tk.END)
+        text_widget.insert(tk.END, "--- Current\n", ("diff_header",))
+        text_widget.insert(tk.END, "+++ Proposed\n\n", ("diff_header",))
+        for line in difflib.ndiff(original_lines, revised_lines):
+            if line.startswith("? "):
+                continue
+            if line.startswith("+ "):
+                tag = "diff_add"
+            elif line.startswith("- "):
+                tag = "diff_remove"
+            else:
+                tag = "diff_context"
+            text_widget.insert(tk.END, f"{line}\n", (tag,))
+        text_widget.configure(state="disabled")
+
+    def _show_pending_genai_diff_preview(self) -> None:
+        """Show a VS Code-like diff preview for pending Ask revisions."""
+        pending = self._genai_pending_revisions
+        if not pending:
+            return
+        try:
+            if self._genai_diff_preview_window is None or not self._genai_diff_preview_window.winfo_exists():
+                window = tk.Toplevel(self)
+                window.title("Review Ask Changes")
+                window.geometry("980x700")
+                window.transient(self)
+                window.rowconfigure(0, weight=1)
+                window.columnconfigure(0, weight=1)
+                notebook = ttk.Notebook(window)
+                notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+                footer = ttk.Frame(window)
+                footer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+                footer.columnconfigure(0, weight=1)
+                ttk.Button(footer, text="Close", command=window.withdraw).grid(row=0, column=1)
+                ttk.Button(footer, text="Apply revisions", command=self._apply_pending_genai_revisions).grid(
+                    row=0, column=2, padx=(6, 0)
+                )
+                window.protocol("WM_DELETE_WINDOW", window.withdraw)
+                self._genai_diff_preview_window = window
+                self._genai_diff_preview_notebook = notebook
+                self._genai_diff_preview_texts = {}
+            window = self._genai_diff_preview_window
+            notebook = self._genai_diff_preview_notebook
+            if window is None or notebook is None:
+                return
+            for tab_id in notebook.tabs():
+                notebook.forget(tab_id)
+            self._genai_diff_preview_texts = {}
+
+            tabs: list[tuple[str, str, str]] = []
+            revised_model = str(pending.get("revised_model") or "")
+            revised_data = str(pending.get("revised_data") or "")
+            current_model = str(pending.get("current_model") or "")
+            current_data = str(pending.get("current_data") or "")
+            if revised_model:
+                tabs.append(("Model", current_model, revised_model))
+            if revised_data:
+                tabs.append(("Data", current_data, revised_data))
+            for label, original, revised in tabs:
+                frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
+                text_widget = self._create_diff_preview_text(frame)
+                self._populate_diff_preview_text(text_widget, original, revised)
+                notebook.add(frame, text=label)
+                self._genai_diff_preview_texts[label.lower()] = text_widget
+            try:
+                window.deiconify()
+                window.lift()
+                window.focus_force()
+            except Exception:
+                pass
+        except Exception:
+            pass
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
@@ -3519,6 +3667,8 @@ class OPLIDE(tk.Tk):
                             {
                                 "revised_model": revised_model,
                                 "revised_data": revised_data,
+                                "current_model": self.model_text.get("1.0", tk.END),
+                                "current_data": self.data_text.get("1.0", tk.END),
                                 "model_path": model_path,
                                 "data_path": data_path,
                                 "safe_ts": safe_ts,
