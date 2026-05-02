@@ -855,6 +855,27 @@ class OPLIDE(tk.Tk):
         try:
             self.update_idletasks()
             self._sync_side_panel_width(self._side_panel_width)
+            self._sync_genai_mode_width()
+        except Exception:
+            pass
+
+    def _on_genai_prompt_configure(self, event: Optional[tk.Event] = None) -> None:
+        """Resync the segmented control after prompt widget size changes."""
+        self.after_idle(self._sync_genai_mode_width)
+
+    def _sync_genai_mode_width(self) -> None:
+        """Match the segmented control width to the prompt text area excluding the scrollbar."""
+        if not hasattr(self, "genai_mode_frame") or not hasattr(self, "genai_prompt_text"):
+            return
+        try:
+            prompt_width = int(self.genai_prompt_text.winfo_width())
+            scrollbar = getattr(self.genai_prompt_text, "vbar", None)
+            scrollbar_width = 0
+            if scrollbar is not None:
+                scrollbar_width = max(int(scrollbar.winfo_width()), int(scrollbar.winfo_reqwidth()))
+            gap_width = 4 + (1 if (prompt_width - 4) % 2 else 0)
+            self.genai_mode_frame.columnconfigure(1, minsize=gap_width)
+            self.genai_mode_frame.grid_configure(padx=(0, scrollbar_width))
         except Exception:
             pass
 
@@ -981,14 +1002,27 @@ class OPLIDE(tk.Tk):
 
         mode_frame = ttk.Frame(composer_panel, style="Sidebar.TFrame")
         mode_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        for idx, (label, value) in enumerate((("Generate", "generate"), ("Ask", "ask"))):
-            ttk.Radiobutton(
-                mode_frame,
-                text=label,
-                value=value,
-                variable=self.genai_panel_mode_var,
-                command=self._on_genai_mode_changed,
-            ).grid(row=0, column=idx, sticky="w", padx=(0, 12))
+        self.genai_mode_frame = mode_frame
+        mode_frame.columnconfigure(0, weight=1, uniform="genai-mode")
+        mode_frame.columnconfigure(1, minsize=4)
+        mode_frame.columnconfigure(2, weight=1, uniform="genai-mode")
+        mode_button_width = max(len("Generate"), len("Ask"))
+        self.genai_generate_mode_button = ttk.Button(
+            mode_frame,
+            text="Generate",
+            style="GenaiModeActive.TButton",
+            width=mode_button_width,
+            command=lambda: self._set_genai_panel_mode("generate"),
+        )
+        self.genai_generate_mode_button.grid(row=0, column=0, sticky="ew")
+        self.genai_ask_mode_button = ttk.Button(
+            mode_frame,
+            text="Ask",
+            style="GenaiMode.TButton",
+            width=mode_button_width,
+            command=lambda: self._set_genai_panel_mode("ask"),
+        )
+        self.genai_ask_mode_button.grid(row=0, column=2, sticky="ew")
 
         composer = ttk.Frame(composer_panel, style="Sidebar.TFrame")
         composer.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
@@ -1008,6 +1042,7 @@ class OPLIDE(tk.Tk):
         self.genai_prompt_text.grid(row=1, column=0, sticky="nsew")
         self.genai_prompt_text.bind("<Control-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Command-Return>", self._submit_genai_from_event)
+        self.genai_prompt_text.bind("<Configure>", self._on_genai_prompt_configure, add="+")
         composer.rowconfigure(1, weight=1)
 
         attachments = ttk.Frame(composer, style="Sidebar.TFrame")
@@ -1119,6 +1154,7 @@ class OPLIDE(tk.Tk):
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         status_bar.columnconfigure(0, weight=1)
         self.status_bar = status_bar
+        self.status_bar_labels: list[ttk.Label] = []
 
         segments: list[tuple[tk.StringVar, str, int]] = [
             (self.status_message_var, "w", 0),
@@ -1129,12 +1165,14 @@ class OPLIDE(tk.Tk):
         ]
 
         for idx, (var, anchor, column) in enumerate(segments):
-            ttk.Label(
+            label = ttk.Label(
                 status_bar,
                 textvariable=var,
                 anchor=anchor,
                 style="StatusBar.TLabel" if column == 0 else "StatusBarMeta.TLabel",
-            ).grid(row=0, column=idx, sticky=("ew" if column == 0 else "w"), padx=((0, 0) if idx == 0 else (10, 0)))
+            )
+            label.grid(row=0, column=idx, sticky=("ew" if column == 0 else "w"), padx=((0, 0) if idx == 0 else (10, 0)))
+            self.status_bar_labels.append(label)
 
         self._refresh_status_context()
 
@@ -1162,9 +1200,25 @@ class OPLIDE(tk.Tk):
         """Update composer copy when the GenAI panel mode changes."""
         self._refresh_genai_panel_state()
 
+    def _set_genai_panel_mode(self, mode: str) -> None:
+        """Switch the GenAI composer mode from the segmented control."""
+        if mode not in ("generate", "ask"):
+            return
+        self.genai_panel_mode_var.set(mode)
+        self._refresh_genai_panel_state()
+
+    def _refresh_genai_mode_buttons(self) -> None:
+        """Keep the segmented mode buttons visually aligned with the selected mode."""
+        mode = self.genai_panel_mode_var.get() if hasattr(self, "genai_panel_mode_var") else "generate"
+        if hasattr(self, "genai_generate_mode_button"):
+            self.genai_generate_mode_button.configure(style=("GenaiModeActive.TButton" if mode == "generate" else "GenaiMode.TButton"))
+        if hasattr(self, "genai_ask_mode_button"):
+            self.genai_ask_mode_button.configure(style=("GenaiModeActive.TButton" if mode == "ask" else "GenaiMode.TButton"))
+
     def _refresh_genai_panel_state(self) -> None:
         """Refresh docked GenAI panel labels and enabled state."""
         mode = self.genai_panel_mode_var.get() if hasattr(self, "genai_panel_mode_var") else "generate"
+        self._refresh_genai_mode_buttons()
         if mode == "ask":
             self.genai_prompt_title_var.set("Ask about the current model and data")
             self.genai_submit_label_var.set("Ask")
@@ -2303,6 +2357,8 @@ class OPLIDE(tk.Tk):
 
         # Update caret position after size change
         self._update_caret_position(self.model_text)
+        self._apply_theme_colors()
+        self._sync_genai_mode_width()
 
         # Persist settings
         self._save_settings()
@@ -3819,11 +3875,43 @@ class OPLIDE(tk.Tk):
             self.style.configure("SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold"))
             self.style.configure("SidebarSection.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 10, "bold"))
             self.style.configure("SidebarSubtle.TLabel", background=sidebar_bg, foreground=sidebar_muted, font=("Segoe UI", 9))
+            self.style.configure(
+                "GenaiMode.TButton",
+                background=paned_bg,
+                foreground=sidebar_muted,
+                borderwidth=0,
+                focusthickness=0,
+                padding=(10, 5),
+                font=("Segoe UI", self.current_font_size),
+            )
+            self.style.map("GenaiMode.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
+            self.style.configure(
+                "GenaiModeActive.TButton",
+                background=list_select_bg,
+                foreground=sidebar_fg,
+                borderwidth=0,
+                focusthickness=0,
+                padding=(10, 5),
+                font=("Segoe UI", self.current_font_size),
+            )
+            self.style.map("GenaiModeActive.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
             self.style.configure("StatusBar.TFrame", background=status_bg)
-            self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 8))
-            self.style.configure("StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 8))
+            self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 12))
+            self.style.configure("StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 12))
         except Exception:
             pass
+
+        if hasattr(self, "status_bar"):
+            try:
+                self.status_bar.configure(style="StatusBar.TFrame")
+            except Exception:
+                pass
+        if hasattr(self, "status_bar_labels"):
+            for idx, label in enumerate(self.status_bar_labels):
+                try:
+                    label.configure(style=("StatusBar.TLabel" if idx == 0 else "StatusBarMeta.TLabel"))
+                except Exception:
+                    pass
 
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
