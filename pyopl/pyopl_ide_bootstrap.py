@@ -925,7 +925,7 @@ class OPLIDE(tk.Tk):
         if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
             return
         timestamp = str(self._output_session_timestamp.get(session_id) or session_id)
-        safe_ts = re.sub(r"[^0-9A-Za-z_-]+", "_", timestamp).strip("_") or "session"
+        safe_ts = timestamp.replace(":", "-").replace(" ", "_")
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         model_target = os.path.join(tmp_dir, f"session_model_{safe_ts}.mod")
@@ -1756,7 +1756,7 @@ class OPLIDE(tk.Tk):
         m_ext = m_ext or ".mod"
 
         def _strip_ts_suffix(name: str) -> str:
-            match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})(?:_\d+)?$", name)
+            match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
             return match.group(1) if match and match.group(1) else name
 
         m_base_name = _strip_ts_suffix(m_base_name)

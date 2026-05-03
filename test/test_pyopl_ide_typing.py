@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -85,7 +86,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 data_file=None,
             )
 
-            with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap, "datetime") as fake_datetime,
+            ):
+                fake_datetime.now.return_value = datetime(2026, 5, 3, 1, 18, 7)
                 session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
 
             artifacts = dummy._output_session_artifacts[session_id]
@@ -96,6 +101,64 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertTrue(data_path.exists())
             self.assertEqual(model_path.read_text(encoding="utf-8"), "dvar int x;")
             self.assertEqual(data_path.read_text(encoding="utf-8"), "x = 3;")
+            self.assertEqual(model_path.name, "session_model_2026-05-03_01-18-07.mod")
+            self.assertEqual(data_path.name, "session_data_2026-05-03_01-18-07.dat")
+
+    def test_apply_pending_genai_revisions_replaces_session_snapshot_timestamp(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        class DummyNotebook:
+            def tab(self, *_args, **_kwargs):
+                pass
+
+        with TemporaryDirectory() as tmpdir:
+            original_data = Path(tmpdir) / "session_data_2026-05-03_01_18_07.dat"
+            original_data.write_text("old = 1;\n", encoding="utf-8")
+            original_model = Path(tmpdir) / "session_model_2026-05-03_01_18_07.mod"
+            original_model.write_text("dvar int x;\n", encoding="utf-8")
+
+            log = []
+            dummy = SimpleNamespace(
+                _genai_pending_revisions={
+                    "revised_model": "dvar int y;\n",
+                    "revised_data": "y = 2;\n",
+                    "model_path": str(original_model),
+                    "data_path": str(original_data),
+                    "safe_ts": "2026-05-03_01-20-41",
+                    "had_data_file": True,
+                    "session_id": "session-1",
+                },
+                model_file=str(original_model),
+                data_file=str(original_data),
+                model_text=DummyText("dvar int x;\n"),
+                data_text=DummyText("old = 1;\n"),
+                editor_notebook=DummyNotebook(),
+                model_frame=object(),
+                data_frame=object(),
+                status_var=SimpleNamespace(set=lambda value: None),
+                highlight=lambda *args, **kwargs: None,
+                _append_output=lambda text, session_id=None: log.append((text, session_id)),
+                _clear_pending_genai_revisions=lambda: None,
+                _save_session=lambda: None,
+                _record_output_session_artifacts=lambda *args, **kwargs: None,
+            )
+
+            with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
+                OPLIDE._apply_pending_genai_revisions(dummy)
+
+            self.assertEqual(Path(dummy.model_file).name, "session_model_2026-05-03_01-20-41.mod")
+            self.assertEqual(Path(dummy.data_file).name, "session_data_2026-05-03_01-20-41.dat")
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
