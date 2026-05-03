@@ -1177,15 +1177,11 @@ class OPLIDE(tk.Tk):
 
         composer_panel = ttk.Frame(panel, style="Sidebar.TFrame", padding=(0, 0, 0, 0))
         composer_panel.columnconfigure(0, weight=1)
+        composer_panel.rowconfigure(0, minsize=24)
         composer_panel.grid(row=0, column=0, sticky="nsew")
 
-        ttk.Label(composer_panel, text="GenAI", style="SidebarHeader.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(composer_panel, textvariable=self.genai_context_var, style="SidebarSubtle.TLabel", wraplength=320).grid(
-            row=1, column=0, sticky="ew", pady=(2, 10)
-        )
-
         mode_frame = ttk.Frame(composer_panel, style="Sidebar.TFrame")
-        mode_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        mode_frame.grid(row=1, column=0, sticky="ew", pady=(2, 10))
         self.genai_mode_frame = mode_frame
         mode_frame.columnconfigure(0, weight=1, uniform="genai-mode")
         mode_frame.columnconfigure(1, minsize=4)
@@ -1330,6 +1326,7 @@ class OPLIDE(tk.Tk):
         self.status_syntax_var = tk.StringVar(value="Syntax OK")
         self.status_caret_var = tk.StringVar(value="Ln 1, Col 0")
         self.status_solver_var = tk.StringVar(value="Solver: Gurobi")
+        self.status_genai_var = tk.StringVar(value="GenAI: none")
         self.status_runtime_var = tk.StringVar(value="")
         self.status_var = _StatusVarProxy(self._set_status_message, lambda: self.status_message_var.get())
 
@@ -1344,7 +1341,8 @@ class OPLIDE(tk.Tk):
             (self.status_syntax_var, "w", 1),
             (self.status_caret_var, "w", 2),
             (self.status_solver_var, "w", 3),
-            (self.status_runtime_var, "e", 4),
+            (self.status_genai_var, "w", 4),
+            (self.status_runtime_var, "e", 5),
         ]
 
         for idx, (var, anchor, column) in enumerate(segments):
@@ -1367,6 +1365,13 @@ class OPLIDE(tk.Tk):
         """Refresh footer context segments that derive from current IDE state."""
         solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "SciPy"
         self.status_solver_var.set(f"Solver: {solver_name}")
+        provider = getattr(self, "genai_provider", None)
+        model = getattr(self, "genai_model", None)
+        method = self._label_for_method(self.genai_method_var.get()) if hasattr(self, "genai_method_var") else "SyntAGM"
+        if provider and model:
+            self.status_genai_var.set(f"GenAI: {provider} • {model} • {method}")
+        else:
+            self.status_genai_var.set("GenAI: none")
 
     def _setup_tag_configs(self) -> None:
         """Configure syntax highlighting tags for editors."""
@@ -1410,14 +1415,6 @@ class OPLIDE(tk.Tk):
         else:
             self.genai_prompt_title_var.set("Describe the optimization problem")
             self.genai_submit_label_var.set("Generate")
-
-        provider = getattr(self, "genai_provider", None)
-        model = getattr(self, "genai_model", None)
-        method = self._label_for_method(self.genai_method_var.get()) if hasattr(self, "genai_method_var") else "SyntAGM"
-        if provider and model:
-            self.genai_context_var.set(f"{provider} • {model} • {method}")
-        else:
-            self.genai_context_var.set("No GenAI model selected. Choose one from the GenAI menu.")
 
         attachment_count = len(getattr(self, "_genai_attachment_paths", []))
         if attachment_count == 0:
