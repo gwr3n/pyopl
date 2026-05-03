@@ -1,5 +1,7 @@
 import unittest
 from types import SimpleNamespace
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 # Import should not fail regardless of Pillow availability
@@ -59,6 +61,41 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIn(session_id, dummy._output_session_timestamp)
         self.assertIn(session_id, dummy._output_session_artifacts)
         self.assertEqual(dummy._output_session_artifacts[session_id], {})
+
+    def test_begin_new_output_session_snapshots_current_editor_state(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+        with TemporaryDirectory() as tmpdir:
+            dummy = SimpleNamespace(
+                _output_sessions={},
+                _output_session_ids=[],
+                _output_session_display={},
+                _current_output_session_id=None,
+                _viewing_output_session_id=None,
+                _save_session=lambda: None,
+                _show_output_session=lambda session_id: None,
+                model_text=DummyText("dvar int x;\n"),
+                data_text=DummyText("x = 3;\n"),
+                model_file=None,
+                data_file=None,
+            )
+
+            with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
+                session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+
+            artifacts = dummy._output_session_artifacts[session_id]
+            model_path = Path(artifacts["model_path"])
+            data_path = Path(artifacts["data_path"])
+
+            self.assertTrue(model_path.exists())
+            self.assertTrue(data_path.exists())
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "dvar int x;")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "x = 3;")
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:

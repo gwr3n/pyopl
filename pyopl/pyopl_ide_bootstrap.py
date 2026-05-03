@@ -202,7 +202,6 @@ class OPLIDE(tk.Tk):
         self._output_session_artifacts: dict[str, dict[str, str]] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
-        self.session_browser_mode_var = tk.StringVar(value="sessions")
         self._active_operation: Optional[_ForegroundOperation] = None
 
         # Settings
@@ -864,7 +863,6 @@ class OPLIDE(tk.Tk):
             self.update_idletasks()
             self._sync_side_panel_width(self._side_panel_width)
             self._sync_genai_mode_width()
-            self._sync_session_browser_mode_width()
         except Exception:
             pass
 
@@ -885,41 +883,6 @@ class OPLIDE(tk.Tk):
             gap_width = 4 + (1 if (prompt_width - 4) % 2 else 0)
             self.genai_mode_frame.columnconfigure(1, minsize=gap_width)
             self.genai_mode_frame.grid_configure(padx=(0, scrollbar_width))
-        except Exception:
-            pass
-
-    def _set_session_browser_mode(self, mode: str) -> None:
-        """Switch the session list between session and model interaction modes."""
-        if mode not in ("sessions", "models"):
-            return
-        self.session_browser_mode_var.set(mode)
-        self._refresh_session_browser_mode_buttons()
-
-    def _refresh_session_browser_mode_buttons(self) -> None:
-        """Keep the Sessions/Models selector visually aligned with the active mode."""
-        mode = self.session_browser_mode_var.get() if hasattr(self, "session_browser_mode_var") else "sessions"
-        if hasattr(self, "session_browser_sessions_button"):
-            self.session_browser_sessions_button.configure(
-                style=("GenaiModeActive.TButton" if mode == "sessions" else "GenaiMode.TButton")
-            )
-        if hasattr(self, "session_browser_models_button"):
-            self.session_browser_models_button.configure(
-                style=("GenaiModeActive.TButton" if mode == "models" else "GenaiMode.TButton")
-            )
-
-    def _sync_session_browser_mode_width(self) -> None:
-        """Keep the Sessions/Models selector aligned with the session list width."""
-        if not hasattr(self, "session_browser_mode_frame") or not hasattr(self, "request_listbox"):
-            return
-        try:
-            scrollbar = getattr(self.request_listbox, "_vscrollbar", None)
-            scrollbar_width = 0
-            if scrollbar is not None:
-                scrollbar_width = max(int(scrollbar.winfo_width()), int(scrollbar.winfo_reqwidth()))
-            list_width = int(self.request_listbox.winfo_width())
-            gap_width = 4 + (1 if (list_width - 4) % 2 else 0)
-            self.session_browser_mode_frame.columnconfigure(1, minsize=gap_width)
-            self.session_browser_mode_frame.grid_configure(padx=(0, scrollbar_width))
         except Exception:
             pass
 
@@ -952,6 +915,28 @@ class OPLIDE(tk.Tk):
             artifact["data_path"] = str(data_path)
         if artifact:
             self._output_session_artifacts[session_id] = artifact
+
+    def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
+        """Snapshot the current editor state into temp files for a session when possible."""
+        if not session_id:
+            return
+        if not hasattr(self, "model_text") or not hasattr(self, "data_text"):
+            return
+        if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
+            return
+        timestamp = str(self._output_session_timestamp.get(session_id) or session_id)
+        safe_ts = re.sub(r"[^0-9A-Za-z_-]+", "_", timestamp).strip("_") or "session"
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        model_target = os.path.join(tmp_dir, f"session_model_{safe_ts}.mod")
+        data_target = os.path.join(tmp_dir, f"session_data_{safe_ts}.dat")
+        suffix = 1
+        while os.path.exists(model_target) or os.path.exists(data_target):
+            model_target = os.path.join(tmp_dir, f"session_model_{safe_ts}_{suffix}.mod")
+            data_target = os.path.join(tmp_dir, f"session_data_{safe_ts}_{suffix}.dat")
+            suffix += 1
+        model_path, data_path = OPLIDE._ensure_model_data_saved(self, model_target=model_target, data_target=data_target)
+        OPLIDE._record_output_session_artifacts(self, session_id, model_path=model_path, data_path=data_path)
 
     def _get_output_session_artifacts(self, session_id: Optional[str]) -> dict[str, str]:
         """Return the stored model/data artifact paths for a session."""
@@ -1026,7 +1011,7 @@ class OPLIDE(tk.Tk):
                     continue
                 frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
                 text_widget = self._create_diff_preview_text(frame)
-                self._populate_diff_preview_text(text_widget, current_text, selected_text)
+                self._populate_diff_preview_text(text_widget, selected_text, current_text)
                 notebook.add(frame, text=label)
             ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
         except Exception:
@@ -1062,31 +1047,29 @@ class OPLIDE(tk.Tk):
         self.status_var.set("Model restored from session")
 
     def _populate_request_context_menu(self, session_id: Optional[str]) -> None:
-        """Populate the session list context menu based on the active browser mode."""
+        """Populate the session list context menu."""
         try:
             self.request_context_menu.delete(0, tk.END)
         except Exception:
             pass
-        mode = self.session_browser_mode_var.get() if hasattr(self, "session_browser_mode_var") else "sessions"
         artifacts = self._get_output_session_artifacts(session_id)
         has_artifacts = bool(artifacts.get("model_path") or artifacts.get("data_path"))
-        if mode == "models":
-            self.request_context_menu.add_command(
-                label="Preview",
-                command=self._show_session_model_preview,
-                state=("normal" if has_artifacts else "disabled"),
-            )
-            self.request_context_menu.add_command(
-                label="Diff Against Current",
-                command=self._show_session_model_diff,
-                state=("normal" if has_artifacts else "disabled"),
-            )
-            self.request_context_menu.add_command(
-                label="Restore",
-                command=self._restore_session_model,
-                state=("normal" if has_artifacts else "disabled"),
-            )
-            self.request_context_menu.add_separator()
+        self.request_context_menu.add_command(
+            label="Preview",
+            command=self._show_session_model_preview,
+            state=("normal" if has_artifacts else "disabled"),
+        )
+        self.request_context_menu.add_command(
+            label="Diff Against Current",
+            command=self._show_session_model_diff,
+            state=("normal" if has_artifacts else "disabled"),
+        )
+        self.request_context_menu.add_command(
+            label="Restore",
+            command=self._restore_session_model,
+            state=("normal" if has_artifacts else "disabled"),
+        )
+        self.request_context_menu.add_separator()
         self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
@@ -1303,35 +1286,11 @@ class OPLIDE(tk.Tk):
         parent.add(sessions_panel, minsize=180)
         sessions_panel.pack_propagate(False)
         sessions_panel.columnconfigure(0, weight=1)
-        sessions_panel.rowconfigure(1, weight=1)
+        sessions_panel.rowconfigure(0, weight=1)
         self.genai_sessions_panel = sessions_panel
 
-        browser_mode_frame = ttk.Frame(sessions_panel, style="Sidebar.TFrame")
-        browser_mode_frame.grid(row=0, column=0, sticky="ew", pady=(2, 8))
-        browser_mode_frame.columnconfigure(0, weight=1, uniform="session-browser-mode")
-        browser_mode_frame.columnconfigure(1, minsize=4)
-        browser_mode_frame.columnconfigure(2, weight=1, uniform="session-browser-mode")
-        self.session_browser_mode_frame = browser_mode_frame
-        mode_button_width = max(len("Sessions"), len("Models"))
-        self.session_browser_sessions_button = ttk.Button(
-            browser_mode_frame,
-            text="Sessions",
-            style="GenaiModeActive.TButton",
-            width=mode_button_width,
-            command=lambda: self._set_session_browser_mode("sessions"),
-        )
-        self.session_browser_sessions_button.grid(row=0, column=0, sticky="ew")
-        self.session_browser_models_button = ttk.Button(
-            browser_mode_frame,
-            text="Models",
-            style="GenaiMode.TButton",
-            width=mode_button_width,
-            command=lambda: self._set_session_browser_mode("models"),
-        )
-        self.session_browser_models_button.grid(row=0, column=2, sticky="ew")
-
         sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
-        sessions_list.grid(row=1, column=0, sticky="nsew")
+        sessions_list.grid(row=0, column=0, sticky="nsew")
         sessions_list.columnconfigure(0, weight=1)
         sessions_list.rowconfigure(0, weight=1)
         self.sessions_surface = sessions_list
@@ -1353,8 +1312,6 @@ class OPLIDE(tk.Tk):
 
         self._clear_pending_genai_revisions()
         self._refresh_genai_panel_state()
-        self._refresh_session_browser_mode_buttons()
-        self.after_idle(self._sync_session_browser_mode_width)
 
     def _set_genai_panel_visible(self, visible: bool) -> None:
         """Show or hide the top-row GenAI composer while keeping the session list visible."""
@@ -1706,8 +1663,8 @@ class OPLIDE(tk.Tk):
         revised_lines = revised.splitlines()
         text_widget.configure(state="normal")
         text_widget.delete("1.0", tk.END)
-        text_widget.insert(tk.END, "--- Current\n", ("diff_header",))
-        text_widget.insert(tk.END, "+++ Proposed\n\n", ("diff_header",))
+        text_widget.insert(tk.END, "--- Historical\n", ("diff_header",))
+        text_widget.insert(tk.END, "+++ Current\n\n", ("diff_header",))
         for line in difflib.ndiff(original_lines, revised_lines):
             if line.startswith("? "):
                 continue
@@ -3247,6 +3204,7 @@ class OPLIDE(tk.Tk):
         self._output_session_display[session_id] = display
         self._output_session_timestamp[session_id] = timestamp
         self._output_session_artifacts.setdefault(session_id, {})
+        OPLIDE._snapshot_output_session_artifacts(self, session_id)
         self._output_session_ids.insert(0, session_id)
 
         # Update UI list (most recent at top)
@@ -3448,8 +3406,8 @@ class OPLIDE(tk.Tk):
         try:
             tmp_dir = os.path.join(os.getcwd(), "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
-            model_path = model_target or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
-            data_path = data_target or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
+            model_path = model_target or getattr(self, "model_file", None) or os.path.join(tmp_dir, "temp_model.mod")
+            data_path = data_target or getattr(self, "data_file", None) or os.path.join(tmp_dir, "temp_data.dat")
             with open(model_path, "w", encoding="utf-8") as f:
                 f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
             with open(data_path, "w", encoding="utf-8") as f:
