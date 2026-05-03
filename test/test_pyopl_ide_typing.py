@@ -10,6 +10,76 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_populate_genai_model_menus_preserves_current_selection(self):
+        class DummyVar:
+            def __init__(self, value=None):
+                self.value = value
+
+            def set(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class DummyMenu:
+            def __init__(self, *args, **kwargs):
+                self.items = []
+
+            def delete(self, *_args):
+                self.items.clear()
+
+            def add_cascade(self, **kwargs):
+                self.items.append(("cascade", kwargs))
+
+            def add_radiobutton(self, **kwargs):
+                self.items.append(("radiobutton", kwargs))
+
+            def add_separator(self):
+                self.items.append(("separator", {}))
+
+            def add_checkbutton(self, **kwargs):
+                self.items.append(("checkbutton", kwargs))
+
+            def add_command(self, **kwargs):
+                self.items.append(("command", kwargs))
+
+        dummy = SimpleNamespace(
+            _shutting_down=False,
+            genai_menu=DummyMenu(),
+            menubar=SimpleNamespace(entryconfig=lambda *args, **kwargs: None),
+            genai_selection_var=DummyVar("openai|custom-model"),
+            genai_method_var=DummyVar("pyopl_generative"),
+            show_genai_panel_var=DummyVar(True),
+            verbose_llm_var=DummyVar(False),
+            _genai_methods=[("SyntAGM", "pyopl_generative")],
+            _desired_genai_provider="openai",
+            _desired_genai_model="gpt-5.4",
+            genai_provider="openai",
+            genai_model="custom-model",
+            debug=False,
+            _active_operation=None,
+            _refresh_genai_panel_state=lambda: None,
+            _save_settings=lambda: None,
+            _toggle_genai_panel_visibility=lambda: None,
+            _genai_solve_and_explain=lambda: None,
+            interrupt_active_operation=lambda: None,
+            _accel=lambda key: f"Ctrl+{key}",
+        )
+        dummy._make_select_model_cmd = lambda provider_key, model_name: (lambda: None)
+        dummy._make_select_genai_method_cmd = lambda key: (lambda: None)
+        dummy._on_select_genai_model = lambda provider_key, model_name: OPLIDE._on_select_genai_model(
+            dummy, provider_key, model_name
+        )
+
+        provider_models = {"openai": ["gpt-5.4", "custom-model"], "google": [], "ollama": []}
+
+        with mock.patch.object(pyopl_ide_bootstrap.tk, "Menu", DummyMenu):
+            OPLIDE._populate_genai_model_menus(dummy, provider_models)
+
+        self.assertEqual(dummy.genai_provider, "openai")
+        self.assertEqual(dummy.genai_model, "custom-model")
+        self.assertEqual(dummy.genai_selection_var.get(), "openai|custom-model")
+
     def test_pillow_optional_imports_exist(self):
         # Module should define these attributes
         self.assertTrue(hasattr(pyopl_ide_bootstrap, "PILImage"))

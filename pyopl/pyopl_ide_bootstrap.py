@@ -4462,10 +4462,16 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
-            # Prefer saved selection if available; otherwise first available
+            # Preserve the live selection when menus refresh; fall back to the saved
+            # selection only when there is no current valid choice.
             preselected = False
             try:
-                if self._desired_genai_provider and self._desired_genai_model:
+                if self.genai_provider and self.genai_model:
+                    models = provider_models.get(self.genai_provider) or []
+                    if self.genai_model in models:
+                        self.genai_selection_var.set(f"{self.genai_provider}|{self.genai_model}")
+                        preselected = True
+                if not preselected and self._desired_genai_provider and self._desired_genai_model:
                     models = provider_models.get(self._desired_genai_provider) or []
                     if self._desired_genai_model in models:
                         self.genai_selection_var.set(f"{self._desired_genai_provider}|{self._desired_genai_model}")
@@ -4570,6 +4576,8 @@ class OPLIDE(tk.Tk):
             return
         self.genai_provider = provider_key
         self.genai_model = model_name
+        self._desired_genai_provider = provider_key
+        self._desired_genai_model = model_name
         try:
             self.genai_selection_var.set(f"{provider_key}|{model_name}")
         except Exception:
