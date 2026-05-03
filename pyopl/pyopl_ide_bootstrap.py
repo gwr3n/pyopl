@@ -36,6 +36,7 @@ from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLP
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
 CONFIG_FILENAME = "settings.json"
+_SESSION_ARTIFACT_UNSET = object()
 
 # Pillow (optional) for window icon
 PILImage: Optional[Any]
@@ -513,7 +514,6 @@ class OPLIDE(tk.Tk):
             explain_after_solve=explain_after_solve,
         )
         self._active_operation = operation
-        OPLIDE._record_output_session_artifacts(self, session_id, model_path=model_file, data_path=data_file)
         self.status_var.set(status)
         self._refresh_foreground_operation_ui()
         return operation
@@ -900,67 +900,46 @@ class OPLIDE(tk.Tk):
     def _record_output_session_artifacts(
         self,
         session_id: Optional[str],
-        model_path: Optional[str] = None,
-        data_path: Optional[str] = None,
+        model_text: Any = _SESSION_ARTIFACT_UNSET,
+        data_text: Any = _SESSION_ARTIFACT_UNSET,
     ) -> None:
-        """Associate a session with its model/data artifact files when available."""
+        """Associate a session with its persisted model/data snapshot content."""
         if not session_id:
             return
         if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
             self._output_session_artifacts = {}
         artifact = dict(self._output_session_artifacts.get(session_id, {}))
-        if model_path:
-            artifact["model_path"] = str(model_path)
-        if data_path:
-            artifact["data_path"] = str(data_path)
-        if artifact:
-            self._output_session_artifacts[session_id] = artifact
+        if model_text is not _SESSION_ARTIFACT_UNSET:
+            artifact["model_text"] = str(model_text)
+        if data_text is not _SESSION_ARTIFACT_UNSET:
+            artifact["data_text"] = str(data_text)
+        self._output_session_artifacts[session_id] = artifact
 
     def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
-        """Snapshot the current editor state into temp files for a session when possible."""
+        """Snapshot the current editor state inline for a session when possible."""
         if not session_id:
             return
         if not hasattr(self, "model_text") or not hasattr(self, "data_text"):
             return
-        if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
-            return
-        timestamp = str(self._output_session_timestamp.get(session_id) or session_id)
-        safe_ts = timestamp.replace(":", "-").replace(" ", "_")
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-        model_target = os.path.join(tmp_dir, f"session_model_{safe_ts}.mod")
-        data_target = os.path.join(tmp_dir, f"session_data_{safe_ts}.dat")
-        suffix = 1
-        while os.path.exists(model_target) or os.path.exists(data_target):
-            model_target = os.path.join(tmp_dir, f"session_model_{safe_ts}_{suffix}.mod")
-            data_target = os.path.join(tmp_dir, f"session_data_{safe_ts}_{suffix}.dat")
-            suffix += 1
-        model_path, data_path = OPLIDE._ensure_model_data_saved(self, model_target=model_target, data_target=data_target)
-        OPLIDE._record_output_session_artifacts(self, session_id, model_path=model_path, data_path=data_path)
+        model_text = self.model_text.get("1.0", tk.END).rstrip("\n")
+        data_text = self.data_text.get("1.0", tk.END).rstrip("\n")
+        OPLIDE._record_output_session_artifacts(self, session_id, model_text=model_text, data_text=data_text)
 
     def _get_output_session_artifacts(self, session_id: Optional[str]) -> dict[str, str]:
-        """Return the stored model/data artifact paths for a session."""
+        """Return the stored model/data snapshot content for a session."""
         if not session_id:
             return {}
         return dict(self._output_session_artifacts.get(session_id, {}))
 
-    def _read_text_file_safely(self, path: Optional[str]) -> str:
-        """Best-effort text file reader for preview/diff features."""
-        if not path:
-            return ""
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception:
-            return ""
-
     def _show_session_model_preview(self) -> None:
-        """Preview the selected session's model/data artifacts in a read-only window."""
+        """Preview the selected session's model/data snapshot in a read-only window."""
         session_id = self._get_selected_request_session_id()
         artifacts = self._get_output_session_artifacts(session_id)
-        model_text = self._read_text_file_safely(artifacts.get("model_path"))
-        data_text = self._read_text_file_safely(artifacts.get("data_path"))
-        if not model_text and not data_text:
+        has_model = "model_text" in artifacts
+        has_data = "data_text" in artifacts
+        model_text = str(artifacts.get("model_text", ""))
+        data_text = str(artifacts.get("data_text", ""))
+        if not has_model and not has_data:
             messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
             return
         try:
@@ -972,8 +951,8 @@ class OPLIDE(tk.Tk):
             window.columnconfigure(0, weight=1)
             notebook = ttk.Notebook(window)
             notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
-            for label, content in (("Model", model_text), ("Data", data_text)):
-                if not content:
+            for label, content, is_present in (("Model", model_text, has_model), ("Data", data_text, has_data)):
+                if not is_present:
                     continue
                 frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
                 text_widget = self._create_diff_preview_text(frame)
@@ -987,12 +966,14 @@ class OPLIDE(tk.Tk):
             pass
 
     def _show_session_model_diff(self) -> None:
-        """Diff the selected session's model/data artifacts against the currently loaded editors."""
+        """Diff the selected session's model/data snapshot against the currently loaded editors."""
         session_id = self._get_selected_request_session_id()
         artifacts = self._get_output_session_artifacts(session_id)
-        selected_model = self._read_text_file_safely(artifacts.get("model_path"))
-        selected_data = self._read_text_file_safely(artifacts.get("data_path"))
-        if not selected_model and not selected_data:
+        has_model = "model_text" in artifacts
+        has_data = "data_text" in artifacts
+        selected_model = str(artifacts.get("model_text", ""))
+        selected_data = str(artifacts.get("data_text", ""))
+        if not has_model and not has_data:
             messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
             return
         try:
@@ -1006,8 +987,11 @@ class OPLIDE(tk.Tk):
             notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
             current_model = self.model_text.get("1.0", tk.END)
             current_data = self.data_text.get("1.0", tk.END)
-            for label, current_text, selected_text in (("Model", current_model, selected_model), ("Data", current_data, selected_data)):
-                if not selected_text:
+            for label, current_text, selected_text, is_present in (
+                ("Model", current_model, selected_model, has_model),
+                ("Data", current_data, selected_data, has_data),
+            ):
+                if not is_present:
                     continue
                 frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
                 text_widget = self._create_diff_preview_text(frame)
@@ -1018,30 +1002,30 @@ class OPLIDE(tk.Tk):
             pass
 
     def _restore_session_model(self) -> None:
-        """Restore the selected session's model/data artifacts into the editors."""
+        """Restore the selected session's model/data snapshot into the editors."""
         session_id = self._get_selected_request_session_id()
         artifacts = self._get_output_session_artifacts(session_id)
-        model_path = artifacts.get("model_path")
-        data_path = artifacts.get("data_path")
-        model_text = self._read_text_file_safely(model_path)
-        data_text = self._read_text_file_safely(data_path)
-        if not model_text and not data_text:
+        has_model = "model_text" in artifacts
+        has_data = "data_text" in artifacts
+        model_text = str(artifacts.get("model_text", ""))
+        data_text = str(artifacts.get("data_text", ""))
+        if not has_model and not has_data:
             messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
             return
         if not messagebox.askyesno("Restore Model", "Restore the selected model/data pair into the editors?"):
             return
-        if model_text:
+        if has_model:
             self.model_text.delete("1.0", tk.END)
             self.model_text.insert(tk.END, model_text)
-            self.model_file = model_path
-        if data_text:
+            self.model_file = None
+        if has_data:
             self.data_text.delete("1.0", tk.END)
             self.data_text.insert(tk.END, data_text)
-            self.data_file = data_path
-        if model_path:
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
-        if data_path:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
+            self.data_file = None
+        if has_model:
+            self.editor_notebook.tab(self.model_frame, text="Model: session snapshot")
+        if has_data:
+            self.editor_notebook.tab(self.data_frame, text="Data: session snapshot")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
         self.status_var.set("Model restored from session")
@@ -1053,14 +1037,14 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
         artifacts = self._get_output_session_artifacts(session_id)
-        has_artifacts = bool(artifacts.get("model_path") or artifacts.get("data_path"))
+        has_artifacts = "model_text" in artifacts or "data_text" in artifacts
         self.request_context_menu.add_command(
             label="Preview",
             command=self._show_session_model_preview,
             state=("normal" if has_artifacts else "disabled"),
         )
         self.request_context_menu.add_command(
-            label="Diff Against Current",
+            label="Diff",
             command=self._show_session_model_diff,
             state=("normal" if has_artifacts else "disabled"),
         )
@@ -1798,7 +1782,11 @@ class OPLIDE(tk.Tk):
         self.model_file = model_tgt
         if data_tgt:
             self.data_file = data_tgt
-        self._record_output_session_artifacts(session_id, model_path=model_tgt, data_path=data_tgt or data_path)
+        self._record_output_session_artifacts(
+            session_id,
+            model_text=self.model_text.get("1.0", tk.END).rstrip("\n"),
+            data_text=self.data_text.get("1.0", tk.END).rstrip("\n"),
+        )
 
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         if data_tgt:
@@ -3305,7 +3293,17 @@ class OPLIDE(tk.Tk):
             self._output_session_ids = session.get("output_session_ids", []) or []
             self._output_session_display = session.get("output_session_display", {}) or {}
             self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
-            self._output_session_artifacts = session.get("output_session_artifacts", {}) or {}
+            raw_artifacts = session.get("output_session_artifacts", {}) or {}
+            self._output_session_artifacts = {}
+            for sid, artifact in raw_artifacts.items():
+                if not isinstance(artifact, dict):
+                    continue
+                normalized: dict[str, str] = {}
+                if "model_text" in artifact:
+                    normalized["model_text"] = str(artifact.get("model_text") or "")
+                if "data_text" in artifact:
+                    normalized["data_text"] = str(artifact.get("data_text") or "")
+                self._output_session_artifacts[str(sid)] = normalized
             self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
             self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
 
@@ -3788,7 +3786,7 @@ class OPLIDE(tk.Tk):
                     # Update file paths and tabs
                     self.model_file = model_path
                     self.data_file = data_path
-                    self._record_output_session_artifacts(operation.session_id, model_path=model_path, data_path=data_path)
+                    self._record_output_session_artifacts(operation.session_id, model_text=model_code, data_text=data_code)
                     self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
                     self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
                     # Highlight

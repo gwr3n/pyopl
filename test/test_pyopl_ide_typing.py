@@ -1,5 +1,4 @@
 import unittest
-from datetime import datetime
 from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -71,40 +70,25 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def get(self, *_args):
                 return self.content
 
-        with TemporaryDirectory() as tmpdir:
-            dummy = SimpleNamespace(
-                _output_sessions={},
-                _output_session_ids=[],
-                _output_session_display={},
-                _current_output_session_id=None,
-                _viewing_output_session_id=None,
-                _save_session=lambda: None,
-                _show_output_session=lambda session_id: None,
-                model_text=DummyText("dvar int x;\n"),
-                data_text=DummyText("x = 3;\n"),
-                model_file=None,
-                data_file=None,
-            )
+        dummy = SimpleNamespace(
+            _output_sessions={},
+            _output_session_ids=[],
+            _output_session_display={},
+            _current_output_session_id=None,
+            _viewing_output_session_id=None,
+            _save_session=lambda: None,
+            _show_output_session=lambda session_id: None,
+            model_text=DummyText("dvar int x;\n"),
+            data_text=DummyText("x = 3;\n"),
+        )
 
-            with (
-                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
-                mock.patch.object(pyopl_ide_bootstrap, "datetime") as fake_datetime,
-            ):
-                fake_datetime.now.return_value = datetime(2026, 5, 3, 1, 18, 7)
-                session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+        artifacts = dummy._output_session_artifacts[session_id]
 
-            artifacts = dummy._output_session_artifacts[session_id]
-            model_path = Path(artifacts["model_path"])
-            data_path = Path(artifacts["data_path"])
+        self.assertEqual(artifacts["model_text"], "dvar int x;")
+        self.assertEqual(artifacts["data_text"], "x = 3;")
 
-            self.assertTrue(model_path.exists())
-            self.assertTrue(data_path.exists())
-            self.assertEqual(model_path.read_text(encoding="utf-8"), "dvar int x;")
-            self.assertEqual(data_path.read_text(encoding="utf-8"), "x = 3;")
-            self.assertEqual(model_path.name, "session_model_2026-05-03_01-18-07.mod")
-            self.assertEqual(data_path.name, "session_data_2026-05-03_01-18-07.dat")
-
-    def test_apply_pending_genai_revisions_replaces_session_snapshot_timestamp(self):
+    def test_apply_pending_genai_revisions_persists_inline_session_snapshot(self):
         class DummyText:
             def __init__(self, content):
                 self.content = content
@@ -123,12 +107,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 pass
 
         with TemporaryDirectory() as tmpdir:
-            original_data = Path(tmpdir) / "session_data_2026-05-03_01_18_07.dat"
+            original_data = Path(tmpdir) / "data.dat"
             original_data.write_text("old = 1;\n", encoding="utf-8")
-            original_model = Path(tmpdir) / "session_model_2026-05-03_01_18_07.mod"
+            original_model = Path(tmpdir) / "model.mod"
             original_model.write_text("dvar int x;\n", encoding="utf-8")
 
             log = []
+            artifact_calls = []
             dummy = SimpleNamespace(
                 _genai_pending_revisions={
                     "revised_model": "dvar int y;\n",
@@ -151,14 +136,23 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _append_output=lambda text, session_id=None: log.append((text, session_id)),
                 _clear_pending_genai_revisions=lambda: None,
                 _save_session=lambda: None,
-                _record_output_session_artifacts=lambda *args, **kwargs: None,
             )
+            dummy._record_output_session_artifacts = lambda *args, **kwargs: artifact_calls.append((args, kwargs))
 
             with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
                 OPLIDE._apply_pending_genai_revisions(dummy)
 
-            self.assertEqual(Path(dummy.model_file).name, "session_model_2026-05-03_01-20-41.mod")
-            self.assertEqual(Path(dummy.data_file).name, "session_data_2026-05-03_01-20-41.dat")
+            self.assertEqual(Path(dummy.model_file).name, "model_2026-05-03_01-20-41.mod")
+            self.assertEqual(Path(dummy.data_file).name, "data_2026-05-03_01-20-41.dat")
+            self.assertEqual(
+                artifact_calls,
+                [
+                    (
+                        ("session-1",),
+                        {"model_text": "dvar int y;", "data_text": "y = 2;"},
+                    )
+                ],
+            )
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
