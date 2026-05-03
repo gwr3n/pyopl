@@ -43,6 +43,23 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIn("first-session-update", dummy._output_sessions[first])
         self.assertNotIn("first-session-update", dummy._output_sessions[second])
 
+    def test_begin_new_output_session_initializes_missing_artifact_metadata(self):
+        dummy = SimpleNamespace(
+            _output_sessions={},
+            _output_session_ids=[],
+            _output_session_display={},
+            _current_output_session_id=None,
+            _viewing_output_session_id=None,
+            _save_session=lambda: None,
+            _show_output_session=lambda session_id: None,
+        )
+
+        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+
+        self.assertIn(session_id, dummy._output_session_timestamp)
+        self.assertIn(session_id, dummy._output_session_artifacts)
+        self.assertEqual(dummy._output_session_artifacts[session_id], {})
+
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
             def __init__(self):

@@ -199,8 +199,10 @@ class OPLIDE(tk.Tk):
         self._output_session_ids: list[str] = []
         self._output_session_display: dict[str, str] = {}
         self._output_session_timestamp: dict[str, str] = {}
+        self._output_session_artifacts: dict[str, dict[str, str]] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
+        self.session_browser_mode_var = tk.StringVar(value="sessions")
         self._active_operation: Optional[_ForegroundOperation] = None
 
         # Settings
@@ -512,6 +514,7 @@ class OPLIDE(tk.Tk):
             explain_after_solve=explain_after_solve,
         )
         self._active_operation = operation
+        OPLIDE._record_output_session_artifacts(self, session_id, model_path=model_file, data_path=data_file)
         self.status_var.set(status)
         self._refresh_foreground_operation_ui()
         return operation
@@ -557,7 +560,8 @@ class OPLIDE(tk.Tk):
             return
         if hasattr(self, "genai_menu"):
             self._populate_genai_model_menus(getattr(self, "_genai_provider_models", {}))
-        self._refresh_genai_panel_state()
+        if hasattr(self, "_refresh_genai_panel_state"):
+            self._refresh_genai_panel_state()
 
     def interrupt_active_operation(self) -> None:
         """Interrupt the current foreground operation."""
@@ -657,6 +661,10 @@ class OPLIDE(tk.Tk):
                 self._output_session_timestamp.clear()
             except Exception:
                 self._output_session_timestamp = {}
+            try:
+                self._output_session_artifacts.clear()
+            except Exception:
+                self._output_session_artifacts = {}
             self._current_output_session_id = None
             self._viewing_output_session_id = None
 
@@ -856,6 +864,7 @@ class OPLIDE(tk.Tk):
             self.update_idletasks()
             self._sync_side_panel_width(self._side_panel_width)
             self._sync_genai_mode_width()
+            self._sync_session_browser_mode_width()
         except Exception:
             pass
 
@@ -878,6 +887,207 @@ class OPLIDE(tk.Tk):
             self.genai_mode_frame.grid_configure(padx=(0, scrollbar_width))
         except Exception:
             pass
+
+    def _set_session_browser_mode(self, mode: str) -> None:
+        """Switch the session list between session and model interaction modes."""
+        if mode not in ("sessions", "models"):
+            return
+        self.session_browser_mode_var.set(mode)
+        self._refresh_session_browser_mode_buttons()
+
+    def _refresh_session_browser_mode_buttons(self) -> None:
+        """Keep the Sessions/Models selector visually aligned with the active mode."""
+        mode = self.session_browser_mode_var.get() if hasattr(self, "session_browser_mode_var") else "sessions"
+        if hasattr(self, "session_browser_sessions_button"):
+            self.session_browser_sessions_button.configure(
+                style=("GenaiModeActive.TButton" if mode == "sessions" else "GenaiMode.TButton")
+            )
+        if hasattr(self, "session_browser_models_button"):
+            self.session_browser_models_button.configure(
+                style=("GenaiModeActive.TButton" if mode == "models" else "GenaiMode.TButton")
+            )
+
+    def _sync_session_browser_mode_width(self) -> None:
+        """Keep the Sessions/Models selector aligned with the session list width."""
+        if not hasattr(self, "session_browser_mode_frame") or not hasattr(self, "request_listbox"):
+            return
+        try:
+            scrollbar = getattr(self.request_listbox, "_vscrollbar", None)
+            scrollbar_width = 0
+            if scrollbar is not None:
+                scrollbar_width = max(int(scrollbar.winfo_width()), int(scrollbar.winfo_reqwidth()))
+            list_width = int(self.request_listbox.winfo_width())
+            gap_width = 4 + (1 if (list_width - 4) % 2 else 0)
+            self.session_browser_mode_frame.columnconfigure(1, minsize=gap_width)
+            self.session_browser_mode_frame.grid_configure(padx=(0, scrollbar_width))
+        except Exception:
+            pass
+
+    def _get_selected_request_session_id(self) -> Optional[str]:
+        """Return the currently selected session id from the request list."""
+        try:
+            sel = self.request_listbox.curselection()
+            index = int(sel[0]) if sel else getattr(self, "_last_request_popup_index", None)
+        except Exception:
+            index = getattr(self, "_last_request_popup_index", None)
+        if index is None or index < 0 or index >= len(self._output_session_ids):
+            return None
+        return self._output_session_ids[index]
+
+    def _record_output_session_artifacts(
+        self,
+        session_id: Optional[str],
+        model_path: Optional[str] = None,
+        data_path: Optional[str] = None,
+    ) -> None:
+        """Associate a session with its model/data artifact files when available."""
+        if not session_id:
+            return
+        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
+            self._output_session_artifacts = {}
+        artifact = dict(self._output_session_artifacts.get(session_id, {}))
+        if model_path:
+            artifact["model_path"] = str(model_path)
+        if data_path:
+            artifact["data_path"] = str(data_path)
+        if artifact:
+            self._output_session_artifacts[session_id] = artifact
+
+    def _get_output_session_artifacts(self, session_id: Optional[str]) -> dict[str, str]:
+        """Return the stored model/data artifact paths for a session."""
+        if not session_id:
+            return {}
+        return dict(self._output_session_artifacts.get(session_id, {}))
+
+    def _read_text_file_safely(self, path: Optional[str]) -> str:
+        """Best-effort text file reader for preview/diff features."""
+        if not path:
+            return ""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
+
+    def _show_session_model_preview(self) -> None:
+        """Preview the selected session's model/data artifacts in a read-only window."""
+        session_id = self._get_selected_request_session_id()
+        artifacts = self._get_output_session_artifacts(session_id)
+        model_text = self._read_text_file_safely(artifacts.get("model_path"))
+        data_text = self._read_text_file_safely(artifacts.get("data_path"))
+        if not model_text and not data_text:
+            messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
+            return
+        try:
+            window = tk.Toplevel(self)
+            window.title("Preview Session Model")
+            window.geometry("980x700")
+            window.transient(self)
+            window.rowconfigure(0, weight=1)
+            window.columnconfigure(0, weight=1)
+            notebook = ttk.Notebook(window)
+            notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+            for label, content in (("Model", model_text), ("Data", data_text)):
+                if not content:
+                    continue
+                frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
+                text_widget = self._create_diff_preview_text(frame)
+                text_widget.configure(state="normal")
+                text_widget.delete("1.0", tk.END)
+                text_widget.insert(tk.END, content)
+                text_widget.configure(state="disabled")
+                notebook.add(frame, text=label)
+            ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
+        except Exception:
+            pass
+
+    def _show_session_model_diff(self) -> None:
+        """Diff the selected session's model/data artifacts against the currently loaded editors."""
+        session_id = self._get_selected_request_session_id()
+        artifacts = self._get_output_session_artifacts(session_id)
+        selected_model = self._read_text_file_safely(artifacts.get("model_path"))
+        selected_data = self._read_text_file_safely(artifacts.get("data_path"))
+        if not selected_model and not selected_data:
+            messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
+            return
+        try:
+            window = tk.Toplevel(self)
+            window.title("Diff Against Current Model")
+            window.geometry("980x700")
+            window.transient(self)
+            window.rowconfigure(0, weight=1)
+            window.columnconfigure(0, weight=1)
+            notebook = ttk.Notebook(window)
+            notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+            current_model = self.model_text.get("1.0", tk.END)
+            current_data = self.data_text.get("1.0", tk.END)
+            for label, current_text, selected_text in (("Model", current_model, selected_model), ("Data", current_data, selected_data)):
+                if not selected_text:
+                    continue
+                frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
+                text_widget = self._create_diff_preview_text(frame)
+                self._populate_diff_preview_text(text_widget, current_text, selected_text)
+                notebook.add(frame, text=label)
+            ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
+        except Exception:
+            pass
+
+    def _restore_session_model(self) -> None:
+        """Restore the selected session's model/data artifacts into the editors."""
+        session_id = self._get_selected_request_session_id()
+        artifacts = self._get_output_session_artifacts(session_id)
+        model_path = artifacts.get("model_path")
+        data_path = artifacts.get("data_path")
+        model_text = self._read_text_file_safely(model_path)
+        data_text = self._read_text_file_safely(data_path)
+        if not model_text and not data_text:
+            messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
+            return
+        if not messagebox.askyesno("Restore Model", "Restore the selected model/data pair into the editors?"):
+            return
+        if model_text:
+            self.model_text.delete("1.0", tk.END)
+            self.model_text.insert(tk.END, model_text)
+            self.model_file = model_path
+        if data_text:
+            self.data_text.delete("1.0", tk.END)
+            self.data_text.insert(tk.END, data_text)
+            self.data_file = data_path
+        if model_path:
+            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
+        if data_path:
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
+        self.highlight(self.model_text, is_data=False)
+        self.highlight(self.data_text, is_data=True)
+        self.status_var.set("Model restored from session")
+
+    def _populate_request_context_menu(self, session_id: Optional[str]) -> None:
+        """Populate the session list context menu based on the active browser mode."""
+        try:
+            self.request_context_menu.delete(0, tk.END)
+        except Exception:
+            pass
+        mode = self.session_browser_mode_var.get() if hasattr(self, "session_browser_mode_var") else "sessions"
+        artifacts = self._get_output_session_artifacts(session_id)
+        has_artifacts = bool(artifacts.get("model_path") or artifacts.get("data_path"))
+        if mode == "models":
+            self.request_context_menu.add_command(
+                label="Preview",
+                command=self._show_session_model_preview,
+                state=("normal" if has_artifacts else "disabled"),
+            )
+            self.request_context_menu.add_command(
+                label="Diff Against Current",
+                command=self._show_session_model_diff,
+                state=("normal" if has_artifacts else "disabled"),
+            )
+            self.request_context_menu.add_command(
+                label="Restore",
+                command=self._restore_session_model,
+                state=("normal" if has_artifacts else "disabled"),
+            )
+            self.request_context_menu.add_separator()
+        self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
         """Create model and data editor frames inside a Notebook."""
@@ -1093,17 +1303,42 @@ class OPLIDE(tk.Tk):
         parent.add(sessions_panel, minsize=180)
         sessions_panel.pack_propagate(False)
         sessions_panel.columnconfigure(0, weight=1)
-        sessions_panel.rowconfigure(0, weight=1)
+        sessions_panel.rowconfigure(1, weight=1)
         self.genai_sessions_panel = sessions_panel
 
+        browser_mode_frame = ttk.Frame(sessions_panel, style="Sidebar.TFrame")
+        browser_mode_frame.grid(row=0, column=0, sticky="ew", pady=(2, 8))
+        browser_mode_frame.columnconfigure(0, weight=1, uniform="session-browser-mode")
+        browser_mode_frame.columnconfigure(1, minsize=4)
+        browser_mode_frame.columnconfigure(2, weight=1, uniform="session-browser-mode")
+        self.session_browser_mode_frame = browser_mode_frame
+        mode_button_width = max(len("Sessions"), len("Models"))
+        self.session_browser_sessions_button = ttk.Button(
+            browser_mode_frame,
+            text="Sessions",
+            style="GenaiModeActive.TButton",
+            width=mode_button_width,
+            command=lambda: self._set_session_browser_mode("sessions"),
+        )
+        self.session_browser_sessions_button.grid(row=0, column=0, sticky="ew")
+        self.session_browser_models_button = ttk.Button(
+            browser_mode_frame,
+            text="Models",
+            style="GenaiMode.TButton",
+            width=mode_button_width,
+            command=lambda: self._set_session_browser_mode("models"),
+        )
+        self.session_browser_models_button.grid(row=0, column=2, sticky="ew")
+
         sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
-        sessions_list.grid(row=0, column=0, sticky="nsew")
+        sessions_list.grid(row=1, column=0, sticky="nsew")
         sessions_list.columnconfigure(0, weight=1)
         sessions_list.rowconfigure(0, weight=1)
         self.sessions_surface = sessions_list
 
         self.request_listbox = tk.Listbox(sessions_list, exportselection=False, height=10, activestyle="none")
         request_scroll = tk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
+        self.request_listbox._vscrollbar = request_scroll
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
@@ -1111,7 +1346,6 @@ class OPLIDE(tk.Tk):
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
         self.request_context_menu = tk.Menu(self, tearoff=0)
-        self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
         self.request_listbox.bind("<Button-3>", self._on_request_right_click)
         if sys.platform == "darwin":
             self.request_listbox.bind("<Button-2>", self._on_request_right_click)
@@ -1119,6 +1353,8 @@ class OPLIDE(tk.Tk):
 
         self._clear_pending_genai_revisions()
         self._refresh_genai_panel_state()
+        self._refresh_session_browser_mode_buttons()
+        self.after_idle(self._sync_session_browser_mode_width)
 
     def _set_genai_panel_visible(self, visible: bool) -> None:
         """Show or hide the top-row GenAI composer while keeping the session list visible."""
@@ -1605,6 +1841,7 @@ class OPLIDE(tk.Tk):
         self.model_file = model_tgt
         if data_tgt:
             self.data_file = data_tgt
+        self._record_output_session_artifacts(session_id, model_path=model_tgt, data_path=data_tgt or data_path)
 
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         if data_tgt:
@@ -1895,6 +2132,7 @@ class OPLIDE(tk.Tk):
                 self._last_request_popup_index = index
             else:
                 self._last_request_popup_index = None
+            self._populate_request_context_menu(self._get_selected_request_session_id())
             self.request_context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -1933,6 +2171,7 @@ class OPLIDE(tk.Tk):
             self._output_sessions.pop(sid, None)
             self._output_session_display.pop(sid, None)
             self._output_session_timestamp.pop(sid, None)
+            self._output_session_artifacts.pop(sid, None)
 
             # Update pointers
             if self._current_output_session_id == sid:
@@ -2995,7 +3234,11 @@ class OPLIDE(tk.Tk):
         """Create a new request session, add it to the list, and show it."""
         dt = datetime.now()
         timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
-        label = self._label_for_output_session(header)
+        if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
+            self._output_session_timestamp = {}
+        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
+            self._output_session_artifacts = {}
+        label = OPLIDE._label_for_output_session(self, header)
         display = f"{timestamp} • {label}"
         session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
@@ -3003,6 +3246,7 @@ class OPLIDE(tk.Tk):
         self._output_sessions[session_id] = initial
         self._output_session_display[session_id] = display
         self._output_session_timestamp[session_id] = timestamp
+        self._output_session_artifacts.setdefault(session_id, {})
         self._output_session_ids.insert(0, session_id)
 
         # Update UI list (most recent at top)
@@ -3063,6 +3307,7 @@ class OPLIDE(tk.Tk):
                 "output_session_ids": self._output_session_ids,
                 "output_session_display": self._output_session_display,
                 "output_session_timestamp": self._output_session_timestamp,
+                "output_session_artifacts": self._output_session_artifacts,
                 "current_output_session_id": self._current_output_session_id,
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
@@ -3102,6 +3347,7 @@ class OPLIDE(tk.Tk):
             self._output_session_ids = session.get("output_session_ids", []) or []
             self._output_session_display = session.get("output_session_display", {}) or {}
             self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
+            self._output_session_artifacts = session.get("output_session_artifacts", {}) or {}
             self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
             self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
 
@@ -3584,6 +3830,7 @@ class OPLIDE(tk.Tk):
                     # Update file paths and tabs
                     self.model_file = model_path
                     self.data_file = data_path
+                    self._record_output_session_artifacts(operation.session_id, model_path=model_path, data_path=data_path)
                     self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
                     self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
                     # Highlight
