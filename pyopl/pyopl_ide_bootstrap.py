@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
-from typing import Any, Callable, Optional, Protocol
+from typing import Any, Callable, Literal, Optional, Protocol, cast
 
 import ttkbootstrap as tb
 from platformdirs import user_config_dir
@@ -784,7 +784,9 @@ class OPLIDE(tk.Tk):
         try:
             self.update_idletasks()
             self._sync_side_panel_width(self._initial_genai_panel_width)
-            top_width = int(self.genai_panel.winfo_width()) if hasattr(self, "genai_panel") else self._initial_genai_panel_width
+            top_width = (
+                int(self.genai_panel.winfo_width()) if hasattr(self, "genai_panel") else self._initial_genai_panel_width
+            )
             bottom_width = (
                 int(self.genai_sessions_panel.winfo_width())
                 if hasattr(self, "genai_sessions_panel")
@@ -1236,7 +1238,7 @@ class OPLIDE(tk.Tk):
         self.genai_attachment_menu.add_separator()
         self.genai_attachment_menu.add_command(label="Clear all", command=self._genai_clear_images)
         self.genai_attachment_listbox.bind("<Button-3>", self._on_genai_attachment_right_click)
-        self.genai_attachment_listbox.bind("<Double-Button-1>", self._genai_add_images)
+        self.genai_attachment_listbox.bind("<Double-Button-1>", lambda _event: self._genai_add_images())
         if sys.platform == "darwin":
             self.genai_attachment_listbox.bind("<Button-2>", self._on_genai_attachment_right_click)
             self.genai_attachment_listbox.bind("<Control-Button-1>", self._on_genai_attachment_right_click)
@@ -1281,7 +1283,6 @@ class OPLIDE(tk.Tk):
 
         self.request_listbox = tk.Listbox(sessions_list, exportselection=False, height=10, activestyle="none")
         request_scroll = tk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
-        self.request_listbox._vscrollbar = request_scroll
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
@@ -1333,7 +1334,7 @@ class OPLIDE(tk.Tk):
         self.status_bar = status_bar
         self.status_bar_labels: list[ttk.Label] = []
 
-        segments: list[tuple[tk.StringVar, str, int]] = [
+        segments: list[tuple[tk.StringVar, Literal["w", "e"], int]] = [
             (self.status_message_var, "w", 0),
             (self.status_syntax_var, "w", 1),
             (self.status_caret_var, "w", 2),
@@ -1388,7 +1389,9 @@ class OPLIDE(tk.Tk):
         """Keep the segmented mode buttons visually aligned with the selected mode."""
         mode = self.genai_panel_mode_var.get() if hasattr(self, "genai_panel_mode_var") else "generate"
         if hasattr(self, "genai_generate_mode_button"):
-            self.genai_generate_mode_button.configure(style=("GenaiModeActive.TButton" if mode == "generate" else "GenaiMode.TButton"))
+            self.genai_generate_mode_button.configure(
+                style=("GenaiModeActive.TButton" if mode == "generate" else "GenaiMode.TButton")
+            )
         if hasattr(self, "genai_ask_mode_button"):
             self.genai_ask_mode_button.configure(style=("GenaiModeActive.TButton" if mode == "ask" else "GenaiMode.TButton"))
 
@@ -1425,7 +1428,9 @@ class OPLIDE(tk.Tk):
                 self.genai_submit_label_var.set("Interrupt")
                 self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
             else:
-                self.genai_submit_button.configure(command=self._submit_genai_request, state=("normal" if active is None else "disabled"))
+                self.genai_submit_button.configure(
+                    command=self._submit_genai_request, state=("normal" if active is None else "disabled")
+                )
         if hasattr(self, "status_genai_var"):
             self._refresh_status_context()
 
@@ -1513,7 +1518,9 @@ class OPLIDE(tk.Tk):
                         selected_index = idx
 
             has_any = bool(self._genai_attachment_paths)
-            self.genai_attachment_menu.entryconfigure("Remove selected", state=("normal" if selected_index is not None else "disabled"))
+            self.genai_attachment_menu.entryconfigure(
+                "Remove selected", state=("normal" if selected_index is not None else "disabled")
+            )
             self.genai_attachment_menu.entryconfigure("Clear all", state=("normal" if has_any else "disabled"))
             self.genai_attachment_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1688,9 +1695,10 @@ class OPLIDE(tk.Tk):
                 self._genai_diff_preview_notebook = notebook
                 self._genai_diff_preview_texts = {}
             window = self._genai_diff_preview_window
-            notebook = self._genai_diff_preview_notebook
-            if window is None or notebook is None:
+            preview_notebook = self._genai_diff_preview_notebook
+            if window is None or preview_notebook is None:
                 return
+            notebook = cast(ttk.Notebook, preview_notebook)
             for tab_id in notebook.tabs():
                 notebook.forget(tab_id)
             self._genai_diff_preview_texts = {}
@@ -1790,7 +1798,8 @@ class OPLIDE(tk.Tk):
 
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         if data_tgt:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+            current_data_file = self.data_file or ""
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(current_data_file)}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
         self._append_output("\nRevisions applied to editors.\n", session_id)
@@ -2826,7 +2835,6 @@ class OPLIDE(tk.Tk):
 
     def stop_model(self) -> None:
         p = self._solver_process
-        q = self._solver_queue
 
         if p and p.is_alive():
             try:
@@ -2838,27 +2846,35 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
-        self._solver_process = None
-        self._solver_queue = None
+        self._cleanup_solver_ipc(cancel_queue_thread=True)
 
         # Stop timer updates
         self._stop_run_timer()
-
-        # Best-effort cleanup of queue resources
-        try:
-            if q is not None:
-                q.close()
-                # Only join if we expect the process finished cleanly.
-                # Since we just killed it, we should skip join_thread or cancel it.
-                q.cancel_join_thread()
-        except Exception:
-            pass
 
         active = getattr(self, "_active_operation", None)
         self._append_output("\nExecution stopped by user.\n", active.session_id if active is not None else None)
         self.status_var.set("Execution stopped.")
         self._set_run_menu_running(False)
         self._finish_foreground_operation(active)
+
+    def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
+        """Release solver process/queue resources to avoid multiprocessing tracker leaks."""
+        q = self._solver_queue
+        self._solver_process = None
+        self._solver_queue = None
+        if q is None:
+            return
+        try:
+            q.close()
+        except Exception:
+            pass
+        try:
+            if cancel_queue_thread:
+                q.cancel_join_thread()
+            else:
+                q.join_thread()
+        except Exception:
+            pass
 
     def _poll_solver(self, operation: Optional[_ForegroundOperation] = None) -> None:
         # _poll_solver is scheduled via `after()`, so it can run after `stop_model()`
@@ -2886,8 +2902,7 @@ class OPLIDE(tk.Tk):
             self._stop_run_timer()
 
             self.status_var.set("Error: Solver process terminated.")
-            self._solver_process = None
-            self._solver_queue = None
+            self._cleanup_solver_ipc(cancel_queue_thread=True)
             self._finish_foreground_operation(operation)
             return
 
@@ -2897,8 +2912,7 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
-        self._solver_process = None
-        self._solver_queue = None
+        self._cleanup_solver_ipc(cancel_queue_thread=False)
         self._set_run_menu_running(False)
 
         # Stop timer updates
@@ -4075,8 +4089,12 @@ class OPLIDE(tk.Tk):
         try:
             self.style.configure("Editor.TFrame", background=editor_bg)
             self.style.configure("Sidebar.TFrame", background=sidebar_bg)
-            self.style.configure("SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold"))
-            self.style.configure("SidebarSection.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 10, "bold"))
+            self.style.configure(
+                "SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold")
+            )
+            self.style.configure(
+                "SidebarSection.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 10, "bold")
+            )
             self.style.configure("SidebarSubtle.TLabel", background=sidebar_bg, foreground=sidebar_muted, font=("Segoe UI", 9))
             self.style.configure(
                 "GenaiMode.TButton",
@@ -4100,7 +4118,9 @@ class OPLIDE(tk.Tk):
             self.style.map("GenaiModeActive.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
             self.style.configure("StatusBar.TFrame", background=status_bg)
             self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 12))
-            self.style.configure("StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 12))
+            self.style.configure(
+                "StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 12)
+            )
         except Exception:
             pass
 

@@ -1,7 +1,7 @@
 import unittest
-from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import mock
 
 # Import should not fail regardless of Pillow availability
@@ -242,6 +242,54 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertEqual(dummy.model_text.state, "normal")
         self.assertEqual(dummy.data_text.state, "normal")
+
+    def test_cleanup_solver_ipc_closes_queue_and_joins_thread(self):
+        events = []
+
+        class DummyQueue:
+            def close(self):
+                events.append("close")
+
+            def join_thread(self):
+                events.append("join_thread")
+
+            def cancel_join_thread(self):
+                events.append("cancel_join_thread")
+
+        dummy = SimpleNamespace(
+            _solver_process=object(),
+            _solver_queue=DummyQueue(),
+        )
+
+        OPLIDE._cleanup_solver_ipc(dummy, cancel_queue_thread=False)
+
+        self.assertEqual(events, ["close", "join_thread"])
+        self.assertIsNone(dummy._solver_process)
+        self.assertIsNone(dummy._solver_queue)
+
+    def test_cleanup_solver_ipc_can_cancel_queue_thread(self):
+        events = []
+
+        class DummyQueue:
+            def close(self):
+                events.append("close")
+
+            def join_thread(self):
+                events.append("join_thread")
+
+            def cancel_join_thread(self):
+                events.append("cancel_join_thread")
+
+        dummy = SimpleNamespace(
+            _solver_process=object(),
+            _solver_queue=DummyQueue(),
+        )
+
+        OPLIDE._cleanup_solver_ipc(dummy, cancel_queue_thread=True)
+
+        self.assertEqual(events, ["close", "cancel_join_thread"])
+        self.assertIsNone(dummy._solver_process)
+        self.assertIsNone(dummy._solver_queue)
 
     def test_interrupt_active_non_solve_operation_marks_cancelled(self):
         class DummyVar:
