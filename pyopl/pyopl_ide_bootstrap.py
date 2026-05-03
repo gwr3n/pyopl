@@ -608,6 +608,11 @@ class OPLIDE(tk.Tk):
         """Clear saved and in-memory session history and start a fresh session."""
         if not self._ensure_no_active_operation("New Session"):
             return
+        if not messagebox.askyesno(
+            "New Session",
+            "Are you sure you want to proceed? This will clear the current editors and session history.",
+        ):
+            return
         try:
             # Also clear editors and reset file state to a blank IDE
             try:
