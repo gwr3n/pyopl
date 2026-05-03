@@ -158,6 +158,24 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(artifacts["model_text"], "dvar int x;")
         self.assertEqual(artifacts["data_text"], "x = 3;")
 
+    def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
+        dummy = SimpleNamespace(
+            _output_sessions={},
+            _output_session_ids=[],
+            _output_session_display={},
+            _current_output_session_id=None,
+            _viewing_output_session_id=None,
+            _save_session=lambda: None,
+            _show_output_session=lambda session_id: None,
+        )
+
+        first = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
+        dummy._output_session_display["session-1"] = first
+        second = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
+
+        self.assertEqual(first, "2026-05-03 12:00:00 • Ask")
+        self.assertEqual(second, "2026-05-03 12:00:00 • Ask (2)")
+
     def test_apply_pending_genai_revisions_persists_inline_session_snapshot(self):
         class DummyText:
             def __init__(self, content):
@@ -411,6 +429,36 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIn("Attachments:\n", formatted)
         self.assertIn("- /tmp/chart.png\n", formatted)
         self.assertIn("- /tmp/table.png\n", formatted)
+
+    def test_append_output_to_prompt_input_text_only(self):
+        merged = OPLIDE._append_output_to_prompt_input(
+            None,
+            "What changed in the model?",
+            "Solve: Solving model...\nStatus: OPTIMAL\nObjective: 42",
+        )
+
+        self.assertEqual(
+            merged,
+            "What changed in the model?\n\nSolve: Solving model...\nStatus: OPTIMAL\nObjective: 42",
+        )
+
+    def test_append_output_to_prompt_input_preserves_attachments(self):
+        merged = OPLIDE._append_output_to_prompt_input(
+            None,
+            {
+                "text": "Please explain this result.",
+                "images": [{"path": "/tmp/chart.png"}],
+            },
+            "Solve: Solving model...\nStatus: OPTIMAL",
+        )
+
+        self.assertEqual(
+            merged,
+            {
+                "text": "Please explain this result.\n\nSolve: Solving model...\nStatus: OPTIMAL",
+                "images": [{"path": "/tmp/chart.png"}],
+            },
+        )
 
 
 if __name__ == "__main__":

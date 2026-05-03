@@ -187,6 +187,7 @@ class OPLIDE(tk.Tk):
         self._genai_provider_models: dict[str, list[str]] = {}
         self._genai_loading: bool = False
         self.genai_panel_mode_var = tk.StringVar(value="generate")
+        self.genai_attach_output_var = tk.BooleanVar(value=False)
         self.genai_prompt_title_var = tk.StringVar(value="Describe the optimization problem")
         self.genai_submit_label_var = tk.StringVar(value="Generate")
         self.genai_context_var = tk.StringVar(value="No GenAI model selected")
@@ -1225,8 +1226,16 @@ class OPLIDE(tk.Tk):
         self.genai_prompt_text.bind("<Configure>", self._on_genai_prompt_configure, add="+")
         composer.rowconfigure(1, weight=1)
 
+        self.genai_attach_output_check = ttk.Checkbutton(
+            composer,
+            text="Attach output",
+            variable=self.genai_attach_output_var,
+            style="Sidebar.TCheckbutton",
+        )
+        self.genai_attach_output_check.grid(row=2, column=0, sticky="w", pady=(8, 0))
+
         attachments = ttk.Frame(composer, style="Sidebar.TFrame")
-        attachments.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        attachments.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         attachments.columnconfigure(0, weight=1)
         ttk.Label(attachments, textvariable=self.genai_attachment_summary_var, style="SidebarSubtle.TLabel").grid(
             row=0, column=0, sticky="w"
@@ -1416,6 +1425,12 @@ class OPLIDE(tk.Tk):
             self.genai_prompt_title_var.set("Describe the optimization problem")
             self.genai_submit_label_var.set("Generate")
 
+        if hasattr(self, "genai_attach_output_check"):
+            if mode == "ask":
+                self.genai_attach_output_check.grid()
+            else:
+                self.genai_attach_output_check.grid_remove()
+
         attachment_count = len(getattr(self, "_genai_attachment_paths", []))
         if attachment_count == 0:
             self.genai_attachment_summary_var.set("No images attached")
@@ -1536,13 +1551,56 @@ class OPLIDE(tk.Tk):
         if not hasattr(self, "genai_prompt_text"):
             return None
         text_val = self.genai_prompt_text.get("1.0", tk.END).rstrip()
+        prompt_input: Optional[_PromptInput]
         if self._genai_attachment_paths:
             if not text_val.strip() and not self._genai_attachment_paths:
                 return None
-            return {"text": text_val, "images": [{"path": p} for p in self._genai_attachment_paths]}
-        if not text_val.strip():
-            return None
-        return text_val
+            prompt_input = {"text": text_val, "images": [{"path": p} for p in self._genai_attachment_paths]}
+        else:
+            if not text_val.strip():
+                return None
+            prompt_input = text_val
+
+        if (
+            self.genai_panel_mode_var.get() == "ask"
+            and hasattr(self, "genai_attach_output_var")
+            and self.genai_attach_output_var.get()
+        ):
+            prompt_input = self._append_output_to_prompt_input(prompt_input, self._get_selected_output_session_text())
+        return prompt_input
+
+    def _get_selected_output_session_text(self) -> str:
+        """Return the currently selected output session content, if any."""
+        session_id: Optional[str] = None
+        if hasattr(self, "request_listbox"):
+            try:
+                sel = self.request_listbox.curselection()
+                if sel:
+                    index = int(sel[0])
+                    if 0 <= index < len(self._output_session_ids):
+                        session_id = self._output_session_ids[index]
+            except Exception:
+                session_id = None
+        if not session_id:
+            session_id = getattr(self, "_viewing_output_session_id", None)
+        if not session_id:
+            session_id = getattr(self, "_current_output_session_id", None)
+        if not session_id:
+            return ""
+        return str(self._output_sessions.get(session_id, "")).rstrip()
+
+    def _append_output_to_prompt_input(self, prompt_input: _PromptInput, session_output: str) -> _PromptInput:
+        """Append selected output history to the prompt text while preserving attachments."""
+        output_text = str(session_output or "").rstrip()
+        if not output_text:
+            return prompt_input
+        if isinstance(prompt_input, dict):
+            merged_input = dict(prompt_input)
+            prompt_text = str(merged_input.get("text", "")).rstrip()
+            merged_input["text"] = f"{prompt_text}\n\n{output_text}" if prompt_text else output_text
+            return merged_input
+        prompt_text = str(prompt_input).rstrip()
+        return f"{prompt_text}\n\n{output_text}" if prompt_text else output_text
 
     def _submit_genai_from_event(self, event: Optional[tk.Event] = None) -> str:
         """Submit the active GenAI composer via keyboard."""
@@ -3190,6 +3248,19 @@ class OPLIDE(tk.Tk):
             return "GenAI"
         return "Session"
 
+    def _make_output_session_display(self, timestamp: str, label: str) -> str:
+        """Return a request-list label that stays unique even for same-second requests."""
+        base = f"{timestamp} • {label}"
+        existing = set(getattr(self, "_output_session_display", {}).values())
+        if base not in existing:
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base} ({suffix})"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
+
     # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
@@ -3200,7 +3271,7 @@ class OPLIDE(tk.Tk):
         if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
             self._output_session_artifacts = {}
         label = OPLIDE._label_for_output_session(self, header)
-        display = f"{timestamp} • {label}"
+        display = OPLIDE._make_output_session_display(self, timestamp, label)
         session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
         initial = (header + "\n") if header else ""
