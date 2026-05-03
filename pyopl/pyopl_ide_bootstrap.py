@@ -150,6 +150,7 @@ class OPLIDE(tk.Tk):
         self.data_file: Optional[str] = None
         self.current_font_size = 12
         self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"
+        self.interface_button_font = "TkDefaultFont"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")
         self.show_genai_panel_var = tk.BooleanVar(value=True)
@@ -4175,7 +4176,7 @@ class OPLIDE(tk.Tk):
                 borderwidth=0,
                 focusthickness=0,
                 padding=(10, 5),
-                font=("Segoe UI", self.current_font_size),
+                font=self.interface_button_font,
             )
             self.style.map("GenaiMode.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
             self.style.configure(
@@ -4185,7 +4186,7 @@ class OPLIDE(tk.Tk):
                 borderwidth=0,
                 focusthickness=0,
                 padding=(10, 5),
-                font=("Segoe UI", self.current_font_size),
+                font=self.interface_button_font,
             )
             self.style.map("GenaiModeActive.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
             self.style.configure("StatusBar.TFrame", background=status_bg)

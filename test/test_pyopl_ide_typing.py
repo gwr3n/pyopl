@@ -10,6 +10,51 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_apply_theme_colors_keeps_genai_button_font_independent_of_editor_font_size(self):
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        class DummyStyle:
+            def __init__(self):
+                self.configured = {}
+                self.mapped = {}
+
+            def configure(self, style_name, **kwargs):
+                self.configured[style_name] = kwargs
+
+            def map(self, style_name, **kwargs):
+                self.mapped[style_name] = kwargs
+
+        class DummyWidget:
+            def __init__(self):
+                self.calls = []
+
+            def config(self, **kwargs):
+                self.calls.append(kwargs)
+
+            def tag_configure(self, *_args, **_kwargs):
+                pass
+
+        dummy = SimpleNamespace(
+            theme_var=DummyVar("flatly"),
+            style=DummyStyle(),
+            interface_button_font="TkDefaultFont",
+            current_font_size=20,
+            configure=lambda **_kwargs: None,
+            model_text=DummyWidget(),
+            data_text=DummyWidget(),
+            output_text=DummyWidget(),
+        )
+
+        OPLIDE._apply_theme_colors(dummy)
+
+        self.assertEqual(dummy.style.configured["GenaiMode.TButton"]["font"], "TkDefaultFont")
+        self.assertEqual(dummy.style.configured["GenaiModeActive.TButton"]["font"], "TkDefaultFont")
+
     def test_populate_genai_model_menus_preserves_current_selection(self):
         class DummyVar:
             def __init__(self, value=None):
