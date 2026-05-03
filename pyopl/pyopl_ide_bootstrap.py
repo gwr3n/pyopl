@@ -1594,13 +1594,14 @@ class OPLIDE(tk.Tk):
         output_text = str(session_output or "").rstrip()
         if not output_text:
             return prompt_input
+        wrapped_output = f"<session_output>\n{output_text}\n</session_output>"
         if isinstance(prompt_input, dict):
             merged_input = dict(prompt_input)
             prompt_text = str(merged_input.get("text", "")).rstrip()
-            merged_input["text"] = f"{prompt_text}\n\n{output_text}" if prompt_text else output_text
+            merged_input["text"] = f"{prompt_text}\n\n{wrapped_output}" if prompt_text else wrapped_output
             return merged_input
         prompt_text = str(prompt_input).rstrip()
-        return f"{prompt_text}\n\n{output_text}" if prompt_text else output_text
+        return f"{prompt_text}\n\n{wrapped_output}" if prompt_text else wrapped_output
 
     def _submit_genai_from_event(self, event: Optional[tk.Event] = None) -> str:
         """Submit the active GenAI composer via keyboard."""

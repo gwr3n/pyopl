@@ -439,7 +439,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertEqual(
             merged,
-            "What changed in the model?\n\nSolve: Solving model...\nStatus: OPTIMAL\nObjective: 42",
+            "What changed in the model?\n\n<session_output>\nSolve: Solving model...\nStatus: OPTIMAL\nObjective: 42\n</session_output>",
         )
 
     def test_append_output_to_prompt_input_preserves_attachments(self):
@@ -455,7 +455,22 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(
             merged,
             {
-                "text": "Please explain this result.\n\nSolve: Solving model...\nStatus: OPTIMAL",
+                "text": "Please explain this result.\n\n<session_output>\nSolve: Solving model...\nStatus: OPTIMAL\n</session_output>",
+                "images": [{"path": "/tmp/chart.png"}],
+            },
+        )
+
+    def test_append_output_to_prompt_input_wraps_output_when_prompt_is_empty(self):
+        merged = OPLIDE._append_output_to_prompt_input(
+            None,
+            {"text": "", "images": [{"path": "/tmp/chart.png"}]},
+            "Solve: Solving model...\nStatus: OPTIMAL",
+        )
+
+        self.assertEqual(
+            merged,
+            {
+                "text": "<session_output>\nSolve: Solving model...\nStatus: OPTIMAL\n</session_output>",
                 "images": [{"path": "/tmp/chart.png"}],
             },
         )
