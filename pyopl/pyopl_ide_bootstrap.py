@@ -346,9 +346,7 @@ class OPLIDE(tk.Tk):
         editmenu.add_command(label="Redo", command=self._redo, accelerator=f"Shift+{self._accel('Z')}")
         editmenu.add_separator()
         editmenu.add_command(label="Find...", command=self._open_find_replace_dialog, accelerator=self._accel("F"))
-        editmenu.add_command(
-            label="Replace...", command=lambda: self._open_find_replace_dialog(replace=True), accelerator=self._accel("H")
-        )
+        editmenu.add_command(label="Replace...", command=lambda: self._open_find_replace_dialog(replace=True))
         menubar.add_cascade(label="Edit", menu=editmenu)
 
         # Run
@@ -4311,7 +4309,6 @@ class OPLIDE(tk.Tk):
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
         self.bind_all("<Control-e>", self._genai_solve_and_explain_shortcut)
         self.bind_all("<Control-f>", self._find_shortcut)
-        self.bind_all("<Control-h>", self._replace_shortcut)
 
         if sys.platform == "darwin":
             self.bind_all("<Command-s>", self.save_current_buffer)
@@ -4321,7 +4318,6 @@ class OPLIDE(tk.Tk):
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
             self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
             self.bind_all("<Command-f>", self._find_shortcut)
-            self.bind_all("<Command-h>", self._replace_shortcut)
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
