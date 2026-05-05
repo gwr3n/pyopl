@@ -4234,14 +4234,13 @@ class OPLIDE(tk.Tk):
             editor_fg = "#e9ecef"
             caret_fg = "#e9ecef"
             sidebar_bg = editor_bg
-            output_bg = sidebar_bg
+            output_bg = "#212529"
             output_fg = "#e9ecef"
             error_fg = "white"
             paned_bg = root_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#aab4be"
             list_select_bg = "#334155"
-            list_select_fg = editor_fg
             inset_border = "#495057"
             status_bg = "#212529"
             status_fg = "#cfd6dd"
@@ -4252,14 +4251,13 @@ class OPLIDE(tk.Tk):
             editor_fg = "#212529"
             caret_fg = "#212529"
             sidebar_bg = editor_bg
-            output_bg = sidebar_bg
+            output_bg = "#f8f9fa"
             output_fg = "#212529"
             error_fg = "black"
             paned_bg = root_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#6b7785"
             list_select_bg = "#cfe0ff"
-            list_select_fg = editor_fg
             inset_border = "#ced4da"
             status_bg = "#f8f9fa"
             status_fg = "#364152"
@@ -4322,35 +4320,6 @@ class OPLIDE(tk.Tk):
         # Ensure the editor frames share the same background as the text area
         try:
             self.style.configure("Editor.TFrame", background=editor_bg)
-            self.style.configure(
-                "Editor.TNotebook",
-                background=editor_bg,
-                borderwidth=0,
-                relief=tk.FLAT,
-                bordercolor=editor_bg,
-                lightcolor=editor_bg,
-                darkcolor=editor_bg,
-                tabmargins=(0, 0, 0, 0),
-            )
-            self.style.configure(
-                "Editor.TNotebook.Tab",
-                background=paned_bg,
-                foreground=sidebar_muted,
-                borderwidth=0,
-                relief=tk.FLAT,
-                bordercolor=paned_bg,
-                lightcolor=paned_bg,
-                darkcolor=paned_bg,
-                padding=(12, 6),
-            )
-            self.style.map(
-                "Editor.TNotebook.Tab",
-                background=[("selected", list_select_bg), ("active", editor_bg)],
-                foreground=[("selected", list_select_fg), ("active", sidebar_fg)],
-                bordercolor=[("selected", list_select_bg), ("active", editor_bg)],
-                lightcolor=[("selected", list_select_bg), ("active", editor_bg)],
-                darkcolor=[("selected", list_select_bg), ("active", editor_bg)],
-            )
             self.style.configure("Sidebar.TFrame", background=sidebar_bg)
             self.style.configure(
                 "SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold")
@@ -4397,7 +4366,7 @@ class OPLIDE(tk.Tk):
                 pass
         if hasattr(self, "editor_notebook"):
             try:
-                self.editor_notebook.configure(style="Editor.TNotebook", padding=0)
+                self.editor_notebook.configure(style="TNotebook", padding=0)
             except Exception:
                 pass
         if hasattr(self, "status_bar_labels"):
