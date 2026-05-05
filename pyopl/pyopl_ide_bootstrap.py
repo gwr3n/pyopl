@@ -2242,7 +2242,7 @@ class OPLIDE(tk.Tk):
 
         new_label = self._ask_short_text(
             title="Change label",
-            prompt="Enter a short label (max 49 characters):",
+            prompt="Enter a short label (max 50 characters):",
             initial_text=current_label,
         )
         if new_label is None:
@@ -2252,8 +2252,8 @@ class OPLIDE(tk.Tk):
         if not new_label:
             messagebox.showerror("Change label", "The session label cannot be empty.")
             return
-        if len(new_label) >= 50:
-            messagebox.showerror("Change label", "The session label must be fewer than 50 characters.")
+        if len(new_label) > 50:
+            messagebox.showerror("Change label", "The session label cannot exceed 50 characters.")
             return
 
         display = self._make_output_session_display(timestamp, new_label, exclude_session_id=session_id)
