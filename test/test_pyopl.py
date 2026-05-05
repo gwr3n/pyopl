@@ -4,6 +4,7 @@ import unittest
 
 from pyopl.pyopl_core import (
     GurobiCodeGenerator,
+    OPLCompiler,
     OPLDataLexer,
     OPLDataParser,
     OPLLexer,
@@ -75,6 +76,34 @@ class TestPyOPL(unittest.TestCase):
 
 
 class TestPyOPLLexer(TestPyOPL):
+    def test_compiler_can_mask_error_details_as_syntax_error(self):
+        model_code = """
+        dvar float x;
+        maximize x + 1
+        subject to { x <= 10; }
+        """
+
+        compiler = OPLCompiler(mask_error_details=True)
+
+        with self.assertRaises(SyntaxError) as exc:
+            compiler.compile_model(model_code, solver="scipy")
+
+        self.assertEqual(str(exc.exception), "Syntax error on line 4")
+
+    def test_compiler_keeps_rich_semantic_errors_by_default(self):
+        model_code = """
+        dvar float x;
+        maximize x + z;
+        subject to { x <= 10; }
+        """
+
+        compiler = OPLCompiler()
+
+        with self.assertRaises(SemanticError) as exc:
+            compiler.compile_model(model_code, solver="scipy")
+
+        self.assertIn("Undeclared symbol 'z'", str(exc.exception))
+
     def test_syntax_error_missing_semicolon(self):
         """Test that a missing semicolon triggers a syntax error."""
         error_code = """

@@ -3421,13 +3421,30 @@ class OPLCompiler:
     to generating and potentially executing GurobiPy code.
     """
 
-    def __init__(self):
+    def __init__(self, mask_error_details: bool = False):
         self.model_lexer = OPLLexer()
         self.model_parser = OPLParser()
         self.data_lexer = OPLDataLexer()
         self.data_parser = OPLDataParser()
+        self.mask_error_details = mask_error_details
 
-    def compile_model(self, model_code: str, data_code: Optional[str] = None, solver: str = "gurobi"):
+    def _raise_masked_syntax_error(self, exc: SemanticError) -> None:
+        lineno = getattr(exc, "lineno", None)
+        if lineno is None:
+            lineno = getattr(self.model_parser, "_last_lineno", None)
+        if lineno is None:
+            lineno = getattr(self.data_parser, "_last_token_lineno", None)
+        if lineno is None:
+            raise SyntaxError("Syntax error") from None
+        raise SyntaxError(f"Syntax error on line {lineno}") from None
+
+    def compile_model(
+        self,
+        model_code: str,
+        data_code: Optional[str] = None,
+        solver: str = "gurobi",
+        mask_error_details: Optional[bool] = None,
+    ):
         """
         Compiles an OPL model and optional data into solver-specific code.
 
@@ -3443,8 +3460,17 @@ class OPLCompiler:
             SemanticError: If there's an error during lexing, parsing, or semantic analysis.
             Exception: For unexpected errors.
         """
+        should_mask_errors = self.mask_error_details if mask_error_details is None else mask_error_details
+        if should_mask_errors:
+            try:
+                return self.compile_model(model_code, data_code, solver=solver, mask_error_details=False)
+            except SemanticError as exc:
+                self._raise_masked_syntax_error(exc)
+
         data_dict = {}
         model_ast = None
+        ast: dict[str, Any] = {}
+        code = ""
         if data_code:
             # Tokenize and parse data file
             data_tokens = self.data_lexer.tokenize(data_code)
