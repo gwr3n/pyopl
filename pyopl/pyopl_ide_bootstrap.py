@@ -201,6 +201,7 @@ class OPLIDE(tk.Tk):
         self._output_sessions: dict[str, str] = {}
         self._output_session_ids: list[str] = []
         self._output_session_display: dict[str, str] = {}
+        self._output_session_label: dict[str, str] = {}
         self._output_session_timestamp: dict[str, str] = {}
         self._output_session_artifacts: dict[str, dict[str, str]] = {}
         self._current_output_session_id: Optional[str] = None
@@ -662,6 +663,10 @@ class OPLIDE(tk.Tk):
             except Exception:
                 self._output_session_display = {}
             try:
+                self._output_session_label.clear()
+            except Exception:
+                self._output_session_label = {}
+            try:
                 self._output_session_timestamp.clear()
             except Exception:
                 self._output_session_timestamp = {}
@@ -1061,6 +1066,7 @@ class OPLIDE(tk.Tk):
             state=("normal" if has_artifacts else "disabled"),
         )
         self.request_context_menu.add_separator()
+        self.request_context_menu.add_command(label="Change label", command=self._rename_selected_request)
         self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
@@ -2184,6 +2190,7 @@ class OPLIDE(tk.Tk):
             self._output_session_ids.pop(index)
             self._output_sessions.pop(sid, None)
             self._output_session_display.pop(sid, None)
+            self._output_session_label.pop(sid, None)
             self._output_session_timestamp.pop(sid, None)
             self._output_session_artifacts.pop(sid, None)
 
@@ -2219,6 +2226,102 @@ class OPLIDE(tk.Tk):
             self.status_var.set("Session deleted.")
         except Exception:
             pass
+
+    def _rename_selected_request(self) -> None:
+        """Rename the currently selected output session."""
+        session_id = self._get_selected_request_session_id()
+        if not session_id:
+            return
+
+        timestamp = self._output_session_timestamp.get(session_id, session_id)
+        current_label = self._output_session_label.get(session_id, "")
+        if not current_label:
+            display = self._output_session_display.get(session_id, "")
+            prefix = f"{timestamp} • "
+            current_label = display[len(prefix) :] if display.startswith(prefix) else (display or "Session")
+
+        new_label = self._ask_short_text(
+            title="Change label",
+            prompt="Enter a short label (max 49 characters):",
+            initial_text=current_label,
+        )
+        if new_label is None:
+            return
+
+        new_label = str(new_label).strip()
+        if not new_label:
+            messagebox.showerror("Change label", "The session label cannot be empty.")
+            return
+        if len(new_label) >= 50:
+            messagebox.showerror("Change label", "The session label must be fewer than 50 characters.")
+            return
+
+        display = self._make_output_session_display(timestamp, new_label, exclude_session_id=session_id)
+        self._output_session_label[session_id] = new_label
+        self._output_session_display[session_id] = display
+
+        try:
+            index = self._output_session_ids.index(session_id)
+        except ValueError:
+            return
+
+        try:
+            self.request_listbox.delete(index)
+            self.request_listbox.insert(index, display)
+            self.request_listbox.selection_clear(0, tk.END)
+            self.request_listbox.selection_set(index)
+            self.request_listbox.activate(index)
+        except Exception:
+            pass
+
+        try:
+            self._save_session()
+        except Exception:
+            pass
+
+    def _ask_short_text(self, title: str, prompt: str, initial_text: str = "") -> Optional[str]:
+        """Show a themed short-text dialog and return the entered text or None."""
+        dlg = tk.Toplevel(self)
+        dlg.title(title)
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.grid(row=0, column=0, sticky="nsew")
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(0, weight=1)
+        frm.columnconfigure(0, weight=1)
+
+        ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+
+        text_var = tk.StringVar(value=initial_text)
+        entry = ttk.Entry(frm, textvariable=text_var, width=48)
+        entry.grid(row=1, column=0, sticky="ew")
+        entry.focus_set()
+        entry.selection_range(0, tk.END)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        result: dict[str, Optional[str]] = {"value": None}
+
+        def on_ok(event: Optional[tk.Event] = None) -> None:
+            result["value"] = text_var.get()
+            dlg.destroy()
+
+        def on_cancel(event: Optional[tk.Event] = None) -> None:
+            result["value"] = None
+            dlg.destroy()
+
+        ok_btn = ttk.Button(btns, text="OK", command=on_ok)
+        cancel_btn = ttk.Button(btns, text="Cancel", command=on_cancel)
+        cancel_btn.grid(row=0, column=1, padx=(6, 0))
+        ok_btn.grid(row=0, column=0)
+
+        dlg.bind("<Return>", on_ok)
+        dlg.bind("<Escape>", on_cancel)
+        dlg.wait_window()
+        return result["value"]
 
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
@@ -3248,10 +3351,12 @@ class OPLIDE(tk.Tk):
             return "GenAI"
         return "Session"
 
-    def _make_output_session_display(self, timestamp: str, label: str) -> str:
+    def _make_output_session_display(self, timestamp: str, label: str, exclude_session_id: Optional[str] = None) -> str:
         """Return a request-list label that stays unique even for same-second requests."""
         base = f"{timestamp} • {label}"
-        existing = set(getattr(self, "_output_session_display", {}).values())
+        existing = {
+            display for sid, display in getattr(self, "_output_session_display", {}).items() if sid != exclude_session_id
+        }
         if base not in existing:
             return base
         suffix = 2
@@ -3270,6 +3375,8 @@ class OPLIDE(tk.Tk):
             self._output_session_timestamp = {}
         if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
             self._output_session_artifacts = {}
+        if not hasattr(self, "_output_session_label") or self._output_session_label is None:
+            self._output_session_label = {}
         label = OPLIDE._label_for_output_session(self, header)
         display = OPLIDE._make_output_session_display(self, timestamp, label)
         session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -3277,6 +3384,7 @@ class OPLIDE(tk.Tk):
         initial = (header + "\n") if header else ""
         self._output_sessions[session_id] = initial
         self._output_session_display[session_id] = display
+        self._output_session_label[session_id] = label
         self._output_session_timestamp[session_id] = timestamp
         self._output_session_artifacts.setdefault(session_id, {})
         OPLIDE._snapshot_output_session_artifacts(self, session_id)
@@ -3339,6 +3447,7 @@ class OPLIDE(tk.Tk):
                 "output_sessions": self._output_sessions,
                 "output_session_ids": self._output_session_ids,
                 "output_session_display": self._output_session_display,
+                "output_session_label": self._output_session_label,
                 "output_session_timestamp": self._output_session_timestamp,
                 "output_session_artifacts": self._output_session_artifacts,
                 "current_output_session_id": self._current_output_session_id,
@@ -3379,6 +3488,7 @@ class OPLIDE(tk.Tk):
             self._output_sessions = session.get("output_sessions", {}) or {}
             self._output_session_ids = session.get("output_session_ids", []) or []
             self._output_session_display = session.get("output_session_display", {}) or {}
+            self._output_session_label = session.get("output_session_label", {}) or {}
             self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
             raw_artifacts = session.get("output_session_artifacts", {}) or {}
             self._output_session_artifacts = {}
@@ -3398,9 +3508,19 @@ class OPLIDE(tk.Tk):
                 if sid not in self._output_session_timestamp:
                     display = self._output_session_display.get(sid, sid)
                     if " • " in display:
-                        self._output_session_timestamp[sid] = display.rsplit(" • ", 1)[-1]
+                        self._output_session_timestamp[sid] = display.split(" • ", 1)[0]
                     else:
                         self._output_session_timestamp[sid] = display
+                if sid not in self._output_session_label:
+                    display = self._output_session_display.get(sid, sid)
+                    timestamp = self._output_session_timestamp.get(sid, "")
+                    prefix = f"{timestamp} • "
+                    if timestamp and display.startswith(prefix):
+                        self._output_session_label[sid] = display[len(prefix) :]
+                    elif " • " in display:
+                        self._output_session_label[sid] = display.split(" • ", 1)[-1]
+                    else:
+                        self._output_session_label[sid] = str(display)
 
             # Restore listbox UI
             if hasattr(self, "request_listbox"):
