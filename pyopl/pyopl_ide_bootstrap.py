@@ -11,6 +11,7 @@ import threading
 
 # --- Third-Party Imports ---
 import tkinter as tk
+import tkinter.font as tkfont
 import traceback
 import webbrowser
 from dataclasses import dataclass
@@ -145,11 +146,12 @@ class OPLIDE(tk.Tk):
         # Whether the IDE was launched with debug/verbose CLI flags
         self.debug = bool(debug)
         self.title("Rhetor")
+        self._configure_macos_application_identity("Rhetor")
         self.geometry("1150x700")
         self.model_file: Optional[str] = None
         self.data_file: Optional[str] = None
         self.current_font_size = 12
-        self.editor_font_family = "Courier New" if os.name == "nt" else "Courier"
+        self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
         self.interface_button_font = "TkDefaultFont"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")
@@ -296,6 +298,96 @@ class OPLIDE(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(0, self._stabilize_initial_side_panel_width)
         self.bind("<Configure>", self._on_window_resize, add="+")
+
+    def _configure_macos_application_identity(self, app_name: str) -> None:
+        """Best-effort macOS app naming so the menu bar does not keep the generic Python label."""
+        if sys.platform != "darwin":
+            return
+        try:
+            self.tk.call("tk", "appname", app_name)
+        except Exception:
+            pass
+        try:
+            import ctypes
+
+            objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+
+            objc.objc_getClass.restype = ctypes.c_void_p
+            objc.objc_getClass.argtypes = [ctypes.c_char_p]
+            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.sel_registerName.argtypes = [ctypes.c_char_p]
+            objc.objc_msgSend.restype = ctypes.c_void_p
+
+            ns_process_info = objc.objc_getClass(b"NSProcessInfo")
+            ns_string = objc.objc_getClass(b"NSString")
+            sel_process_info = objc.sel_registerName(b"processInfo")
+            sel_set_process_name = objc.sel_registerName(b"setProcessName:")
+            sel_string_with_utf8 = objc.sel_registerName(b"stringWithUTF8String:")
+
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            process_info = objc.objc_msgSend(ns_process_info, sel_process_info)
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+            ns_app_name = objc.objc_msgSend(ns_string, sel_string_with_utf8, app_name.encode("utf-8"))
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            objc.objc_msgSend(process_info, sel_set_process_name, ns_app_name)
+
+            ns_bundle = objc.objc_getClass(b"NSBundle")
+            sel_main_bundle = objc.sel_registerName(b"mainBundle")
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            main_bundle = objc.objc_msgSend(ns_bundle, sel_main_bundle)
+            if main_bundle:
+                sel_info_dictionary = objc.sel_registerName(b"infoDictionary")
+                sel_set_object = objc.sel_registerName(b"setObject:forKey:")
+                info_dict = objc.objc_msgSend(main_bundle, sel_info_dictionary)
+                for bundle_key in (b"CFBundleName", b"CFBundleDisplayName"):
+                    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+                    ns_key = objc.objc_msgSend(ns_string, sel_string_with_utf8, bundle_key)
+                    objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+                    objc.objc_msgSend(info_dict, sel_set_object, ns_app_name, ns_key)
+        except Exception:
+            pass
+
+    def _apply_macos_theme_appearance(self, theme_name: str) -> None:
+        """Best-effort sync of the native macOS window chrome with the active app theme."""
+        if sys.platform != "darwin":
+            return
+        try:
+            import ctypes
+
+            objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+            objc.objc_getClass.restype = ctypes.c_void_p
+            objc.objc_getClass.argtypes = [ctypes.c_char_p]
+            objc.sel_registerName.restype = ctypes.c_void_p
+            objc.sel_registerName.argtypes = [ctypes.c_char_p]
+            objc.objc_msgSend.restype = ctypes.c_void_p
+
+            ns_app_class = objc.objc_getClass(b"NSApplication")
+            ns_appearance_class = objc.objc_getClass(b"NSAppearance")
+            ns_string_class = objc.objc_getClass(b"NSString")
+            if not ns_app_class or not ns_appearance_class or not ns_string_class:
+                return
+
+            sel_shared_application = objc.sel_registerName(b"sharedApplication")
+            sel_set_appearance = objc.sel_registerName(b"setAppearance:")
+            sel_string_with_utf8 = objc.sel_registerName(b"stringWithUTF8String:")
+            sel_appearance_named = objc.sel_registerName(b"appearanceNamed:")
+
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            ns_app = objc.objc_msgSend(ns_app_class, sel_shared_application)
+            if not ns_app:
+                return
+
+            appearance_name = b"NSAppearanceNameDarkAqua" if theme_name == "darkly" else b"NSAppearanceNameAqua"
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
+            ns_appearance_name = objc.objc_msgSend(ns_string_class, sel_string_with_utf8, appearance_name)
+            if not ns_appearance_name:
+                return
+
+            objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+            appearance = objc.objc_msgSend(ns_appearance_class, sel_appearance_named, ns_appearance_name)
+            objc.objc_msgSend(ns_app, sel_set_appearance, appearance)
+        except Exception:
+            pass
 
     # --- UI Setup Methods ---
     def _set_icon(self) -> None:
@@ -1091,6 +1183,7 @@ class OPLIDE(tk.Tk):
             relief=tk.FLAT,
             bd=0,
         )
+        self._replace_scrolled_text_vbar(self.model_text)
         self.model_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
 
         def _on_model_changed(event: tk.Event) -> None:
@@ -1117,6 +1210,7 @@ class OPLIDE(tk.Tk):
             relief=tk.FLAT,
             bd=0,
         )
+        self._replace_scrolled_text_vbar(self.data_text)
         self.data_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
@@ -1168,6 +1262,7 @@ class OPLIDE(tk.Tk):
             relief=tk.FLAT,
             bd=0,
         )
+        self._replace_scrolled_text_vbar(self.output_text)
         self.output_text.pack(fill=tk.BOTH, expand=1)
 
         parent.add(output_frame, minsize=150)
@@ -1225,7 +1320,13 @@ class OPLIDE(tk.Tk):
             relief=tk.FLAT,
             bd=0,
         )
+        self._replace_scrolled_text_vbar(self.genai_prompt_text)
         self.genai_prompt_text.grid(row=1, column=0, sticky="nsew")
+        self._bind_autohide_vertical_scrollbar(
+            self.genai_prompt_text,
+            getattr(self.genai_prompt_text, "vbar", None),
+            on_toggle=self._sync_genai_mode_width,
+        )
         self.genai_prompt_text.bind("<Control-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Command-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Configure>", self._on_genai_prompt_configure, add="+")
@@ -1297,10 +1398,11 @@ class OPLIDE(tk.Tk):
         self.sessions_surface = sessions_list
 
         self.request_listbox = tk.Listbox(sessions_list, exportselection=False, height=10, activestyle="none")
-        request_scroll = tk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
+        request_scroll = ttk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
         request_scroll.grid(row=0, column=1, sticky="ns")
+        self._bind_autohide_vertical_scrollbar(self.request_listbox, request_scroll)
 
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
@@ -1396,7 +1498,7 @@ class OPLIDE(tk.Tk):
         self.model_text.tag_configure("ERROR", background="#e06c75", foreground="black")
         self.data_text.tag_configure("ERROR", background="#e06c75", foreground="black")
         # Comments
-        self.model_text.tag_configure("COMMENT", font=("Consolas", self.current_font_size, "italic"))
+        self.model_text.tag_configure("COMMENT", font=(self.editor_font_family, self.current_font_size, "italic"))
 
     def _on_genai_mode_changed(self) -> None:
         """Update composer copy when the GenAI panel mode changes."""
@@ -2707,6 +2809,8 @@ class OPLIDE(tk.Tk):
         self.model_text.config(font=editor_font)
         self.data_text.config(font=editor_font)
         self.output_text.config(font=output_font)
+        if hasattr(self, "genai_prompt_text"):
+            self.genai_prompt_text.config(font=editor_font)
 
         # Adjust comment tag to match new size
         self.model_text.tag_configure("COMMENT", font=(self.editor_font_family, size, "italic"))
@@ -3669,6 +3773,7 @@ class OPLIDE(tk.Tk):
             height=20,
             font=(self.editor_font_family, self.current_font_size),
         )
+        self._replace_scrolled_text_vbar(txt)
         txt.grid(row=1, column=0, sticky="nsew")
         if initial_text:
             txt.insert("1.0", initial_text)
@@ -3739,6 +3844,7 @@ class OPLIDE(tk.Tk):
             height=16,
             font=(self.editor_font_family, self.current_font_size),
         )
+        self._replace_scrolled_text_vbar(txt)
         txt.grid(row=1, column=0, sticky="nsew")
         if initial_text:
             txt.insert("1.0", initial_text)
@@ -3753,7 +3859,7 @@ class OPLIDE(tk.Tk):
 
         file_list = tk.Listbox(attachments, height=4, exportselection=False)
         file_list.grid(row=0, column=0, sticky="ew")
-        yscroll = tk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
+        yscroll = ttk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
         file_list.configure(yscrollcommand=yscroll.set)
         yscroll.grid(row=0, column=1, sticky="ns")
 
@@ -4203,6 +4309,10 @@ class OPLIDE(tk.Tk):
         except Exception:
             self.style = tb.Style(theme=theme_name)
         self._apply_theme_colors()
+        try:
+            self.update_idletasks()
+        except Exception:
+            pass
         # Re-highlight for contrast
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
@@ -4225,9 +4335,118 @@ class OPLIDE(tk.Tk):
             stripped_layout.append((element_name, updated_options))
         return stripped_layout
 
+    def _configure_tk_scrollbar(
+        self,
+        scrollbar: Any,
+        *,
+        thumb_bg: str,
+        active_bg: str,
+        trough_bg: str,
+        border_color: str,
+    ) -> None:
+        """Apply explicit colors to classic Tk scrollbars that do not follow ttk themes."""
+        try:
+            if scrollbar is None or not scrollbar.winfo_exists():
+                return
+            scrollbar.config(
+                bg=thumb_bg,
+                activebackground=active_bg,
+                troughcolor=trough_bg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightthickness=0,
+                highlightbackground=border_color,
+                highlightcolor=border_color,
+                elementborderwidth=0,
+                activerelief=tk.FLAT,
+            )
+        except Exception:
+            pass
+
+    def _replace_scrolled_text_vbar(self, text_widget: Any) -> None:
+        """Swap ScrolledText's native vertical scrollbar for a ttk one so themes apply on macOS."""
+        try:
+            if text_widget is None or not text_widget.winfo_exists():
+                return
+            current_vbar = getattr(text_widget, "vbar", None)
+            if current_vbar is None or not current_vbar.winfo_exists():
+                return
+            if isinstance(current_vbar, ttk.Scrollbar):
+                return
+            current_vbar.destroy()
+            replacement_vbar = ttk.Scrollbar(text_widget, orient=tk.VERTICAL, command=text_widget.yview)
+            replacement_vbar.pack(side=tk.RIGHT, fill=tk.Y)
+            text_widget.configure(yscrollcommand=replacement_vbar.set)
+            text_widget.vbar = replacement_vbar
+        except Exception:
+            pass
+
+    def _bind_autohide_vertical_scrollbar(
+        self,
+        widget: Any,
+        scrollbar: Any,
+        *,
+        on_toggle: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Hide a vertical scrollbar when the full content is already visible."""
+        try:
+            if widget is None or scrollbar is None:
+                return
+            manager = str(scrollbar.winfo_manager())
+            pack_restore_kwargs = None
+            if manager == "pack":
+                try:
+                    pack_info = scrollbar.pack_info()
+                    pack_restore_kwargs = {
+                        "side": pack_info.get("side", tk.RIGHT),
+                        "fill": pack_info.get("fill", tk.Y),
+                    }
+                except Exception:
+                    pack_restore_kwargs = {"side": tk.RIGHT, "fill": tk.Y}
+            is_visible = {"value": True}
+
+            def _set_visibility(first: str, last: str) -> None:
+                try:
+                    scrollbar.set(first, last)
+                except Exception:
+                    pass
+
+                try:
+                    first_value = float(first)
+                    last_value = float(last)
+                except Exception:
+                    first_value = 0.0
+                    last_value = 1.0
+                should_show = not (first_value <= 0.0 and last_value >= 1.0)
+                if should_show == is_visible["value"]:
+                    return
+
+                if should_show:
+                    if manager == "grid":
+                        scrollbar.grid()
+                    elif manager == "pack" and pack_restore_kwargs is not None:
+                        scrollbar.pack(**pack_restore_kwargs)
+                else:
+                    if manager == "grid":
+                        scrollbar.grid_remove()
+                    elif manager == "pack":
+                        scrollbar.pack_forget()
+                is_visible["value"] = should_show
+                if on_toggle is not None:
+                    try:
+                        self.after_idle(on_toggle)
+                    except Exception:
+                        pass
+
+            widget.configure(yscrollcommand=_set_visibility)
+            self.after_idle(lambda: _set_visibility(*widget.yview()))
+        except Exception:
+            pass
+
     def _apply_theme_colors(self) -> None:
         """Apply text widget colors based on theme."""
         theme = self.theme_var.get()
+        self._apply_macos_theme_appearance(theme)
         if theme == "darkly":
             root_bg = "#212529"
             editor_bg = "#2b3035"
@@ -4245,6 +4464,12 @@ class OPLIDE(tk.Tk):
             status_bg = "#212529"
             status_fg = "#cfd6dd"
             status_meta_fg = "#8f9aa3"
+            scrollbar_thumb_bg = "#495057"
+            scrollbar_active_bg = "#5c636a"
+            scrollbar_trough_bg = "#212529"
+            ttk_scrollbar_bg = "#495057"
+            ttk_scrollbar_active_bg = "#5c636a"
+            ttk_scrollbar_trough_bg = "#2b3035"
         else:
             root_bg = "#f8f9fa"
             editor_bg = "#ffffff"
@@ -4262,6 +4487,12 @@ class OPLIDE(tk.Tk):
             status_bg = "#f8f9fa"
             status_fg = "#364152"
             status_meta_fg = "#7b8794"
+            scrollbar_thumb_bg = "#c1c9d0"
+            scrollbar_active_bg = "#adb5bd"
+            scrollbar_trough_bg = "#f1f3f5"
+            ttk_scrollbar_bg = "#c1c9d0"
+            ttk_scrollbar_active_bg = "#adb5bd"
+            ttk_scrollbar_trough_bg = "#f1f3f5"
 
         # Root background
         try:
@@ -4352,9 +4583,29 @@ class OPLIDE(tk.Tk):
             for button_style in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
                 self.style.layout(button_style, button_layout)
             self.style.configure("StatusBar.TFrame", background=status_bg)
-            self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 12))
             self.style.configure(
-                "StatusBarMeta.TLabel", background=status_bg, foreground=status_meta_fg, font=("Segoe UI", 12)
+                "StatusBar.TLabel", background=status_bg, foreground=status_fg, font=self.interface_button_font
+            )
+            self.style.configure(
+                "StatusBarMeta.TLabel",
+                background=status_bg,
+                foreground=status_meta_fg,
+                font=self.interface_button_font,
+            )
+            self.style.configure(
+                "TScrollbar",
+                background=ttk_scrollbar_bg,
+                troughcolor=ttk_scrollbar_trough_bg,
+                bordercolor=ttk_scrollbar_trough_bg,
+                darkcolor=ttk_scrollbar_bg,
+                lightcolor=ttk_scrollbar_bg,
+                arrowcolor=editor_fg,
+                gripcount=0,
+            )
+            self.style.map(
+                "TScrollbar",
+                background=[("active", ttk_scrollbar_active_bg), ("pressed", ttk_scrollbar_active_bg)],
+                arrowcolor=[("disabled", sidebar_muted), ("active", editor_fg)],
             )
         except Exception:
             pass
@@ -4386,6 +4637,13 @@ class OPLIDE(tk.Tk):
                 highlightbackground=inset_border,
                 highlightcolor=inset_border,
             )
+            self._configure_tk_scrollbar(
+                getattr(self.genai_prompt_text, "vbar", None),
+                thumb_bg=scrollbar_thumb_bg,
+                active_bg=scrollbar_active_bg,
+                trough_bg=scrollbar_trough_bg,
+                border_color=inset_border,
+            )
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.config(
                 bg=editor_bg,
@@ -4398,6 +4656,15 @@ class OPLIDE(tk.Tk):
             )
         if hasattr(self, "sessions_surface"):
             self.sessions_surface.config(bg=inset_border, highlightbackground=inset_border, highlightcolor=inset_border)
+            for child in self.sessions_surface.winfo_children():
+                if isinstance(child, tk.Scrollbar):
+                    self._configure_tk_scrollbar(
+                        child,
+                        thumb_bg=scrollbar_thumb_bg,
+                        active_bg=scrollbar_active_bg,
+                        trough_bg=scrollbar_trough_bg,
+                        border_color=inset_border,
+                    )
         if hasattr(self, "request_listbox"):
             self.request_listbox.config(
                 bg=editor_bg,
@@ -4407,6 +4674,19 @@ class OPLIDE(tk.Tk):
                 relief=tk.FLAT,
                 bd=0,
                 highlightthickness=0,
+            )
+        for text_widget in (
+            getattr(self, "model_text", None),
+            getattr(self, "data_text", None),
+            getattr(self, "output_text", None),
+            getattr(self, "genai_prompt_text", None),
+        ):
+            self._configure_tk_scrollbar(
+                getattr(text_widget, "vbar", None),
+                thumb_bg=scrollbar_thumb_bg,
+                active_bg=scrollbar_active_bg,
+                trough_bg=scrollbar_trough_bg,
+                border_color=inset_border,
             )
 
         # Adjust ERROR tag for contrast
@@ -4800,7 +5080,7 @@ class OPLIDE(tk.Tk):
         """Factory for changing theme."""
 
         def _cmd() -> None:
-            self.set_theme(theme)
+            self.after_idle(lambda: self.set_theme(theme))
 
         return _cmd
 
