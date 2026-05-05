@@ -3421,7 +3421,7 @@ class OPLCompiler:
     to generating and potentially executing GurobiPy code.
     """
 
-    def __init__(self, mask_error_details: bool = False):
+    def __init__(self, mask_error_details: bool = True):
         self.model_lexer = OPLLexer()
         self.model_parser = OPLParser()
         self.data_lexer = OPLDataLexer()
