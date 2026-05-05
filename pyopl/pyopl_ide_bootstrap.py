@@ -1069,7 +1069,7 @@ class OPLIDE(tk.Tk):
         parent.add(editor_frame, stretch="always")
 
         # Notebook
-        self.editor_notebook = ttk.Notebook(editor_frame)
+        self.editor_notebook = ttk.Notebook(editor_frame, style="Editor.TNotebook")
         self.editor_notebook.pack(fill=tk.BOTH, expand=1)
 
         # Model editor
@@ -1144,7 +1144,7 @@ class OPLIDE(tk.Tk):
         self.output_frame = output_frame
 
         container = ttk.Frame(output_frame)
-        container.pack(fill=tk.BOTH, expand=1, padx=5, pady=(0, 5))
+        container.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
 
@@ -1168,7 +1168,7 @@ class OPLIDE(tk.Tk):
 
     def _setup_genai_panel(self, parent: tk.PanedWindow) -> None:
         """Create the GenAI composer panel for the top row."""
-        panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(12, 10))
+        panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(5, 10))
         parent.add(panel, minsize=180)
         panel.pack_propagate(False)
         panel.columnconfigure(0, weight=1)
@@ -1277,7 +1277,7 @@ class OPLIDE(tk.Tk):
 
     def _setup_sessions_panel(self, parent: tk.PanedWindow) -> None:
         """Create the output-session list panel for the bottom row."""
-        sessions_panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=(12, 0, 12, 5))
+        sessions_panel = ttk.Frame(parent, style="Sidebar.TFrame", width=300, padding=0)
         parent.add(sessions_panel, minsize=180)
         sessions_panel.pack_propagate(False)
         sessions_panel.columnconfigure(0, weight=1)
@@ -1285,7 +1285,7 @@ class OPLIDE(tk.Tk):
         self.genai_sessions_panel = sessions_panel
 
         sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
-        sessions_list.grid(row=0, column=0, sticky="nsew")
+        sessions_list.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         sessions_list.columnconfigure(0, weight=1)
         sessions_list.rowconfigure(0, weight=1)
         self.sessions_surface = sessions_list
@@ -4089,6 +4089,22 @@ class OPLIDE(tk.Tk):
         # Persist settings
         self._save_settings()
 
+    def _strip_focus_from_ttk_layout(self, layout: Any) -> Any:
+        """Remove ttk focus elements so buttons do not render the dotted focus motif."""
+        stripped_layout: list[tuple[str, Any]] = []
+        for element_name, element_options in layout:
+            normalized_name = element_name.lower()
+            if normalized_name == "focus" or normalized_name.endswith(".focus"):
+                children = element_options.get("children", []) if element_options else []
+                stripped_layout.extend(self._strip_focus_from_ttk_layout(children))
+                continue
+
+            updated_options = dict(element_options) if element_options else {}
+            if "children" in updated_options:
+                updated_options["children"] = self._strip_focus_from_ttk_layout(updated_options["children"])
+            stripped_layout.append((element_name, updated_options))
+        return stripped_layout
+
     def _apply_theme_colors(self) -> None:
         """Apply text widget colors based on theme."""
         theme = self.theme_var.get()
@@ -4097,14 +4113,15 @@ class OPLIDE(tk.Tk):
             editor_bg = "#2b3035"
             editor_fg = "#e9ecef"
             caret_fg = "#e9ecef"
-            output_bg = "#212529"
+            sidebar_bg = editor_bg
+            output_bg = sidebar_bg
             output_fg = "#e9ecef"
             error_fg = "white"
             paned_bg = root_bg
-            sidebar_bg = editor_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#aab4be"
             list_select_bg = "#334155"
+            list_select_fg = editor_fg
             inset_border = "#495057"
             status_bg = "#212529"
             status_fg = "#cfd6dd"
@@ -4114,14 +4131,15 @@ class OPLIDE(tk.Tk):
             editor_bg = "#ffffff"
             editor_fg = "#212529"
             caret_fg = "#212529"
-            output_bg = "#f8f9fa"
+            sidebar_bg = editor_bg
+            output_bg = sidebar_bg
             output_fg = "#212529"
             error_fg = "black"
             paned_bg = root_bg
-            sidebar_bg = editor_bg
             sidebar_fg = editor_fg
             sidebar_muted = "#6b7785"
             list_select_bg = "#cfe0ff"
+            list_select_fg = editor_fg
             inset_border = "#ced4da"
             status_bg = "#f8f9fa"
             status_fg = "#364152"
@@ -4152,15 +4170,67 @@ class OPLIDE(tk.Tk):
 
         # Apply to editors
         if hasattr(self, "model_text"):
-            self.model_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
+            self.model_text.config(
+                bg=editor_bg,
+                fg=editor_fg,
+                insertbackground=caret_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightbackground=inset_border,
+                highlightcolor=inset_border,
+            )
         if hasattr(self, "data_text"):
-            self.data_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
+            self.data_text.config(
+                bg=editor_bg,
+                fg=editor_fg,
+                insertbackground=caret_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightbackground=inset_border,
+                highlightcolor=inset_border,
+            )
         if hasattr(self, "output_text"):
-            self.output_text.config(bg=output_bg, fg=output_fg, relief=tk.FLAT, bd=0)
+            self.output_text.config(
+                bg=output_bg,
+                fg=output_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightbackground=inset_border,
+                highlightcolor=inset_border,
+            )
 
         # Ensure the editor frames share the same background as the text area
         try:
             self.style.configure("Editor.TFrame", background=editor_bg)
+            self.style.configure(
+                "Editor.TNotebook",
+                background=editor_bg,
+                borderwidth=0,
+                relief=tk.FLAT,
+                bordercolor=editor_bg,
+                lightcolor=editor_bg,
+                darkcolor=editor_bg,
+                tabmargins=(0, 0, 0, 0),
+            )
+            self.style.configure(
+                "Editor.TNotebook.Tab",
+                background=paned_bg,
+                foreground=sidebar_muted,
+                borderwidth=0,
+                relief=tk.FLAT,
+                bordercolor=paned_bg,
+                lightcolor=paned_bg,
+                darkcolor=paned_bg,
+                padding=(12, 6),
+            )
+            self.style.map(
+                "Editor.TNotebook.Tab",
+                background=[("selected", list_select_bg), ("active", editor_bg)],
+                foreground=[("selected", list_select_fg), ("active", sidebar_fg)],
+                bordercolor=[("selected", list_select_bg), ("active", editor_bg)],
+                lightcolor=[("selected", list_select_bg), ("active", editor_bg)],
+                darkcolor=[("selected", list_select_bg), ("active", editor_bg)],
+            )
             self.style.configure("Sidebar.TFrame", background=sidebar_bg)
             self.style.configure(
                 "SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold")
@@ -4189,6 +4259,9 @@ class OPLIDE(tk.Tk):
                 font=self.interface_button_font,
             )
             self.style.map("GenaiModeActive.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
+            button_layout = self._strip_focus_from_ttk_layout(self.style.layout("TButton"))
+            for button_style in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
+                self.style.layout(button_style, button_layout)
             self.style.configure("StatusBar.TFrame", background=status_bg)
             self.style.configure("StatusBar.TLabel", background=status_bg, foreground=status_fg, font=("Segoe UI", 12))
             self.style.configure(
@@ -4202,6 +4275,11 @@ class OPLIDE(tk.Tk):
                 self.status_bar.configure(style="StatusBar.TFrame")
             except Exception:
                 pass
+        if hasattr(self, "editor_notebook"):
+            try:
+                self.editor_notebook.configure(style="Editor.TNotebook", padding=0)
+            except Exception:
+                pass
         if hasattr(self, "status_bar_labels"):
             for idx, label in enumerate(self.status_bar_labels):
                 try:
@@ -4210,7 +4288,15 @@ class OPLIDE(tk.Tk):
                     pass
 
         if hasattr(self, "genai_prompt_text"):
-            self.genai_prompt_text.config(bg=editor_bg, fg=editor_fg, insertbackground=caret_fg, relief=tk.FLAT, bd=0)
+            self.genai_prompt_text.config(
+                bg=editor_bg,
+                fg=editor_fg,
+                insertbackground=caret_fg,
+                relief=tk.FLAT,
+                bd=0,
+                highlightbackground=inset_border,
+                highlightcolor=inset_border,
+            )
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.config(
                 bg=editor_bg,
