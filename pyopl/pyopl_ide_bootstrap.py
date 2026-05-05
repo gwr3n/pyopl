@@ -152,6 +152,7 @@ class OPLIDE(tk.Tk):
         self.data_file: Optional[str] = None
         self.current_font_size = 12
         self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
+        self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
         self.interface_button_font = "TkDefaultFont"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
         self.theme_var = tk.StringVar(value="flatly")
@@ -4553,12 +4554,23 @@ class OPLIDE(tk.Tk):
             self.style.configure("Editor.TFrame", background=editor_bg)
             self.style.configure("Sidebar.TFrame", background=sidebar_bg)
             self.style.configure(
-                "SidebarHeader.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 13, "bold")
+                "SidebarHeader.TLabel",
+                background=sidebar_bg,
+                foreground=sidebar_fg,
+                font=(self.interface_font_family, 13, "bold"),
             )
             self.style.configure(
-                "SidebarSection.TLabel", background=sidebar_bg, foreground=sidebar_fg, font=("Segoe UI", 10, "bold")
+                "SidebarSection.TLabel",
+                background=sidebar_bg,
+                foreground=sidebar_fg,
+                font=(self.interface_font_family, 10, "bold"),
             )
-            self.style.configure("SidebarSubtle.TLabel", background=sidebar_bg, foreground=sidebar_muted, font=("Segoe UI", 9))
+            self.style.configure(
+                "SidebarSubtle.TLabel",
+                background=sidebar_bg,
+                foreground=sidebar_muted,
+                font=(self.interface_font_family, 9),
+            )
             self.style.configure(
                 "GenaiMode.TButton",
                 background=paned_bg,
