@@ -22,12 +22,18 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def __init__(self):
                 self.configured = {}
                 self.mapped = {}
+                self.layouts = {}
 
             def configure(self, style_name, **kwargs):
                 self.configured[style_name] = kwargs
 
             def map(self, style_name, **kwargs):
                 self.mapped[style_name] = kwargs
+
+            def layout(self, style_name, layout_spec=None):
+                if layout_spec is None:
+                    return self.layouts.get(style_name, [])
+                self.layouts[style_name] = layout_spec
 
         class DummyWidget:
             def __init__(self):
@@ -42,9 +48,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy = SimpleNamespace(
             theme_var=DummyVar("flatly"),
             style=DummyStyle(),
+            interface_font_family="TkDefaultFont",
             interface_button_font="TkDefaultFont",
             current_font_size=20,
             configure=lambda **_kwargs: None,
+            _apply_macos_theme_appearance=lambda _theme: None,
+            _configure_tk_scrollbar=lambda *_args, **_kwargs: None,
+            _strip_focus_from_ttk_layout=lambda layout: layout,
             model_text=DummyWidget(),
             data_text=DummyWidget(),
             output_text=DummyWidget(),
