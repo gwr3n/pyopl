@@ -3421,14 +3421,17 @@ class OPLCompiler:
     to generating and potentially executing GurobiPy code.
     """
 
-    def __init__(self, mask_error_details: bool = True):
+    def __init__(self, mask_error_details: bool = False, mask_lineno: bool = False):
         self.model_lexer = OPLLexer()
         self.model_parser = OPLParser()
         self.data_lexer = OPLDataLexer()
         self.data_parser = OPLDataParser()
         self.mask_error_details = mask_error_details
+        self.mask_lineno = mask_lineno
 
     def _raise_masked_syntax_error(self, exc: SemanticError) -> None:
+        if self.mask_lineno:
+            raise SyntaxError("Syntax error") from None
         lineno = getattr(exc, "lineno", None)
         if lineno is None:
             lineno = getattr(self.model_parser, "_last_lineno", None)
