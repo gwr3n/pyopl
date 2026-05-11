@@ -1428,6 +1428,14 @@ class OPLParser(Parser):
             "constraints": p.constraints_section,
         }
 
+    @_("declarations constraints_section objective_section")  # type: ignore
+    def model(self, p):
+        return {
+            "declarations": p.declarations,
+            "objective": p.objective_section,
+            "constraints": p.constraints_section,
+        }
+
     @_("declaration_list declaration")  # type: ignore
     def declaration_list(self, p):
         logger.debug(f"[DECL_LIST] Appending declaration: {p.declaration}")

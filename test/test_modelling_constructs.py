@@ -22,6 +22,37 @@ class DummyAST:
 
 
 class TestModellingConstructs(unittest.TestCase):
+    def test_objective_after_subject_to_is_accepted(self):
+        from pyopl.pyopl_core import OPLLexer, OPLParser
+
+        model = """
+        float base_price;
+        float base_demand;
+        float price_drop_per_step;
+        float demand_increase_per_step;
+        float fixed_costs;
+        float marginal_cost;
+
+        dvar int+ n_drops;
+        dvar int+ items_sold;
+        dvar float+ price;
+
+        subject to {
+            n_drops <= 15;
+            items_sold == base_demand + demand_increase_per_step * n_drops;
+            price == base_price - price_drop_per_step * n_drops;
+        }
+
+        maximize Profit: ((price - marginal_cost) * items_sold - fixed_costs);
+        """
+        lexer = OPLLexer()
+        parser = OPLParser()
+        ast = parser.parse(lexer.tokenize(model))
+
+        self.assertEqual(ast["objective"]["type"], "maximize")
+        self.assertEqual(ast["objective"].get("label"), "Profit")
+        self.assertEqual(len(ast["constraints"]), 3)
+
     def test_computed_indexed_parameters_nd(self):
         """Computed indexed parameters over multiple iterators should be supported and rewritten to inline indexed params."""
         from pyopl.pyopl_core import OPLCompiler

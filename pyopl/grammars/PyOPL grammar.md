@@ -55,6 +55,7 @@ BNF is simplified for readability. Optional elements are in [brackets]. Alternat
 
 ```
 <model> ::= <declarations_opt> <objective_section> <constraints_section>
+          | <declarations_opt> <constraints_section> <objective_section>
 
 <declarations_opt> ::= <declaration_list> | ε
 <declaration_list> ::= <declaration_list> <declaration> | <declaration>
@@ -73,6 +74,7 @@ BNF is simplified for readability. Optional elements are in [brackets]. Alternat
 
 Clarification:
 - Objective labels must be unindexed. Indexed labels like `minimize z[i]: ...;` or `minimize z[i] = ...;` are rejected.
+- The objective section may appear either before or after the `subject to { ... }` block.
 
 ### Constraints
 
