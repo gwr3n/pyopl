@@ -37,6 +37,96 @@ from .pyopl_generative import (
 logger = logging.getLogger(__name__)
 
 
+def _build_json_repair_prompt(original_prompt: str, invalid_response: str, error: str) -> str:
+    return (
+        f"{original_prompt}\n\n"
+        "<retry_instruction>\n"
+        "Your previous response was invalid for this step. Return ONLY valid JSON that matches the required schema.\n"
+        "Do not include Markdown, explanations, or any text before or after the JSON.\n"
+        "</retry_instruction>\n\n"
+        "<previous_response_error>\n"
+        f"{error}\n"
+        "</previous_response_error>\n\n"
+        "<previous_invalid_response>\n"
+        f"{invalid_response or '(empty response)'}\n"
+        "</previous_invalid_response>\n"
+    )
+
+
+def _generate_json_object(
+    *,
+    provider: LLMProvider,
+    model_name: str,
+    input_text: str,
+    images: Optional[List[ImageInput]],
+    max_tokens: Optional[int],
+    temperature: Optional[float],
+    stop: Optional[List[str]],
+    progress: Optional[Callable[[str], None]],
+    validator: Callable[[Any], Optional[str]],
+    retry_label: str,
+) -> tuple[Dict[str, Any], Dict[str, int]]:
+    total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    attempt_prompt = input_text
+    last_content = ""
+    last_error = "Empty response"
+
+    for attempt in range(2):
+        content, usage = _llm_generate_text(
+            provider=provider,
+            model_name=model_name,
+            input_text=attempt_prompt,
+            images=images,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop=stop,
+            progress=progress,
+            capture_usage=True,
+        )
+        total_usage["prompt_tokens"] += usage.get("prompt_tokens", 0) or 0
+        total_usage["completion_tokens"] += usage.get("completion_tokens", 0) or 0
+
+        last_content = content or ""
+        if not content:
+            last_error = "Empty response"
+        else:
+            try:
+                result = _json_loads_relaxed(content)
+            except Exception as exc:
+                last_error = f"Failed to parse JSON: {exc}"
+            else:
+                validation_error = validator(result)
+                if validation_error is None:
+                    return result, total_usage
+                last_error = validation_error
+
+        if attempt == 0:
+            _notify(progress, f"[{retry_label}] Invalid JSON response; retrying once with corrective feedback")
+            attempt_prompt = _build_json_repair_prompt(input_text, last_content, last_error)
+
+    raise RuntimeError(f"{last_error}\nResponse: {last_content}")
+
+
+def _validate_model_data_payload(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return "Response JSON is not an object"
+    if not isinstance(payload.get("model"), str):
+        return 'Response JSON is missing string key "model"'
+    if not isinstance(payload.get("data"), str):
+        return 'Response JSON is missing string key "data"'
+    return None
+
+
+def _validate_alignment_payload(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return "Response JSON is not an object"
+    if not isinstance(payload.get("aligned"), bool):
+        return 'Response JSON is missing boolean key "aligned"'
+    if not isinstance(payload.get("assessment"), str):
+        return 'Response JSON is missing string key "assessment"'
+    return None
+
+
 # ============================================================================
 # GraphChain Context & Execution Model
 # ============================================================================
@@ -186,7 +276,7 @@ class GenerateNode(GraphNode):
         )
 
         try:
-            content, usage = _llm_generate_text(
+            result, usage = _generate_json_object(
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=user_prompt,
@@ -195,13 +285,9 @@ class GenerateNode(GraphNode):
                 temperature=context.temperature,
                 stop=context.stop,
                 progress=context.progress,
-                capture_usage=True,
+                validator=_validate_model_data_payload,
+                retry_label=self.name,
             )
-
-            if not content:
-                return NodeExecutionResult(context, success=False, error="Empty generation response")
-
-            result = _json_loads_relaxed(content)
             context.model_code = result.get("model", "")
             context.data_code = result.get("data", "")
             context.total_prompt_tokens += usage.get("prompt_tokens", 0) or 0
@@ -255,7 +341,7 @@ class CheckAlignmentNode(GraphNode):
         )
 
         try:
-            content, usage = _llm_generate_text(
+            result, usage = _generate_json_object(
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=alignment_prompt,
@@ -264,13 +350,9 @@ class CheckAlignmentNode(GraphNode):
                 temperature=context.temperature,
                 stop=context.stop,
                 progress=context.progress,
-                capture_usage=True,
+                validator=_validate_alignment_payload,
+                retry_label=self.name,
             )
-
-            if not content:
-                return NodeExecutionResult(context, success=False, error="Empty alignment response")
-
-            result = _json_loads_relaxed(content)
             context.aligned = result.get("aligned", False)
             context.alignment_assessment = result.get("assessment", "").strip()
             context.total_prompt_tokens += usage.get("prompt_tokens", 0) or 0
@@ -301,7 +383,7 @@ class ReviseSyntaxNode(GraphNode):
         )
 
         try:
-            content, usage = _llm_generate_text(
+            result, usage = _generate_json_object(
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=revision_prompt,
@@ -310,13 +392,9 @@ class ReviseSyntaxNode(GraphNode):
                 temperature=context.temperature,
                 stop=context.stop,
                 progress=context.progress,
-                capture_usage=True,
+                validator=_validate_model_data_payload,
+                retry_label=self.name,
             )
-
-            if not content:
-                return NodeExecutionResult(context, success=False, error="Empty revision response")
-
-            result = _json_loads_relaxed(content)
             context.model_code = result.get("model", context.model_code)
             context.data_code = result.get("data", context.data_code)
             context.last_revision_type = "syntax"
@@ -347,7 +425,7 @@ class ReviseAlignmentNode(GraphNode):
         )
 
         try:
-            content, usage = _llm_generate_text(
+            result, usage = _generate_json_object(
                 provider=context.provider,
                 model_name=context.model_name,
                 input_text=revision_prompt,
@@ -356,13 +434,9 @@ class ReviseAlignmentNode(GraphNode):
                 temperature=context.temperature,
                 stop=context.stop,
                 progress=context.progress,
-                capture_usage=True,
+                validator=_validate_model_data_payload,
+                retry_label=self.name,
             )
-
-            if not content:
-                return NodeExecutionResult(context, success=False, error="Empty revision response")
-
-            result = _json_loads_relaxed(content)
             context.model_code = result.get("model", context.model_code)
             context.data_code = result.get("data", context.data_code)
             context.last_revision_type = "alignment"
