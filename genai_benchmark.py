@@ -147,6 +147,9 @@ def _process_item(
         )
         if few_shot is not None:
             gen_kwargs["few_shot"] = few_shot
+        if args.logic == "SyntAGM":
+            gen_kwargs["mask_error_details"] = bool(args.mask_error_details)
+            gen_kwargs["mask_lineno"] = bool(args.mask_lineno)
 
         gen = solve_fn(
             prompt,
@@ -242,6 +245,16 @@ def main() -> int:
         action="store_true",
         help="Disable alignment check (SyntAGM logic only).",
     )
+    parser.add_argument(
+        "--mask-error-details",
+        action="store_true",
+        help="Mask OPLCompiler syntax error details during SyntAGM validation (ablation flag).",
+    )
+    parser.add_argument(
+        "--mask-lineno",
+        action="store_true",
+        help="Mask OPLCompiler syntax error line numbers during SyntAGM validation (ablation flag).",
+    )
 
     # If called with no CLI args, default to showing help
     if len(sys.argv) == 1:
@@ -270,8 +283,13 @@ def main() -> int:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
     # Enforce ablation flags only for SyntAGM
-    if args.logic != "SyntAGM" and (args.no_few_shot or args.no_alignment_check):
-        print("--no-few-shot and --no-alignment-check are only allowed with --logic SyntAGM.", file=sys.stderr)
+    if args.logic != "SyntAGM" and (
+        args.no_few_shot or args.no_alignment_check or args.mask_error_details or args.mask_lineno
+    ):
+        print(
+            "--no-few-shot, --no-alignment-check, --mask-error-details, and --mask-lineno are only allowed with --logic SyntAGM.",
+            file=sys.stderr,
+        )
         return 2
 
     impl = importlib.import_module(mod_name)
@@ -333,6 +351,10 @@ def main() -> int:
             tags.append("fewshot_off")
         if args.no_alignment_check:
             tags.append("align_off")
+        if args.mask_error_details:
+            tags.append("mask_errors_on")
+        if args.mask_lineno:
+            tags.append("mask_lineno_on")
         if tags:
             base_dir = os.path.join(base_dir, "+".join(tags))
     base_dir = os.path.join(base_dir, timestamp)

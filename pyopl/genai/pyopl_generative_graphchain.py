@@ -176,6 +176,12 @@ class ExecutionContext:
     problem_images: List[ImageInput] = field(default_factory=list)
     """Optional images associated with the problem prompt."""
 
+    mask_error_details: bool = False
+    """Whether syntax error details should be masked by OPLCompiler."""
+
+    mask_lineno: bool = False
+    """Whether syntax error line numbers should be masked by OPLCompiler."""
+
     # Grammar and utility
     grammar_implementation: str = ""
     """Loaded grammar specification (GBNF, BNF, or code templates)."""
@@ -308,7 +314,7 @@ class CheckSyntaxNode(GraphNode):
 
     async def execute(self, context: ExecutionContext) -> NodeExecutionResult:
         _notify(context.progress, f"[{self.name}] Validating syntax")
-        compiler = OPLCompiler()
+        compiler = OPLCompiler(mask_error_details=context.mask_error_details, mask_lineno=context.mask_lineno)
         context.syntax_errors = []
         context.syntax_valid = False
 
@@ -708,6 +714,8 @@ async def generative_solve_async(
     llm_provider: Optional[str] = "openai",
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
+    mask_error_details: bool = False,
+    mask_lineno: bool = False,
 ) -> Union[str, Dict[str, Any]]:
     """
     Async version of generative_solve using GraphChain orchestration.
@@ -758,6 +766,8 @@ async def generative_solve_async(
         progress=progress,
         few_shots=few_shots,
         problem_images=prompt_images,
+        mask_error_details=mask_error_details,
+        mask_lineno=mask_lineno,
     )
 
     # Execute GraphChain
@@ -829,6 +839,8 @@ def generative_solve_graphchain(
     llm_provider: Optional[str] = "openai",
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
+    mask_error_details: bool = False,
+    mask_lineno: bool = False,
 ) -> Union[str, Dict[str, Any]]:
     """
     Synchronous wrapper for the async GraphChain executor.
@@ -856,6 +868,8 @@ def generative_solve_graphchain(
                 llm_provider=llm_provider,
                 progress=progress,
                 few_shot=few_shot,
+                mask_error_details=mask_error_details,
+                mask_lineno=mask_lineno,
             )
         )
 
