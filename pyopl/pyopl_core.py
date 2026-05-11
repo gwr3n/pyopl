@@ -40,6 +40,8 @@ RESERVED_PY_IDENTIFIERS: set[str] = set(keyword.kwlist) | set(getattr(keyword, "
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
 
+SYNTAX_ERROR_REPORTING_MODES = {"full", "line", "masked"}
+
 # --- Optional gurobipy import (lazy). Parser should not require gurobi at import time. ---
 # Define as Optional[Any] so assigning None is type-safe when gurobipy is unavailable
 gp: Optional[Any] = None
@@ -3429,16 +3431,23 @@ class OPLCompiler:
     to generating and potentially executing GurobiPy code.
     """
 
-    def __init__(self, mask_error_details: bool = False, mask_lineno: bool = False):
+    @staticmethod
+    def _normalize_syntax_error_reporting(syntax_error_reporting: str = "full") -> str:
+        reporting = syntax_error_reporting.strip().lower()
+        if reporting not in SYNTAX_ERROR_REPORTING_MODES:
+            valid = ", ".join(sorted(SYNTAX_ERROR_REPORTING_MODES))
+            raise ValueError(f"Unknown syntax_error_reporting: {syntax_error_reporting}. Valid options: {valid}")
+        return reporting
+
+    def __init__(self, syntax_error_reporting: str = "full"):
         self.model_lexer = OPLLexer()
         self.model_parser = OPLParser()
         self.data_lexer = OPLDataLexer()
         self.data_parser = OPLDataParser()
-        self.mask_error_details = mask_error_details
-        self.mask_lineno = mask_lineno
+        self.syntax_error_reporting = self._normalize_syntax_error_reporting(syntax_error_reporting)
 
     def _raise_masked_syntax_error(self, exc: SemanticError) -> None:
-        if self.mask_lineno:
+        if self.syntax_error_reporting == "masked":
             raise SyntaxError("Syntax error") from None
         lineno = getattr(exc, "lineno", None)
         if lineno is None:
@@ -3454,7 +3463,7 @@ class OPLCompiler:
         model_code: str,
         data_code: Optional[str] = None,
         solver: str = "gurobi",
-        mask_error_details: Optional[bool] = None,
+        syntax_error_reporting: Optional[str] = None,
     ):
         """
         Compiles an OPL model and optional data into solver-specific code.
@@ -3471,12 +3480,22 @@ class OPLCompiler:
             SemanticError: If there's an error during lexing, parsing, or semantic analysis.
             Exception: For unexpected errors.
         """
-        should_mask_errors = self.mask_error_details if mask_error_details is None else mask_error_details
+        effective_reporting = (
+            self.syntax_error_reporting
+            if syntax_error_reporting is None
+            else self._normalize_syntax_error_reporting(syntax_error_reporting)
+        )
+        should_mask_errors = effective_reporting != "full"
         if should_mask_errors:
             try:
-                return self.compile_model(model_code, data_code, solver=solver, mask_error_details=False)
+                return self.compile_model(model_code, data_code, solver=solver, syntax_error_reporting="full")
             except SemanticError as exc:
-                self._raise_masked_syntax_error(exc)
+                previous_reporting = self.syntax_error_reporting
+                self.syntax_error_reporting = effective_reporting
+                try:
+                    self._raise_masked_syntax_error(exc)
+                finally:
+                    self.syntax_error_reporting = previous_reporting
 
         data_dict = {}
         model_ast = None

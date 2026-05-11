@@ -684,8 +684,7 @@ def generative_solve(
     progress: Optional[Callable[[str], None]] = None,
     few_shot: bool = True,
     use_graphchain: bool = True,
-    mask_error_details: bool = False,
-    mask_lineno: bool = False,
+    syntax_error_reporting: str = "full",
 ):
     """Generate a PyOPL model and data file from a prompt, validate with pyopl, iterate on errors, and assess alignment.
 
@@ -728,8 +727,7 @@ def generative_solve(
             llm_provider=llm_provider,
             progress=progress,
             few_shot=few_shot,
-            mask_error_details=mask_error_details,
-            mask_lineno=mask_lineno,
+            syntax_error_reporting=syntax_error_reporting,
         )
 
     prompt_text, prompt_images = _normalize_prompt_input(prompt)
@@ -824,7 +822,7 @@ def generative_solve(
         except Exception as e:
             raise RuntimeError(f"Failed to parse model response as JSON: {e}\nResponse: {content}")
 
-        compiler = OPLCompiler(mask_error_details=mask_error_details, mask_lineno=mask_lineno)
+        compiler = OPLCompiler(syntax_error_reporting=syntax_error_reporting)
         syntax_errors = []
         try:
             _notify(progress, "Compiling model and data")

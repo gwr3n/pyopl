@@ -76,19 +76,33 @@ class TestPyOPL(unittest.TestCase):
 
 
 class TestPyOPLLexer(TestPyOPL):
-    def test_compiler_can_mask_error_details_as_syntax_error(self):
+    def test_compiler_line_reporting_masks_details_but_keeps_lineno(self):
         model_code = """
         dvar float x;
         maximize x + 1
         subject to { x <= 10; }
         """
 
-        compiler = OPLCompiler(mask_error_details=True)
+        compiler = OPLCompiler(syntax_error_reporting="line")
 
         with self.assertRaises(SyntaxError) as exc:
             compiler.compile_model(model_code, solver="scipy")
 
         self.assertEqual(str(exc.exception), "Syntax error on line 4")
+
+    def test_compiler_masked_reporting_hides_lineno(self):
+        model_code = """
+        dvar float x;
+        maximize x + 1
+        subject to { x <= 10; }
+        """
+
+        compiler = OPLCompiler(syntax_error_reporting="masked")
+
+        with self.assertRaises(SyntaxError) as exc:
+            compiler.compile_model(model_code, solver="scipy")
+
+        self.assertEqual(str(exc.exception), "Syntax error")
 
     def test_compiler_keeps_rich_semantic_errors_by_default(self):
         model_code = """

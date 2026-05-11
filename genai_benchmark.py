@@ -148,8 +148,7 @@ def _process_item(
         if few_shot is not None:
             gen_kwargs["few_shot"] = few_shot
         if args.logic == "SyntAGM":
-            gen_kwargs["mask_error_details"] = bool(args.mask_error_details)
-            gen_kwargs["mask_lineno"] = bool(args.mask_lineno)
+            gen_kwargs["syntax_error_reporting"] = args.syntax_error_reporting
 
         gen = solve_fn(
             prompt,
@@ -246,14 +245,10 @@ def main() -> int:
         help="Disable alignment check (SyntAGM logic only).",
     )
     parser.add_argument(
-        "--mask-error-details",
-        action="store_true",
-        help="Mask OPLCompiler syntax error details during SyntAGM validation (ablation flag).",
-    )
-    parser.add_argument(
-        "--mask-lineno",
-        action="store_true",
-        help="Mask OPLCompiler syntax error line numbers during SyntAGM validation (ablation flag).",
+        "--syntax-error-reporting",
+        default="full",
+        choices=["full", "line", "masked"],
+        help="SyntAGM-only OPLCompiler syntax error reporting mode: full, line, or masked.",
     )
 
     # If called with no CLI args, default to showing help
@@ -283,11 +278,9 @@ def main() -> int:
         print(f"Unknown logic: {args.logic}", file=sys.stderr)
         return 2
     # Enforce ablation flags only for SyntAGM
-    if args.logic != "SyntAGM" and (
-        args.no_few_shot or args.no_alignment_check or args.mask_error_details or args.mask_lineno
-    ):
+    if args.logic != "SyntAGM" and (args.no_few_shot or args.no_alignment_check or args.syntax_error_reporting != "full"):
         print(
-            "--no-few-shot, --no-alignment-check, --mask-error-details, and --mask-lineno are only allowed with --logic SyntAGM.",
+            "--no-few-shot, --no-alignment-check, and --syntax-error-reporting are only allowed with --logic SyntAGM.",
             file=sys.stderr,
         )
         return 2
@@ -351,10 +344,8 @@ def main() -> int:
             tags.append("fewshot_off")
         if args.no_alignment_check:
             tags.append("align_off")
-        if args.mask_error_details:
-            tags.append("mask_errors_on")
-        if args.mask_lineno:
-            tags.append("mask_lineno_on")
+        if args.syntax_error_reporting != "full":
+            tags.append(f"syntax_{args.syntax_error_reporting}")
         if tags:
             base_dir = os.path.join(base_dir, "+".join(tags))
     base_dir = os.path.join(base_dir, timestamp)
