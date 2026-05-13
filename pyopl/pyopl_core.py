@@ -42,6 +42,46 @@ logger = logging.getLogger(__name__)
 
 SYNTAX_ERROR_REPORTING_MODES = {"full", "line", "masked"}
 
+
+def _parser_error_with_hint(tok_type: object, tok_val: object) -> str:
+    message = f"Syntax error at or near token {tok_type}, value '{tok_val}'."
+    if tok_type == "IN":
+        return (
+            message + " Hint: this implementation does not support filtered/index-comprehension style dvar declarations. "
+            "Declare the variable over full index sets and move filtering logic into constraints or tuple/set definitions."
+        )
+    return (
+        message
+        + " Hint: rewrite the construct using simpler supported PyOPL syntax, and avoid OPL forms that depend on inline filtering or advanced indexing in declarations."
+    )
+
+
+def _execution_error_with_hint(exc: Exception, backend: str) -> str:
+    raw = f"Error during {backend} code execution: {exc}"
+    detail = str(exc)
+    if "unsupported operand type(s) for -: 'str' and 'str'" in detail:
+        return (
+            raw + " Hint: a string comparison or string-valued expression is being used inside an algebraic expression. "
+            'Do not use tests like k == "K1" inside sums/objectives; encode that logic through data or explicit binary variables.'
+        )
+    if "unsupported operand type(s) for -: 'gurobipy._core.LinExpr' and 'TempConstr'" in detail:
+        return (
+            raw + " Hint: a boolean comparison such as (sum(...) >= 1) is being used as if it were a numeric expression. "
+            "Replace boolean comparisons in arithmetic with explicit binary variables or separate linear constraints."
+        )
+    return (
+        raw + " Hint: the generated model uses a construct accepted by parsing but not by the backend code generator. "
+        "Simplify boolean logic, string tests, and advanced indexed expressions in arithmetic contexts."
+    )
+
+
+def _load_failure_message() -> str:
+    return (
+        "Failed to load or parse OPL model from file. See errors traceback. "
+        "Hint: common fixes are to remove unsupported declaration filters, rewrite keyed .dat arrays into supported plain arrays/key-value forms, and avoid advanced indexed expressions in parameter lookups."
+    )
+
+
 # --- Optional gurobipy import (lazy). Parser should not require gurobi at import time. ---
 # Define as Optional[Any] so assigning None is type-safe when gurobipy is unavailable
 gp: Optional[Any] = None
@@ -1413,10 +1453,7 @@ class OPLParser(Parser):
             lineno = getattr(token, "lineno", self._last_lineno)
             tok_type = getattr(token, "type", None)
             tok_val = getattr(token, "value", None)
-            raise SemanticError(
-                f"Syntax error at or near token {tok_type}, value '{tok_val}'.",
-                lineno=lineno,
-            )
+            raise SemanticError(_parser_error_with_hint(tok_type, tok_val), lineno=lineno)
         # Unexpected EOF
         raise SemanticError("Syntax error at end of file (EOF).", lineno=self._last_lineno)
 
@@ -3118,7 +3155,7 @@ class OPLDataLexer(Lexer):
         self.lineno += t.value.count("\n")
 
     def error(self, t):
-        raise SemanticError(f"Illegal character in .dat file: '{t.value[0]}'", lineno=self.lineno)
+        raise SemanticError(f"Illegal character in .dat file: '{t.value[0]}'.", lineno=self.lineno)
 
 
 # --- Parser for .dat files ---
@@ -3416,6 +3453,22 @@ class OPLDataParser(Parser):
             lineno = getattr(p, "lineno", None)
             if lineno is None:
                 lineno = getattr(self.lexer, "lineno", self._last_token_lineno)
+            if p.type == "NUMBER":
+                raise SemanticError(
+                    f"Syntax error in .dat file at or near token NUMBER, value '{p.value}'. "
+                    "Hint: keyed arrays in .dat files accept string keys like '\"S1\" 0.25' or tuple keys like '<\"S1\"> 0.25', "
+                    "but not bare numeric keys like '1 0.25'. If the parameter is indexed by scenario order, use a plain array such as "
+                    "'[0.25, 0.25, 0.25, 0.25]'; otherwise switch to string or tuple-labeled keys that match the model index set.",
+                    lineno=lineno,
+                )
+            if p.type == "<":
+                raise SemanticError(
+                    "Syntax error in .dat file at or near token <, value '<'. "
+                    "Hint: tuple literals '<...>' are only accepted in flat tuple collections such as 'S = { <...>, <...> };' "
+                    "or 'A = [ <...>, <...> ];'. Nested tuple structures such as arrays of tuple-lists are not supported in .dat files; "
+                    "rewrite them as a supported flat collection or use plain scalar/array data instead.",
+                    lineno=lineno,
+                )
             raise SemanticError(
                 f"Syntax error in .dat file at or near token {p.type}, value '{p.value}'.",
                 lineno=lineno,
@@ -5642,14 +5695,14 @@ def solve_with_gurobi(model_file, data_file=None):
             logger.error(results["message"])
         except Exception as e:
             results["status"] = "EXECUTION_ERROR"
-            results["message"] = f"Error during GurobiPy code execution: {e}"
+            results["message"] = _execution_error_with_hint(e, "GurobiPy")
             logger.error(results["message"])
             traceback.print_exc(file=sys.stdout)  # Print traceback to captured stdout
         finally:
             sys.stdout = old_stdout  # Restore stdout
             logger.info(redirected_output.getvalue())  # Print captured output to original stdout
     else:
-        results["message"] = "Failed to load or parse OPL model from file. See errors traceback."
+        results["message"] = _load_failure_message()
         logger.error(results["message"])
 
     logger.info("\n" + "=" * 50 + "\n")
@@ -5718,14 +5771,14 @@ def solve_with_scipy(model_file, data_file=None):
                 logger.warning(results["message"])
         except Exception as e:
             results["status"] = "EXECUTION_ERROR"
-            results["message"] = f"Error during SciPy code execution: {e}"
+            results["message"] = _execution_error_with_hint(e, "SciPy")
             logger.error(results["message"])
             traceback.print_exc(file=sys.stdout)
         finally:
             sys.stdout = old_stdout
             logger.info(redirected_output.getvalue())
     else:
-        results["message"] = "Failed to load or parse OPL model from file. See errors traceback."
+        results["message"] = _load_failure_message()
         logger.error(results["message"])
 
     logger.info("\n" + "=" * 50 + "\n")
