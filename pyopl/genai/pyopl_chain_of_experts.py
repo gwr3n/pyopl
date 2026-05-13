@@ -378,7 +378,7 @@ def _build_reducer_prompt(problem: str, grammar: str, comments: List[Dict[str, s
         "</comments>\n\n"
         "<output_requirements>\n"
         '- Return ONLY a JSON object with exactly two keys: "model" and "data".\n'
-        "- Each value must be a single JSON string (escape quotes/backslashes, encode newlines as \\n).\n"
+        "- Each value must be a valid JSON string containing the full file contents. Use standard JSON escaping only.\n"
         "</output_requirements>\n\n"
         "<json_schema>\n"
         '{ "type": "object", "additionalProperties": false,\n'
@@ -555,8 +555,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "<output_requirements>\n"
         "- Return ONLY a JSON object with 1 required key and up to 2 optional keys:\n"
         '  "feedback" (required), "revised_model" (optional), "revised_data" (optional).\n'
-        "- Each value must be a single JSON string. Escape all double quotes and backslashes;\n"
-        "  encode newlines as \\n.\n"
+        "- Each value must be a valid JSON string containing the full text. Use standard JSON escaping only.\n"
         '- If no changes are needed, omit "revised_model" and "revised_data".\n'
         "- If changes are needed, return complete model and data strings; do not return diffs.\n"
         "- No trailing commas. No additional keys. No commentary.\n"

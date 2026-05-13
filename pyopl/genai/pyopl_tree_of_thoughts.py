@@ -532,8 +532,7 @@ def _build_feedback_prompt(user_prompt_text: str, grammar_implementation: str, m
         "<output_requirements>\n"
         "- Return ONLY a JSON object with 1 required key and up to 2 optional keys:\n"
         '  "feedback" (required), "revised_model" (optional), "revised_data" (optional).\n'
-        "- Each value must be a single JSON string. Escape all double quotes and backslashes;\n"
-        "  encode newlines as \\n.\n"
+        "- Each value must be a valid JSON string containing the full text. Use standard JSON escaping only.\n"
         '- If no changes are needed, omit "revised_model" and "revised_data".\n'
         "- If changes are needed, return complete model and data strings; do not return diffs.\n"
         "- No trailing commas. No additional keys. No commentary.\n"
@@ -1000,7 +999,7 @@ def _build_tot_expand_prompt(
         f"{parent_section}"
         "<output_requirements>\n"
         f'- Return ONLY a JSON array of exactly {k} objects. Each object must have keys "model" and "data".\n'
-        "- Values must be single JSON strings (escape quotes/backslashes; encode newlines as \\n).\n"
+        "- Values must be valid JSON strings containing the full file contents. Use standard JSON escaping only.\n"
         "- Do not include the scratchpad or any additional keys. No commentary.\n"
         "- Optional: you MAY wrap the JSON array in a ```json fenced block that contains only the JSON array.\n"
         "</output_requirements>\n\n"
