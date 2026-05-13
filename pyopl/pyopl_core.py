@@ -3468,6 +3468,15 @@ class OPLDataParser(Parser):
                     "'[0.25, 0.25, 0.25, 0.25]'; otherwise switch to string or tuple-labeled keys that match the model index set.",
                     lineno=lineno,
                 )
+            if p.type == "[":
+                raise SemanticError(
+                    "Syntax error in .dat file at or near token [, value '['. "
+                    "Hint: a common cause is a nested keyed-array block (for example, "
+                    '\'A = [ "k1" [ "sub1" [...], "sub2" [...] ], ... ];\'). '
+                    "This parser supports one keyed-array level only: after a string or tuple key, the value must be a scalar or a plain array, "
+                    "not another keyed sub-block. If that pattern is not present, also check for missing commas, misplaced brackets, or a missing trailing ';'.",
+                    lineno=lineno,
+                )
             if p.type == "<":
                 raise SemanticError(
                     "Syntax error in .dat file at or near token <, value '<'. "
