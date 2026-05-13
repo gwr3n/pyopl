@@ -318,7 +318,7 @@ def main() -> int:
         few_shot_opt = False
 
     # Load dataset
-    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR"]:
+    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR", "ChallengeOR"]:
         dataset_path = _dataset_file(args.dataset)
     else:
         raise ValueError(
