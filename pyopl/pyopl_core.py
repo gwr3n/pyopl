@@ -3453,6 +3453,13 @@ class OPLDataParser(Parser):
             lineno = getattr(p, "lineno", None)
             if lineno is None:
                 lineno = getattr(self.lexer, "lineno", self._last_token_lineno)
+            if p.type == "NAME":
+                raise SemanticError(
+                    f"Syntax error in .dat file at or near token NAME, value '{p.value}'. "
+                    "Hint: .dat files must contain plain data assignments such as 'nbJobs = 3;', 'S = { ... };', or 'cost = [ ... ];'. "
+                    "Do not include model-style declarations like 'int nbJobs = 3;', 'float cost[I] = ...;', 'param ...', or any 'dvar', 'minimize', or 'subject to' blocks in the .dat file.",
+                    lineno=lineno,
+                )
             if p.type == "NUMBER":
                 raise SemanticError(
                     f"Syntax error in .dat file at or near token NUMBER, value '{p.value}'. "
