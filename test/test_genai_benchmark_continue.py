@@ -38,7 +38,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
             run_dir = base_root / run_id
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            existing_results_path = run_dir / f"{dataset_name}.json"
+            existing_results_path = run_dir / f"{dataset_name}_results.json"
             existing_results = [
                 {"index": 0, "exit_code": 0},
                 {"index": 1, "exit_code": 0},
@@ -137,8 +137,8 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
             old_dir.mkdir(parents=True, exist_ok=True)
             new_dir.mkdir(parents=True, exist_ok=True)
 
-            (old_dir / f"{dataset_name}.json").write_text(json.dumps([{"index": 0, "exit_code": 0}]), encoding="utf-8")
-            new_results_path = new_dir / f"{dataset_name}.json"
+            (old_dir / f"{dataset_name}_results.json").write_text(json.dumps([{"index": 0, "exit_code": 0}]), encoding="utf-8")
+            new_results_path = new_dir / f"{dataset_name}_results.json"
             new_results_path.write_text(json.dumps([{"index": 0, "exit_code": 0}]), encoding="utf-8")
 
             call_log: list[int] = []
