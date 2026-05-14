@@ -7,6 +7,14 @@ def _with_repair_hint(message: str) -> str:
 
     patterns: list[tuple[str, str]] = [
         (
+            r"^Syntax error in \\.dat file at end of file",
+            "Hint: the .dat file is likely missing a closing delimiter such as ';', '}', ']', or ')'. Check the most recent assignment.",
+        ),
+        (
+            r"^Syntax error in \\.dat file at or near token",
+            "Hint: .dat files must contain plain data assignments such as 'x = 3;', 'S = { ... };', or 'A = [ ... ];' (no 'dvar', 'param', 'minimize', or 'subject to').",
+        ),
+        (
             r"^Syntax error at or near token",
             "Hint: rewrite the construct using simpler supported PyOPL syntax. In particular, avoid filtered declarations, advanced inline indexing, and OPL-only shorthand that is not part of this implementation.",
         ),

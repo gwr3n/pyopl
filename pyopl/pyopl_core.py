@@ -47,8 +47,10 @@ def _parser_error_with_hint(tok_type: object, tok_val: object) -> str:
     message = f"Syntax error at or near token {tok_type}, value '{tok_val}'."
     if tok_type == "IN":
         return (
-            message + " Hint: this implementation does not support filtered/index-comprehension style dvar declarations. "
-            "Declare the variable over full index sets and move filtering logic into constraints or tuple/set definitions."
+            message
+            + " Hint: unexpected 'in' often means either (a) a malformed iterator header (missing commas/brackets) in sum/forall, "
+            "or (b) an unsupported filtered declaration. This implementation does not support filtered/index-comprehension style dvar declarations; "
+            "declare the variable over full index sets and move filtering logic into constraints or tuple/set definitions."
         )
     return (
         message
