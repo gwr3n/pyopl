@@ -418,8 +418,9 @@ def main() -> int:
         if tags:
             base_root = os.path.join(base_root, "+".join(tags))
 
-    # Results file names (kept short so users can glob easily per dataset)
-    results_filenames = [f"{args.dataset}.json", f"{args.dataset}_results.json"]
+    # Results file name: always write to <dataset>_results.json.
+    primary_results_filename = f"{args.dataset}_results.json"
+    results_filenames = [primary_results_filename]
 
     # If user didn't ask to resume, but a prior run exists, emit a hint.
     if args.all and args.resume is None:
@@ -459,14 +460,13 @@ def main() -> int:
             return 2
 
         models_dir = os.path.join(base_dir, "models")
-        found_results = _find_results_file(base_dir, results_filenames)
-        if found_results is None:
+        results_json_path = os.path.join(base_dir, primary_results_filename)
+        if not os.path.exists(results_json_path):
             print(
-                f"No results JSON found to resume in {base_dir}. Expected one of: {', '.join(results_filenames)}",
+                f"No results JSON found to resume in {base_dir}. Expected: {primary_results_filename}",
                 file=sys.stderr,
             )
             return 2
-        results_json_path = found_results
 
         try:
             results = _load_results_json(results_json_path)
@@ -479,7 +479,7 @@ def main() -> int:
         # Fresh run folder.
         base_dir = os.path.join(base_root, timestamp)
         models_dir = os.path.join(base_dir, "models")
-        results_json_path = os.path.join(base_dir, results_filenames[0])
+        results_json_path = os.path.join(base_dir, primary_results_filename)
 
     _ensure_parent_dir(results_json_path)
     os.makedirs(models_dir, exist_ok=True)

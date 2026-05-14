@@ -137,9 +137,9 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
             old_dir.mkdir(parents=True, exist_ok=True)
             new_dir.mkdir(parents=True, exist_ok=True)
 
-            (old_dir / f"{dataset_name}.json").write_text(json.dumps([{ "index": 0, "exit_code": 0 }]), encoding="utf-8")
+            (old_dir / f"{dataset_name}.json").write_text(json.dumps([{"index": 0, "exit_code": 0}]), encoding="utf-8")
             new_results_path = new_dir / f"{dataset_name}.json"
-            new_results_path.write_text(json.dumps([{ "index": 0, "exit_code": 0 }]), encoding="utf-8")
+            new_results_path.write_text(json.dumps([{"index": 0, "exit_code": 0}]), encoding="utf-8")
 
             call_log: list[int] = []
 
