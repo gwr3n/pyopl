@@ -26,6 +26,67 @@ def _dump_json_atomic(path: str, payload: Any) -> None:
     os.replace(tmp, path)
 
 
+def _load_results_json(path: str) -> list[dict[str, Any]]:
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, list):
+        raise ValueError(f"Results file is not a list: {path}")
+    out: list[dict[str, Any]] = []
+    for item in payload:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
+def _completed_indices(results: list[dict[str, Any]]) -> set[int]:
+    done: set[int] = set()
+    for entry in results:
+        idx = entry.get("index")
+        if isinstance(idx, int):
+            done.add(idx)
+    return done
+
+
+def _find_results_file(run_dir: str, results_filenames: list[str]) -> Optional[str]:
+    for fn in results_filenames:
+        p = os.path.join(run_dir, fn)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _find_latest_run_dir(base_root: str, results_filenames: list[str]) -> Optional[tuple[str, str]]:
+    """Return (run_dir, results_filename) for the newest matching run, else None.
+
+    We treat subfolders as run directories and pick the lexicographically largest
+    name (timestamps like 20260514T120000 sort correctly). Only considers folders
+    that contain one of the expected results files.
+    """
+
+    if not os.path.isdir(base_root):
+        return None
+
+    candidates: list[tuple[str, str]] = []
+    try:
+        for name in os.listdir(base_root):
+            run_dir = os.path.join(base_root, name)
+            if not os.path.isdir(run_dir):
+                continue
+            for fn in results_filenames:
+                p = os.path.join(run_dir, fn)
+                if os.path.exists(p):
+                    candidates.append((name, fn))
+                    break
+    except FileNotFoundError:
+        return None
+
+    if not candidates:
+        return None
+
+    newest_name, newest_fn = sorted(candidates, key=lambda t: t[0])[-1]
+    return os.path.join(base_root, newest_name), newest_fn
+
+
 # Resolve dataset file path relative to this script
 def _dataset_file(dataset_name: str) -> Path:
     root = Path(__file__).resolve().parent
@@ -245,6 +306,14 @@ def main() -> int:
         help="Disable alignment check (SyntAGM logic only).",
     )
     parser.add_argument(
+        "--continue",
+        dest="resume",
+        nargs="?",
+        const="latest",
+        metavar="RUN_ID",
+        help="Resume an interrupted --all run from a specific run folder (e.g. 20260514T104019) under the output root. Use '--continue' with no value (or 'latest') to pick the newest run.",
+    )
+    parser.add_argument(
         "--syntax-error-reporting",
         default="full",
         choices=["full", "line", "masked"],
@@ -336,7 +405,7 @@ def main() -> int:
 
     # Output directories
     timestamp = time.strftime("%Y%m%dT%H%M%S")
-    base_dir = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
+    base_root = os.path.join("gen_ai", args.dataset, args.logic, args.grammar, args.gpt, str(args.iterations))
     # Add ablation tag subfolder only for SyntAGM and only when flags set
     if args.logic == "SyntAGM":
         tags = []
@@ -347,18 +416,79 @@ def main() -> int:
         if args.syntax_error_reporting != "full":
             tags.append(f"syntax_{args.syntax_error_reporting}")
         if tags:
-            base_dir = os.path.join(base_dir, "+".join(tags))
-    base_dir = os.path.join(base_dir, timestamp)
+            base_root = os.path.join(base_root, "+".join(tags))
 
-    models_dir = os.path.join(base_dir, "models")
-    results_json_path = os.path.join(base_dir, f"{args.dataset}_results.json")
+    # Results file names (kept short so users can glob easily per dataset)
+    results_filenames = [f"{args.dataset}.json", f"{args.dataset}_results.json"]
+
+    # If user didn't ask to resume, but a prior run exists, emit a hint.
+    if args.all and args.resume is None:
+        latest_hint = _find_latest_run_dir(base_root, results_filenames)
+        if latest_hint is not None:
+            latest_dir, _latest_fn = latest_hint
+            run_id = os.path.basename(latest_dir)
+            print(
+                f"Note: found an existing run at {latest_dir}. "
+                f"To resume it, re-run with --continue {run_id} (or --continue latest)."
+            )
+
+    # Determine output folder + resume state.
+    results: list[dict[str, Any]] = []
+    done_indices: set[int] = set()
+    if args.resume is not None:
+        if not args.all:
+            print("--continue is only supported with --all.", file=sys.stderr)
+            return 2
+
+        resume_id = str(args.resume).strip()
+        if resume_id.lower() == "latest":
+            latest = _find_latest_run_dir(base_root, results_filenames)
+            if latest is None:
+                print(f"No existing runs found under {base_root} to resume.", file=sys.stderr)
+                return 2
+            base_dir, _found_fn = latest
+        else:
+            # Accept either a folder name under base_root or a direct path.
+            if os.sep in resume_id or resume_id.startswith("."):
+                base_dir = resume_id
+            else:
+                base_dir = os.path.join(base_root, resume_id)
+
+        if not os.path.isdir(base_dir):
+            print(f"Resume folder not found: {base_dir}", file=sys.stderr)
+            return 2
+
+        models_dir = os.path.join(base_dir, "models")
+        found_results = _find_results_file(base_dir, results_filenames)
+        if found_results is None:
+            print(
+                f"No results JSON found to resume in {base_dir}. Expected one of: {', '.join(results_filenames)}",
+                file=sys.stderr,
+            )
+            return 2
+        results_json_path = found_results
+
+        try:
+            results = _load_results_json(results_json_path)
+            done_indices = _completed_indices(results)
+            print(f"Resuming from existing results: {results_json_path}")
+        except Exception as e:
+            print(f"Failed to load existing results for --continue: {e}", file=sys.stderr)
+            return 2
+    else:
+        # Fresh run folder.
+        base_dir = os.path.join(base_root, timestamp)
+        models_dir = os.path.join(base_dir, "models")
+        results_json_path = os.path.join(base_dir, results_filenames[0])
 
     _ensure_parent_dir(results_json_path)
     os.makedirs(models_dir, exist_ok=True)
 
-    # Unified flow: choose indices based on --all
     if args.all:
-        indices: list[int] = list(range(len(dataset)))
+        if args.resume and done_indices:
+            indices = [i for i in range(len(dataset)) if i not in done_indices]
+        else:
+            indices = list(range(len(dataset)))
     else:
         idx = 0 if args.index is None else args.index
         if idx < 0 or idx >= len(dataset):
@@ -366,7 +496,9 @@ def main() -> int:
             return 2
         indices = [idx]
 
-    results: list[dict[str, Any]] = []
+    if args.all and args.resume and not indices:
+        print(f"All {len(dataset)} problems already present in {results_json_path}")
+        return 0
     all_ok = True
     last_entry: dict[str, Any] | None = None
     last_ok = False
