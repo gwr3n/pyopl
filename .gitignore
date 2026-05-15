@@ -18,3 +18,4 @@ venv*
 .coverage
 .pyopl_session
 docs/dev_notes.md
+pricing_table.md

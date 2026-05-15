@@ -1,6 +1,7 @@
 import functools
 import logging
 import re
+from pathlib import Path
 from typing import (
     Any,
     Dict,
@@ -12,6 +13,38 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 PRICING_URL = "https://github.com/AgentOps-AI/tokencost/blob/main/pricing_table.md"
+LOCAL_PRICING_FILENAME = "pricing_table.md"
+
+
+def _resolve_pricing_source() -> str:
+    """Return a local pricing_table.md path if available; else fall back to PRICING_URL."""
+    candidates = []
+
+    # 1) Current working directory (common when running from repo root)
+    candidates.append(Path.cwd() / LOCAL_PRICING_FILENAME)
+
+    # 2) Repository root relative to this module
+    # pyopl/genai/genai_pricing.py -> repo_root/pricing_table.md
+    try:
+        repo_root = Path(__file__).resolve().parents[2]
+        candidates.append(repo_root / LOCAL_PRICING_FILENAME)
+    except Exception:
+        pass
+
+    # 3) Package directory (in case file is bundled alongside the module)
+    try:
+        candidates.append(Path(__file__).resolve().with_name(LOCAL_PRICING_FILENAME))
+    except Exception:
+        pass
+
+    for p in candidates:
+        try:
+            if p.is_file():
+                return str(p)
+        except Exception:
+            continue
+
+    return PRICING_URL
 
 
 def _approx_token_count(text: str) -> int:
@@ -217,7 +250,7 @@ def clear_pricing_cache():
 
 
 def estimate_costs(args, usage):
-    pricing = _parse_pricing(PRICING_URL)
+    pricing = _parse_pricing(_resolve_pricing_source())
     model_key = args.model.lower()
     prompt_tokens = usage.get("prompt_tokens")
     completion_tokens = usage.get("completion_tokens")
@@ -255,7 +288,7 @@ def exercise_estimate_costs(model=None):
 
     # Choose a model: use given, else first from pricing_table.md, else a common default
     if model is None:
-        pricing = _parse_pricing(PRICING_URL)
+        pricing = _parse_pricing(_resolve_pricing_source())
         model = next(iter(pricing.keys()), None) or "gpt-4o"
 
     from types import SimpleNamespace
