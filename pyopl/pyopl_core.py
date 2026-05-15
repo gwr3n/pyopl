@@ -1056,16 +1056,6 @@ class OPLParser(Parser):
             "sem_type": field_type,
         }
 
-    # --- NEW: simple function calls (currently only sqrt) ---
-    @_("NAME '(' expression ')'")  # type: ignore
-    def primary(self, p):
-        func = p.NAME
-        if func != "sqrt":
-            raise SemanticError(f"Unsupported function '{func}'. Only sqrt(...) is supported.")
-        arg = p.expression
-        # Result of sqrt is float
-        return {"type": "funcall", "name": "sqrt", "args": [arg], "sem_type": "float"}
-
     # --- Untyped set literal on LHS: allow only set of tuples; scalar sets must be typed ---
     @_('NAME "=" "{" set_value_list "}" ";"')  # type: ignore
     def declaration(self, p):

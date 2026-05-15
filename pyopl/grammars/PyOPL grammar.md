@@ -1,6 +1,6 @@
 # PyOPL Grammar (Aligned with implementation)
 
-This document specifies the grammar implemented in `pyopl/pyopl_core.py` and consumed by both code generators (`gurobi_codegen.py`, `scipy_codegen*.py`). It includes logical operators, implication (`=>`), conditional expressions, field access on tuples, typed scalar sets, tuple arrays, decision-expressions (dexpr), min/max aggregates, sqrt/minl/maxl functions, modulo, and richer .dat file constructs.
+This document specifies the grammar implemented in `pyopl/pyopl_core.py`. The backends (`gurobi_codegen.py`, `scipy_codegen*.py`) support overlapping but not identical subsets of the parsed AST, so some constructs may parse successfully but be unsupported by a particular solver.
 
 Reference: `pyopl/pyopl_core.py`
 
@@ -368,7 +368,7 @@ Functions and aggregates:
 
 Notes:
 - `minl`/`maxl` require at least one argument; a single-argument call returns that argument.
-- `sqrt` is only supported on ground expressions (no decision variables); use it for data/parameter/dexpr evaluation. Applying `sqrt` to decision variables in objectives/constraints is rejected.
+- `sqrt` is supported for ground computations that are evaluated during compilation (notably computed parameters). `sqrt` may parse in general expressions, but it is not supported by the SciPy backend and is not reliably supported for decision-variable expressions in the generated Gurobi code.
 
 Sum/forall headers:
 
@@ -460,7 +460,7 @@ From lowest to highest binding power:
 1. Ternary `? :` (right-assoc; condition must be parenthesized)
 2. Logical OR `||`
 3. Logical AND `&&`
-4. Comparisons `==`, `!=`, `<=`, `>=`, `<`, `>` (tokens are non-assoc in precedence; chained comparisons are parsed left-nested and are not rewritten; prefer explicit conjunctions like `(a < b) && (b < c)`)
+4. Comparisons `==`, `!=`, `<=`, `>=`, `<`, `>` (tokens are non-assoc in precedence; chained comparisons like `a < b < c` are rejected; prefer explicit conjunctions like `(a < b) && (b < c)`)
 5. Add/Sub `+`, `-`
 6. Mul/Div/Mod `*`, `/`, `%`
 7. Unary NOT `!` and unary minus `-` (right-assoc)
@@ -470,8 +470,9 @@ From lowest to highest binding power:
 
 - Arithmetic and comparisons:
   - Mix of int, float, and boolean is allowed (booleans treated numerically where needed).
-  - `%` (modulo) is supported in expressions for data and parameter evaluation (including inline/externally loaded parameters and .dat computations). It is not supported inside linear model parts (objectives or constraints). Using `%` in those contexts will be rejected or fail code generation.
-  - `sqrt` is supported for ground computations (parameters, dexpr with ground operands). Using `sqrt` on decision variables in constraints/objectives is not supported and will be rejected.
+  - Chained relational comparisons like `a < b < c` are rejected (use explicit conjunctions such as `(a < b) && (b < c)`).
+  - `%` (modulo) is supported in expressions for data and parameter evaluation (including inline/externally loaded parameters and .dat computations). In general objectives/constraints it is not supported by the current backends and may fail code generation or runtime execution.
+  - `sqrt` is supported for ground computations that are evaluated during compilation (notably computed parameters). `sqrt` may parse in general expressions, but it is not supported by the SciPy backend and is not reliably supported for decision-variable expressions in the generated Gurobi code.
 
 - Boolean expressions:
   - `==`/`!=` are allowed on booleans and numbers/strings; boolean equality to `true` is used to normalize.
@@ -493,6 +494,7 @@ From lowest to highest binding power:
 - Indexing:
   - Range index form `[lo..hi]` requires integer-valued bounds.
   - General index expressions (names, number literals, string literals, arithmetic, parenthesized, or tuple field access with int type) are supported.
+  - Backend note: SciPy index-expression evaluation supports only `+`, `-`, `*` for arithmetic; `/` and `%` in index expressions may parse but are not supported by the SciPy code generator.
   - For set dimensions:
     - If the set is a set of tuples, the index must be of that tuple type (or a tuple literal).
     - If the set is a typed scalar set, the index must match its base type.
@@ -553,7 +555,7 @@ minimize max( t in T ) ( y[t] );        // aggregate max over T
 subject to {
   cap: (sum(t in T) y[t]) >= 1;
 
-  // Implication with boolean expressions on each side (only accepted by Gurobi code generator)
+  // Implication with boolean expressions on each side (accepted by both backends)
   forall(e in E)
     (x[e] == 1) => (y[1] + y[2] >= 0.5);
 

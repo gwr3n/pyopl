@@ -146,6 +146,20 @@ class TestPyOPLLexer(TestPyOPL):
 
         self.assertIn("Identifier 'del' is reserved", str(exc.exception))
 
+        def test_single_arg_minl_maxl_parse(self):
+            model_code = """
+                dvar float x;
+                minimize 0;
+                subject to {
+                    maxl(x) <= 1;
+                    minl(x) >= 0;
+                }
+                """
+            lexer = OPLLexer()
+            parser = OPLParser()
+            ast = parser.parse(lexer.tokenize(model_code))
+            self.assertIsInstance(ast, dict)
+
     def test_reserved_python_keyword_data_keys_are_rejected(self):
         """Data keys that are Python keywords must be rejected during model loading."""
         model_code = """
