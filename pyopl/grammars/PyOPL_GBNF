@@ -12,7 +12,8 @@ STRING_LITERAL ::= "\"" ([^"\\])* "\""
 // Operators and symbols appear as literals in productions.
 
 // ------------ MODEL GRAMMAR ------------
-model ::= declarations_opt objective_section constraints_section
+// Implementation allows objective section either before or after subject-to block.
+model ::= declarations_opt ( objective_section constraints_section | constraints_section objective_section )
 
 declarations_opt ::= declaration*
 declaration_list ::= declaration+
@@ -71,35 +72,37 @@ untyped_set_declaration ::= "set" _ NAME _ ";" _
 
 // --- typed scalar sets (strings, ints, floats, booleans)
 typed_set_declaration ::=
-      "{" _ "string" _ "}" _ NAME _ "=" _ "{" _ element_list_string_opt _ "}" _ ";" _
+      "{" _ "string" _ "}" _ NAME _ "=" _ "{" _ element_list_string _ "}" _ ";" _
     | "{" _ "string" _ "}" _ NAME _ ";" _
     | "{" _ "string" _ "}" _ NAME _ "=" _ "..." _ ";" _
-    | "{" _ "int" _ "}" _ NAME _ "=" _ "{" _ element_list_int_opt _ "}" _ ";" _
+    | "{" _ "int" _ "}" _ NAME _ "=" _ "{" _ element_list_int _ "}" _ ";" _
     | "{" _ "int" _ "}" _ NAME _ ";" _
     | "{" _ "int" _ "}" _ NAME _ "=" _ "..." _ ";" _
-    | "{" _ "float" _ "}" _ NAME _ "=" _ "{" _ element_list_float_opt _ "}" _ ";" _
+    | "{" _ "float" _ "}" _ NAME _ "=" _ "{" _ element_list_float _ "}" _ ";" _
     | "{" _ "float" _ "}" _ NAME _ ";" _
     | "{" _ "float" _ "}" _ NAME _ "=" _ "..." _ ";" _
-    | "{" _ "boolean" _ "}" _ NAME _ "=" _ "{" _ element_list_boolean_opt _ "}" _ ";" _
+    | "{" _ "boolean" _ "}" _ NAME _ "=" _ "{" _ element_list_boolean _ "}" _ ";" _
     | "{" _ "boolean" _ "}" _ NAME _ ";" _
     | "{" _ "boolean" _ "}" _ NAME _ "=" _ "..." _ ";" _
 
-element_list_string_opt  ::= (STRING_LITERAL (_ "," _ STRING_LITERAL)*)?
-element_list_int_opt     ::= (NUMBER_INT (_ "," _ NUMBER_INT)*)?
-element_list_float_opt   ::= (NUMBER (_ "," _ NUMBER)*)?
-element_list_boolean_opt ::= (BOOLEAN_LITERAL (_ "," _ BOOLEAN_LITERAL)*)?
+// Note: empty literal sets like `{}` are not accepted by the current parser.
+element_list_string  ::= STRING_LITERAL (_ "," _ STRING_LITERAL)*
+element_list_int     ::= NUMBER_INT (_ "," _ NUMBER_INT)*
+element_list_float   ::= NUMBER (_ "," _ NUMBER)*
+element_list_boolean ::= BOOLEAN_LITERAL (_ "," _ BOOLEAN_LITERAL)*
 
 // Helpers to constrain ints in {int} element list
 NUMBER_INT ::= [0-9]+
 
 // --- set of tuples (typed by tuple type)
 set_of_tuples_declaration ::=
-      "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+      "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_literal_list_model _ "}" _ ";" _
     | "{" _ NAME _ "}" _ NAME _ ";" _
     | "{" _ NAME _ "}" _ NAME _ "=" _ "..." _ ";" _
+    | "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_comprehension _ "}" _ ";" _
 
 // --- untyped set-of-tuples assignment (model; only tuple literals allowed on RHS)
-untyped_tuple_set_assignment ::= NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+untyped_tuple_set_assignment ::= NAME _ "=" _ "{" _ tuple_literal_list_model _ "}" _ ";" _
 
 // --- tuple type
 tuple_type_declaration ::= "tuple" _ NAME _ "{" _ tuple_field_list_opt _ "}" _ opt_semicolon
@@ -145,7 +148,7 @@ indexed_dimensions ::= ( "[" _ index_specifier _ "]" _ )+
 index_specifier ::=
       expression _ ".." _ expression          // range index
     | expression                              // general index: name/number/arith/field/string/tuple literal
-    | tuple_literal                           // tuple literal index for tuple-set dims
+    | tuple_literal_model                      // tuple literal index for tuple-set dims
 
 range_expr ::= expression                     // must be int-valued (semantic)
 
@@ -174,7 +177,8 @@ logic_or_expr  ::= logic_and_expr ( _ "||" _ logic_and_expr )*
 logic_and_expr ::= equality_expr ( _ "&&" _ equality_expr )*
 
 equality_expr ::= relational_expr ( _ ( "==" | "!=" ) _ relational_expr )*
-relational_expr ::= additive_expr ( _ ( "<=" | "<" | ">=" | ">" ) _ additive_expr )*
+// Implementation rejects chained relational comparisons like `a < b < c`.
+relational_expr ::= additive_expr ( _ ( "<=" | "<" | ">=" | ">" ) _ additive_expr )?
 
 additive_expr ::= multiplicative_expr ( _ ( "\+" | "-" ) _ multiplicative_expr )*
 multiplicative_expr ::= unary_expr ( _ ( "\*" | "/" | "%" ) _ unary_expr )*
@@ -194,7 +198,7 @@ primary ::=
     | NAME
     | NAME _ indexed_dimensions
     | "(" _ expression _ ")"
-    | tuple_literal
+    | tuple_literal_model
     | sum_expression
     | min_aggregate
     | max_aggregate
@@ -209,11 +213,17 @@ function_call ::=
 arg_list ::= expression ( _ "," _ expression )*
 
 // --- Tuple literals (ensure iterator/name elements are allowed)
-tuple_literal ::= "<" _ tuple_element_list_opt _ ">" _
-tuple_element_list_opt ::= (tuple_element (_ "," _ tuple_element)*)?
+// Model tuple literals allow NAME elements and allow empty `<>`.
+tuple_literal_model ::= "<" _ tuple_element_list_model_opt _ ">" _
+tuple_element_list_model_opt ::= (tuple_element_model (_ "," _ tuple_element_model)*)?
+tuple_element_model ::= NAME | STRING_LITERAL | NUMBER | tuple_literal_model
 
-// Allow NAME inside tuple elements to support uses like <i, j>
-tuple_element ::= NAME | STRING_LITERAL | NUMBER | tuple_literal
+// Non-empty tuple literal lists (model)
+tuple_literal_list_model ::= tuple_literal_model ( _ "," _ tuple_literal_model )*
+
+// Tuple comprehension (model)
+tuple_comprehension ::= "<" _ tuple_element_list_model _ ">" _ "|" _ sum_index_list _ opt_index_constraint
+tuple_element_list_model ::= tuple_element_model ( _ "," _ tuple_element_model )*
 
 
 // --- Arrays (nested) for inline params (.mod) ---
@@ -232,43 +242,50 @@ data_file ::= data_declaration_list
 data_declaration_list ::= data_declaration*
 
 data_declaration ::=
-      "param" _ NAME _ "=" _ scalar_value _ ";" _
-    | "set" _ NAME _ "=" _ set_value _ ";" _
-    | "param" _ NAME _ "=" _ array_value _ ";" _
     | NAME _ "=" _ scalar_value _ ";" _
     | NAME _ "=" _ set_value _ ";" _
     | NAME _ "=" _ array_value _ ";" _
     | NAME _ "=" _ key_value_array _ ";" _
-    | NAME _ "=" _ "param" _ key_value_array _ ";" _
-    | NAME _ "=" _ "set" _ key_value_array _ ";" _
     | NAME _ "=" _ NUMBER _ ".." _ NUMBER _ ";" _
     | set_of_tuples_data_assignment
 
 // Set-of-tuples in .dat (untyped or typed)
 set_of_tuples_data_assignment ::=
-      NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
-    | NAME _ "=" _ "[" _ tuple_literal_list_opt _ "]" _ ";" _
-    | "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_literal_list_opt _ "}" _ ";" _
+      NAME _ "=" _ "{" _ tuple_literal_list_data _ "}" _ ";" _
+    | NAME _ "=" _ "[" _ tuple_literal_list_data _ "]" _ ";" _
 
 // set values for .dat scalar sets
-set_value ::= "{" _ element_list_scalar_opt _ "}"
-element_list_scalar_opt ::= (scalar_value (_ "," _ scalar_value)*)?
+set_value ::= "{" _ element_list_scalar _ "}"
+element_list_scalar ::= scalar_value ( _ "," _ scalar_value )*
 
 // Key-value arrays (string/tuple keys -> scalar or array)
-key_value_array ::= "[" _ key_value_row_list_opt _ "]"
-key_value_row_list_opt ::= (key_value_row (_ "," _ key_value_row)* _ ("," _)? )?
+key_value_array ::= "[" _ key_value_row_list _ "]"
+key_value_row_list ::= key_value_row (_ "," _ key_value_row)* _ ("," _)?
 key_value_row ::=
       STRING_LITERAL _ scalar_value
-    | tuple_literal _ scalar_value
+    | tuple_literal_data _ scalar_value
     | STRING_LITERAL _ array_value
-    | tuple_literal _ array_value
+    | tuple_literal_data _ array_value
 
-// --- Aggregates: min/max over indexed domains (aligns with parser min/max_expression) ---
-min_aggregate ::= "min" _ sum_index_header _ expression
-max_aggregate ::= "max" _ sum_index_header _ expression
+// Data tuple literals do NOT allow NAME elements and do NOT allow empty `<>`.
+tuple_literal_data ::= "<" _ tuple_element_list_data _ ">" _
+tuple_element_list_data ::= tuple_element_data ( _ "," _ tuple_element_data )*
+tuple_element_data ::= scalar_value | tuple_literal_data
 
-// --- sum aggregates (used as primary) ---
-sum_expression ::= "sum" _ sum_index_header _ expression
+// Non-empty tuple literal lists (data)
+tuple_literal_list_data ::= tuple_literal_data ( _ "," _ tuple_literal_data )*
+
+// --- Aggregates: parser only allows a non-parenthesized multiplicative body, or an explicit parenthesized body ---
+nonparen_expression ::= multiplicative_expr
+paren_expression ::= "(" _ expression _ ")"
+
+min_aggregate ::= "min" _ sum_index_header _ nonparen_expression
+              | "min" _ sum_index_header _ paren_expression
+max_aggregate ::= "max" _ sum_index_header _ nonparen_expression
+              | "max" _ sum_index_header _ paren_expression
+
+sum_expression ::= "sum" _ sum_index_header _ nonparen_expression
+               | "sum" _ sum_index_header _ paren_expression
 
 // --- helpers used in param_declaration ---
 opt_param_kw        ::= ("param" _)?                   // optional 'param' keyword
