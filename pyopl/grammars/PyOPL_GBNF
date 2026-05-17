@@ -267,8 +267,10 @@ key_value_row ::=
     | STRING_LITERAL _ array_value
     | tuple_literal_data _ array_value
 
-// Data tuple literals do NOT allow NAME elements and do NOT allow empty `<>`.
+// Data tuple literals do NOT allow NAME elements.
+// Empty tuples `<>` are allowed (align with implementation).
 tuple_literal_data ::= "<" _ tuple_element_list_data _ ">" _
+                  | "<" _ ">" _
 tuple_element_list_data ::= tuple_element_data ( _ "," _ tuple_element_data )*
 tuple_element_data ::= scalar_value | tuple_literal_data
 

@@ -3228,6 +3228,11 @@ class OPLDataParser(Parser):
     def tuple_literal(self, p):
         return tuple(p.tuple_element_list)
 
+    @_('"<" ">"')  # type: ignore
+    def tuple_literal(self, p):
+        # Allow empty tuple literal <> in .dat (align with model parser)
+        return tuple()
+
     @_('tuple_element_list "," tuple_element')  # type: ignore
     def tuple_element_list(self, p):
         return p.tuple_element_list + [p.tuple_element]
@@ -3472,9 +3477,10 @@ class OPLDataParser(Parser):
             if p.type == "<":
                 raise SemanticError(
                     "Syntax error in .dat file at or near token <, value '<'. "
-                    "Hint: tuple literals '<...>' are only accepted in flat tuple collections such as 'S = { <...>, <...> };' "
-                    "or 'A = [ <...>, <...> ];'. Nested tuple structures such as arrays of tuple-lists are not supported in .dat files; "
-                    "rewrite them as a supported flat collection or use plain scalar/array data instead.",
+                    "Hint: tuple literals '<...>' (including nested and empty '<>') are accepted in tuple collections such as "
+                    "'S = { <...>, <...> };', tuple arrays such as 'A = [ <...>, <...> ];', and as keys in keyed arrays like "
+                    "'P = [ <...> 1.0, <...> 2.0 ];'. If you are using '<...>' inside a plain numeric array like '[ <...>, ... ]' "
+                    "or in some other position, rewrite the data into one of the supported tuple-collection forms.",
                     lineno=lineno,
                 )
             raise SemanticError(
