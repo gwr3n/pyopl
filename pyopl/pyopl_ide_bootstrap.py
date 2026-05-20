@@ -2830,6 +2830,17 @@ class OPLIDE(tk.Tk):
         Update status bar with current caret position. If a syntax error is present,
         display its line alongside the caret position.
         """
+
+        def _strip_hint(message: Optional[str]) -> Optional[str]:
+            if not message:
+                return message
+            text = str(message).strip()
+            for marker in (" Hint:", "\nHint:"):
+                hint_index = text.find(marker)
+                if hint_index != -1:
+                    return text[:hint_index].rstrip()
+            return text
+
         if text_widget.winfo_exists():
             try:
                 index = text_widget.index(tk.INSERT)
@@ -2859,13 +2870,13 @@ class OPLIDE(tk.Tk):
                 error_msg = None
                 if error_lines and caret_line in error_lines:
                     if last_error and f"line {caret_line}" in last_error:
-                        error_msg = last_error
+                        error_msg = _strip_hint(last_error)
                     else:
                         error_msg = f"Syntax Error on line {caret_line}"
                 elif error_lines:
                     first_err_line = error_lines[0]
                     if last_error and f"line {first_err_line}" in last_error:
-                        error_msg = last_error
+                        error_msg = _strip_hint(last_error)
                     else:
                         error_msg = f"Syntax Error on line {first_err_line}"
 
