@@ -277,7 +277,7 @@ def main() -> int:
     parser.add_argument(
         "--dataset",
         default="ComplexOR",
-        help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default), StochasticOR.",
+        help="The dataset to be used: NL4OPT, NLP4LP, IndustryOR, ComplexOR (default), StochasticOR, ChallengeOR, SmallOR.",
     )
     parser.add_argument("--iterations", type=int, default=5, help="Number of iterations for generative_solve.")
     parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
@@ -387,11 +387,11 @@ def main() -> int:
         few_shot_opt = False
 
     # Load dataset
-    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR", "ChallengeOR"]:
+    if args.dataset in ["NL4OPT", "NLP4LP", "IndustryOR", "ComplexOR", "ReSocratic", "StochasticOR", "SmallOR"]:
         dataset_path = _dataset_file(args.dataset)
     else:
         raise ValueError(
-            "Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, ReSocratic, StochasticOR.".format(
+            "Unknown dataset: {}. Supported: NL4OPT, NLP4LP, IndustryOR, ComplexOR, ReSocratic, StochasticOR, ChallengeOR, SmallOR.".format(
                 args.dataset
             )
         )
