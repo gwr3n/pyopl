@@ -362,7 +362,7 @@ class CheckAlignmentNode(GraphNode):
             context.total_completion_tokens += usage.get("completion_tokens", 0) or 0
 
             status = "✓" if context.aligned else "✗"
-            _notify(context.progress, f"[{self.name}] Alignment: {status} {context.alignment_assessment[:60]}...")
+            _notify(context.progress, f"[{self.name}] Alignment: {status} {context.alignment_assessment}")
             return NodeExecutionResult(context, success=True)
 
         except Exception as e:
