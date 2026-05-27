@@ -280,14 +280,3 @@ PyOPL supports a rich subset of OPL constructs for linear and mixed-integer prog
 
 MIT License.
 
-## Limitations
-
-- PyOPL robustly supports tuple types, sets of tuples (including nested), tuple field access, `sum` / `forall` over tuple sets, `!=`, and implication constraints.
-- Composite boolean implication antecedents are currently only available in the Gurobi backend.
-- Features not yet supported: piecewise linear expressions, SOS constraints, user-defined functions, nonlinear arithmetic, bi-implication `<=>`, global constraints (alldiff, etc.).
-- SciPy backend implication: antecedents must be a single comparison or a boolean variable; composite boolean antecedents are not yet supported (boolean trees are supported in general constraints).
-- Automatic big-M tightening applies where bounds are inferable; otherwise a conservative fallback is used.
-- Gurobi must be installed and licensed for `solver='gurobi'`.
-- SciPy/HiGHS is open-source and can be used for linear programs and, if supported by your SciPy version, mixed-integer programs (MIP, i.e., integer and boolean variables). Integrality is passed to `linprog` if present, but full MIP support depends on your SciPy installation.
-- The library is designed for educational and prototyping purposes and supports a subset of OPL syntax.
-

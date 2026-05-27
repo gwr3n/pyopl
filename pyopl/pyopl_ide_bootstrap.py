@@ -4875,7 +4875,7 @@ class OPLIDE(tk.Tk):
 
         messagebox.showinfo(
             "About Rhetor",
-            f"Rhetor {__version__}\n\n© {__year__} Roberto Rossi",
+            f"Rhetor {__version__}\n\n© {__year__} University of Edinburgh",
         )
 
     # --- GenAI model discovery ---
