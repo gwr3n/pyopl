@@ -39,7 +39,7 @@ pip install .
 
 Dependencies are managed via `pyproject.toml` and are listed in [`requirements.txt`](./requirements.txt)
 
-PyOPL requires Python 3.9+
+PyOPL requires Python 3.10+
 
 You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selectable in the API and the IDE. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
 
