@@ -1160,7 +1160,7 @@ class OPLIDE(tk.Tk):
         )
         self.request_context_menu.add_separator()
         self.request_context_menu.add_command(label="Change label", command=self._rename_selected_request)
-        self.request_context_menu.add_command(label="Delete Session", command=self._delete_selected_request)
+        self.request_context_menu.add_command(label="Delete entry", command=self._delete_selected_request)
 
     def _setup_editors(self, parent: tk.PanedWindow) -> None:
         """Create model and data editor frames inside a Notebook."""
