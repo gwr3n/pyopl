@@ -84,6 +84,59 @@ def _load_failure_message() -> str:
     )
 
 
+def _list_with_item(item: Any) -> list[Any]:
+    return [item]
+
+
+def _append_list_item(items: list[Any], item: Any) -> list[Any]:
+    items.append(item)
+    return items
+
+
+def _prepend_list_item(item: Any, items: list[Any]) -> list[Any]:
+    return [item] + items
+
+
+def _unquote_string_literal(value: str) -> str:
+    return value.strip('"')
+
+
+def _model_boolean_literal_to_bool(value: str) -> bool:
+    return value == "true"
+
+
+def _coerce_int_set_element(value: Any) -> int:
+    if not (isinstance(value, int) and not isinstance(value, bool)):
+        raise SemanticError(f"Expected integer literal in {{int}} set, got '{value}'.")
+    return value
+
+
+def _coerce_float_set_element(value: Any) -> float:
+    if isinstance(value, bool):
+        raise SemanticError(f"Expected numeric literal in {{float}} set, got '{value}'.")
+    return float(value)
+
+
+def _string_label_value_pair(label: str, value: Any) -> tuple[str, Any]:
+    return (_unquote_string_literal(label), value)
+
+
+def _model_tuple_literal(elements: list[Any]) -> dict[str, Any]:
+    return {"type": "tuple_literal", "elements": elements}
+
+
+def _empty_model_tuple_literal() -> dict[str, Any]:
+    return {"type": "tuple_literal", "elements": []}
+
+
+def _dat_tuple_literal(elements: list[Any]) -> tuple[Any, ...]:
+    return tuple(elements)
+
+
+def _empty_dat_tuple_literal() -> tuple[Any, ...]:
+    return tuple()
+
+
 # --- Optional gurobipy import (lazy). Parser should not require gurobi at import time. ---
 # Define as Optional[Any] so assigning None is type-safe when gurobipy is unavailable
 gp: Optional[Any] = None
@@ -501,7 +554,7 @@ class OPLParser(Parser):
     def tuple_comprehension(self, p):
         return {
             "type": "tuple_comprehension",
-            "tuple_expr": {"type": "tuple_literal", "elements": p.tuple_element_list},
+            "tuple_expr": _model_tuple_literal(p.tuple_element_list),
             "iterators": p.sum_index_list,
             "index_constraint": p.opt_index_constraint,
         }
@@ -538,12 +591,11 @@ class OPLParser(Parser):
 
     @_("dexpr_index_list ',' dexpr_index")  # type: ignore
     def dexpr_index_list(self, p):
-        p.dexpr_index_list.append(p.dexpr_index)
-        return p.dexpr_index_list
+        return _append_list_item(p.dexpr_index_list, p.dexpr_index)
 
     @_("dexpr_index")  # type: ignore
     def dexpr_index_list(self, p):
-        return [p.dexpr_index]
+        return _list_with_item(p.dexpr_index)
 
     @_("NAME IN IN_RANGE")  # type: ignore
     def dexpr_index(self, p):
@@ -600,36 +652,12 @@ class OPLParser(Parser):
     # Indexed dexpr: dexpr type Y[i in I, j in J] = expression;
     @_('DEXPR type NAME dexpr_index_header "=" expression ";"')  # type: ignore
     def declaration(self, p):
-        # Convert iterator ranges to declaration-like dimensions so usage checks work
-        def to_decl_dim(rng):
-            if rng["type"] == "range_specifier":
-                # Keep start/end as AST nodes
-                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
-            if rng["type"] == "named_range":
-                # Attach start/end if available
-                try:
-                    sym = self.symbol_table.get_symbol(rng["name"])
-                    if sym.get("type") == "range" and sym.get("value"):
-                        return {
-                            "type": "named_range_dimension",
-                            "name": rng["name"],
-                            "start": sym["value"]["start"],
-                            "end": sym["value"]["end"],
-                        }
-                except SemanticError:
-                    pass
-                return {"type": "named_range_dimension", "name": rng["name"]}
-            if rng["type"] == "named_set":
-                return {"type": "named_set_dimension", "name": rng["name"]}
-            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
-
         iterators = p.dexpr_index_header["iterators"]
-        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
 
         # Close the iterator scope BEFORE adding the symbol so W persists in the global scope
         try:
-            if p.dexpr_index_header.get("_iterator_scope_opened"):
-                self.symbol_table.exit_scope()
+            self._cleanup_iterator_header(p.dexpr_index_header)
         except Exception:
             pass
 
@@ -660,33 +688,12 @@ class OPLParser(Parser):
     # NEW: Indexed dexpr with strict OPL nested headers: dexpr type Y[i in I][j in J] = expression;
     @_('DEXPR type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
     def declaration(self, p):
-        def to_decl_dim(rng):
-            if rng["type"] == "range_specifier":
-                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
-            if rng["type"] == "named_range":
-                try:
-                    sym = self.symbol_table.get_symbol(rng["name"])
-                    if sym.get("type") == "range" and sym.get("value"):
-                        return {
-                            "type": "named_range_dimension",
-                            "name": rng["name"],
-                            "start": sym["value"]["start"],
-                            "end": sym["value"]["end"],
-                        }
-                except SemanticError:
-                    pass
-                return {"type": "named_range_dimension", "name": rng["name"]}
-            if rng["type"] == "named_set":
-                return {"type": "named_set_dimension", "name": rng["name"]}
-            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
-
         iterators = p.dexpr_index_headers["iterators"]
-        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
 
         # Close iterator scope before adding symbol
         try:
-            if p.dexpr_index_headers.get("_iterator_scope_opened"):
-                self.symbol_table.exit_scope()
+            self._cleanup_iterator_header(p.dexpr_index_headers)
         except Exception:
             pass
 
@@ -883,12 +890,7 @@ class OPLParser(Parser):
         expr_type = sum_body["sem_type"]
         if expr_type == "boolean":
             expr_type = "int"
-        # Close iterator scope if opened (legacy behavior)
-        if p.sum_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
-        # Pop iterator context if pushed
-        if p.sum_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
+        self._cleanup_iterator_header(p.sum_index_header)
         logger.debug(
             f"[PARSER] Exit sum_expression (juxtaposition): iterators={iterators}, index_constraint={index_constraint}, expr_type={expr_type}"
         )
@@ -909,10 +911,7 @@ class OPLParser(Parser):
         parsed_expression = p.parenthesized_expression
         expr_type = parsed_expression["sem_type"]
         result_type = "int" if expr_type == "boolean" else expr_type
-        if p.sum_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
-        if p.sum_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
+        self._cleanup_iterator_header(p.sum_index_header)
         logger.debug(
             f"[PARSER] Exit sum_expression (parenthesized): iterators={iterators}, index_constraint={index_constraint}, expr_type={expr_type}"
         )
@@ -1078,72 +1077,56 @@ class OPLParser(Parser):
     # --- element_list (model parser) for typed scalar sets ---
     @_("STRING_LITERAL")  # type: ignore
     def element_list(self, p):
-        return [p.STRING_LITERAL.strip('"')]
+        return _list_with_item(_unquote_string_literal(p.STRING_LITERAL))
 
     @_('element_list "," STRING_LITERAL')  # type: ignore
     def element_list(self, p):
-        p.element_list.append(p.STRING_LITERAL.strip('"'))
-        return p.element_list
+        return _append_list_item(p.element_list, _unquote_string_literal(p.STRING_LITERAL))
 
     # NEW: int_element_list for {int} sets
     @_("signed_number")  # type: ignore
     def int_element_list(self, p):
-        v = p.signed_number
-        if not (isinstance(v, int) and not isinstance(v, bool)):
-            raise SemanticError(f"Expected integer literal in {{int}} set, got '{v}'.")
-        return [v]
+        return _list_with_item(_coerce_int_set_element(p.signed_number))
 
     @_('int_element_list "," signed_number')  # type: ignore
     def int_element_list(self, p):
-        v = p.signed_number
-        if not (isinstance(v, int) and not isinstance(v, bool)):
-            raise SemanticError(f"Expected integer literal in {{int}} set, got '{v}'.")
-        p.int_element_list.append(v)
-        return p.int_element_list
+        return _append_list_item(p.int_element_list, _coerce_int_set_element(p.signed_number))
 
     # NEW: float_element_list for {float} sets (allow ints; coerce to float)
     @_("signed_number")  # type: ignore
     def float_element_list(self, p):
-        v = p.signed_number
-        if isinstance(v, bool):
-            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{v}'.")
-        return [float(v)]
+        return _list_with_item(_coerce_float_set_element(p.signed_number))
 
     @_('float_element_list "," signed_number')  # type: ignore
     def float_element_list(self, p):
-        v = p.signed_number
-        if isinstance(v, bool):
-            raise SemanticError(f"Expected numeric literal in {{float}} set, got '{v}'.")
-        p.float_element_list.append(float(v))
-        return p.float_element_list
+        return _append_list_item(p.float_element_list, _coerce_float_set_element(p.signed_number))
 
     # NEW: boolean_element_list for {boolean} sets
     @_("BOOLEAN_LITERAL")  # type: ignore
     def boolean_element_list(self, p):
         # Model lexer provides 'true'/'false' (str)
-        return [True if p.BOOLEAN_LITERAL == "true" else False]
+        return _list_with_item(_model_boolean_literal_to_bool(p.BOOLEAN_LITERAL))
 
     @_('boolean_element_list "," BOOLEAN_LITERAL')  # type: ignore
     def boolean_element_list(self, p):
-        p.boolean_element_list.append(True if p.BOOLEAN_LITERAL == "true" else False)
-        return p.boolean_element_list
+        return _append_list_item(p.boolean_element_list, _model_boolean_literal_to_bool(p.BOOLEAN_LITERAL))
 
     @_("tuple_literal_list ',' tuple_literal")  # type: ignore
     def tuple_literal_list(self, p):
-        return p.tuple_literal_list + [p.tuple_literal]
+        return _append_list_item(p.tuple_literal_list, p.tuple_literal)
 
     @_("tuple_literal")  # type: ignore
     def tuple_literal_list(self, p):
-        return [p.tuple_literal]
+        return _list_with_item(p.tuple_literal)
 
     @_("'<' tuple_element_list '>'")  # type: ignore
     def tuple_literal(self, p):
-        return {"type": "tuple_literal", "elements": p.tuple_element_list}
+        return _model_tuple_literal(p.tuple_element_list)
 
     @_("'<' '>'")  # type: ignore
     def tuple_literal(self, p):
         # Allow empty tuple literal <>
-        return {"type": "tuple_literal", "elements": []}
+        return _empty_model_tuple_literal()
 
     # Make tuple literal usable as an expression (e.g., as an index into tuple-set–indexed vars/params)
     @_("tuple_literal")  # type: ignore
@@ -1153,16 +1136,16 @@ class OPLParser(Parser):
 
     @_("tuple_element_list ',' tuple_element")  # type: ignore
     def tuple_element_list(self, p):
-        return p.tuple_element_list + [p.tuple_element]
+        return _append_list_item(p.tuple_element_list, p.tuple_element)
 
     @_("tuple_element")  # type: ignore
     def tuple_element_list(self, p):
-        return [p.tuple_element]
+        return _list_with_item(p.tuple_element)
 
     # Tuple elements: allow negative numbers via signed_number
     @_("STRING_LITERAL")  # type: ignore
     def tuple_element(self, p):
-        return p.STRING_LITERAL.strip('"')
+        return _unquote_string_literal(p.STRING_LITERAL)
 
     @_("signed_number")  # type: ignore
     def tuple_element(self, p):
@@ -1192,11 +1175,11 @@ class OPLParser(Parser):
 
     @_("tuple_field_list tuple_field")  # type: ignore
     def tuple_field_list(self, p):
-        return p.tuple_field_list + [p.tuple_field]
+        return _append_list_item(p.tuple_field_list, p.tuple_field)
 
     @_("tuple_field")  # type: ignore
     def tuple_field_list(self, p):
-        return [p.tuple_field]
+        return _list_with_item(p.tuple_field)
 
     @_('type NAME ";"')  # type: ignore
     def tuple_field(self, p):
@@ -1424,6 +1407,85 @@ class OPLParser(Parser):
 
         return it_types
 
+    def _wrap_range_bound_if_needed(self, bound):
+        if isinstance(bound, int):
+            return {"type": "number", "value": bound, "sem_type": "int"}
+        return bound
+
+    def _resolve_named_declaration_dimension(self, name, lineno, undeclared_message=None):
+        try:
+            symbol_info = self.symbol_table.get_symbol(name)
+        except SemanticError as exc:
+            if undeclared_message is None:
+                raise SemanticError(exc.message, lineno=lineno) from exc
+            raise SemanticError(undeclared_message.format(name=name), lineno=lineno) from exc
+
+        if symbol_info["type"] == "range":
+            if symbol_info["value"] is not None:
+                return {
+                    "type": "named_range_dimension",
+                    "name": name,
+                    "start": symbol_info["value"]["start"],
+                    "end": symbol_info["value"]["end"],
+                }
+            return {"type": "named_range_dimension", "name": name}
+        if symbol_info["type"] == "set":
+            return {"type": "named_set_dimension", "name": name}
+        raise SemanticError(
+            f"Symbol '{name}' used as dimension must be a 'range' or 'set', but found '{symbol_info['type']}'.",
+            lineno=lineno,
+        )
+
+    def _normalize_declaration_dimension(
+        self,
+        dim_spec,
+        lineno,
+        *,
+        wrap_range_bounds=False,
+        undeclared_message=None,
+        number_literal_message="Single number index '{value}' not allowed in declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
+    ):
+        if dim_spec["type"] == "range_index":
+            if not wrap_range_bounds:
+                return dim_spec
+            return {
+                "type": "range_index",
+                "start": self._wrap_range_bound_if_needed(dim_spec["start"]),
+                "end": self._wrap_range_bound_if_needed(dim_spec["end"]),
+            }
+        if dim_spec["type"] == "name_reference_index":
+            return self._resolve_named_declaration_dimension(
+                dim_spec["name"],
+                lineno,
+                undeclared_message=undeclared_message,
+            )
+        if dim_spec["type"] == "number_literal_index":
+            raise SemanticError(number_literal_message.format(value=dim_spec["value"]), lineno=lineno)
+        raise SemanticError(
+            f"Unsupported dimension type in declaration: {dim_spec['type']}",
+            lineno=lineno,
+        )
+
+    def _iterator_range_to_declaration_dimension(self, rng):
+        if rng["type"] == "range_specifier":
+            return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
+        if rng["type"] == "named_range":
+            try:
+                sym = self.symbol_table.get_symbol(rng["name"])
+                if sym.get("type") == "range" and sym.get("value"):
+                    return {
+                        "type": "named_range_dimension",
+                        "name": rng["name"],
+                        "start": sym["value"]["start"],
+                        "end": sym["value"]["end"],
+                    }
+            except SemanticError:
+                pass
+            return {"type": "named_range_dimension", "name": rng["name"]}
+        if rng["type"] == "named_set":
+            return {"type": "named_set_dimension", "name": rng["name"]}
+        return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
+
     def parse(self, tokens):
         # Materialize tokens so we can track the last line for EOF diagnostics
         self.symbol_table = SymbolTable()
@@ -1470,12 +1532,12 @@ class OPLParser(Parser):
     @_("declaration_list declaration")  # type: ignore
     def declaration_list(self, p):
         logger.debug(f"[DECL_LIST] Appending declaration: {p.declaration}")
-        return p.declaration_list + [p.declaration]
+        return _append_list_item(p.declaration_list, p.declaration)
 
     @_("declaration")  # type: ignore
     def declaration_list(self, p):
         logger.debug(f"[DECL_LIST] Single declaration: {p.declaration}")
-        return [p.declaration]
+        return _list_with_item(p.declaration)
 
     @_("declaration_list")  # type: ignore
     def declarations(self, p):
@@ -1485,7 +1547,7 @@ class OPLParser(Parser):
     @_("declaration")  # type: ignore
     def declarations(self, p):
         logger.debug(f"[DECLARATIONS] Single declaration: {p.declaration}")
-        return [p.declaration]
+        return _list_with_item(p.declaration)
 
     @_('DVAR type NAME ";"')  # type: ignore
     def declaration(self, p):
@@ -1506,56 +1568,16 @@ class OPLParser(Parser):
                 "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
                 lineno=p.lineno,
             )
-        processed_dimensions = []
-        for dim_spec in p.indexed_dimensions:
-            if dim_spec["type"] == "range_index":
-                # Always store start/end as AST nodes (do not convert to int)
-                # If start/end are int, wrap as AST number nodes for codegen compatibility
-                start = dim_spec["start"]
-                end = dim_spec["end"]
-                if isinstance(start, int):
-                    start = {"type": "number", "value": start, "sem_type": "int"}
-                if isinstance(end, int):
-                    end = {"type": "number", "value": end, "sem_type": "int"}
-                processed_dimensions.append({"type": "range_index", "start": start, "end": end})
-            elif dim_spec["type"] == "name_reference_index":
-                name = dim_spec["name"]
-                try:
-                    symbol_info = self.symbol_table.get_symbol(name)
-                    if symbol_info["type"] == "range":
-                        if symbol_info["value"] is not None:
-                            processed_dimensions.append(
-                                {
-                                    "type": "named_range_dimension",
-                                    "name": name,
-                                    "start": symbol_info["value"]["start"],
-                                    "end": symbol_info["value"]["end"],
-                                }
-                            )
-                        else:
-                            processed_dimensions.append({"type": "named_range_dimension", "name": name})
-                    elif symbol_info["type"] == "set":
-                        processed_dimensions.append({"type": "named_set_dimension", "name": name})
-                    else:
-                        raise SemanticError(
-                            f"Symbol '{name}' used as dimension must be a 'range' or 'set', but found '{symbol_info['type']}'.",
-                            lineno=p.lineno,
-                        )
-                except SemanticError as e:
-                    raise SemanticError(
-                        f"Undeclared symbol '{name}' used as dimension.",
-                        lineno=p.lineno,
-                    ) from e
-            elif dim_spec["type"] == "number_literal_index":
-                raise SemanticError(
-                    f"Single number index '{dim_spec['value']}' not allowed in variable declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
-                    lineno=p.lineno,
-                )
-            else:
-                raise SemanticError(
-                    f"Unsupported dimension type in declaration: {dim_spec['type']}",
-                    lineno=p.lineno,
-                )
+        processed_dimensions = [
+            self._normalize_declaration_dimension(
+                dim_spec,
+                p.lineno,
+                wrap_range_bounds=True,
+                undeclared_message="Undeclared symbol '{name}' used as dimension.",
+                number_literal_message="Single number index '{value}' not allowed in variable declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
+            )
+            for dim_spec in p.indexed_dimensions
+        ]
 
         self.symbol_table.add_symbol(
             p.NAME,
@@ -1669,45 +1691,10 @@ class OPLParser(Parser):
         """
         name = p.NAME
         var_type = p.type
-        processed_dimensions = []
-        for dim_spec in p.indexed_dimensions:
-            if dim_spec["type"] == "range_index":
-                processed_dimensions.append(dim_spec)
-            elif dim_spec["type"] == "name_reference_index":
-                dim_name = dim_spec["name"]
-                try:
-                    symbol_info = self.symbol_table.get_symbol(dim_name)
-                    if symbol_info["type"] == "range":
-                        if symbol_info["value"] is not None:
-                            processed_dimensions.append(
-                                {
-                                    "type": "named_range_dimension",
-                                    "name": dim_name,
-                                    "start": symbol_info["value"]["start"],
-                                    "end": symbol_info["value"]["end"],
-                                }
-                            )
-                        else:
-                            processed_dimensions.append({"type": "named_range_dimension", "name": dim_name})
-                    elif symbol_info["type"] == "set":
-                        processed_dimensions.append({"type": "named_set_dimension", "name": dim_name})
-                    else:
-                        raise SemanticError(
-                            f"Symbol '{dim_name}' used as dimension must be a 'range' or 'set', but found '{symbol_info['type']}'.",
-                            lineno=p.lineno,
-                        )
-                except SemanticError as e:
-                    raise SemanticError(e.message, lineno=p.lineno) from e
-            elif dim_spec["type"] == "number_literal_index":
-                raise SemanticError(
-                    f"Single number index '{dim_spec['value']}' not allowed in declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
-                    lineno=p.lineno,
-                )
-            else:
-                raise SemanticError(
-                    f"Unsupported dimension type in declaration: {dim_spec['type']}",
-                    lineno=p.lineno,
-                )
+        processed_dimensions = [
+            self._normalize_declaration_dimension(dim_spec, p.lineno)
+            for dim_spec in p.indexed_dimensions
+        ]
 
         has_ellipsis_assignment = p.opt_assign_ellipsis
 
@@ -1750,15 +1737,14 @@ class OPLParser(Parser):
         Handles multiple dimensions for indexed variables (e.g., [1..2][1..3]).
         Recursively builds a list of index specifiers.
         """
-        p.indexed_dimensions.append(p.index_specifier)
-        return p.indexed_dimensions
+        return _append_list_item(p.indexed_dimensions, p.index_specifier)
 
     @_('"[" index_specifier "]"')  # type: ignore
     def indexed_dimensions(self, p):
         """
         Base case for indexed_dimensions: a single dimension.
         """
-        return [p.index_specifier]
+        return _list_with_item(p.index_specifier)
 
     @_("INT")  # type: ignore
     def type(self, p):
@@ -1843,10 +1829,7 @@ class OPLParser(Parser):
     @_('NAME ":" FORALL forall_index_header constraint')  # type: ignore
     def constraint(self, p):
         # Clean up any iterator context opened by the header to avoid leaking state
-        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
-        if p.forall_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
+        self._cleanup_iterator_header(p.forall_index_header)
         raise SemanticError(
             "Constraint labels may not prefix a forall. To label constraints produced by a forall, put the label inside the forall, e.g.:\n"
             "  forall(i in I) ct: expr;\n"
@@ -1858,10 +1841,7 @@ class OPLParser(Parser):
     @_('NAME ":" FORALL forall_index_header constraint_block')  # type: ignore
     def constraint(self, p):
         # Clean up any iterator context opened by the header to avoid leaking state
-        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
-        if p.forall_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
+        self._cleanup_iterator_header(p.forall_index_header)
         raise SemanticError(
             "Constraint labels may not prefix a forall. To label constraints produced by a forall, put the label inside the forall, e.g.:\n"
             "  forall(i in I) ct: expr;\n"
@@ -1884,10 +1864,7 @@ class OPLParser(Parser):
     @_('FORALL forall_index_header NAME indexed_dimensions ":" expression ";"')  # type: ignore
     def constraint(self, p):
         # Close any iterator context opened by the header to avoid scope leaks on error
-        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
-        if p.forall_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
+        self._cleanup_iterator_header(p.forall_index_header)
         raise SemanticError(
             "Indexed constraint labels are not allowed inside forall. Use a plain, unindexed label inside the forall: "
             "forall(i in I) ct: ...;",
@@ -1906,37 +1883,17 @@ class OPLParser(Parser):
     # --- Constraint list: sequence of constraints, each ending with a semicolon ---
     @_("constraint")  # type: ignore
     def constraint_list(self, p):
-        return [p.constraint]
+        return _list_with_item(p.constraint)
 
     @_("constraint_list constraint")  # type: ignore
     def constraint_list(self, p):
-        p.constraint_list.append(p.constraint)
-        return p.constraint_list
+        return _append_list_item(p.constraint_list, p.constraint)
 
     # --- Constraint: either implication or regular constraint, both consume semicolon ---
     @_('expression IMPLIES expression ";"')  # type: ignore
     def constraint(self, p):
-        def to_constraint(expr):
-            if expr.get("type") == "constraint":
-                return expr
-            # Any boolean-valued expression (including binop comparisons, 'not', parenthesized, boolean literals)
-            if expr.get("sem_type") == "boolean":
-                return {
-                    "type": "constraint",
-                    "op": "==",
-                    "left": expr,
-                    "right": {
-                        "type": "boolean_literal",
-                        "value": True,
-                        "sem_type": "boolean",
-                    },
-                }
-            if expr.get("type") == "parenthesized_expression":
-                return to_constraint(expr["expression"])
-            raise SemanticError("Implication sides must be constraints or boolean expressions.")
-
-        antecedent = to_constraint(p.expression0)
-        consequent = to_constraint(p.expression1)
+        antecedent = self._coerce_implication_side(p.expression0)
+        consequent = self._coerce_implication_side(p.expression1)
         return {
             "type": "implication_constraint",
             "antecedent": antecedent,
@@ -1945,121 +1902,31 @@ class OPLParser(Parser):
 
     @_('expression ";"')  # type: ignore
     def constraint(self, p):
-        # Normalize int+ and float+ to int and float for OPL semantics
-        def norm_type(t):
-            if t == "int+":
-                return "int"
-            if t == "float+":
-                return "float"
-            return t
-
         expr = p.expression
-        # If it's already a constraint node (equality to True) pass through
-        if expr.get("type") == "constraint":
-            return expr
-        if expr.get("type") == "binop" and expr.get("op") in (
-            "==",
-            "!=",
-            "<",
-            ">",
-            "<=",
-            ">=",
-        ):
-            op = expr["op"]
-            left = expr["left"]
-            right = expr["right"]
-            left_type = norm_type(left.get("sem_type", None))
-            right_type = norm_type(right.get("sem_type", None))
-            allowed_types = {"int", "float", "boolean", None}
-            if left_type not in allowed_types or right_type not in allowed_types:
-                raise SemanticError(
-                    f"'{op}' operator only supported for int/float/boolean types, got '{left_type}' and '{right_type}'.",
-                    lineno=p.lineno,
-                )
-            return {"type": "constraint", "op": op, "left": left, "right": right}
-        # Fallback: if boolean-valued (e.g., from logical composition), equate to True
-        if expr.get("sem_type") == "boolean":
-            return {
-                "type": "constraint",
-                "op": "==",
-                "left": expr,
-                "right": {
-                    "type": "boolean_literal",
-                    "value": True,
-                    "sem_type": "boolean",
-                },
-            }
-        # If purely arithmetic numeric expression appears alone, this is likely a user error.
-        raise SemanticError(
-            "Standalone arithmetic expression not allowed as constraint; use comparison (e.g., expr <= value)."
+        return self._coerce_expression_to_constraint(
+            expr,
+            invalid_message="Standalone arithmetic expression not allowed as constraint; use comparison (e.g., expr <= value).",
+            lineno=p.lineno,
+            validate_comparison_types=True,
         )
 
     # Labeled simple constraint: label: expr OP expr;
     @_('NAME ":" expression ";"')  # type: ignore
     def constraint(self, p):
-        expr = p.expression
-        if expr.get("type") == "binop" and expr.get("op") in (
-            "==",
-            "!=",
-            "<",
-            ">",
-            "<=",
-            ">=",
-        ):
-            return {
-                "type": "constraint",
-                "label": p.NAME,
-                "op": expr["op"],
-                "left": expr["left"],
-                "right": expr["right"],
-            }
-        if expr.get("sem_type") == "boolean":
-            return {
-                "type": "constraint",
-                "label": p.NAME,
-                "op": "==",
-                "left": expr,
-                "right": {
-                    "type": "boolean_literal",
-                    "value": True,
-                    "sem_type": "boolean",
-                },
-            }
-        raise SemanticError("Labeled constraints must be comparison or boolean expression.")
+        return self._coerce_expression_to_constraint(
+            p.expression,
+            invalid_message="Labeled constraints must be comparison or boolean expression.",
+            label=p.NAME,
+        )
 
     # Labeled forall single constraint: forall(...) label: expr OP expr;
     @_('FORALL forall_index_header NAME ":" expression ";"')  # type: ignore
     def constraint(self, p):
-        expr = p.expression
-        if expr.get("type") == "binop" and expr.get("op") in (
-            "==",
-            "!=",
-            "<",
-            ">",
-            "<=",
-            ">=",
-        ):
-            base_constraint = {
-                "type": "constraint",
-                "label": p.NAME,
-                "op": expr["op"],
-                "left": expr["left"],
-                "right": expr["right"],
-            }
-        elif expr.get("sem_type") == "boolean":
-            base_constraint = {
-                "type": "constraint",
-                "label": p.NAME,
-                "op": "==",
-                "left": expr,
-                "right": {
-                    "type": "boolean_literal",
-                    "value": True,
-                    "sem_type": "boolean",
-                },
-            }
-        else:
-            raise SemanticError("forall labeled constraint must be comparison or boolean expression.")
+        base_constraint = self._coerce_expression_to_constraint(
+            p.expression,
+            invalid_message="forall labeled constraint must be comparison or boolean expression.",
+            label=p.NAME,
+        )
         fc = self._build_forall_constraint(p.forall_index_header, base_constraint, getattr(p, "lineno", None))
         return fc
 
@@ -2092,20 +1959,89 @@ class OPLParser(Parser):
     def _check_comparison_types(self, left_expr, right_expr, lineno):
         # Patch: allow boolean variables in arithmetic and sum contexts (OPL semantics)
         # Accept any combination of int, float, or boolean for arithmetic and comparison.
-        def normalize_type(t):
-            if t == "int+":
-                return "int"
-            if t == "float+":
-                return "float"
-            return t
-
-        left_type = normalize_type(left_expr.get("sem_type", None))
-        right_type = normalize_type(right_expr.get("sem_type", None))
+        left_type = self._normalize_sem_type(left_expr.get("sem_type", None))
+        right_type = self._normalize_sem_type(right_expr.get("sem_type", None))
         allowed_types = {"int", "float", "boolean", None}
         if left_type not in allowed_types or right_type not in allowed_types:
             raise SemanticError(f"Type mismatch in comparison: {left_type} vs {right_type}", lineno)
         # Otherwise, allow (int, float, boolean) in any combination
         return
+
+    def _normalize_sem_type(self, sem_type):
+        if sem_type == "int+":
+            return "int"
+        if sem_type == "float+":
+            return "float"
+        return sem_type
+
+    def _true_constraint_rhs(self):
+        return {
+            "type": "boolean_literal",
+            "value": True,
+            "sem_type": "boolean",
+        }
+
+    def _coerce_expression_to_constraint(
+        self,
+        expr,
+        invalid_message,
+        *,
+        label=None,
+        lineno=None,
+        validate_comparison_types=False,
+    ):
+        if expr.get("type") == "constraint":
+            if label is None:
+                return expr
+            constraint = dict(expr)
+            constraint["label"] = label
+            return constraint
+
+        if expr.get("type") == "binop" and expr.get("op") in ("==", "!=", "<", ">", "<=", ">="):
+            left = expr["left"]
+            right = expr["right"]
+            if validate_comparison_types:
+                left_type = self._normalize_sem_type(left.get("sem_type", None))
+                right_type = self._normalize_sem_type(right.get("sem_type", None))
+                allowed_types = {"int", "float", "boolean", None}
+                if left_type not in allowed_types or right_type not in allowed_types:
+                    raise SemanticError(
+                        f"'{expr['op']}' operator only supported for int/float/boolean types, got '{left_type}' and '{right_type}'.",
+                        lineno=lineno,
+                    )
+            constraint = {"type": "constraint", "op": expr["op"], "left": left, "right": right}
+            if label is not None:
+                constraint["label"] = label
+            return constraint
+
+        if expr.get("sem_type") == "boolean":
+            constraint = {
+                "type": "constraint",
+                "op": "==",
+                "left": expr,
+                "right": self._true_constraint_rhs(),
+            }
+            if label is not None:
+                constraint["label"] = label
+            return constraint
+
+        if lineno is None:
+            raise SemanticError(invalid_message)
+        raise SemanticError(invalid_message, lineno=lineno)
+
+    def _coerce_implication_side(self, expr):
+        if expr.get("type") == "parenthesized_expression":
+            return self._coerce_implication_side(expr["expression"])
+        return self._coerce_expression_to_constraint(
+            expr,
+            invalid_message="Implication sides must be constraints or boolean expressions.",
+        )
+
+    def _cleanup_iterator_header(self, header):
+        if header.get("_iter_ctx_pushed") and self._iterator_context_stack:
+            self._iterator_context_stack.pop()
+        if header.get("_iterator_scope_opened"):
+            self.symbol_table.exit_scope()
 
     def _build_forall_constraint(self, forall_index_header, constraint_or_block, lineno):
         # Scope is already open (iter_header_open), and iterators are already added by sum_index.
@@ -2147,21 +2083,13 @@ class OPLParser(Parser):
     @_("FORALL forall_index_header constraint")  # type: ignore
     def constraint(self, p):
         node = self._build_forall_constraint(p.forall_index_header, p.constraint, getattr(p, "lineno", None))
-        # Close parser iterator-context scope
-        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
-        # Legacy: close symbol-table scope if it was opened
-        if p.forall_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
+        self._cleanup_iterator_header(p.forall_index_header)
         return node
 
     @_("FORALL forall_index_header constraint_block")  # type: ignore
     def constraint(self, p):
         node = self._build_forall_constraint(p.forall_index_header, p.constraint_block, getattr(p, "lineno", None))
-        if p.forall_index_header.get("_iter_ctx_pushed") and self._iterator_context_stack:
-            self._iterator_context_stack.pop()
-        if p.forall_index_header.get("_iterator_scope_opened"):
-            self.symbol_table.exit_scope()
+        self._cleanup_iterator_header(p.forall_index_header)
         return node
 
     @_('"{" constraint_list "}"')  # type: ignore
@@ -2371,13 +2299,12 @@ class OPLParser(Parser):
     @_('sum_index_list "," sum_index')  # type: ignore
     def sum_index_list(self, p):
         # Do not enter/exit scope here; all iterators are in the same scope
-        p.sum_index_list.append(p.sum_index)
-        return p.sum_index_list
+        return _append_list_item(p.sum_index_list, p.sum_index)
 
     @_("sum_index")  # type: ignore
     def sum_index_list(self, p):
         # Do not enter/exit scope here; all iterators are in the same scope
-        return [p.sum_index]
+        return _list_with_item(p.sum_index)
 
     @_("NAME IN IN_RANGE")  # type: ignore
     def sum_index(self, p):
@@ -2423,35 +2350,6 @@ class OPLParser(Parser):
     @_("")  # type: ignore
     def opt_index_constraint(self, p):
         return None
-
-    # Removed duplicate binary operation rules for expression
-    @_('expression "+" expression')  # type: ignore
-    def expression(self, p):
-        logger.debug(
-            f"[BINOP_RULE] '+' left: {p.expression0}, right: {p.expression1}, left type: {p.expression0.get('sem_type', p.expression0.get('type', type(p.expression0)))}, right type: {p.expression1.get('sem_type', p.expression1.get('type', type(p.expression1)))}"
-        )
-        return self._handle_binop(p.expression0, p.expression1, "+", p.lineno)
-
-    @_('expression "-" expression')  # type: ignore
-    def expression(self, p):
-        logger.debug(
-            f"[BINOP_RULE] '-' left: {p.expression0}, right: {p.expression1}, left type: {p.expression0.get('sem_type', p.expression0.get('type', type(p.expression0)))}, right type: {p.expression1.get('sem_type', p.expression1.get('type', type(p.expression1)))}"
-        )
-        return self._handle_binop(p.expression0, p.expression1, "-", p.lineno)
-
-    @_('expression "*" expression')  # type: ignore
-    def expression(self, p):
-        logger.debug(
-            f"[BINOP_RULE] '*' left: {p.expression0}, right: {p.expression1}, left type: {p.expression0.get('sem_type', p.expression0.get('type', type(p.expression0)))}, right type: {p.expression1.get('sem_type', p.expression1.get('type', type(p.expression1)))}"
-        )
-        return self._handle_binop(p.expression0, p.expression1, "*", p.lineno)
-
-    @_('expression "/" expression')  # type: ignore
-    def expression(self, p):
-        logger.debug(
-            f"[BINOP_RULE] '/' left: {p.expression0}, right: {p.expression1}, left type: {p.expression0.get('sem_type', p.expression0.get('type', type(p.expression0)))}, right type: {p.expression1.get('sem_type', p.expression1.get('type', type(p.expression1)))}"
-        )
-        return self._handle_binop(p.expression0, p.expression1, "/", p.lineno)
 
     def _handle_binop(self, left_expr, right_expr, op, lineno):
         # Extensive logger debugging for binop typing issues
@@ -2540,11 +2438,11 @@ class OPLParser(Parser):
 
     @_("expression ',' arg_list")
     def arg_list(self, p):
-        return [p.expression] + p.arg_list
+        return _prepend_list_item(p.expression, p.arg_list)
 
     @_("expression")
     def arg_list(self, p):
-        return [p.expression]
+        return _list_with_item(p.expression)
 
     # --- Function calls: sqrt (1 arg), maxl/minl (>=1 arg) ---
     @_("NAME '(' arg_list ')'")  # type: ignore
@@ -2845,22 +2743,11 @@ class OPLParser(Parser):
         name = p.NAME
         var_type = p.type
         iterators = p.dexpr_index_header["iterators"]
-
-        def to_decl_dim(rng):
-            if rng["type"] == "range_specifier":
-                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
-            if rng["type"] == "named_range":
-                return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
-            if rng["type"] == "named_set":
-                return {"type": "named_set_dimension", "name": rng["name"]}
-            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
-
-        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
 
         # Close the iterator scope before adding the parameter symbol
         try:
-            if p.dexpr_index_header.get("_iterator_scope_opened"):
-                self.symbol_table.exit_scope()
+            self._cleanup_iterator_header(p.dexpr_index_header)
         except Exception:
             pass
 
@@ -2889,22 +2776,11 @@ class OPLParser(Parser):
         name = p.NAME
         var_type = p.type
         iterators = p.dexpr_index_headers["iterators"]
-
-        def to_decl_dim(rng):
-            if rng["type"] == "range_specifier":
-                return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
-            if rng["type"] == "named_range":
-                return {"type": "named_range_dimension", "name": rng["name"], "start": rng.get("start"), "end": rng.get("end")}
-            if rng["type"] == "named_set":
-                return {"type": "named_set_dimension", "name": rng["name"]}
-            return {"type": rng["type"], **{k: v for k, v in rng.items() if k != "type"}}
-
-        dimensions = [to_decl_dim(it["range"]) for it in iterators]
+        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
 
         # Close iterator scope before adding the symbol
         try:
-            if p.dexpr_index_headers.get("_iterator_scope_opened"):
-                self.symbol_table.exit_scope()
+            self._cleanup_iterator_header(p.dexpr_index_headers)
         except Exception:
             pass
 
@@ -2932,52 +2808,10 @@ class OPLParser(Parser):
         var_type = p.type
         dimensions = p.indexed_dimensions
         value = p.array_value
-        processed_dimensions = []
-        for dim_spec in dimensions:
-            if dim_spec["type"] == "range_index":
-                # Always store start/end as AST nodes (do not convert to int)
-                start = dim_spec["start"]
-                end = dim_spec["end"]
-                if isinstance(start, int):
-                    start = {"type": "number", "value": start, "sem_type": "int"}
-                if isinstance(end, int):
-                    end = {"type": "number", "value": end, "sem_type": "int"}
-                processed_dimensions.append({"type": "range_index", "start": start, "end": end})
-            elif dim_spec["type"] == "name_reference_index":
-                dim_name = dim_spec["name"]
-                try:
-                    symbol_info = self.symbol_table.get_symbol(dim_name)
-                    if symbol_info["type"] == "range":
-                        if symbol_info["value"] is not None:
-                            processed_dimensions.append(
-                                {
-                                    "type": "named_range_dimension",
-                                    "name": dim_name,
-                                    "start": symbol_info["value"]["start"],
-                                    "end": symbol_info["value"]["end"],
-                                }
-                            )
-                        else:
-                            processed_dimensions.append({"type": "named_range_dimension", "name": dim_name})
-                    elif symbol_info["type"] == "set":
-                        processed_dimensions.append({"type": "named_set_dimension", "name": dim_name})
-                    else:
-                        raise SemanticError(
-                            f"Symbol '{dim_name}' used as dimension must be a 'range' or 'set', but found '{symbol_info['type']}'.",
-                            lineno=p.lineno,
-                        )
-                except SemanticError as e:
-                    raise SemanticError(e.message, lineno=p.lineno) from e
-            elif dim_spec["type"] == "number_literal_index":
-                raise SemanticError(
-                    f"Single number index '{dim_spec['value']}' not allowed in declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
-                    lineno=p.lineno,
-                )
-            else:
-                raise SemanticError(
-                    f"Unsupported dimension type in declaration: {dim_spec['type']}",
-                    lineno=p.lineno,
-                )
+        processed_dimensions = [
+            self._normalize_declaration_dimension(dim_spec, p.lineno, wrap_range_bounds=True)
+            for dim_spec in dimensions
+        ]
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -3055,20 +2889,20 @@ class OPLParser(Parser):
     # not just NUMBER, to match .dat file capabilities.
     @_('row_list "," scalar_value')
     def row_list(self, p):
-        return p.row_list + [p.scalar_value]
+        return _append_list_item(p.row_list, p.scalar_value)
 
     @_("scalar_value")
     def row_list(self, p):
-        return [p.scalar_value]
+        return _list_with_item(p.scalar_value)
 
     # Nested arrays remain supported
     @_('row_list "," array_value')
     def row_list(self, p):
-        return p.row_list + [p.array_value]
+        return _append_list_item(p.row_list, p.array_value)
 
     @_("array_value")
     def row_list(self, p):
-        return [p.array_value]
+        return _list_with_item(p.array_value)
 
     # General scalar values usable in inline model arrays
     @_("signed_number")
@@ -3218,28 +3052,28 @@ class OPLDataParser(Parser):
     # Fix: Only add to the list if p.tuple_literal is not None (prevents extra split on nested commas)
     @_('tuple_literal_list "," tuple_literal')  # type: ignore
     def tuple_literal_list(self, p):
-        return p.tuple_literal_list + [p.tuple_literal]
+        return _append_list_item(p.tuple_literal_list, p.tuple_literal)
 
     @_("tuple_literal")  # type: ignore
     def tuple_literal_list(self, p):
-        return [p.tuple_literal]
+        return _list_with_item(p.tuple_literal)
 
     @_('"<" tuple_element_list ">"')  # type: ignore
     def tuple_literal(self, p):
-        return tuple(p.tuple_element_list)
+        return _dat_tuple_literal(p.tuple_element_list)
 
     @_('"<" ">"')  # type: ignore
     def tuple_literal(self, p):
         # Allow empty tuple literal <> in .dat (align with model parser)
-        return tuple()
+        return _empty_dat_tuple_literal()
 
     @_('tuple_element_list "," tuple_element')  # type: ignore
     def tuple_element_list(self, p):
-        return p.tuple_element_list + [p.tuple_element]
+        return _append_list_item(p.tuple_element_list, p.tuple_element)
 
     @_("tuple_element")  # type: ignore
     def tuple_element_list(self, p):
-        return [p.tuple_element]
+        return _list_with_item(p.tuple_element)
 
     @_("NUMBER")  # type: ignore
     def tuple_element(self, p):
@@ -3247,7 +3081,7 @@ class OPLDataParser(Parser):
 
     @_("STRING_LITERAL")  # type: ignore
     def tuple_element(self, p):
-        return p.STRING_LITERAL.strip('"')
+        return _unquote_string_literal(p.STRING_LITERAL)
 
     @_("BOOLEAN_LITERAL")  # type: ignore
     def tuple_element(self, p):
@@ -3294,11 +3128,11 @@ class OPLDataParser(Parser):
     @_("data_declaration_list data_declaration")  # type: ignore
     def data_declaration_list(self, p):
         # Accept a sequence of data_declaration statements
-        return p.data_declaration_list + [p.data_declaration]
+        return _append_list_item(p.data_declaration_list, p.data_declaration)
 
     @_("data_declaration")  # type: ignore
     def data_declaration_list(self, p):
-        return [p.data_declaration]
+        return _list_with_item(p.data_declaration)
 
     @_(
         'NAME "=" scalar_value ";"',
@@ -3363,17 +3197,16 @@ class OPLDataParser(Parser):
 
     @_('key_value_row_list "," key_value_row')  # type: ignore
     def key_value_row_list(self, p):
-        p.key_value_row_list.append(p.key_value_row)
-        return p.key_value_row_list
+        return _append_list_item(p.key_value_row_list, p.key_value_row)
 
     @_("key_value_row")  # type: ignore
     def key_value_row_list(self, p):
-        return [p.key_value_row]
+        return _list_with_item(p.key_value_row)
 
     # String label row: "Seattle" 350
     @_("STRING_LITERAL scalar_value")  # type: ignore
     def key_value_row(self, p):
-        return (p.STRING_LITERAL.strip('"'), p.scalar_value)
+        return _string_label_value_pair(p.STRING_LITERAL, p.scalar_value)
 
     # Tuple label row: <...> scalar_value
     @_("tuple_literal scalar_value")  # type: ignore
@@ -3383,7 +3216,7 @@ class OPLDataParser(Parser):
     # NEW: String label row with array value: "StoreA" [1,2,3]
     @_("STRING_LITERAL array_value")  # type: ignore
     def key_value_row(self, p):
-        return (p.STRING_LITERAL.strip('"'), p.array_value)
+        return _string_label_value_pair(p.STRING_LITERAL, p.array_value)
 
     # NEW: Tuple label row with array value: <"StoreA"> [1,2,3]
     @_("tuple_literal array_value")  # type: ignore
@@ -3401,7 +3234,7 @@ class OPLDataParser(Parser):
 
     @_("STRING_LITERAL")  # type: ignore
     def scalar_value(self, p):
-        return p.STRING_LITERAL.strip('"')
+        return _unquote_string_literal(p.STRING_LITERAL)
 
     @_("BOOLEAN_LITERAL")  # type: ignore
     def scalar_value(self, p):
@@ -3413,12 +3246,11 @@ class OPLDataParser(Parser):
 
     @_("scalar_value")  # type: ignore
     def element_list(self, p):
-        return [p.scalar_value]
+        return _list_with_item(p.scalar_value)
 
     @_('element_list "," scalar_value')  # type: ignore
     def element_list(self, p):
-        p.element_list.append(p.scalar_value)
-        return p.element_list
+        return _append_list_item(p.element_list, p.scalar_value)
 
     # --- Nested array support for .dat files ---
     @_('"[" row_list "]"')  # type: ignore
@@ -3427,22 +3259,20 @@ class OPLDataParser(Parser):
 
     @_('row_list "," scalar_value')  # type: ignore
     def row_list(self, p):
-        p.row_list.append(p.scalar_value)
-        return p.row_list
+        return _append_list_item(p.row_list, p.scalar_value)
 
     @_("scalar_value")  # type: ignore
     def row_list(self, p):
-        return [p.scalar_value]
+        return _list_with_item(p.scalar_value)
 
     # Add support for nested arrays (e.g., [ [1,2], [3,4] ])
     @_('row_list "," array_value')  # type: ignore
     def row_list(self, p):
-        p.row_list.append(p.array_value)
-        return p.row_list
+        return _append_list_item(p.row_list, p.array_value)
 
     @_("array_value")  # type: ignore
     def row_list(self, p):
-        return [p.array_value]
+        return _list_with_item(p.array_value)
 
     def error(self, p):
         # Unexpected token
@@ -3525,6 +3355,705 @@ class OPLCompiler:
             raise SyntaxError("Syntax error") from None
         raise SyntaxError(f"Syntax error on line {lineno}") from None
 
+    def _prepare_model_ast_and_working_data(
+        self,
+        model_code: str,
+        data_code: Optional[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        data_dict: dict[str, Any] = {}
+        if data_code:
+            data_tokens = self.data_lexer.tokenize(data_code)
+            data_dict = self.data_parser.parse(data_tokens, lexer=self.data_lexer)
+
+        model_tokens = list(self.model_lexer.tokenize(model_code))
+        logger.debug("[TOKEN_STREAM] Model tokens:")
+        for token in model_tokens:
+            logger.debug(f"  type={token.type}, value={token.value}")
+        model_ast = self.model_parser.parse(iter(model_tokens))
+
+        declarations = model_ast.get("declarations") or []
+        for decl in declarations:
+            decl_type = decl.get("type", "")
+            if decl_type.startswith("parameter"):
+                name = decl.get("name")
+                value = decl.get("value")
+                if value is not None:
+                    data_dict[name] = value
+            if decl_type == "parameter_array":
+                name = decl.get("name")
+                value = decl.get("value")
+                if value is not None:
+                    data_dict[name] = value
+
+        working_data = dict(data_dict)
+        for decl in declarations:
+            decl_type = decl.get("type")
+            name = decl.get("name")
+            if not name:
+                continue
+            if decl_type in ("parameter_inline", "parameter_inline_indexed") and decl.get("value") is not None:
+                working_data[name] = decl["value"]
+            if decl_type == "typed_set" and decl.get("value") is not None and name not in working_data:
+                working_data[name] = decl["value"]
+            if decl_type == "set_of_tuples" and decl.get("value") is not None:
+                elems = []
+                for value in decl["value"]:
+                    if isinstance(value, dict) and "elements" in value:
+                        elems.append(value["elements"])
+                    else:
+                        elems.append(value)
+                working_data[name] = {
+                    "elements": elems,
+                    "tuple_type": decl.get("tuple_type"),
+                }
+
+        declared_names = {
+            decl.get("name")
+            for decl in declarations
+            if isinstance(decl, dict) and isinstance(decl.get("name"), str)
+        }
+        bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
+        if bad_decl:
+            bad = sorted(bad_decl)[0]
+            raise SemanticError(
+                f"Identifier '{bad}' is reserved and cannot be used as a model symbol. "
+                f"Please rename it in the .mod file."
+            )
+
+        bad_data = set(working_data.keys()) & RESERVED_PY_IDENTIFIERS
+        if bad_data:
+            bad = sorted(bad_data)[0]
+            ln = getattr(self.data_parser, "name_linenos", {}).get(bad)
+            raise SemanticError(
+                f"Identifier '{bad}' is reserved and cannot appear as a data key (would shadow Python keywords or built-ins). "
+                f"Please rename it in the .dat or model data.",
+                lineno=ln,
+            )
+
+        return model_ast, working_data
+
+    def _eval_bound_expr(self, expr: Any, working_data: dict[str, Any]) -> int:
+        if isinstance(expr, dict):
+            expr_type = expr.get("type")
+            if expr_type == "number":
+                return int(expr.get("value"))
+            if expr_type == "name":
+                value = working_data.get(expr.get("value"))
+                if isinstance(value, (int, float)):
+                    return int(value)
+                raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
+            if expr_type == "binop":
+                op = expr.get("op")
+                left = self._eval_bound_expr(expr.get("left"), working_data)
+                right = self._eval_bound_expr(expr.get("right"), working_data)
+                if op == "+":
+                    return left + right
+                if op == "-":
+                    return left - right
+                if op == "*":
+                    return left * right
+                if op == "/":
+                    return int(left / right)
+        raise SemanticError(f"Unsupported bound expr: {expr}")
+
+    def _resolve_named_range(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        rng_name: str,
+        *,
+        context: str,
+    ) -> tuple[int, int]:
+        rng_decl = next(
+            (
+                decl
+                for decl in (model_ast.get("declarations") or [])
+                if isinstance(decl, dict)
+                and decl.get("type") == "range_declaration_inline"
+                and decl.get("name") == rng_name
+            ),
+            None,
+        )
+        if rng_decl:
+            start = self._eval_bound_expr(rng_decl["start"], working_data)
+            end = self._eval_bound_expr(rng_decl["end"], working_data)
+            return start, end
+
+        data_range = working_data.get(rng_name)
+        if isinstance(data_range, dict) and data_range.get("type") == "range_data":
+            return int(data_range["start"]), int(data_range["end"])
+
+        raise SemanticError(f"Named range '{rng_name}' not found for {context}.")
+
+    def _materialize_set_of_tuples_comprehensions(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
+        declarations = model_ast.get("declarations")
+        if not isinstance(declarations, list):
+            return
+
+        rewritten_declarations = []
+        for decl in declarations:
+            if decl.get("type") != "set_of_tuples_comprehension":
+                rewritten_declarations.append(decl)
+                continue
+
+            comp = decl.get("comprehension") or {}
+            tuple_expr = comp.get("tuple_expr")
+            iterators = comp.get("iterators") or []
+            index_constraint = comp.get("index_constraint")
+
+            def domain_for_range(rng: dict[str, Any]) -> list[Any]:
+                if rng["type"] == "range_specifier":
+                    start = self._eval_bound_expr(rng["start"], working_data)
+                    end = self._eval_bound_expr(rng["end"], working_data)
+                    return list(range(int(start), int(end) + 1))
+                if rng["type"] == "named_range":
+                    start, end = self._resolve_named_range(
+                        model_ast,
+                        working_data,
+                        rng["name"],
+                        context="set comprehension",
+                    )
+                    return list(range(int(start), int(end) + 1))
+                if rng["type"] in ("named_set", "named_set_dimension"):
+                    set_name = rng["name"]
+                    set_obj = working_data.get(set_name, [])
+                    if isinstance(set_obj, dict) and "elements" in set_obj:
+                        elements = set_obj["elements"]
+                    else:
+                        elements = set_obj
+                    return list(elements or [])
+                raise SemanticError(
+                    f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
+                )
+
+            def eval_tuple(expr: Any, env: dict[str, Any]) -> Any:
+                if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
+                    return tuple(eval_tuple(element, env) for element in expr.get("elements", []))
+                if isinstance(expr, dict):
+                    expr_type = expr.get("type")
+                    if expr_type == "name":
+                        return env.get(expr.get("value"))
+                    if expr_type == "number":
+                        return expr.get("value")
+                    if expr_type == "parenthesized_expression":
+                        return eval_tuple(expr.get("expression"), env)
+                return expr
+
+            def eval_bool(expr: Any, env: dict[str, Any]) -> bool:
+                if isinstance(expr, dict):
+                    expr_type = expr.get("type")
+                    if expr_type == "number":
+                        return bool(expr.get("value"))
+                    if expr_type == "name":
+                        return bool(env.get(expr.get("value")))
+                    if expr_type == "parenthesized_expression":
+                        return eval_bool(expr.get("expression"), env)
+                return bool(expr)
+
+            def normalize_tuple_value(value: Any) -> Any:
+                if isinstance(value, float) and value.is_integer():
+                    return int(value)
+                if isinstance(value, tuple):
+                    return tuple(normalize_tuple_value(item) for item in value)
+                return value
+
+            iterator_names = [iterator["iterator"] for iterator in iterators]
+            domains = [domain_for_range(iterator["range"]) for iterator in iterators]
+            tuples: list[Any] = []
+
+            def recurse(depth: int, env: dict[str, Any]) -> None:
+                if depth == len(iterator_names):
+                    if index_constraint is None or eval_bool(index_constraint, env):
+                        tuple_value = eval_tuple(tuple_expr, env)
+                        tuples.append(normalize_tuple_value(tuple_value))
+                    return
+                iterator_name = iterator_names[depth]
+                for value in domains[depth]:
+                    env[iterator_name] = value
+                    recurse(depth + 1, env)
+                env.pop(iterator_name, None)
+
+            recurse(0, {})
+            working_data[decl["name"]] = tuples
+            rewritten_declarations.append(
+                {
+                    "type": "set_of_tuples",
+                    "tuple_type": decl.get("tuple_type"),
+                    "name": decl.get("name"),
+                    "value": tuples,
+                }
+            )
+
+        model_ast["declarations"] = rewritten_declarations
+
+    def _materialize_computed_parameters(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
+        declarations = model_ast.get("declarations")
+        if not isinstance(declarations, list):
+            return
+
+        import math
+
+        tuple_fields_by_type: dict[str, list[str]] = {}
+        set_tuple_type_by_name: dict[str, str] = {}
+        for decl in declarations:
+            if not isinstance(decl, dict):
+                continue
+            if decl.get("type") == "tuple_type":
+                tuple_name = decl.get("name")
+                if isinstance(tuple_name, str):
+                    raw_fields = decl.get("fields") or []
+                    fields: list[str] = []
+                    for field in raw_fields:
+                        if isinstance(field, dict):
+                            field_name = field.get("name")
+                            if isinstance(field_name, str):
+                                fields.append(field_name)
+                    tuple_fields_by_type[tuple_name] = fields
+            elif decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                name = decl.get("name")
+                tuple_type = decl.get("tuple_type")
+                if isinstance(name, str) and isinstance(tuple_type, str):
+                    set_tuple_type_by_name[name] = tuple_type
+
+        def eval_index(idx_expr: dict[str, Any], env: dict[str, Any]) -> Any:
+            expr_type = idx_expr.get("type")
+            if expr_type == "number_literal_index":
+                return idx_expr.get("value")
+            if expr_type == "name_reference_index":
+                name = idx_expr.get("name")
+                return env.get(name, name)
+            if expr_type == "name":
+                return env.get(idx_expr.get("value"), idx_expr.get("value"))
+            if expr_type in ("field_access_index", "field_access"):
+                raise SemanticError("Field access in computed parameter indices not supported.")
+            if expr_type == "binop":
+                op = idx_expr.get("op")
+                left = eval_index(idx_expr.get("left"), env)
+                right = eval_index(idx_expr.get("right"), env)
+                if op == "+":
+                    return int(left) + int(right)
+                if op == "-":
+                    return int(left) - int(right)
+                if op == "*":
+                    return int(left) * int(right)
+                raise SemanticError(f"Unsupported index binop: {op}")
+            if expr_type == "uminus":
+                return -int(eval_index(idx_expr.get("value"), env))
+            if expr_type == "parenthesized_expression":
+                return eval_index(idx_expr.get("expression"), env)
+            if expr_type == "string_literal":
+                return idx_expr.get("value")
+            raise SemanticError(f"Unsupported index expr: {expr_type}")
+
+        def iterator_domains(iterators: list[dict[str, Any]], param_name: Optional[str] = None) -> list[list[Any]]:
+            domains: list[list[Any]] = []
+            for iterator in iterators:
+                rng = iterator["range"]
+                if rng["type"] == "range_specifier":
+                    start = self._eval_bound_expr(rng["start"], working_data)
+                    end = self._eval_bound_expr(rng["end"], working_data)
+                    domains.append(list(range(start, end + 1)))
+                elif rng["type"] == "named_range":
+                    start, end = self._resolve_named_range(
+                        model_ast,
+                        working_data,
+                        rng["name"],
+                        context="computed parameter",
+                    )
+                    domains.append(list(range(start, end + 1)))
+                elif rng["type"] in ("named_set", "named_set_dimension"):
+                    set_name = rng["name"]
+                    set_obj = working_data.get(set_name, [])
+                    if isinstance(set_obj, dict) and "elements" in set_obj:
+                        elements = set_obj["elements"]
+                    else:
+                        elements = set_obj
+                    domains.append(list(elements or []))
+                else:
+                    if param_name is None:
+                        raise SemanticError(f"Unsupported range in aggregate: {rng['type']}")
+                    raise SemanticError(
+                        f"Unsupported iterator range type '{rng['type']}' for computed parameter '{param_name}'."
+                    )
+            return domains
+
+        def iterator_metadata(iterators: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+            metadata: dict[str, dict[str, Any]] = {}
+            for iterator in iterators:
+                iterator_name = iterator["iterator"]
+                rng = iterator["range"]
+                meta: dict[str, Any] = {}
+                if rng.get("type") in ("named_set", "named_set_dimension"):
+                    set_name = rng["name"]
+                    meta["set"] = set_name
+                    meta["tuple_type"] = set_tuple_type_by_name.get(set_name)
+                metadata[iterator_name] = meta
+            return metadata
+
+        def eval_expr(expr: dict[str, Any], env: dict[str, Any], iter_meta: Optional[dict[str, dict[str, Any]]] = None) -> Any:
+            expr_type = expr.get("type") if isinstance(expr, dict) else None
+            if expr_type == "number":
+                return float(expr.get("value"))
+            if expr_type == "boolean_literal":
+                return 1.0 if expr.get("value") else 0.0
+            if expr_type == "string_literal":
+                return expr.get("value")
+            if expr_type == "name":
+                name = expr.get("value")
+                if name in env:
+                    value = env[name]
+                    return float(value) if isinstance(value, (int, float)) else value
+                if name in working_data:
+                    return working_data[name]
+                raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
+            if expr_type == "conditional":
+                cond_value = eval_expr(expr.get("condition"), env, iter_meta)
+                branch = expr.get("then") if bool(cond_value) else expr.get("else")
+                return eval_expr(branch, env, iter_meta)
+            if expr_type == "field_access":
+                base = expr.get("base")
+                field = expr.get("field")
+                base_value = eval_expr(base, env, iter_meta)
+                tuple_type = None
+                if isinstance(base, dict):
+                    base_sem_type = base.get("sem_type")
+                    if isinstance(base_sem_type, str) and base_sem_type in tuple_fields_by_type:
+                        tuple_type = base_sem_type
+                if tuple_type is None and isinstance(base, dict) and base.get("type") == "name" and isinstance(iter_meta, dict):
+                    iterator_name = base.get("value")
+                    meta = iter_meta.get(iterator_name) if iterator_name else None
+                    if isinstance(meta, dict):
+                        tuple_type = meta.get("tuple_type")
+                if tuple_type is None:
+                    raise SemanticError("Cannot resolve tuple type for field access in computed parameter.")
+                fields = tuple_fields_by_type.get(tuple_type) or []
+                try:
+                    idx = fields.index(field)
+                except ValueError as exc:
+                    raise SemanticError(f"Unknown field '{field}' for tuple type '{tuple_type}'.") from exc
+                try:
+                    value = base_value[idx]
+                except Exception as exc:
+                    raise SemanticError(f"Field access failed on base value: {exc}") from exc
+                return float(value) if isinstance(value, (int, float)) else value
+            if expr_type == "indexed_name":
+                base = expr.get("name")
+                dims = expr.get("dimensions", [])
+                arr = working_data.get(base)
+                if arr is None:
+                    raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+                cur = arr
+                for dim in dims:
+                    idx_value = eval_index(dim, env)
+                    if isinstance(idx_value, float) and idx_value.is_integer():
+                        idx_value = int(idx_value)
+                    if isinstance(cur, list):
+                        if not isinstance(idx_value, (int, float)):
+                            raise SemanticError(
+                                f"List parameter '{base}' requires integer indices, got {type(idx_value).__name__}: {idx_value!r}"
+                            )
+                        pos = int(idx_value) - 1
+                        try:
+                            cur = cur[pos]
+                        except Exception as exc:
+                            raise SemanticError(f"Index out of bounds for '{base}' at {idx_value}: {exc}") from exc
+                    elif isinstance(cur, dict):
+                        try:
+                            cur = cur[idx_value]
+                        except Exception as exc:
+                            raise SemanticError(f"Key '{idx_value!r}' not found in parameter '{base}': {exc}") from exc
+                    else:
+                        raise SemanticError(f"Cannot index into value of type {type(cur).__name__} for '{base}'.")
+                return float(cur) if isinstance(cur, (int, float)) else cur
+            if expr_type == "sum":
+                iterators = expr.get("iterators", [])
+                index_constraint = expr.get("index_constraint")
+                body = expr.get("expression")
+                domains = iterator_domains(iterators)
+
+                def rec_sum(depth: int, local_env: dict[str, Any]) -> float:
+                    if depth == len(iterators):
+                        if index_constraint is not None:
+                            cond_value = eval_expr(index_constraint, local_env, iter_meta_local)
+                            if isinstance(cond_value, (int, float)):
+                                if not bool(cond_value):
+                                    return 0.0
+                            elif not cond_value:
+                                return 0.0
+                        return float(eval_expr(body, local_env, iter_meta_local))
+                    iterator_name = iterators[depth]["iterator"]
+                    total = 0.0
+                    for value in domains[depth]:
+                        local_env[iterator_name] = value
+                        total += rec_sum(depth + 1, local_env)
+                    local_env.pop(iterator_name, None)
+                    return total
+
+                iter_meta_local = iterator_metadata(iterators)
+                return rec_sum(0, dict(env))
+            if expr_type in ("max_agg", "min_agg"):
+                iterators = expr.get("iterators", [])
+                index_constraint = expr.get("index_constraint")
+                body = expr.get("expression")
+                domains = iterator_domains(iterators)
+                iter_meta_local = iterator_metadata(iterators)
+                best = None
+
+                def rec_agg(depth: int, local_env: dict[str, Any]) -> None:
+                    nonlocal best
+                    if depth == len(iterators):
+                        if index_constraint is not None:
+                            cond_value = eval_expr(index_constraint, local_env, iter_meta_local)
+                            if isinstance(cond_value, (int, float)):
+                                if not bool(cond_value):
+                                    return
+                            elif not cond_value:
+                                return
+                        value = float(eval_expr(body, local_env, iter_meta_local))
+                        if best is None:
+                            best = value
+                        elif expr_type == "max_agg":
+                            if value > best:
+                                best = value
+                        elif value < best:
+                            best = value
+                        return
+                    iterator_name = iterators[depth]["iterator"]
+                    for value in domains[depth]:
+                        local_env[iterator_name] = value
+                        rec_agg(depth + 1, local_env)
+                    local_env.pop(iterator_name, None)
+
+                rec_agg(0, dict(env))
+                if best is None:
+                    raise SemanticError("Aggregate domain is empty in computed parameter expression.")
+                return best
+            if expr_type == "and":
+                return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
+            if expr_type == "or":
+                return bool(eval_expr(expr.get("left"), env)) or bool(eval_expr(expr.get("right"), env))
+            if expr_type == "not":
+                return not bool(eval_expr(expr.get("value"), env))
+            if expr_type == "binop":
+                op = expr.get("op")
+                left_value = eval_expr(expr.get("left"), env)
+                right_value = eval_expr(expr.get("right"), env)
+                if op == "+":
+                    return float(left_value) + float(right_value)
+                if op == "-":
+                    return float(left_value) - float(right_value)
+                if op == "*":
+                    return float(left_value) * float(right_value)
+                if op == "/":
+                    return float(left_value) / float(right_value)
+                if op == "%":
+                    return float(left_value) % float(right_value)
+                if op in ("<", "<=", ">", ">=", "==", "!="):
+                    if op == "<":
+                        return 1.0 if (float(left_value) < float(right_value)) else 0.0
+                    if op == "<=":
+                        return 1.0 if (float(left_value) <= float(right_value)) else 0.0
+                    if op == ">":
+                        return 1.0 if (float(left_value) > float(right_value)) else 0.0
+                    if op == ">=":
+                        return 1.0 if (float(left_value) >= float(right_value)) else 0.0
+                    if op == "==":
+                        return 1.0 if (left_value == right_value) else 0.0
+                    if op == "!=":
+                        return 1.0 if (left_value != right_value) else 0.0
+                raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
+            if expr_type == "uminus":
+                return -float(eval_expr(expr.get("value"), env))
+            if expr_type == "parenthesized_expression":
+                return eval_expr(expr.get("expression"), env)
+            if expr_type == "funcall":
+                func_name = expr.get("name")
+                args = expr.get("args", [])
+                if func_name == "sqrt" and len(args) == 1:
+                    return math.sqrt(float(eval_expr(args[0], env)))
+                raise SemanticError(f"Unsupported function '{func_name}' in computed parameter expression.")
+            if expr_type in ("maxl", "minl"):
+                values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
+                try:
+                    nums = [float(value) for value in values]
+                except Exception as exc:
+                    raise SemanticError(f"{expr_type} in parameter must be numeric and ground.") from exc
+                if not nums:
+                    raise SemanticError(f"{expr_type} requires at least one argument.")
+                return max(nums) if expr_type == "maxl" else min(nums)
+            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
+
+        def cast_value(value: Any, var_type: Any) -> Any:
+            if isinstance(var_type, str) and var_type.startswith("int"):
+                return int(round(float(value)))
+            if var_type == "boolean":
+                return bool(round(float(value)))
+            return float(value)
+
+        rewritten_declarations = []
+        for decl in declarations:
+            decl_type = decl.get("type")
+            if decl_type not in ("parameter_inline_indexed_expr", "parameter_inline_expr"):
+                rewritten_declarations.append(decl)
+                continue
+
+            if decl_type == "parameter_inline_expr":
+                name = decl["name"]
+                var_type = decl.get("var_type") or ""
+                value = cast_value(eval_expr(decl["expression"], {}), var_type)
+                working_data[name] = value
+                rewritten_declarations.append(
+                    {
+                        "type": "parameter_inline",
+                        "var_type": var_type,
+                        "name": name,
+                        "value": value,
+                    }
+                )
+                continue
+
+            name = decl["name"]
+            var_type = decl.get("var_type") or ""
+            dimensions = decl.get("dimensions", [])
+            iterators = decl.get("iterators", [])
+            iterator_names = [iterator["iterator"] for iterator in iterators]
+            domains = iterator_domains(iterators, name)
+
+            def build_nested(depth: int, env_map: dict[str, Any]) -> object:
+                if depth == len(iterators):
+                    value = eval_expr(decl["expression"], env_map)
+                    return cast_value(value, var_type)
+                values = []
+                iterator_name = iterator_names[depth]
+                for item in domains[depth]:
+                    env_map[iterator_name] = item
+                    values.append(build_nested(depth + 1, env_map))
+                env_map.pop(iterator_name, None)
+                return values
+
+            computed_value = build_nested(0, {})
+            working_data[name] = computed_value
+            rewritten_declarations.append(
+                {
+                    "type": "parameter_inline_indexed",
+                    "var_type": var_type,
+                    "name": name,
+                    "dimensions": dimensions,
+                    "value": computed_value,
+                }
+            )
+
+        model_ast["declarations"] = rewritten_declarations
+
+        for decl in model_ast.get("declarations") or []:
+            if decl.get("type") != "parameter_inline_indexed":
+                continue
+            name = decl.get("name")
+            if not name or name not in working_data:
+                continue
+            value = working_data.get(name)
+            if not isinstance(value, (list, tuple)):
+                continue
+
+            dims = decl.get("dimensions", []) or []
+            domains = []
+            for dim in dims:
+                dim_type = dim.get("type")
+                if dim_type in ("named_set", "named_set_dimension"):
+                    set_name = dim.get("name")
+                    set_obj = working_data.get(set_name, [])
+                    if isinstance(set_obj, dict) and "elements" in set_obj:
+                        domain_elements = list(set_obj["elements"])
+                    else:
+                        domain_elements = list(set_obj or [])
+                    domains.append(domain_elements)
+                elif dim_type in ("named_range", "named_range_dimension"):
+                    try:
+                        start, end = self._resolve_named_range(
+                            model_ast,
+                            working_data,
+                            dim["name"],
+                            context="computed parameter",
+                        )
+                        domains.append(list(range(int(start), int(end) + 1)))
+                    except Exception:
+                        rng_decl = next(
+                            (
+                                candidate
+                                for candidate in (model_ast.get("declarations") or [])
+                                if candidate.get("name") == dim.get("name")
+                                and candidate.get("type") == "range_declaration_inline"
+                            ),
+                            None,
+                        )
+                        if rng_decl:
+                            start_idx = self._eval_bound_expr(rng_decl["start"], working_data)
+                            end_idx = self._eval_bound_expr(rng_decl["end"], working_data)
+                            domains.append(list(range(int(start_idx), int(end_idx) + 1)))
+                        else:
+                            domains.append(list(range(1, len(value) + 1)))
+                else:
+                    if isinstance(value, (list, tuple)):
+                        domains.append(list(range(1, len(value) + 1)))
+                    else:
+                        domains.append([])
+
+            mapping = {}
+
+            def rec_flat(depth: int, node: Any, prefix: list[Any]) -> None:
+                if depth == len(domains):
+                    if len(prefix) == 1:
+                        key = prefix[0]
+                        if isinstance(key, list):
+                            key = tuple(key)
+                        mapping[key] = node
+                    else:
+                        safe_prefix = tuple(tuple(item) if isinstance(item, list) else item for item in prefix)
+                        mapping[safe_prefix] = node
+                    return
+                if not isinstance(node, (list, tuple)):
+                    raise SemanticError(
+                        f"Parameter '{name}' expected nested list matching declared domains, got {type(node).__name__}"
+                    )
+                domain = domains[depth]
+                for index, key in enumerate(domain):
+                    if index >= len(node):
+                        raise SemanticError(f"Parameter '{name}' data length shorter than domain at dimension {depth+1}")
+                    rec_flat(depth + 1, node[index], prefix + [key])
+
+            try:
+                rec_flat(0, value, [])
+            except SemanticError:
+                continue
+
+            working_data[f"{name}__map"] = mapping
+
+    def _normalize_indexed_parameters_for_codegen(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
+        for decl in model_ast.get("declarations") or []:
+            if decl.get("type") != "parameter_inline_indexed":
+                continue
+            name = decl.get("name")
+            if not isinstance(name, str):
+                continue
+            mapping = working_data.get(f"{name}__map")
+            if not isinstance(mapping, dict):
+                continue
+            decl["type"] = "parameter_external_indexed"
+            decl["value"] = mapping
+            working_data[name] = mapping
+
     def compile_model(
         self,
         model_code: str,
@@ -3564,844 +4093,19 @@ class OPLCompiler:
                 finally:
                     self.syntax_error_reporting = previous_reporting
 
-        data_dict = {}
-        model_ast = None
         ast: dict[str, Any] = {}
         code = ""
-        if data_code:
-            # Tokenize and parse data file
-            data_tokens = self.data_lexer.tokenize(data_code)
-            data_dict = self.data_parser.parse(data_tokens, lexer=self.data_lexer)
+        model_ast, working_data = self._prepare_model_ast_and_working_data(model_code, data_code)
+        data_dict = dict(working_data)
 
-        # Tokenize and parse model file
-        model_tokens = list(self.model_lexer.tokenize(model_code))
-        # Debug: print token stream for model
-        logger.debug("[TOKEN_STREAM] Model tokens:")
-        for t in model_tokens:
-            logger.debug(f"  type={t.type}, value={t.value}")
-        model_ast = self.model_parser.parse(iter(model_tokens))
+        self._materialize_set_of_tuples_comprehensions(model_ast, working_data)
+        self._materialize_computed_parameters(model_ast, working_data)
+        data_dict = dict(working_data)
 
-        # --- Inject parameter assignments from model AST into data_dict ---
-        if model_ast and "declarations" in model_ast:
-            for decl in model_ast["declarations"]:
-                # Handle scalar and array parameter assignments
-                if decl.get("type", "").startswith("parameter"):
-                    name = decl.get("name")
-                    value = decl.get("value")
-                    if value is not None:
-                        data_dict[name] = value
-                # Handle array assignments (e.g., float demand[1..T] = [...])
-                if decl.get("type", "") == "parameter_array":
-                    name = decl.get("name")
-                    value = decl.get("value")
-                    if value is not None:
-                        data_dict[name] = value
-
-        # Build a single canonical working_data that merges .dat data with inline parameter values
-        working_data = dict(data_dict or {})
-        # Inject inline declarations (parameters, typed sets, tuple-array inline values) into working_data
-        if model_ast and "declarations" in model_ast:
-            for decl in model_ast["declarations"]:
-                t = decl.get("type")
-                name = decl.get("name")  # ensure we have the declaration name for all branches
-                if not name:
-                    continue
-                # Inline scalar/array parameters (parameter_inline / parameter_inline_indexed)
-                if t in ("parameter_inline", "parameter_inline_indexed") and decl.get("value") is not None:
-                    working_data[name] = decl["value"]
-                # Typed sets declared inline
-                if t == "typed_set" and decl.get("value") is not None and name not in working_data:
-                    working_data[name] = decl["value"]
-                # Sets-of-tuples declared inline
-                if t == "set_of_tuples" and decl.get("value") is not None:
-                    elems = []
-                    for v in decl["value"]:
-                        if isinstance(v, dict) and "elements" in v:
-                            elems.append(v["elements"])
-                        else:
-                            elems.append(v)
-                    working_data[name] = {
-                        "elements": elems,
-                        "tuple_type": decl.get("tuple_type"),
-                    }
-
-        # NEW: reserved-name guard across declarations and data keys (prevents emitting e.g. 'len = {...}')
-        def _reject_reserved_names():
-            # Check declared names
-            declared_names = {
-                d.get("name")
-                for d in (model_ast.get("declarations") or [])
-                if isinstance(d, dict) and isinstance(d.get("name"), str)
-            }
-            bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
-            if bad_decl:
-                bad = sorted(bad_decl)[0]
-                raise SemanticError(
-                    f"Identifier '{bad}' is reserved and cannot be used as a model symbol. "
-                    f"Please rename it in the .mod file."
-                )
-            # Check data keys as well, since generators may emit all keys from data_dict
-            bad_data = set(working_data.keys()) & RESERVED_PY_IDENTIFIERS
-            if bad_data:
-                bad = sorted(bad_data)[0]
-                ln = getattr(self.data_parser, "name_linenos", {}).get(bad)
-                raise SemanticError(
-                    f"Identifier '{bad}' is reserved and cannot appear as a data key (would shadow Python keywords or built-ins). "
-                    f"Please rename it in the .dat or model data.",
-                    lineno=ln,
-                )
-
-        _reject_reserved_names()
-
-        # --- evaluate typed set-of-tuples comprehensions into concrete sets (must happen BEFORE computed params) ---
-        # Local helpers used by comprehensions to evaluate integer bounds and named ranges against working_data.
-        def eval_bound(expr):
-            if isinstance(expr, dict):
-                t = expr.get("type")
-                if t == "number":
-                    return int(expr.get("value"))
-                if t == "name":
-                    val = working_data.get(expr.get("value"))
-                    if isinstance(val, (int, float)):
-                        return int(val)
-                    raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
-                if t == "binop":
-                    op = expr.get("op")
-                    left = eval_bound(expr.get("left"))
-                    right = eval_bound(expr.get("right"))
-                    if op == "+":
-                        return left + right
-                    if op == "-":
-                        return left - right
-                    if op == "*":
-                        return left * right
-                    if op == "/":
-                        # integer division for bounds
-                        return int(left / right)
-            raise SemanticError(f"Unsupported bound expr: {expr}")
-
-        def resolve_named_range(rng_name: str):
-            # Try inline range declaration in the model
-            rng_decl = next(
-                (
-                    d
-                    for d in (model_ast.get("declarations") or [])
-                    if isinstance(d, dict) and d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
-                ),
-                None,
-            )
-            if rng_decl:
-                s = eval_bound(rng_decl["start"])
-                e = eval_bound(rng_decl["end"])
-                return s, e
-            # Try .dat-provided range
-            dv = working_data.get(rng_name)
-            if isinstance(dv, dict) and dv.get("type") == "range_data":
-                return int(dv["start"]), int(dv["end"])
-            raise SemanticError(f"Named range '{rng_name}' not found for set comprehension.")
-
-        if model_ast and "declarations" in model_ast:
-            new_decls2 = []
-            for decl in model_ast["declarations"]:
-                if decl.get("type") != "set_of_tuples_comprehension":
-                    new_decls2.append(decl)
-                    continue
-
-                comp = decl.get("comprehension") or {}
-                tuple_expr = comp.get("tuple_expr")
-                iterators = comp.get("iterators") or []
-                idxc = comp.get("index_constraint")
-
-                # Domain resolution for each iterator (range, named range, named set)
-                def _domain_for_range(rng):
-                    if rng["type"] == "range_specifier":
-                        s = eval_bound(rng["start"])
-                        e = eval_bound(rng["end"])
-                        return list(range(int(s), int(e) + 1))
-                    if rng["type"] == "named_range":
-                        s, e = resolve_named_range(rng["name"])
-                        return list(range(int(s), int(e) + 1))
-                    if rng["type"] in ("named_set", "named_set_dimension"):
-                        set_name = rng["name"]
-                        set_obj = working_data.get(set_name, [])
-                        if isinstance(set_obj, dict) and "elements" in set_obj:
-                            elems = set_obj["elements"]
-                        else:
-                            elems = set_obj
-                        return list(elems or [])
-                    raise SemanticError(
-                        f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{decl.get('name')}'."
-                    )
-
-                it_names = [it["iterator"] for it in iterators]
-                domains = [_domain_for_range(it["range"]) for it in iterators]
-
-                # Evaluate tuple expression into a Python tuple under env
-                def _eval_tuple(expr, env):
-                    if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
-                        out = []
-                        for el in expr.get("elements", []):
-                            out.append(_eval_tuple(el, env))
-                        return tuple(out)
-                    if isinstance(expr, dict):
-                        # Reuse the later eval_expr if present, else minimally handle names and numbers
-                        t = expr.get("type")
-                        if t == "name":
-                            return env.get(expr.get("value"))
-                        if t == "number":
-                            return expr.get("value")
-                        if t == "parenthesized_expression":
-                            return _eval_tuple(expr.get("expression"), env)
-                    return expr
-
-                tuples = []
-
-                # Nested loops over cartesian product of all iterator domains
-                def _recurse(depth, env):
-                    if depth == len(it_names):
-                        # filter
-                        keep = True
-                        if idxc is not None:
-                            # very simple boolean evaluation: treat nonzero numeric as True
-                            def _eval_bool(e, envb):
-                                if isinstance(e, dict):
-                                    if e.get("type") == "number":
-                                        return bool(e.get("value"))
-                                    if e.get("type") == "name":
-                                        return bool(envb.get(e.get("value")))
-                                    if e.get("type") == "parenthesized_expression":
-                                        return _eval_bool(e.get("expression"), envb)
-                                return bool(e)
-
-                            keep = _eval_bool(idxc, env)
-                        if keep:
-                            tval = _eval_tuple(tuple_expr, env)
-
-                            # Normalize nested numeric to int when integral
-                            def _norm(v):
-                                if isinstance(v, float) and v.is_integer():
-                                    return int(v)
-                                if isinstance(v, tuple):
-                                    return tuple(_norm(x) for x in v)
-                                return v
-
-                            tuples.append(_norm(tval))
-                        return
-                    nm = it_names[depth]
-                    for v in domains[depth]:
-                        env[nm] = v
-                        _recurse(depth + 1, env)
-                    env.pop(nm, None)
-
-                _recurse(0, {})
-                # Mutate working_data and AST: concrete set as list of tuples
-                working_data[decl["name"]] = tuples
-                new_decls2.append(
-                    {
-                        "type": "set_of_tuples",
-                        "tuple_type": decl.get("tuple_type"),
-                        "name": decl.get("name"),
-                        "value": tuples,
-                    }
-                )
-            model_ast["declarations"] = new_decls2
-            data_dict = dict(working_data)
-
-        # Use working_data for subsequent validation/emission
-        data_dict = working_data
-
-        # NEW: evaluate computed indexed parameter declarations and rewrite them into concrete inline params
-        if model_ast and "declarations" in model_ast:
-            import math
-
-            # Helpers to evaluate simple int bounds from AST using working_data
-            def eval_bound(expr):
-                if isinstance(expr, dict):
-                    t = expr.get("type")
-                    if t == "number":
-                        return int(expr.get("value"))
-                    if t == "name":
-                        # named range bound could reference a number param
-                        val = working_data.get(expr.get("value"))
-                        if isinstance(val, (int, float)):
-                            return int(val)
-                        raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
-                    if t == "binop":
-                        op = expr.get("op")
-                        left = eval_bound(expr.get("left"))
-                        right = eval_bound(expr.get("right"))
-                        if op == "+":
-                            return left + right
-                        if op == "-":
-                            return left - right
-                        if op == "*":
-                            return left * right
-                        if op == "/":
-                            return int(left / right)
-                raise SemanticError(f"Unsupported bound expr: {expr}")
-
-            # NEW: resolve a named range from declarations or data
-            def resolve_named_range(rng_name: str):
-                # Try model inline range
-                rng_decl = next(
-                    (
-                        d
-                        for d in (model_ast.get("declarations") or [])
-                        if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
-                    ),
-                    None,
-                )
-                if rng_decl:
-                    s = eval_bound(rng_decl["start"])
-                    e = eval_bound(rng_decl["end"])
-                    return s, e
-                # Try .dat provided range
-                data_rng = working_data.get(rng_name)
-                if isinstance(data_rng, dict) and data_rng.get("type") == "range_data":
-                    return int(data_rng["start"]), int(data_rng["end"])
-                raise SemanticError(f"Named range '{rng_name}' not found for computed parameter.")
-
-            # Build tuple metadata for field access in computed params
-            tuple_fields_by_type: dict[str, list[str]] = {}
-            set_tuple_type_by_name: dict[str, str] = {}
-            for d in model_ast.get("declarations") or []:
-                if not isinstance(d, dict):
-                    continue
-                if d.get("type") == "tuple_type":
-                    tname_any = d.get("name")
-                    if isinstance(tname_any, str):
-                        raw_fields = d.get("fields") or []
-                        fields: list[str] = []
-                        for f in raw_fields:
-                            if isinstance(f, dict):
-                                fname = f.get("name")
-                                if isinstance(fname, str):
-                                    fields.append(fname)
-                        tuple_fields_by_type[tname_any] = fields
-                elif d.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    name_any = d.get("name")
-                    tuple_type_any = d.get("tuple_type")
-                    if isinstance(name_any, str) and isinstance(tuple_type_any, str):
-                        set_tuple_type_by_name[name_any] = tuple_type_any
-
-            # Evaluate general numeric/boolean/string expression for param RHS. Limited support: number, name,
-            # indexed_name, binop, uminus, parenthesis, funcall(sqrt), minl/maxl, and NEW: sum/min_agg/max_agg & field_access.
-            def eval_expr(expr, env, iter_meta=None) -> Any:
-                t = expr.get("type") if isinstance(expr, dict) else None
-                if t == "number":
-                    return float(expr.get("value"))
-                if t == "boolean_literal":
-                    return 1.0 if expr.get("value") else 0.0
-                if t == "string_literal":
-                    return expr.get("value")
-                if t == "name":
-                    nm = expr.get("value")
-                    if nm in env:
-                        v = env[nm]
-                        return float(v) if isinstance(v, (int, float)) else v
-                    if nm in working_data:
-                        return working_data[nm]
-                    raise SemanticError(f"Unknown name '{nm}' in computed parameter expression.")
-                if t == "conditional":
-                    # Support (cond ? then : else) in computed parameter expressions
-                    cval = eval_expr(expr.get("condition"), env, iter_meta)
-                    ctruth = bool(cval)
-                    branch = expr.get("then") if ctruth else expr.get("else")
-                    return eval_expr(branch, env, iter_meta)
-                if t == "field_access":
-                    # Support s.demand where s is an iterator bound to a tuple from a set-of-tuples
-                    base = expr.get("base")
-                    field = expr.get("field")
-                    # Evaluate base value
-                    base_val = eval_expr(base, env, iter_meta)
-                    # Determine tuple type: prefer base.sem_type, then iterator metadata
-                    tuple_type = None
-                    if isinstance(base, dict):
-                        bst = base.get("sem_type")
-                        if isinstance(bst, str) and bst in tuple_fields_by_type:
-                            tuple_type = bst
-                    if (
-                        tuple_type is None
-                        and isinstance(base, dict)
-                        and base.get("type") == "name"
-                        and isinstance(iter_meta, dict)
-                    ):
-                        itn = base.get("value")
-                        meta = iter_meta.get(itn) if itn else None
-                        if isinstance(meta, dict):
-                            tuple_type = meta.get("tuple_type")
-                    if tuple_type is None:
-                        raise SemanticError("Cannot resolve tuple type for field access in computed parameter.")
-                    fields = tuple_fields_by_type.get(tuple_type) or []
-                    try:
-                        idx = fields.index(field)
-                    except ValueError as e:
-                        raise SemanticError(f"Unknown field '{field}' for tuple type '{tuple_type}'.") from e
-                    try:
-                        val = base_val[idx]
-                    except Exception as e:
-                        raise SemanticError(f"Field access failed on base value: {e}") from e
-                    return float(val) if isinstance(val, (int, float)) else val
-                if t == "indexed_name":
-                    base = expr.get("name")
-                    dims = expr.get("dimensions", [])
-                    # Support multi-dimensional indices (range or set based)
-                    arr = working_data.get(base)
-                    if arr is None:
-                        raise SemanticError(f"Parameter '{base}' not found for indexed access.")
-                    # Evaluate each index and progressively index into arr
-                    cur = arr
-                    for dim in dims:
-                        idx_val = eval_index(dim, env)
-                        # Normalize float-int to int
-                        if isinstance(idx_val, float) and idx_val.is_integer():
-                            idx_val = int(idx_val)
-                        if isinstance(cur, list):
-                            if not isinstance(idx_val, (int, float)):
-                                raise SemanticError(
-                                    f"List parameter '{base}' requires integer indices, got {type(idx_val).__name__}: {idx_val!r}"
-                                )
-                            pos = int(idx_val) - 1  # OPL is 1-based for range-indexed lists
-                            try:
-                                cur = cur[pos]
-                            except Exception as e:
-                                raise SemanticError(f"Index out of bounds for '{base}' at {idx_val}: {e}") from e
-                        elif isinstance(cur, dict):
-                            # dict can be keyed by ints/strings/tuples depending on declaration
-                            try:
-                                cur = cur[idx_val]
-                            except Exception as e:
-                                raise SemanticError(f"Key '{idx_val!r}' not found in parameter '{base}': {e}") from e
-                        else:
-                            raise SemanticError(f"Cannot index into value of type {type(cur).__name__} for '{base}'.")
-                    # At the end, cur is the scalar or structured element
-                    if isinstance(cur, (int, float)):
-                        return float(cur)
-                    return cur
-                if t == "sum":
-                    # Evaluate sum over iterators, respecting optional index_constraint
-                    iters = expr.get("iterators", [])
-                    idxc = expr.get("index_constraint")
-                    body = expr.get("expression")
-                    # Build iterator domains
-                    domains = []
-                    for it in iters:
-                        rng = it["range"]
-                        if rng["type"] == "range_specifier":
-                            st = eval_bound(rng["start"])
-                            en = eval_bound(rng["end"])
-                            domains.append(list(range(st, en + 1)))
-                        elif rng["type"] == "named_range":
-                            st, en = resolve_named_range(rng["name"])
-                            domains.append(list(range(st, en + 1)))
-                        elif rng["type"] in ("named_set", "named_set_dimension"):
-                            set_name = rng["name"]
-                            set_obj = working_data.get(set_name, [])
-                            if isinstance(set_obj, dict) and "elements" in set_obj:
-                                elems = set_obj["elements"]
-                            else:
-                                elems = set_obj
-                            domains.append(list(elems or []))
-                        else:
-                            raise SemanticError(f"Unsupported range in sum aggregate: {rng['type']}")
-
-                    # Recursive nested loops
-                    def rec_sum(depth, local_env):
-                        if depth == len(iters):
-                            # index constraint filter
-                            if idxc is not None:
-                                cond_val = eval_expr(idxc, local_env, it_meta)
-                                if isinstance(cond_val, (int, float)):
-                                    if not bool(cond_val):
-                                        return 0.0
-                                else:
-                                    if not cond_val:
-                                        return 0.0
-                            v = eval_expr(body, local_env, it_meta)
-                            return float(v)
-                        it_name = iters[depth]["iterator"]
-                        total = 0.0
-                        for val in domains[depth]:
-                            local_env[it_name] = val
-                            total += rec_sum(depth + 1, local_env)
-                        local_env.pop(it_name, None)
-                        return total
-
-                    # Build iterator metadata map for field access
-                    it_meta: dict[str, dict] = {}
-                    for it in iters:
-                        nm = it["iterator"]
-                        rng = it["range"]
-                        meta = {}
-                        if rng.get("type") in ("named_set", "named_set_dimension"):
-                            sname = rng["name"]
-                            meta["set"] = sname
-                            meta["tuple_type"] = set_tuple_type_by_name.get(sname)
-                        it_meta[nm] = meta
-                    return rec_sum(0, dict(env))
-                if t in ("max_agg", "min_agg"):
-                    iters = expr.get("iterators", [])
-                    idxc = expr.get("index_constraint")
-                    body = expr.get("expression")
-
-                    # Build domains
-                    domains = []
-                    for it in iters:
-                        rng = it["range"]
-                        if rng["type"] == "range_specifier":
-                            st = eval_bound(rng["start"])
-                            en = eval_bound(rng["end"])
-                            domains.append(list(range(st, en + 1)))
-                        elif rng["type"] == "named_range":
-                            st, en = resolve_named_range(rng["name"])
-                            domains.append(list(range(st, en + 1)))
-                        elif rng["type"] in ("named_set", "named_set_dimension"):
-                            set_name = rng["name"]
-                            set_obj = working_data.get(set_name, [])
-                            if isinstance(set_obj, dict) and "elements" in set_obj:
-                                elems = set_obj["elements"]
-                            else:
-                                elems = set_obj
-                            domains.append(list(elems or []))
-                        else:
-                            raise SemanticError(f"Unsupported range in aggregate: {rng['type']}")
-
-                    # Iterator metadata for field access
-                    it_meta: dict[str, dict] = {}
-                    for it in iters:
-                        nm = it["iterator"]
-                        rng = it["range"]
-                        meta = {}
-                        if rng.get("type") in ("named_set", "named_set_dimension"):
-                            sname = rng["name"]
-                            meta["set"] = sname
-                            meta["tuple_type"] = set_tuple_type_by_name.get(sname)
-                        it_meta[nm] = meta
-
-                    best = None
-
-                    def rec_agg(depth, local_env):
-                        nonlocal best
-                        if depth == len(iters):
-                            # filter
-                            if idxc is not None:
-                                cond_val = eval_expr(idxc, local_env, it_meta)
-                                if isinstance(cond_val, (int, float)):
-                                    if not bool(cond_val):
-                                        return
-                                else:
-                                    if not cond_val:
-                                        return
-                            v = float(eval_expr(body, local_env, it_meta))
-                            if best is None:
-                                best = v
-                            else:
-                                if t == "max_agg":
-                                    if v > best:
-                                        best = v
-                                else:
-                                    if v < best:
-                                        best = v
-                            return
-                        it_name = iters[depth]["iterator"]
-                        for val in domains[depth]:
-                            local_env[it_name] = val
-                            rec_agg(depth + 1, local_env)
-                        local_env.pop(it_name, None)
-
-                    rec_agg(0, dict(env))
-                    if best is None:
-                        raise SemanticError("Aggregate domain is empty in computed parameter expression.")
-                    return best
-                if t == "and":
-                    return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
-                if t == "or":
-                    return bool(eval_expr(expr.get("left"), env)) or bool(eval_expr(expr.get("right"), env))
-                if t == "not":
-                    return not bool(eval_expr(expr.get("value"), env))
-                if t == "binop":
-                    op = expr.get("op")
-                    lv = eval_expr(expr.get("left"), env)
-                    rv = eval_expr(expr.get("right"), env)
-                    # numeric arithmetic
-                    if op == "+":
-                        return float(lv) + float(rv)
-                    if op == "-":
-                        return float(lv) - float(rv)
-                    if op == "*":
-                        return float(lv) * float(rv)
-                    if op == "/":
-                        return float(lv) / float(rv)
-                    if op == "%":
-                        return float(lv) % float(rv)
-                    # comparisons: support numeric and equality on general types
-                    if op in ("<", "<=", ">", ">=", "==", "!="):
-                        if op == "<":
-                            return 1.0 if (float(lv) < float(rv)) else 0.0
-                        if op == "<=":
-                            return 1.0 if (float(lv) <= float(rv)) else 0.0
-                        if op == ">":
-                            return 1.0 if (float(lv) > float(rv)) else 0.0
-                        if op == ">=":
-                            return 1.0 if (float(lv) >= float(rv)) else 0.0
-                        if op == "==":
-                            return 1.0 if (lv == rv) else 0.0
-                        if op == "!=":
-                            return 1.0 if (lv != rv) else 0.0
-                    raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
-                if t == "uminus":
-                    return -float(eval_expr(expr.get("value"), env))
-                if t == "parenthesized_expression":
-                    return eval_expr(expr.get("expression"), env)
-                if t == "funcall":
-                    fname = expr.get("name")
-                    args = expr.get("args", [])
-                    if fname == "sqrt" and len(args) == 1:
-                        return math.sqrt(float(eval_expr(args[0], env)))
-                    raise SemanticError(f"Unsupported function '{fname}' in computed parameter expression.")
-                if t in ("maxl", "minl"):
-                    vals = [eval_expr(e, env) for e in (expr.get("args") or [])]
-                    try:
-                        nums = [float(v) for v in vals]
-                    except Exception:
-                        raise SemanticError(f"{t} in parameter must be numeric and ground.")
-                    if not nums:
-                        raise SemanticError(f"{t} requires at least one argument.")
-                    return max(nums) if t == "maxl" else min(nums)
-                raise SemanticError(f"Unsupported node in computed parameter expression: {t}")
-
-            def eval_index(idx_expr, env):
-                t = idx_expr.get("type")
-                if t == "number_literal_index":
-                    return idx_expr.get("value")
-                if t == "name_reference_index":
-                    nm = idx_expr.get("name")
-                    return env.get(nm, nm)
-                if t == "name":
-                    return env.get(idx_expr.get("value"), idx_expr.get("value"))
-                if t == "field_access_index" or t == "field_access":
-                    raise SemanticError("Field access in computed parameter indices not supported.")
-                if t == "binop":
-                    op = idx_expr.get("op")
-                    left = eval_index(idx_expr.get("left"), env)
-                    right = eval_index(idx_expr.get("right"), env)
-                    if op == "+":
-                        return int(left) + int(right)
-                    if op == "-":
-                        return int(left) - int(right)
-                    if op == "*":
-                        return int(left) * int(right)
-                    raise SemanticError(f"Unsupported index binop: {op}")
-                if t == "uminus":
-                    return -int(eval_index(idx_expr.get("value"), env))
-                if t == "parenthesized_expression":
-                    return eval_index(idx_expr.get("expression"), env)
-                if t == "string_literal":
-                    return idx_expr.get("value")
-                raise SemanticError(f"Unsupported index expr: {t}")
-
-            new_decls = []
-            for decl in model_ast["declarations"]:
-                if decl.get("type") != "parameter_inline_indexed_expr" and decl.get("type") != "parameter_inline_expr":
-                    new_decls.append(decl)
-                    continue
-
-                # Shared caster by declared var_type
-                def cast_value(v, var_type):
-                    if isinstance(var_type, str) and var_type.startswith("int"):
-                        return int(round(float(v)))
-                    if var_type == "boolean":
-                        return bool(round(float(v)))
-                    return float(v)
-
-                # Handle scalar parameter from expression
-                if decl.get("type") == "parameter_inline_expr":
-                    name = decl["name"]
-                    var_type = decl.get("var_type") or ""
-                    value = cast_value(eval_expr(decl["expression"], {}), var_type)
-                    working_data[name] = value
-                    new_decls.append(
-                        {
-                            "type": "parameter_inline",
-                            "var_type": var_type,
-                            "name": name,
-                            "value": value,
-                        }
-                    )
-                    continue
-
-                # Computed indexed param
-                name = decl["name"]
-                var_type = decl.get("var_type") or ""
-                dimensions = decl.get("dimensions", [])
-                iterators = decl.get("iterators", [])
-
-                # Support N-dimensional computed parameters (build nested lists in iterator order)
-                # Domains for each iterator (respecting ranges and named sets)
-                def _domain_for_range(rng):
-                    if rng["type"] == "range_specifier":
-                        s = eval_bound(rng["start"])
-                        e = eval_bound(rng["end"])
-                        return list(range(s, e + 1))
-                    if rng["type"] == "named_range":
-                        s, e = resolve_named_range(rng["name"])
-                        return list(range(s, e + 1))
-                    if rng["type"] in ("named_set", "named_set_dimension"):
-                        set_name = rng["name"]
-                        set_obj = working_data.get(set_name, [])
-                        if isinstance(set_obj, dict) and "elements" in set_obj:
-                            elems = set_obj["elements"]
-                        else:
-                            elems = set_obj
-                        return list(elems or [])
-                    raise SemanticError(f"Unsupported iterator range type '{rng['type']}' for computed parameter '{name}'.")
-
-                it_names = [it["iterator"] for it in iterators]
-                domains = [_domain_for_range(it["range"]) for it in iterators]
-
-                # Recursively build nested lists in row-major order following iterator sequence
-                def build_nested(depth: int, env_map: dict) -> object:
-                    if depth == len(iterators):
-                        # Ground evaluation at the leaf
-                        val = eval_expr(decl["expression"], env_map)
-                        return cast_value(val, var_type)
-                    acc = []
-                    itn = it_names[depth]
-                    for v in domains[depth]:
-                        env_map[itn] = v
-                        acc.append(build_nested(depth + 1, env_map))
-                    # Clean up to avoid leaking iterator into sibling branches
-                    env_map.pop(itn, None)
-                    return acc
-
-                computed_value = build_nested(0, {})
-
-                # Store nested list in working_data and rewrite declaration to an inline indexed parameter
-                working_data[name] = computed_value
-                new_decls.append(
-                    {
-                        "type": "parameter_inline_indexed",
-                        "var_type": var_type,
-                        "name": name,
-                        "dimensions": dimensions,
-                        "value": computed_value,
-                    }
-                )
-                continue
-            # Replace declarations list
-            model_ast["declarations"] = new_decls
-            # Also update data_dict since generators may consult it directly
-            data_dict = dict(working_data)
-
-            # Normalize inline indexed parameter lists into dicts keyed by domain elements/tuples.
-            # This makes generated code robust: instead of relying on list-index fallbacks,
-            # generators can index parameters by labels (strings/ints/tuples) directly.
-            for decl in model_ast.get("declarations") or []:
-                if decl.get("type") != "parameter_inline_indexed":
-                    continue
-                name = decl.get("name")
-                if not name or name not in working_data:
-                    continue
-                val = working_data.get(name)
-                # Only normalize when data is a nested list/tuple (produced inline or by computed params)
-                if not isinstance(val, (list, tuple)):
-                    continue
-
-                dims = decl.get("dimensions", []) or []
-
-                # Build domains list for each declared dimension
-                domains = []
-                for d in dims:
-                    dtyp = d.get("type")
-                    if dtyp in ("named_set", "named_set_dimension"):
-                        set_name = d.get("name")
-                        set_obj = working_data.get(set_name, [])
-                        if isinstance(set_obj, dict) and "elements" in set_obj:
-                            domain_elems = list(set_obj["elements"])
-                        else:
-                            domain_elems = list(set_obj or [])
-                        domains.append(domain_elems)
-                    elif dtyp in ("named_range", "named_range_dimension"):
-                        # Try to resolve named range bounds from model declarations or working_data
-                        try:
-                            s, e = resolve_named_range(d["name"])
-                            domains.append(list(range(int(s), int(e) + 1)))
-                        except Exception:
-                            # Fallback: if a range declaration exists, evaluate its AST bounds
-                            rng_decl = next(
-                                (
-                                    x
-                                    for x in (model_ast.get("declarations") or [])
-                                    if x.get("name") == d.get("name") and x.get("type") == "range_declaration_inline"
-                                ),
-                                None,
-                            )
-                            if rng_decl:
-                                start_idx = eval_bound(rng_decl["start"])
-                                end_idx = eval_bound(rng_decl["end"])
-                                domains.append(list(range(int(start_idx), int(end_idx) + 1)))
-                            else:
-                                # As a last resort, map to 1..len(val) for this axis
-                                domains.append(list(range(1, len(val) + 1)))
-                    else:
-                        # For anonymous/range_index dims, infer positions 1..N
-                        if isinstance(val, (list, tuple)):
-                            domains.append(list(range(1, len(val) + 1)))
-                        else:
-                            domains.append([])
-
-                # Flatten nested list into a mapping keyed by domain elements or tuples
-                mapping = {}
-
-                def _rec_flat(depth: int, node, prefix: list):
-                    if depth == len(domains):
-                        # Build a hashable key for this entry. If the key element
-                        # is a list (e.g., tuple elements parsed as lists),
-                        # convert it to a tuple so it can be used as a dict key.
-                        if len(prefix) == 1:
-                            key = prefix[0]
-                            if isinstance(key, list):
-                                key = tuple(key)
-                            mapping[key] = node
-                        else:
-                            # For multi-dim keys, ensure any inner lists are
-                            # converted to tuples before forming the key tuple.
-                            safe_prefix = tuple(tuple(p) if isinstance(p, list) else p for p in prefix)
-                            mapping[safe_prefix] = node
-                        return
-                    if not isinstance(node, (list, tuple)):
-                        raise SemanticError(
-                            f"Parameter '{name}' expected nested list matching declared domains, got {type(node).__name__}"
-                        )
-                    dom = domains[depth]
-                    for i, key in enumerate(dom):
-                        if i >= len(node):
-                            raise SemanticError(f"Parameter '{name}' data length shorter than domain at dimension {depth+1}")
-                        _rec_flat(depth + 1, node[i], prefix + [key])
-
-                try:
-                    _rec_flat(0, val, [])
-                except SemanticError:
-                    # If normalization fails, leave the original list form and continue
-                    continue
-
-                # Do NOT overwrite the original AST declaration or the
-                # canonical working_data entry (tests and SciPy expect
-                # nested lists in decl['value'] and data). Instead, keep
-                # the original list form in-place and expose a separate
-                # mapping that generators may use if desired.
-                # Store the mapping under a distinct key to avoid name
-                # collisions with user data.
-                working_data[f"{name}__map"] = mapping
-
-        # --- Validate shape of multi-dimensional arrays (use merged working data) ---
         def validate_shape(param_data, dims, param_name, data_dict, dim=0):
             if not dims:
                 return
             d = dims[0]
-            # New: if this is a 1-D parameter indexed by a set/range and data is a dict,
-            # ensure each value is a scalar (not a list/tuple/dict). This catches cases like:
-            # transport_cost[Stores] declared, but data provides {"StoreA": [2.0], ...}.
             if (
                 len(dims) == 1
                 and isinstance(param_data, dict)
@@ -4431,7 +4135,6 @@ class OPLCompiler:
                         if expr["type"] == "number":
                             return int(expr["value"])
                         elif expr["type"] == "name":
-                            # resolve name from merged working data (may be inline scalar)
                             if expr["value"] not in data_dict:
                                 raise SemanticError(f"Range bound refers to unknown name '{expr['value']}'")
                             return int(data_dict[expr["value"]])
@@ -4469,10 +4172,9 @@ class OPLCompiler:
                         f"Parameter '{param_name}' data length {len(param_data)} does not match declared dimension '{d.get('name')}' of length {expected_len} at dimension {dim+1}."
                     )
                 if len(dims) > 1:
-                    for i, sub in enumerate(param_data):
+                    for sub in param_data:
                         validate_shape(sub, dims[1:], param_name, data_dict, dim + 1)
 
-        # Apply validation for all indexed parameters using merged data_dict
         if model_ast and "declarations" in model_ast:
             for decl in model_ast["declarations"]:
                 if decl.get("type") in (
@@ -4487,9 +4189,6 @@ class OPLCompiler:
                     if param_data is not None and isinstance(param_data, (list, tuple)):
                         validate_shape(param_data, decl["dimensions"], decl["name"], data_dict)
 
-        # --- Generate code for the model ---
-
-        # --- Validate types of typed scalar sets ---
         def _is_int(x):
             return isinstance(x, int) and not isinstance(x, bool)
 
@@ -4510,31 +4209,22 @@ class OPLCompiler:
                     continue
                 base = decl.get("base_type")
                 name = decl.get("name")
-
-                # Determine source of values: inline value takes precedence if present
                 values = decl.get("value")
                 if values is None:
                     values = data_dict.get(name)
-
                 if values is None:
-                    continue  # Uninitialized/external with no data yet
-
-                # Normalize sets-of-tuples (should not pass here) or dict wrappers
+                    continue
                 if isinstance(values, dict) and "elements" in values:
                     values = values["elements"]
-
                 if not isinstance(values, list):
                     raise SemanticError(f"Set '{name}' must be assigned a list of values, got {type(values).__name__}.")
-
                 if base == "int":
                     if not all(_is_int(v) for v in values):
                         raise SemanticError(f"All elements of set '{name}' must be integers.")
                 elif base == "float":
                     if not all(_is_num(v) for v in values):
                         raise SemanticError(f"All elements of set '{name}' must be numeric (int/float).")
-                    # Coerce to float for consistency
-                    coerced = [float(v) for v in values]
-                    data_dict[name] = coerced
+                    data_dict[name] = [float(v) for v in values]
                 elif base == "boolean":
                     if not all(_is_bool(v) for v in values):
                         raise SemanticError(f"All elements of set '{name}' must be booleans (true/false).")
@@ -4543,14 +4233,8 @@ class OPLCompiler:
                         raise SemanticError(f"All elements of set '{name}' must be strings.")
 
         validate_typed_sets(model_ast, data_dict)
-        # --- End typed set validation ---
 
         def validate_named_ranges(ast: dict, data_dict: dict) -> None:
-            """
-            Ensure every named range used as an index or iterator is declared with explicit bounds in the model (.mod).
-            If the same name is present only in the .dat (as a range assignment), raise a clear SemanticError.
-            """
-            # Inline range declarations present in the model
             declared_inline: set[str] = {
                 n
                 for n in (
@@ -4561,7 +4245,6 @@ class OPLCompiler:
                 if isinstance(n, str)
             }
 
-            # Collect named ranges used as indices in declarations
             used: set[str] = set()
             for d in ast.get("declarations", []) or []:
                 if not isinstance(d, dict):
@@ -4573,7 +4256,6 @@ class OPLCompiler:
                         if isinstance(n, str):
                             used.add(n)
 
-            # Collect named ranges used in forall/sum iterators
             def walk(node: object) -> None:
                 if isinstance(node, dict):
                     t = node.get("type")
@@ -4597,11 +4279,9 @@ class OPLCompiler:
             walk(ast.get("objective", {}))
             walk(ast.get("constraints", []))
 
-            # For each used range, require inline declaration
             for name in sorted(used):
                 if name in declared_inline:
                     continue
-                # If present in data as range_data, point to the correct fix
                 dv = data_dict.get(name)
                 if isinstance(dv, dict) and dv.get("type") == "range_data":
                     raise SemanticError(
@@ -4609,39 +4289,38 @@ class OPLCompiler:
                         f"with explicit bounds in the model file. Declare it in the model (e.g., 'range {name} = 1..N;') "
                         f"and remove it from the .dat."
                     )
-                # Otherwise generic not-found
                 raise SemanticError(f"Range '{name}' is used as an index but not declared in the model.")
 
         validate_named_ranges(model_ast, data_dict)
 
-        # --- Generate code for the model ---
-
         ast = model_ast
 
-        # First, simplify any ground boolean gating/conditions to avoid emitting constant boolean rows.
         try:
             self._simplify_ground_booleans(ast, working_data)
         except SemanticError as e:
             logger.error(f"Ground boolean simplification error: {e}")
             raise
 
-        # After AST is built and data_dict merged (inline + .dat), rewrite conditional constraints:
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
-            # Simplify again in case if-constraints introduced new ground booleans
             self._simplify_ground_booleans(ast, working_data)
             self._lower_minmax_aggregates(ast)
             self._lower_maxmin_convex(ast)
-            self._split_boolean_and_constraints(ast)  # NEW: split conjunctions
+            self._split_boolean_and_constraints(ast)
         except SemanticError as e:
             logger.error(f"Conditional constraint error: {e}")
-            # Surface the error similarly to other semantic errors
             raise
 
+        import copy
+
+        codegen_ast = copy.deepcopy(ast)
+        codegen_data = copy.deepcopy(data_dict)
+        self._normalize_indexed_parameters_for_codegen(codegen_ast, codegen_data)
+
         if solver == "gurobi":
-            code = GurobiCodeGenerator(ast, data_dict).generate_code()
+            code = GurobiCodeGenerator(codegen_ast, codegen_data).generate_code()
         elif solver == "scipy":
-            code = cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(ast, data_dict)).generate_code()
+            code = cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(codegen_ast, codegen_data)).generate_code()
         else:
             raise ValueError(f"Unsupported solver: {solver}")
 
@@ -4663,11 +4342,9 @@ class OPLCompiler:
         dvars = self._collect_dvar_names(ast.get("declarations", []))
 
         def is_ground_bool(node: dict) -> bool:
-            # ground if it contains no dvar and all names are in env (no iterators here)
             if self._expr_contains_dvar(node, dvars):
                 return False
             try:
-                # if it evaluates without error, treat as ground
                 _ = self._eval_ground_expr(node, env)
                 return True
             except Exception:
@@ -4681,7 +4358,6 @@ class OPLCompiler:
                 return node
             t = node.get("type")
 
-            # Recurse first
             if t in ("and", "or"):
                 left = simplify_bool(node.get("left"))
                 right = simplify_bool(node.get("right"))
@@ -4696,10 +4372,7 @@ class OPLCompiler:
                 left = simplify_bool(node.get("left"))
                 right = simplify_bool(node.get("right"))
                 node = {"type": "binop", "op": node.get("op"), "left": left, "right": right, "sem_type": "boolean"}
-            else:
-                pass
 
-            # Constant fold ONLY boolean nodes (avoid folding numeric names like L -> true)
             is_bool_node = isinstance(node, dict) and (
                 node.get("sem_type") == "boolean"
                 or node.get("type") in ("and", "or", "not")
@@ -4712,102 +4385,85 @@ class OPLCompiler:
                 except Exception:
                     pass
 
-            # Apply boolean algebra with literals
             if isinstance(node, dict) and node.get("type") in ("and", "or"):
-                L = node.get("left")
-                R = node.get("right")
-                if isinstance(L, dict) and L.get("type") == "boolean_literal":
+                left = node.get("left")
+                right = node.get("right")
+                if isinstance(left, dict) and left.get("type") == "boolean_literal":
                     if node["type"] == "or":
-                        return as_bool_lit(True) if L.get("value") else R
-                    else:
-                        return R if L.get("value") else as_bool_lit(False)
-                if isinstance(R, dict) and R.get("type") == "boolean_literal":
+                        return as_bool_lit(True) if left.get("value") else right
+                    return right if left.get("value") else as_bool_lit(False)
+                if isinstance(right, dict) and right.get("type") == "boolean_literal":
                     if node["type"] == "or":
-                        return as_bool_lit(True) if R.get("value") else L
-                    else:
-                        return L if R.get("value") else as_bool_lit(False)
+                        return as_bool_lit(True) if right.get("value") else left
+                    return left if right.get("value") else as_bool_lit(False)
             if isinstance(node, dict) and node.get("type") == "not":
-                V = node.get("value")
-                if isinstance(V, dict) and V.get("type") == "boolean_literal":
-                    return as_bool_lit(not V.get("value"))
+                value = node.get("value")
+                if isinstance(value, dict) and value.get("type") == "boolean_literal":
+                    return as_bool_lit(not value.get("value"))
             return node
 
         def simplify_constraint(c: dict) -> list[dict]:
-            # Returns zero or more constraints (drop tautologies)
             if c.get("type") == "constraint":
                 op = c.get("op")
-                L = c.get("left")
-                R = c.get("right")
+                left = c.get("left")
+                right = c.get("right")
 
-                # Only simplify boolean-equality constraints: (bool_expr) == true/false
                 if op == "==":
-                    if isinstance(R, dict) and R.get("type") == "boolean_literal":
-                        Ls = simplify_bool(L)
-                        # NEW: unwrap parens so we see the inner comparison
-                        while isinstance(Ls, dict) and Ls.get("type") == "parenthesized_expression":
-                            Ls = Ls.get("expression")
+                    if isinstance(right, dict) and right.get("type") == "boolean_literal":
+                        left_simplified = simplify_bool(left)
+                        while isinstance(left_simplified, dict) and left_simplified.get("type") == "parenthesized_expression":
+                            left_simplified = left_simplified.get("expression")
 
-                        # If L fully reduces to boolean literal, decide
-                        if isinstance(Ls, dict) and Ls.get("type") == "boolean_literal":
-                            if Ls.get("value") == R.get("value"):
-                                return []  # tautology
-                            else:
-                                return [
-                                    {
-                                        "type": "constraint",
-                                        "op": "==",
-                                        "left": {"type": "number", "value": 0, "sem_type": "int"},
-                                        "right": {"type": "number", "value": 1, "sem_type": "int"},
-                                    }
-                                ]
+                        if isinstance(left_simplified, dict) and left_simplified.get("type") == "boolean_literal":
+                            if left_simplified.get("value") == right.get("value"):
+                                return []
+                            return [
+                                {
+                                    "type": "constraint",
+                                    "op": "==",
+                                    "left": {"type": "number", "value": 0, "sem_type": "int"},
+                                    "right": {"type": "number", "value": 1, "sem_type": "int"},
+                                }
+                            ]
 
-                        # If Ls is a comparison (binop boolean), keep or negate it properly
-                        if isinstance(Ls, dict) and Ls.get("type") == "binop" and Ls.get("sem_type") == "boolean":
-                            op_any = Ls.get("op")
+                        if isinstance(left_simplified, dict) and left_simplified.get("type") == "binop" and left_simplified.get("sem_type") == "boolean":
+                            op_any = left_simplified.get("op")
                             if not isinstance(op_any, str):
-                                # Can't safely negate/emit a comparison op; leave as (Ls == true/false)
-                                return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
+                                return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
 
-                            if R.get("value") is True:
-                                # (cmp) == true -> cmp
+                            if right.get("value") is True:
                                 return [
                                     {
                                         "type": "constraint",
                                         "op": op_any,
-                                        "left": Ls.get("left"),
-                                        "right": Ls.get("right"),
-                                    }
-                                ]
-                            else:
-                                # (cmp) == false -> negate cmp
-                                neg: dict[str, str] = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
-                                neg_op = neg.get(op_any)
-                                if neg_op is None:
-                                    return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
-                                return [
-                                    {
-                                        "type": "constraint",
-                                        "op": neg_op,
-                                        "left": Ls.get("left"),
-                                        "right": Ls.get("right"),
+                                        "left": left_simplified.get("left"),
+                                        "right": left_simplified.get("right"),
                                     }
                                 ]
 
-                        # Non-ground boolean tree: leave for codegen to linearize
-                        return [{"type": "constraint", "op": "==", "left": Ls, "right": R}]
+                            neg: dict[str, str] = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
+                            neg_op = neg.get(op_any)
+                            if neg_op is None:
+                                return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
+                            return [
+                                {
+                                    "type": "constraint",
+                                    "op": neg_op,
+                                    "left": left_simplified.get("left"),
+                                    "right": left_simplified.get("right"),
+                                }
+                            ]
 
-                # Other numeric constraints unchanged
+                        return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
+
                 return [c]
 
             if c.get("type") == "forall_constraint":
-                # Simplify index_constraint first
                 new_ic = c.get("index_constraint")
                 if isinstance(new_ic, dict):
                     new_ic = simplify_bool(new_ic)
-                    # Drop forall if guard is false
                     if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is False:
-                        return []  # no constraints generated
-                    # Remove guard if true
+                        return []
                     if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is True:
                         new_ic = None
 
@@ -4836,8 +4492,8 @@ class OPLCompiler:
                     return out
                 if "constraints" in c and isinstance(c["constraints"], list):
                     inner_all = []
-                    for cc in c["constraints"]:
-                        inner_all.extend(simplify_constraint(cc))
+                    for child in c["constraints"]:
+                        inner_all.extend(simplify_constraint(child))
                     if inner_all:
                         if len(inner_all) == 1:
                             out.append(
@@ -4860,7 +4516,6 @@ class OPLCompiler:
                     return out
                 return [c]
 
-            # Pass-through for other nodes
             return [c]
 
         if "constraints" in ast and isinstance(ast["constraints"], list):
@@ -5675,7 +5330,7 @@ def solve_with_gurobi(model_file, data_file=None):
 
     if loaded_ast and loaded_gurobi_code:
         logger.info("\n--- Loaded AST from file ---")
-        logger.info(json.dumps(loaded_ast, indent=2))
+        logger.info(json.dumps(_json_safe(loaded_ast), indent=2))
         if loaded_data_dict:
             logger.info("\n--- Loaded Data Dictionary from file ---")
             logger.info(json.dumps(_json_safe(loaded_data_dict), indent=2))
@@ -5758,7 +5413,7 @@ def solve_with_scipy(model_file, data_file=None):
 
     if loaded_ast and loaded_scipy_code:
         logger.info("\n--- Loaded AST from file ---")
-        logger.info(json.dumps(loaded_ast, indent=2))
+        logger.info(json.dumps(_json_safe(loaded_ast), indent=2))
         if loaded_data_dict:
             logger.info("\n--- Loaded Data Dictionary from file ---")
             logger.info(json.dumps(_json_safe(loaded_data_dict), indent=2))
