@@ -389,18 +389,7 @@ class OPLLexer(Lexer):
 
 # --- Parser ---
 class OPLParser(Parser):
-    # debugfile="parser_debug.out"
-
-    # Allow zero or more declarations at the top level
-    @_("")  # type: ignore
-    def declarations(self, p):
-        logger.debug("[DECLARATIONS] Empty declarations list")
-        return []
-
-    @_("")  # type: ignore
-    def declaration_list(self, p):
-        logger.debug("[DECL_LIST] Empty declaration_list")
-        return []
+    # debugfile = "parser_debug.out"
 
     # Set of tuples declaration (inline init): { TupleType } SetName = { <...>, ... };
     @_('"{" NAME "}" NAME "=" "{" tuple_literal_list "}" ";"')  # type: ignore
@@ -561,14 +550,6 @@ class OPLParser(Parser):
 
     # --- DEXPR: decision expressions (expand-on-use) ---
 
-    # Header: [ i in I, j in J ] — keep iterators in scope until RHS parsed
-    @_('"[" dexpr_index_list "]"')  # type: ignore
-    def dexpr_index_header(self, p):
-        # Open a fresh scope for the iterator(s) used by this header
-        self.symbol_table.enter_scope()
-        # Iterators already added to current scope by dexpr_index_list/dexpr_index
-        return {"iterators": p.dexpr_index_list, "_iterator_scope_opened": True}
-
     # --- Strict OPL nested headers support: [i in I][j in J] ... ---
 
     # Tail of nested headers: zero or more additional [iterators] groups
@@ -646,42 +627,6 @@ class OPLParser(Parser):
             "var_type": p.type,
             "iterators": [],
             "dimensions": [],
-            "expression": p.expression,
-        }
-
-    # Indexed dexpr: dexpr type Y[i in I, j in J] = expression;
-    @_('DEXPR type NAME dexpr_index_header "=" expression ";"')  # type: ignore
-    def declaration(self, p):
-        iterators = p.dexpr_index_header["iterators"]
-        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
-
-        # Close the iterator scope BEFORE adding the symbol so W persists in the global scope
-        try:
-            self._cleanup_iterator_header(p.dexpr_index_header)
-        except Exception:
-            pass
-
-        # Store dexpr in the (now current) outer scope
-        self.symbol_table.add_symbol(
-            p.NAME,
-            "dexpr",
-            value={
-                "iterators": iterators,
-                "dimensions": dimensions,
-                "expression": p.expression,
-                "var_type": p.type,
-            },
-            dimensions=dimensions,
-            lineno=p.lineno,
-        )
-
-        # Return AST declaration
-        return {
-            "type": "dexpr_indexed",
-            "name": p.NAME,
-            "var_type": p.type,
-            "iterators": iterators,
-            "dimensions": dimensions,
             "expression": p.expression,
         }
 
@@ -902,27 +847,6 @@ class OPLParser(Parser):
             "sem_type": expr_type,
         }
 
-    # Parenthesized/atomic case: sum(i in I : cond) (x[i] >= 6)
-    @_("SUM sum_index_header parenthesized_expression")  # type: ignore
-    def sum_expression(self, p):
-        logger.debug(f"[PARSER] Enter sum_expression (parenthesized): SUM {p.sum_index_header} {p.parenthesized_expression}")
-        iterators = p.sum_index_header["iterators"]
-        index_constraint = p.sum_index_header.get("index_constraint")
-        parsed_expression = p.parenthesized_expression
-        expr_type = parsed_expression["sem_type"]
-        result_type = "int" if expr_type == "boolean" else expr_type
-        self._cleanup_iterator_header(p.sum_index_header)
-        logger.debug(
-            f"[PARSER] Exit sum_expression (parenthesized): iterators={iterators}, index_constraint={index_constraint}, expr_type={expr_type}"
-        )
-        return {
-            "type": "sum",
-            "iterators": iterators,
-            "index_constraint": index_constraint,
-            "expression": parsed_expression,
-            "sem_type": result_type,
-        }
-
     # Helper nonterminal for bare aggregate bodies.
     # This lets `sum(i in I) a[i] * x[i]` bind the full product into the sum
     # without greedily swallowing surrounding `+`, `-`, or comparison context.
@@ -988,13 +912,9 @@ class OPLParser(Parser):
         sem_type = "int" if isinstance(p.NUMBER, int) else "float"
         return {"type": "number", "value": p.NUMBER, "sem_type": sem_type}
 
-    @_('"(" expression ")"')  # type: ignore
+    @_("parenthesized_expression")  # type: ignore
     def primary(self, p):
-        return {
-            "type": "parenthesized_expression",
-            "expression": p.expression,
-            "sem_type": p.expression["sem_type"],
-        }
+        return p.parenthesized_expression
 
     # Helper: detect negative numeric literals (either number < 0 or uminus of a number)
     def _is_negative_literal(self, expr) -> bool:
@@ -1511,20 +1431,36 @@ class OPLParser(Parser):
         # Unexpected EOF
         raise SemanticError("Syntax error at end of file (EOF).", lineno=self._last_lineno)
 
-    @_("declarations objective_section constraints_section")  # type: ignore
+    @_("declaration_list objective_section constraints_section")  # type: ignore
     def model(self, p):
         # Debug: print model rule reduction
         # print("[DEBUG] model rule reduced")
         return {
-            "declarations": p.declarations,
+            "declarations": p.declaration_list,
             "objective": p.objective_section,
             "constraints": p.constraints_section,
         }
 
-    @_("declarations constraints_section objective_section")  # type: ignore
+    @_("declaration_list constraints_section objective_section")  # type: ignore
     def model(self, p):
         return {
-            "declarations": p.declarations,
+            "declarations": p.declaration_list,
+            "objective": p.objective_section,
+            "constraints": p.constraints_section,
+        }
+
+    @_("objective_section constraints_section")  # type: ignore
+    def model(self, p):
+        return {
+            "declarations": [],
+            "objective": p.objective_section,
+            "constraints": p.constraints_section,
+        }
+
+    @_("constraints_section objective_section")  # type: ignore
+    def model(self, p):
+        return {
+            "declarations": [],
             "objective": p.objective_section,
             "constraints": p.constraints_section,
         }
@@ -1537,16 +1473,6 @@ class OPLParser(Parser):
     @_("declaration")  # type: ignore
     def declaration_list(self, p):
         logger.debug(f"[DECL_LIST] Single declaration: {p.declaration}")
-        return _list_with_item(p.declaration)
-
-    @_("declaration_list")  # type: ignore
-    def declarations(self, p):
-        logger.debug(f"[DECLARATIONS] Reduced to declaration_list: {p.declaration_list}")
-        return p.declaration_list
-
-    @_("declaration")  # type: ignore
-    def declarations(self, p):
-        logger.debug(f"[DECLARATIONS] Single declaration: {p.declaration}")
         return _list_with_item(p.declaration)
 
     @_('DVAR type NAME ";"')  # type: ignore
@@ -1652,42 +1578,27 @@ class OPLParser(Parser):
     def opt_PARAM(self, p):
         return False
 
-    # --- Optional assignment with ellipsis: allows both 'type Name = ...' and 'type Name' ---
-    @_('"=" ELLIPSIS')  # type: ignore
-    def opt_assign_ellipsis(self, p):
-        return True
-
-    # Empty rule: needed to allow omission of '= ...' in parameter declarations
-    @_("")  # type: ignore
-    def opt_assign_ellipsis(self, p):
-        return False
-
-    @_('opt_PARAM type NAME opt_assign_ellipsis ";"')  # type: ignore
+    @_('opt_PARAM type NAME ";"')  # type: ignore
     def declaration(self, p):
         """
-        Rule for scalar parameter declaration.
-        If '= ...' is present, it's explicitly external.
-        Otherwise, it's implicitly external.
+        Rule for scalar external parameter declaration.
         """
         name = p.NAME
         var_type = p.type
-        has_ellipsis_assignment = p.opt_assign_ellipsis
+        self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
+        return {"type": "parameter_external", "var_type": var_type, "name": name}
 
-        if has_ellipsis_assignment:
-            # Explicitly external parameter: type Name = ...; or param type Name = ...;
-            self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
-            return {"type": "parameter_external", "var_type": var_type, "name": name}
-        else:
-            # Implicitly external parameter: type Name; or param type Name;
-            self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
-            return {"type": "parameter_external", "var_type": var_type, "name": name}
+    @_('opt_PARAM type NAME "=" ELLIPSIS ";"')  # type: ignore
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
+        return {"type": "parameter_external", "var_type": var_type, "name": name}
 
-    @_('opt_PARAM type NAME indexed_dimensions opt_assign_ellipsis ";"')  # type: ignore
+    @_('opt_PARAM type NAME indexed_dimensions ";"')  # type: ignore
     def declaration(self, p):
         """
-        Rule for indexed parameter declaration.
-        If '= ...' is present, it's explicitly external.
-        Otherwise, it's implicitly external.
+        Rule for indexed external parameter declaration.
         """
         name = p.NAME
         var_type = p.type
@@ -1696,38 +1607,41 @@ class OPLParser(Parser):
             for dim_spec in p.indexed_dimensions
         ]
 
-        has_ellipsis_assignment = p.opt_assign_ellipsis
+        self.symbol_table.add_symbol(
+            name,
+            var_type,
+            dimensions=processed_dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "parameter_external_indexed",
+            "var_type": var_type,
+            "name": name,
+            "dimensions": processed_dimensions,
+        }
 
-        if has_ellipsis_assignment:
-            # Explicitly external indexed parameter: type Name[dims] = ...; or param type Name[dims] = ...;
-            self.symbol_table.add_symbol(
-                name,
-                var_type,
-                dimensions=processed_dimensions,
-                is_dvar=False,
-                lineno=p.lineno,
-            )
-            return {
-                "type": "parameter_external_explicit_indexed",
-                "var_type": var_type,
-                "name": name,
-                "dimensions": processed_dimensions,
-            }
-        else:
-            # Implicitly external indexed parameter: type Name[dims]; or param type Name[dims];
-            self.symbol_table.add_symbol(
-                name,
-                var_type,
-                dimensions=processed_dimensions,
-                is_dvar=False,
-                lineno=p.lineno,
-            )
-            return {
-                "type": "parameter_external_indexed",
-                "var_type": var_type,
-                "name": name,
-                "dimensions": processed_dimensions,
-            }
+    @_('opt_PARAM type NAME indexed_dimensions "=" ELLIPSIS ";"')  # type: ignore
+    def declaration(self, p):
+        name = p.NAME
+        var_type = p.type
+        processed_dimensions = [
+            self._normalize_declaration_dimension(dim_spec, p.lineno)
+            for dim_spec in p.indexed_dimensions
+        ]
+        self.symbol_table.add_symbol(
+            name,
+            var_type,
+            dimensions=processed_dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "parameter_external_explicit_indexed",
+            "var_type": var_type,
+            "name": name,
+            "dimensions": processed_dimensions,
+        }
 
     # --- End of "param" optional rules and new explicit external parameter syntax ---
 
@@ -1860,17 +1774,6 @@ class OPLParser(Parser):
             lineno=p.lineno,
         )
 
-    # Lint: reject indexed labels inside forall like 'forall(...) ct[i]: ...;'
-    @_('FORALL forall_index_header NAME indexed_dimensions ":" expression ";"')  # type: ignore
-    def constraint(self, p):
-        # Close any iterator context opened by the header to avoid scope leaks on error
-        self._cleanup_iterator_header(p.forall_index_header)
-        raise SemanticError(
-            "Indexed constraint labels are not allowed inside forall. Use a plain, unindexed label inside the forall: "
-            "forall(i in I) ct: ...;",
-            lineno=p.lineno,
-        )
-
     @_('SUBJECT_TO "{" constraint_list "}"')  # type: ignore
     def constraints_section(self, p):
         return p.constraint_list
@@ -1918,17 +1821,6 @@ class OPLParser(Parser):
             invalid_message="Labeled constraints must be comparison or boolean expression.",
             label=p.NAME,
         )
-
-    # Labeled forall single constraint: forall(...) label: expr OP expr;
-    @_('FORALL forall_index_header NAME ":" expression ";"')  # type: ignore
-    def constraint(self, p):
-        base_constraint = self._coerce_expression_to_constraint(
-            p.expression,
-            invalid_message="forall labeled constraint must be comparison or boolean expression.",
-            label=p.NAME,
-        )
-        fc = self._build_forall_constraint(p.forall_index_header, base_constraint, getattr(p, "lineno", None))
-        return fc
 
     # --- NEW: Conditional constraints ---
     # if (<ground_condition>) { <list-of-constraints> } else { <list-of-constraints> }
@@ -2096,17 +1988,6 @@ class OPLParser(Parser):
     def constraint_block(self, p):
         # Accept implication_constraint(s) in block
         return p.constraint_list
-
-    # Support: (i in Cities, j in Cities: i != j)
-    @_('"(" sum_index_list opt_index_constraint ")"')  # type: ignore
-    def forall_index_header(self, p):
-        iterators = p.sum_index_list
-        result = {"iterators": iterators, "index_constraint": p.opt_index_constraint}
-        # Push iterator context for body parsing
-        iter_types = self._iter_types_from_sum_index_list(iterators)
-        self._iterator_context_stack.append(iter_types)
-        result["_iter_ctx_pushed"] = True
-        return result
 
     @_("expression DOTDOT expression")  # type: ignore
     def IN_RANGE(self, p):
@@ -2279,20 +2160,6 @@ class OPLParser(Parser):
         iter_types = self._iter_types_from_sum_index_list(iterators)
         self._iterator_context_stack.append(iter_types)
         result["_iter_ctx_pushed"] = True
-        return result
-
-    # Support: legacy header without iter_header_open
-    @_('"(" sum_index_list opt_index_constraint ")"')  # type: ignore
-    def sum_index_header(self, p):
-        logger.debug(
-            f"[PARSER] Enter sum_index_header (alt): sum_index_list={p.sum_index_list}, opt_index_constraint={p.opt_index_constraint}"
-        )
-        result = {"iterators": p.sum_index_list, "index_constraint": p.opt_index_constraint}
-        # Push iterator types for body parsing even if no scope was opened
-        iter_types = self._iter_types_from_sum_index_list(p.sum_index_list)
-        self._iterator_context_stack.append(iter_types)
-        result["_iter_ctx_pushed"] = True
-        logger.debug(f"[PARSER] Exit sum_index_header (alt): result={result}")
         return result
 
     # Multi-index: all iterators are in the same scope
@@ -2480,21 +2347,6 @@ class OPLParser(Parser):
             "sem_type": sem,
         }
 
-    # min(...) (parenthesized body)
-    @_("AGG_MIN sum_index_header parenthesized_expression")
-    def min_expression(self, p):
-        expr_type = p.parenthesized_expression["sem_type"]
-        if expr_type not in ("int", "int+", "float", "float+"):
-            raise SemanticError("min aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float", "float+") else "int"
-        return {
-            "type": "min_agg",
-            "iterators": p.sum_index_header["iterators"],
-            "index_constraint": p.sum_index_header.get("index_constraint"),
-            "expression": p.parenthesized_expression,
-            "sem_type": sem,
-        }
-
     # max(i in I : cond) expr
     @_("AGG_MAX sum_index_header nonparen_expression")
     def max_expression(self, p):
@@ -2507,20 +2359,6 @@ class OPLParser(Parser):
             "iterators": p.sum_index_header["iterators"],
             "index_constraint": p.sum_index_header.get("index_constraint"),
             "expression": p.nonparen_expression,
-            "sem_type": sem,
-        }
-
-    @_("AGG_MAX sum_index_header parenthesized_expression")
-    def max_expression(self, p):
-        expr_type = p.parenthesized_expression["sem_type"]
-        if expr_type not in ("int", "int+", "float", "float+"):
-            raise SemanticError("max aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float", "float+") else "int"
-        return {
-            "type": "max_agg",
-            "iterators": p.sum_index_header["iterators"],
-            "index_constraint": p.sum_index_header.get("index_constraint"),
-            "expression": p.parenthesized_expression,
             "sem_type": sem,
         }
 
@@ -2696,21 +2534,6 @@ class OPLParser(Parser):
             "sem_type": sem_type,
         }
 
-    # --- Support for parameter declarations with direct value assignment ---
-    @_('opt_PARAM type NAME "=" signed_number ";"')  # type: ignore
-    def declaration(self, p):
-        # Scalar parameter with direct value assignment (allow negatives)
-        name = p.NAME
-        var_type = p.type
-        value = p.signed_number
-        self.symbol_table.add_symbol(name, var_type, value=value, is_dvar=False, lineno=p.lineno)
-        return {
-            "type": "parameter_inline",
-            "var_type": var_type,
-            "name": name,
-            "value": value,
-        }
-
     # NEW: scalar parameter with general expression on RHS (e.g., float C = 5 / 6;)
     @_('opt_PARAM type NAME "=" expression ";"')  # type: ignore
     def declaration(self, p):
@@ -2734,39 +2557,6 @@ class OPLParser(Parser):
             "var_type": var_type,
             "name": name,
             "expression": expr,
-        }
-
-    # --- computed indexed parameter from expression with iterators, e.g.
-    # float sqrt_demand[t in T] = sqrt(demand[t]);
-    @_('opt_PARAM type NAME dexpr_index_header "=" expression ";"')  # type: ignore
-    def declaration(self, p):
-        name = p.NAME
-        var_type = p.type
-        iterators = p.dexpr_index_header["iterators"]
-        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
-
-        # Close the iterator scope before adding the parameter symbol
-        try:
-            self._cleanup_iterator_header(p.dexpr_index_header)
-        except Exception:
-            pass
-
-        # Register symbol in outer scope
-        self.symbol_table.add_symbol(
-            name,
-            var_type,
-            dimensions=dimensions,
-            is_dvar=False,
-            lineno=p.lineno,
-        )
-
-        return {
-            "type": "parameter_inline_indexed_expr",
-            "var_type": var_type,
-            "name": name,
-            "iterators": iterators,
-            "dimensions": dimensions,
-            "expression": p.expression,
         }
 
     # NEW: computed indexed parameter with strict OPL nested headers: float W[i in I][j in J] = ...
@@ -3121,9 +2911,9 @@ class OPLDataParser(Parser):
         return self.data
 
     @_("")  # type: ignore
-    def data_declaration_list(self, p):
+    def data_file(self, p):
         # Allow empty .dat files
-        return []
+        return self.data
 
     @_("data_declaration_list data_declaration")  # type: ignore
     def data_declaration_list(self, p):
