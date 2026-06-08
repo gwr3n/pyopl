@@ -1602,10 +1602,7 @@ class OPLParser(Parser):
         """
         name = p.NAME
         var_type = p.type
-        processed_dimensions = [
-            self._normalize_declaration_dimension(dim_spec, p.lineno)
-            for dim_spec in p.indexed_dimensions
-        ]
+        processed_dimensions = [self._normalize_declaration_dimension(dim_spec, p.lineno) for dim_spec in p.indexed_dimensions]
 
         self.symbol_table.add_symbol(
             name,
@@ -1625,10 +1622,7 @@ class OPLParser(Parser):
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
-        processed_dimensions = [
-            self._normalize_declaration_dimension(dim_spec, p.lineno)
-            for dim_spec in p.indexed_dimensions
-        ]
+        processed_dimensions = [self._normalize_declaration_dimension(dim_spec, p.lineno) for dim_spec in p.indexed_dimensions]
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -2599,8 +2593,7 @@ class OPLParser(Parser):
         dimensions = p.indexed_dimensions
         value = p.array_value
         processed_dimensions = [
-            self._normalize_declaration_dimension(dim_spec, p.lineno, wrap_range_bounds=True)
-            for dim_spec in dimensions
+            self._normalize_declaration_dimension(dim_spec, p.lineno, wrap_range_bounds=True) for dim_spec in dimensions
         ]
         self.symbol_table.add_symbol(
             name,
@@ -3197,17 +3190,17 @@ class OPLCompiler:
                     "tuple_type": decl.get("tuple_type"),
                 }
 
-        declared_names = {
-            decl.get("name")
-            for decl in declarations
-            if isinstance(decl, dict) and isinstance(decl.get("name"), str)
-        }
-        bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
+        declared_names: set[str] = set()
+        for decl in declarations:
+            if isinstance(decl, dict):
+                name = decl.get("name")
+                if isinstance(name, str):
+                    declared_names.add(name)
+        bad_decl: set[str] = declared_names & RESERVED_PY_IDENTIFIERS
         if bad_decl:
             bad = sorted(bad_decl)[0]
             raise SemanticError(
-                f"Identifier '{bad}' is reserved and cannot be used as a model symbol. "
-                f"Please rename it in the .mod file."
+                f"Identifier '{bad}' is reserved and cannot be used as a model symbol. " f"Please rename it in the .mod file."
             )
 
         bad_data = set(working_data.keys()) & RESERVED_PY_IDENTIFIERS
@@ -3226,12 +3219,18 @@ class OPLCompiler:
         if isinstance(expr, dict):
             expr_type = expr.get("type")
             if expr_type == "number":
-                return int(expr.get("value"))
+                value = expr.get("value")
+                if value is None:
+                    raise SemanticError(f"Unsupported bound expr: {expr}")
+                return int(value)
             if expr_type == "name":
-                value = working_data.get(expr.get("value"))
+                name = expr.get("value")
+                if not isinstance(name, str):
+                    raise SemanticError(f"Unsupported bound expr: {expr}")
+                value = working_data.get(name)
                 if isinstance(value, (int, float)):
                     return int(value)
-                raise SemanticError(f"Unknown name in range bound: {expr.get('value')}")
+                raise SemanticError(f"Unknown name in range bound: {name}")
             if expr_type == "binop":
                 op = expr.get("op")
                 left = self._eval_bound_expr(expr.get("left"), working_data)
@@ -3258,9 +3257,7 @@ class OPLCompiler:
             (
                 decl
                 for decl in (model_ast.get("declarations") or [])
-                if isinstance(decl, dict)
-                and decl.get("type") == "range_declaration_inline"
-                and decl.get("name") == rng_name
+                if isinstance(decl, dict) and decl.get("type") == "range_declaration_inline" and decl.get("name") == rng_name
             ),
             None,
         )
@@ -3326,7 +3323,10 @@ class OPLCompiler:
                 if isinstance(expr, dict):
                     expr_type = expr.get("type")
                     if expr_type == "name":
-                        return env.get(expr.get("value"))
+                        name = expr.get("value")
+                        if not isinstance(name, str):
+                            raise SemanticError("Tuple comprehension name expression is missing an identifier.")
+                        return env.get(name)
                     if expr_type == "number":
                         return expr.get("value")
                     if expr_type == "parenthesized_expression":
@@ -3339,7 +3339,10 @@ class OPLCompiler:
                     if expr_type == "number":
                         return bool(expr.get("value"))
                     if expr_type == "name":
-                        return bool(env.get(expr.get("value")))
+                        name = expr.get("value")
+                        if not isinstance(name, str):
+                            raise SemanticError("Boolean comprehension name expression is missing an identifier.")
+                        return bool(env.get(name))
                     if expr_type == "parenthesized_expression":
                         return eval_bool(expr.get("expression"), env)
                 return bool(expr)
@@ -3419,15 +3422,24 @@ class OPLCompiler:
                 return idx_expr.get("value")
             if expr_type == "name_reference_index":
                 name = idx_expr.get("name")
+                if not isinstance(name, str):
+                    raise SemanticError("Unsupported index expr: missing name reference.")
                 return env.get(name, name)
             if expr_type == "name":
-                return env.get(idx_expr.get("value"), idx_expr.get("value"))
+                name = idx_expr.get("value")
+                if not isinstance(name, str):
+                    raise SemanticError("Unsupported index expr: missing name.")
+                return env.get(name, name)
             if expr_type in ("field_access_index", "field_access"):
                 raise SemanticError("Field access in computed parameter indices not supported.")
             if expr_type == "binop":
                 op = idx_expr.get("op")
-                left = eval_index(idx_expr.get("left"), env)
-                right = eval_index(idx_expr.get("right"), env)
+                left_expr = idx_expr.get("left")
+                right_expr = idx_expr.get("right")
+                if not isinstance(left_expr, dict) or not isinstance(right_expr, dict):
+                    raise SemanticError("Unsupported index binop operands.")
+                left = eval_index(left_expr, env)
+                right = eval_index(right_expr, env)
                 if op == "+":
                     return int(left) + int(right)
                 if op == "-":
@@ -3436,9 +3448,15 @@ class OPLCompiler:
                     return int(left) * int(right)
                 raise SemanticError(f"Unsupported index binop: {op}")
             if expr_type == "uminus":
-                return -int(eval_index(idx_expr.get("value"), env))
+                value_expr = idx_expr.get("value")
+                if not isinstance(value_expr, dict):
+                    raise SemanticError("Unsupported index expr: missing unary operand.")
+                return -int(eval_index(value_expr, env))
             if expr_type == "parenthesized_expression":
-                return eval_index(idx_expr.get("expression"), env)
+                inner_expr = idx_expr.get("expression")
+                if not isinstance(inner_expr, dict):
+                    raise SemanticError("Unsupported index expr: missing parenthesized expression.")
+                return eval_index(inner_expr, env)
             if expr_type == "string_literal":
                 return idx_expr.get("value")
             raise SemanticError(f"Unsupported index expr: {expr_type}")
@@ -3491,13 +3509,18 @@ class OPLCompiler:
         def eval_expr(expr: dict[str, Any], env: dict[str, Any], iter_meta: Optional[dict[str, dict[str, Any]]] = None) -> Any:
             expr_type = expr.get("type") if isinstance(expr, dict) else None
             if expr_type == "number":
-                return float(expr.get("value"))
+                value = expr.get("value")
+                if value is None:
+                    raise SemanticError("Numeric literal missing value in computed parameter expression.")
+                return float(value)
             if expr_type == "boolean_literal":
                 return 1.0 if expr.get("value") else 0.0
             if expr_type == "string_literal":
                 return expr.get("value")
             if expr_type == "name":
                 name = expr.get("value")
+                if not isinstance(name, str):
+                    raise SemanticError("Unknown name in computed parameter expression.")
                 if name in env:
                     value = env[name]
                     return float(value) if isinstance(value, (int, float)) else value
@@ -3505,19 +3528,31 @@ class OPLCompiler:
                     return working_data[name]
                 raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
             if expr_type == "conditional":
-                cond_value = eval_expr(expr.get("condition"), env, iter_meta)
-                branch = expr.get("then") if bool(cond_value) else expr.get("else")
+                condition = expr.get("condition")
+                then_branch = expr.get("then")
+                else_branch = expr.get("else")
+                if not isinstance(condition, dict) or not isinstance(then_branch, dict) or not isinstance(else_branch, dict):
+                    raise SemanticError("Conditional expression must contain expression nodes.")
+                cond_value = eval_expr(condition, env, iter_meta)
+                branch = then_branch if bool(cond_value) else else_branch
                 return eval_expr(branch, env, iter_meta)
             if expr_type == "field_access":
                 base = expr.get("base")
                 field = expr.get("field")
+                if not isinstance(base, dict) or not isinstance(field, str):
+                    raise SemanticError("Cannot resolve tuple field name in computed parameter.")
                 base_value = eval_expr(base, env, iter_meta)
                 tuple_type = None
                 if isinstance(base, dict):
                     base_sem_type = base.get("sem_type")
                     if isinstance(base_sem_type, str) and base_sem_type in tuple_fields_by_type:
                         tuple_type = base_sem_type
-                if tuple_type is None and isinstance(base, dict) and base.get("type") == "name" and isinstance(iter_meta, dict):
+                if (
+                    tuple_type is None
+                    and isinstance(base, dict)
+                    and base.get("type") == "name"
+                    and isinstance(iter_meta, dict)
+                ):
                     iterator_name = base.get("value")
                     meta = iter_meta.get(iterator_name) if iterator_name else None
                     if isinstance(meta, dict):
@@ -3536,6 +3571,8 @@ class OPLCompiler:
                 return float(value) if isinstance(value, (int, float)) else value
             if expr_type == "indexed_name":
                 base = expr.get("name")
+                if not isinstance(base, str):
+                    raise SemanticError("Parameter name missing for indexed access.")
                 dims = expr.get("dimensions", [])
                 arr = working_data.get(base)
                 if arr is None:
@@ -3578,6 +3615,8 @@ class OPLCompiler:
                                     return 0.0
                             elif not cond_value:
                                 return 0.0
+                        if not isinstance(body, dict):
+                            raise SemanticError("Aggregate expression must be an expression node.")
                         return float(eval_expr(body, local_env, iter_meta_local))
                     iterator_name = iterators[depth]["iterator"]
                     total = 0.0
@@ -3607,6 +3646,8 @@ class OPLCompiler:
                                     return
                             elif not cond_value:
                                 return
+                        if not isinstance(body, dict):
+                            raise SemanticError("Aggregate expression must be an expression node.")
                         value = float(eval_expr(body, local_env, iter_meta_local))
                         if best is None:
                             best = value
@@ -3627,15 +3668,30 @@ class OPLCompiler:
                     raise SemanticError("Aggregate domain is empty in computed parameter expression.")
                 return best
             if expr_type == "and":
-                return bool(eval_expr(expr.get("left"), env)) and bool(eval_expr(expr.get("right"), env))
+                left = expr.get("left")
+                right = expr.get("right")
+                if not isinstance(left, dict) or not isinstance(right, dict):
+                    raise SemanticError("Logical 'and' operands must be expression nodes.")
+                return bool(eval_expr(left, env)) and bool(eval_expr(right, env))
             if expr_type == "or":
-                return bool(eval_expr(expr.get("left"), env)) or bool(eval_expr(expr.get("right"), env))
+                left = expr.get("left")
+                right = expr.get("right")
+                if not isinstance(left, dict) or not isinstance(right, dict):
+                    raise SemanticError("Logical 'or' operands must be expression nodes.")
+                return bool(eval_expr(left, env)) or bool(eval_expr(right, env))
             if expr_type == "not":
-                return not bool(eval_expr(expr.get("value"), env))
+                value = expr.get("value")
+                if not isinstance(value, dict):
+                    raise SemanticError("Logical 'not' operand must be an expression node.")
+                return not bool(eval_expr(value, env))
             if expr_type == "binop":
                 op = expr.get("op")
-                left_value = eval_expr(expr.get("left"), env)
-                right_value = eval_expr(expr.get("right"), env)
+                left = expr.get("left")
+                right = expr.get("right")
+                if not isinstance(left, dict) or not isinstance(right, dict):
+                    raise SemanticError("Binary operator operands must be expression nodes.")
+                left_value = eval_expr(left, env)
+                right_value = eval_expr(right, env)
                 if op == "+":
                     return float(left_value) + float(right_value)
                 if op == "-":
@@ -3661,14 +3717,23 @@ class OPLCompiler:
                         return 1.0 if (left_value != right_value) else 0.0
                 raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
             if expr_type == "uminus":
-                return -float(eval_expr(expr.get("value"), env))
+                value = expr.get("value")
+                if not isinstance(value, dict):
+                    raise SemanticError("Unary minus operand must be an expression node.")
+                return -float(eval_expr(value, env))
             if expr_type == "parenthesized_expression":
-                return eval_expr(expr.get("expression"), env)
+                inner = expr.get("expression")
+                if not isinstance(inner, dict):
+                    raise SemanticError("Parenthesized expression must contain an expression node.")
+                return eval_expr(inner, env)
             if expr_type == "funcall":
                 func_name = expr.get("name")
                 args = expr.get("args", [])
                 if func_name == "sqrt" and len(args) == 1:
-                    return math.sqrt(float(eval_expr(args[0], env)))
+                    arg = args[0]
+                    if not isinstance(arg, dict):
+                        raise SemanticError("Unsupported function argument in computed parameter expression.")
+                    return math.sqrt(float(eval_expr(arg, env)))
                 raise SemanticError(f"Unsupported function '{func_name}' in computed parameter expression.")
             if expr_type in ("maxl", "minl"):
                 values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
@@ -4216,7 +4281,11 @@ class OPLCompiler:
                                 }
                             ]
 
-                        if isinstance(left_simplified, dict) and left_simplified.get("type") == "binop" and left_simplified.get("sem_type") == "boolean":
+                        if (
+                            isinstance(left_simplified, dict)
+                            and left_simplified.get("type") == "binop"
+                            and left_simplified.get("sem_type") == "boolean"
+                        ):
                             op_any = left_simplified.get("op")
                             if not isinstance(op_any, str):
                                 return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
