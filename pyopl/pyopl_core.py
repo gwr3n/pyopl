@@ -2329,32 +2329,40 @@ class OPLParser(Parser):
     # min(i in I : cond) expr   — juxtaposition
     @_("AGG_MIN sum_index_header nonparen_expression")
     def min_expression(self, p):
-        expr_type = p.nonparen_expression["sem_type"]
-        if expr_type not in ("int", "int+", "float", "float+"):
-            raise SemanticError("min aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float", "float+") else "int"
-        return {
-            "type": "min_agg",
-            "iterators": p.sum_index_header["iterators"],
-            "index_constraint": p.sum_index_header.get("index_constraint"),
-            "expression": p.nonparen_expression,
-            "sem_type": sem,
-        }
+        header = p.sum_index_header
+        try:
+            expr_type = p.nonparen_expression["sem_type"]
+            if expr_type not in ("int", "int+", "float", "float+"):
+                raise SemanticError("min aggregate expects numeric expression.")
+            sem = "float" if expr_type in ("float", "float+") else "int"
+            return {
+                "type": "min_agg",
+                "iterators": header["iterators"],
+                "index_constraint": header.get("index_constraint"),
+                "expression": p.nonparen_expression,
+                "sem_type": sem,
+            }
+        finally:
+            self._cleanup_iterator_header(header)
 
     # max(i in I : cond) expr
     @_("AGG_MAX sum_index_header nonparen_expression")
     def max_expression(self, p):
-        expr_type = p.nonparen_expression["sem_type"]
-        if expr_type not in ("int", "int+", "float", "float+"):
-            raise SemanticError("max aggregate expects numeric expression.")
-        sem = "float" if expr_type in ("float", "float+") else "int"
-        return {
-            "type": "max_agg",
-            "iterators": p.sum_index_header["iterators"],
-            "index_constraint": p.sum_index_header.get("index_constraint"),
-            "expression": p.nonparen_expression,
-            "sem_type": sem,
-        }
+        header = p.sum_index_header
+        try:
+            expr_type = p.nonparen_expression["sem_type"]
+            if expr_type not in ("int", "int+", "float", "float+"):
+                raise SemanticError("max aggregate expects numeric expression.")
+            sem = "float" if expr_type in ("float", "float+") else "int"
+            return {
+                "type": "max_agg",
+                "iterators": header["iterators"],
+                "index_constraint": header.get("index_constraint"),
+                "expression": p.nonparen_expression,
+                "sem_type": sem,
+            }
+        finally:
+            self._cleanup_iterator_header(header)
 
     # Allow min/max aggregates as primary
     @_("min_expression")
@@ -2888,6 +2896,7 @@ class OPLDataParser(Parser):
     def parse(self, tokens, lexer=None):
         self.lexer = lexer
         self.data = {}
+        self.name_linenos = {}
         # Materialize tokens to capture last token line; feed iterator to SLY
         tok_list = list(tokens)
         if tok_list:
@@ -3126,8 +3135,9 @@ class OPLCompiler:
         self.data_parser = OPLDataParser()
         self.syntax_error_reporting = self._normalize_syntax_error_reporting(syntax_error_reporting)
 
-    def _raise_masked_syntax_error(self, exc: SemanticError) -> None:
-        if self.syntax_error_reporting == "masked":
+    def _raise_masked_syntax_error(self, exc: SemanticError, reporting: Optional[str] = None) -> None:
+        effective_reporting = self.syntax_error_reporting if reporting is None else self._normalize_syntax_error_reporting(reporting)
+        if effective_reporting == "masked":
             raise SyntaxError("Syntax error") from None
         lineno = getattr(exc, "lineno", None)
         if lineno is None:
@@ -3941,12 +3951,7 @@ class OPLCompiler:
             try:
                 return self.compile_model(model_code, data_code, solver=solver, syntax_error_reporting="full")
             except SemanticError as exc:
-                previous_reporting = self.syntax_error_reporting
-                self.syntax_error_reporting = effective_reporting
-                try:
-                    self._raise_masked_syntax_error(exc)
-                finally:
-                    self.syntax_error_reporting = previous_reporting
+                self._raise_masked_syntax_error(exc, effective_reporting)
 
         ast: dict[str, Any] = {}
         code = ""
@@ -5217,13 +5222,14 @@ def solve_with_gurobi(model_file, data_file=None):
                 results["message"] = "GurobiPy code executed, but no results captured."
                 logger.warning(results["message"])
 
-        except gp.GurobiError as e:
-            results["status"] = "GUROBI_ERROR"
-            results["message"] = f"Gurobi Error: {e.message}"
-            logger.error(results["message"])
         except Exception as e:
-            results["status"] = "EXECUTION_ERROR"
-            results["message"] = _execution_error_with_hint(e, "GurobiPy")
+            gurobi_error_type = getattr(gp, "GurobiError", None)
+            if gurobi_error_type is not None and isinstance(e, gurobi_error_type):
+                results["status"] = "GUROBI_ERROR"
+                results["message"] = f"Gurobi Error: {getattr(e, 'message', str(e))}"
+            else:
+                results["status"] = "EXECUTION_ERROR"
+                results["message"] = _execution_error_with_hint(e, "GurobiPy")
             logger.error(results["message"])
             traceback.print_exc(file=sys.stdout)  # Print traceback to captured stdout
         finally:

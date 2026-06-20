@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from pyopl.pyopl_core import (
     GurobiCodeGenerator,
@@ -103,6 +104,34 @@ class TestPyOPLLexer(TestPyOPL):
             compiler.compile_model(model_code, solver="scipy")
 
         self.assertEqual(str(exc.exception), "Syntax error")
+
+    def test_compiler_per_call_masked_reporting_overrides_default(self):
+        model_code = """
+        dvar float x;
+        maximize x + 1
+        subject to { x <= 10; }
+        """
+
+        compiler = OPLCompiler(syntax_error_reporting="full")
+
+        with self.assertRaises(SyntaxError) as exc:
+            compiler.compile_model(model_code, solver="scipy", syntax_error_reporting="masked")
+
+        self.assertEqual(str(exc.exception), "Syntax error")
+
+    def test_compiler_per_call_line_reporting_overrides_masked_default(self):
+        model_code = """
+        dvar float x;
+        maximize x + 1
+        subject to { x <= 10; }
+        """
+
+        compiler = OPLCompiler(syntax_error_reporting="masked")
+
+        with self.assertRaises(SyntaxError) as exc:
+            compiler.compile_model(model_code, solver="scipy", syntax_error_reporting="line")
+
+        self.assertEqual(str(exc.exception), "Syntax error on line 4")
 
     def test_compiler_keeps_rich_semantic_errors_by_default(self):
         model_code = """
@@ -296,6 +325,23 @@ class TestPyOPLLexer(TestPyOPL):
 
 
 class TestPyOPLParser(TestPyOPL):
+    def test_min_max_aggregates_cleanup_iterator_state(self):
+        lexer = OPLLexer()
+        parser = OPLParser()
+        opl_code = """
+        range I = 1..3;
+        dvar float x[I];
+        minimize max(i in I) x[i];
+        subject to {
+            min(i in I) x[i] >= 0;
+        }
+        """
+
+        parser.parse(lexer.tokenize(opl_code))
+
+        self.assertEqual(len(parser.symbol_table.scopes), 1)
+        self.assertEqual(parser._iterator_context_stack, [])
+
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
         lexer = OPLLexer()
@@ -379,6 +425,27 @@ class TestPyOPLParser(TestPyOPL):
             parser = OPLParser()
             with self.assertRaises(SemanticError):
                 parser.parse(lexer.tokenize(code))
+
+    def test_solve_with_gurobi_handles_missing_gurobi_module(self):
+        from pyopl.pyopl_core import solve_with_gurobi
+
+        model_file = "test_model.mod"
+        try:
+            with open(model_file, "w") as f:
+                f.write("dvar float x; maximize x; subject to { x <= 1; }")
+
+            generated_code = "raise RuntimeError('boom')"
+            with patch("pyopl.pyopl_core.gp", None), patch(
+                "pyopl.pyopl_core.load_opl_model",
+                return_value=({"declarations": [], "objective": {}, "constraints": []}, generated_code, {}),
+            ):
+                result = solve_with_gurobi(model_file)
+
+            self.assertEqual(result["status"], "EXECUTION_ERROR")
+            self.assertIn("boom", result["message"])
+        finally:
+            if os.path.exists(model_file):
+                os.remove(model_file)
 
     def test_file_loading_and_gurobi_codegen(self):
         """Test loading a model/data file and Gurobi code generation."""
@@ -1346,6 +1413,18 @@ class TestPyOPLCompiler(TestPyOPL):
         data_dict_3d = parser.parse(tokens_3d, lexer=lexer)
         self.assertIn("cube", data_dict_3d)
         self.assertEqual(data_dict_3d["cube"], [[[1], [2]], [[3], [4]]])
+
+    def test_data_parser_resets_name_linenos_between_parses(self):
+        lexer = OPLDataLexer()
+        parser = OPLDataParser()
+
+        parser.parse(lexer.tokenize("first = 1;"), lexer=lexer)
+        self.assertIn("first", parser.name_linenos)
+
+        parser.parse(lexer.tokenize("second = 2;"), lexer=lexer)
+
+        self.assertNotIn("first", parser.name_linenos)
+        self.assertIn("second", parser.name_linenos)
 
     def test_validate_shape_multi_dimensional(self):
         """Test validate_shape for multi-dimensional arrays with correct and incorrect shapes."""
