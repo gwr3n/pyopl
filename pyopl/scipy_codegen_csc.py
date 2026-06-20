@@ -41,6 +41,7 @@ class _ConstraintBuildContext:
     expr_memo: dict[Any, Any] = field(default_factory=dict)
     neg_cache: dict[Any, Any] = field(default_factory=dict)
 
+
 # --- Logging Setup ---
 logger = logging.getLogger(__name__)
 if not logger.hasHandlers():
@@ -3914,9 +3915,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
             if node_type == "sum":
                 local_iterators = {
-                    it.get("iterator")
-                    for it in (part.get("iterators") or [])
-                    if isinstance(it, dict) and it.get("iterator")
+                    it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
                 }
                 env_snapshot = tuple(
                     sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
@@ -4115,6 +4114,459 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"# comparison truth var for {op}")
         return bname
 
+    def _bool_struct_key(self, node, env):
+        def _bound_key(part):
+            while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
+                part = part.get("expression")
+            if not isinstance(part, dict):
+                return ("lit", part)
+            node_type = part.get("type")
+            if node_type == "indexed_name":
+                try:
+                    return ("indexed", self._multi_indexed_var_name(part, env))
+                except Exception:
+                    return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
+            if node_type == "name":
+                name = part.get("value")
+                return ("name", env.get(name, name))
+            if node_type in ("number", "string_literal", "boolean_literal"):
+                return (node_type, part.get("value"))
+            if node_type == "binop":
+                return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
+            if node_type == "sum":
+                local_iterators = {
+                    it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
+                }
+                env_snapshot = tuple(
+                    sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+                )
+                return (
+                    "sum",
+                    str(part.get("iterators")),
+                    env_snapshot,
+                    _bound_key(part.get("expression")),
+                    _bound_key(part.get("index_constraint")),
+                )
+            return (node_type, str(part))
+
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        if not isinstance(node, dict):
+            return ("lit", node)
+        node_type = node.get("type")
+        if node_type == "constraint" and node.get("op") == "==":
+            left = node["left"]
+            right = node["right"]
+
+            def is_num01(value):
+                return isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
+
+            def is_var(value):
+                return isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+
+            if is_var(left) and is_num01(right):
+                vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
+                return ("atom", vname, right["value"])
+            if is_var(right) and is_num01(left):
+                vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
+                return ("atom", vname, left["value"])
+        if node_type == "not":
+            return ("not", self._bool_struct_key(node["value"], env))
+        if node_type in ("and", "or"):
+            left_key = self._bool_struct_key(node["left"], env)
+            right_key = self._bool_struct_key(node["right"], env)
+            if isinstance(left_key, tuple) and len(left_key) >= 3 and left_key[0] == "eq_link":
+                left_key = left_key[2]
+            if isinstance(right_key, tuple) and len(right_key) >= 3 and right_key[0] == "eq_link":
+                right_key = right_key[2]
+            return (node_type, tuple(sorted([left_key, right_key])))
+        if node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
+            if node.get("op") == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
+                left = node["left"]
+                right = node["right"]
+
+                def _is_bool_var(value):
+                    return (
+                        isinstance(value, dict)
+                        and value.get("type") in ("name", "indexed_name")
+                        and value.get("sem_type") == "boolean"
+                    )
+
+                def _is_bool_composite(value):
+                    return (
+                        isinstance(value, dict)
+                        and value.get("sem_type") == "boolean"
+                        and value.get("type") in ("and", "or", "binop", "parenthesized_expression")
+                    )
+
+                if _is_bool_var(left) and _is_bool_composite(right):
+                    return ("eq_link", _bound_key(left), self._bool_struct_key(right, env))
+                if _is_bool_var(right) and _is_bool_composite(left):
+                    return ("eq_link", _bound_key(right), self._bool_struct_key(left, env))
+            return ("cmp", node.get("op"), _bound_key(node.get("left")), _bound_key(node.get("right")))
+        return ("unknown", id(node))
+
+    def _new_bool_aux_var(self) -> str:
+        vname = f"_baux{len(self.aux_created)}"
+        self.var_names.append(vname)
+        self.var_indices[vname] = len(self.var_names) - 1
+        self.bounds.append([0, 1])
+        if hasattr(self, "integrality"):
+            self.integrality.append(1)
+        else:
+            self.integrality = [1]
+        if hasattr(self, "c") and len(self.c) < len(self.var_names):
+            self.c.append(0.0)
+        self.aux_created.append(vname)
+        return vname
+
+    def _atomic_bool_var(self, node, env):
+        if not isinstance(node, dict):
+            raise SemanticError("Non-dict atomic boolean node")
+        if node.get("type") == "constraint" and node.get("op") == "==":
+            left = node["left"]
+            right = node["right"]
+
+            def is_num01(value):
+                return isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
+
+            def is_var(value):
+                return isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+
+            if is_var(left) and is_num01(right):
+                vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
+                return vname, (1 if right["value"] == 1 else -1)
+            if is_var(right) and is_num01(left):
+                vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
+                return vname, (1 if left["value"] == 1 else -1)
+        raise SemanticError("Unsupported atomic boolean literal")
+
+    @staticmethod
+    def _is_bool_var_node(node) -> bool:
+        return isinstance(node, dict) and node.get("type") in ("name", "indexed_name") and node.get("sem_type") == "boolean"
+
+    @staticmethod
+    def _is_bool_composite_node(node, *, include_not: bool = False) -> bool:
+        composite_types = (
+            ("and", "or", "binop", "parenthesized_expression", "not")
+            if include_not
+            else (
+                "and",
+                "or",
+                "binop",
+                "parenthesized_expression",
+            )
+        )
+        return isinstance(node, dict) and node.get("sem_type") == "boolean" and node.get("type") in composite_types
+
+    def _extract_bool_var_equality(self, node):
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        if not (
+            isinstance(node, dict)
+            and node.get("type") == "binop"
+            and node.get("op") == "=="
+            and isinstance(node.get("left"), dict)
+            and isinstance(node.get("right"), dict)
+        ):
+            return None
+
+        left = node["left"]
+        right = node["right"]
+        if self._is_bool_var_node(left) and self._is_bool_composite_node(right, include_not=True):
+            return (left, right)
+        if self._is_bool_var_node(right) and self._is_bool_composite_node(left, include_not=True):
+            return (right, left)
+        return None
+
+    def _bool_expr_var(self, node, env, ctx: _ConstraintBuildContext):
+        env_memo_key = (
+            id(node),
+            tuple(sorted((name, repr(value)) for name, value in (env or {}).items())),
+        )
+
+        def struct_key(n):
+            return self._bool_struct_key(n, env)
+
+        sk = struct_key(node)
+        if sk in ctx.subtree_var_cache:
+            return ctx.subtree_var_cache[sk]
+        if env_memo_key in ctx.expr_memo:
+            return ctx.expr_memo[env_memo_key]
+        if not isinstance(node, dict):
+            raise SemanticError("Invalid boolean expr node (not a dict): {}".format(repr(node)))
+        t = node.get("type")
+        # Handle special aux_var node for boolean XOR
+        if t == "aux_var" and node.get("sem_type") == "boolean":
+            vname = node["name"]
+            # Register the variable if not already present
+            if vname not in self.var_indices:
+                self.var_names.append(vname)
+                self.var_indices[vname] = len(self.var_names) - 1
+                self.bounds.append([0, 1])
+                if hasattr(self, "integrality"):
+                    self.integrality.append(1)
+                else:
+                    self.integrality = [1]
+                if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                    self.c.append(0.0)
+                logger.debug(f"[DEBUG] Registered aux_var node: {vname} (idx={self.var_indices[vname]})")
+            else:
+                logger.debug(f"[DEBUG] aux_var node already registered: {vname} (idx={self.var_indices[vname]})")
+            ctx.subtree_var_cache[sk] = vname
+            ctx.expr_memo[env_memo_key] = vname
+            return vname
+        # Unwrap parentheses early
+        if t == "parenthesized_expression":
+            inner = node.get("expression")
+            return self._bool_expr_var(inner, env, ctx)
+        # Boolean variable equality with composite (var == (and/or/...)) should reuse composite aux directly
+        # Handle both 'binop' and 'constraint' nodes with op '!=' and both sides boolean
+        is_binop_neq = t == "binop" and node.get("sem_type") == "boolean" and node.get("op") == "!="
+        is_constraint_neq = t == "constraint" and node.get("op") == "!="
+        if is_binop_neq or is_constraint_neq:
+            left = node["left"]
+            right = node["right"]
+
+            def _is_bool_expr(x):
+                return isinstance(x, dict) and (
+                    x.get("sem_type") == "boolean"
+                    or x.get("type") == "boolean_literal"
+                    or (
+                        x.get("type") == "constraint"
+                        and x.get("op") == "=="
+                        and (
+                            (isinstance(x.get("left"), dict) and x["left"].get("type") in ("name", "indexed_name"))
+                            or (isinstance(x.get("right"), dict) and x["right"].get("type") in ("name", "indexed_name"))
+                        )
+                    )
+                    or (x.get("type") in ("and", "or", "not"))
+                )
+
+            if _is_bool_expr(left) and _is_bool_expr(right):
+                x = self._bool_expr_var(left, env, ctx)
+                y = self._bool_expr_var(right, env, ctx)
+                z = self._new_bool_aux_var()
+                # z >= x - y
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[x]] = -1.0
+                row[self.var_indices[y]] = 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                # z >= y - x
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[x]] = 1.0
+                row[self.var_indices[y]] = -1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                # z <= x + y
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = -1.0
+                row[self.var_indices[x]] = 1.0
+                row[self.var_indices[y]] = 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                # z <= 2 - (x + y)
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[x]] = 1.0
+                row[self.var_indices[y]] = 1.0
+                self._append_sparse_row(ctx.state, row, 2.0, sense="ub")
+                ctx.subtree_var_cache[sk] = z
+                ctx.expr_memo[env_memo_key] = z
+                return z
+        # Continue with original binop logic for other ops
+        if t == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
+            op = node.get("op")
+            # Handle special equality rewrite first
+            if op == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
+                left = node["left"]
+                right = node["right"]
+
+                # Normalize pattern so var_side holds the variable, expr_side the composite expression
+                var_side = None
+                expr_side = None
+                if self._is_bool_var_node(left) and self._is_bool_composite_node(right, include_not=True):
+                    var_side, expr_side = left, right
+                elif self._is_bool_var_node(right) and self._is_bool_composite_node(left, include_not=True):
+                    var_side, expr_side = right, left
+                if var_side is not None and expr_side is not None:
+                    # Obtain / build variable representing expr_side
+                    expr_var = self._bool_expr_var(expr_side, env, ctx)
+                    # Tie var_side to expr_var with equality if not already tied
+                    vname = (
+                        self._multi_indexed_var_name(var_side, env)
+                        if var_side.get("type") == "indexed_name"
+                        else var_side["value"]
+                    )
+                    # Avoid duplicating equality row: check existing row pattern quickly
+                    # (Simple heuristic: only add if either row not yet produced linking vname & expr_var)
+                    if vname in self.var_indices and expr_var in self.var_indices:
+                        already = False
+                        if "A_eq" in self.__dict__:
+                            v_idx = self.var_indices[vname]
+                            e_idx = self.var_indices[expr_var]
+                            for r in range(len(self.A_eq)):
+                                row = self.A_eq[r]
+                                if abs(row[v_idx]) == 1 and abs(row[e_idx]) == 1:
+                                    already = True
+                                    break
+                        if not already:
+                            row = [0.0] * len(self.var_names)
+                            row[self.var_indices[vname]] = 1.0
+                            row[self.var_indices[expr_var]] = -1.0
+                            self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+                    ctx.subtree_var_cache[sk] = vname
+                    ctx.expr_memo[env_memo_key] = vname
+                    return vname
+            # Fallback to generic comparison truth var
+            bcmp = self._comparison_truth_var(node, env, ctx)
+            ctx.subtree_var_cache[sk] = bcmp
+            ctx.expr_memo[env_memo_key] = bcmp
+            return bcmp
+        if t == "constraint" and node.get("op") == "==":
+            vname, pol = self._atomic_bool_var(node, env)
+            if pol == 1:
+                ctx.expr_memo[env_memo_key] = vname
+                ctx.subtree_var_cache[sk] = vname
+                return vname
+            if vname in ctx.neg_cache:
+                ctx.expr_memo[env_memo_key] = ctx.neg_cache[vname]
+                ctx.subtree_var_cache[sk] = ctx.neg_cache[vname]
+                return ctx.neg_cache[vname]
+            z = self._new_bool_aux_var()
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[z]] = 1.0
+            row[self.var_indices[vname]] = 1.0
+            self._append_sparse_row(ctx.state, row, 1.0, sense="eq")
+            ctx.neg_cache[vname] = z
+            ctx.expr_memo[env_memo_key] = z
+            ctx.subtree_var_cache[sk] = z
+            return z
+        if t == "not":
+            inner = self._bool_expr_var(node["value"], env, ctx)
+            if inner in ctx.neg_cache:
+                ctx.subtree_var_cache[sk] = ctx.neg_cache[inner]
+                return ctx.neg_cache[inner]
+            z = self._new_bool_aux_var()
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[z]] = 1.0
+            row[self.var_indices[inner]] = 1.0
+            self._append_sparse_row(ctx.state, row, 1.0, sense="eq")
+            ctx.neg_cache[inner] = z
+            ctx.subtree_var_cache[sk] = z
+            return z
+        if t in ("and", "or"):
+            # Use tuple-based struct_key for normalization and sharing
+            sk = struct_key(node)
+            if sk in ctx.subtree_var_cache:
+                shared_aux = ctx.subtree_var_cache[sk]
+                ctx.expr_memo[env_memo_key] = shared_aux
+                # Tie all relevant variables to shared_aux
+                tie_vars = []
+
+                left_node = node["left"]
+                right_node = node["right"]
+                left_eq = self._extract_bool_var_equality(left_node)
+                if left_eq:
+                    tie_vars.append(left_eq[0])
+                right_eq = self._extract_bool_var_equality(right_node)
+                if right_eq:
+                    tie_vars.append(right_eq[0])
+                for var_node in tie_vars:
+                    vname = (
+                        self._multi_indexed_var_name(var_node, env)
+                        if var_node.get("type") == "indexed_name"
+                        else var_node["value"]
+                    )
+                    if vname in self.var_indices and shared_aux in self.var_indices:
+                        row = [0.0] * len(self.var_names)
+                        row[self.var_indices[vname]] = 1.0
+                        row[self.var_indices[shared_aux]] = -1.0
+                        self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+                return shared_aux
+            # Otherwise, create new aux and record
+            tie_vars = []
+
+            left_node = node["left"]
+            right_node = node["right"]
+            left_eq = self._extract_bool_var_equality(left_node)
+            if left_eq:
+                tie_vars.append(left_eq[0])
+                left_node = left_eq[1]
+            right_eq = self._extract_bool_var_equality(right_node)
+            if right_eq:
+                tie_vars.append(right_eq[0])
+                right_node = right_eq[1]
+            left_v = self._bool_expr_var(left_node, env, ctx)
+            right_v = self._bool_expr_var(right_node, env, ctx)
+            if left_v == right_v:
+                ctx.expr_memo[env_memo_key] = left_v
+                ctx.subtree_var_cache[sk] = left_v
+                for var_node in tie_vars:
+                    vname = (
+                        self._multi_indexed_var_name(var_node, env)
+                        if var_node.get("type") == "indexed_name"
+                        else var_node["value"]
+                    )
+                    if vname in self.var_indices and left_v in self.var_indices:
+                        row = [0.0] * len(self.var_names)
+                        v_idx = self.var_indices[vname]
+                        e_idx = self.var_indices[left_v]
+                        row[v_idx] = 1.0
+                        row[e_idx] = -1.0
+                        self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+                return left_v
+            z = self._new_bool_aux_var()
+            if t == "and":
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[left_v]] = -1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[right_v]] = -1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = -1.0
+                row[self.var_indices[left_v]] += 1.0
+                row[self.var_indices[right_v]] += 1.0
+                self._append_sparse_row(ctx.state, row, 1.0, sense="ub")
+            else:  # or
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = -1.0
+                row[self.var_indices[left_v]] = 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = -1.0
+                row[self.var_indices[right_v]] = 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[left_v]] -= 1.0
+                row[self.var_indices[right_v]] -= 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+            ctx.expr_memo[env_memo_key] = z
+            ctx.subtree_var_cache[sk] = z
+            for var_node in tie_vars:
+                vname = (
+                    self._multi_indexed_var_name(var_node, env)
+                    if var_node.get("type") == "indexed_name"
+                    else var_node["value"]
+                )
+                if vname in self.var_indices and z in self.var_indices:
+                    row = [0.0] * len(self.var_names)
+                    row[self.var_indices[vname]] = 1.0
+                    row[self.var_indices[z]] = -1.0
+                    self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+            return z
+        # Lower 'implies' to (not left) or right
+        if t == "implies":
+            not_left = {"type": "not", "value": node["left"]}
+            lowered = {"type": "or", "left": not_left, "right": node["right"]}
+            return self._bool_expr_var(lowered, env, ctx)
+        # If we reach here, node cannot be resolved to a variable name
+        raise SemanticError(f"Unsupported or non-resolvable boolean expression node type: {t} ({repr(node)})")
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -4157,48 +4609,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             comparison_truth_cache=self._comparison_truth_cache,
             subtree_var_cache=self._bool_subtree_cache,
         )
-        neg_cache = ctx.neg_cache  # var -> its negation auxiliary
-        expr_memo = ctx.expr_memo  # id(node) -> var name (per build to avoid leaking id mappings)
-        # Reuse subtree boolean auxiliary vars across constraints via instance-level cache
-        subtree_var_cache = ctx.subtree_var_cache
 
         def _new_aux():
-            vname = f"_baux{len(self.aux_created)}"
-            self.var_names.append(vname)
-            self.var_indices[vname] = len(self.var_names) - 1
-            self.bounds.append([0, 1])
-            if hasattr(self, "integrality"):
-                self.integrality.append(1)
-            else:
-                self.integrality = [1]
-            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                self.c.append(0.0)
-            self.aux_created.append(vname)
-            return vname
+            return self._new_bool_aux_var()
 
         def _atomic_bool(node, env):
-            if not isinstance(node, dict):
-                raise SemanticError("Non-dict atomic boolean node")
-            if node.get("type") == "constraint" and node.get("op") == "==":
-                left = node["left"]
-                right = node["right"]
-
-                def is_num01(x):
-                    return isinstance(x, dict) and x.get("type") == "number" and x.get("value") in (0, 1)
-
-                def is_var(x):
-                    return isinstance(x, dict) and x.get("type") in (
-                        "name",
-                        "indexed_name",
-                    )
-
-                if is_var(left) and is_num01(right):
-                    vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                    return vname, (1 if right["value"] == 1 else -1)
-                if is_var(right) and is_num01(left):
-                    vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                    return vname, (1 if left["value"] == 1 else -1)
-            raise SemanticError("Unsupported atomic boolean literal")
+            return self._atomic_bool_var(node, env)
 
         def _comparison_truth_var(node, env):
             nonlocal eq_row_idx, ub_row_idx
@@ -4211,497 +4627,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         def _bool_expr_var(node, env):
             nonlocal eq_row_idx, ub_row_idx
-
-            env_memo_key = (
-                id(node),
-                tuple(sorted((name, repr(value)) for name, value in (env or {}).items())),
-            )
-
-            # Structural sharing: build a canonical key for subtree to reuse auxiliaries across constraints
-            def struct_key(n):
-                def _bound_key(part):
-                    while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
-                        part = part.get("expression")
-                    if not isinstance(part, dict):
-                        return ("lit", part)
-                    node_type = part.get("type")
-                    if node_type == "indexed_name":
-                        try:
-                            return ("indexed", self._multi_indexed_var_name(part, env))
-                        except Exception:
-                            return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
-                    if node_type == "name":
-                        name = part.get("value")
-                        return ("name", env.get(name, name))
-                    if node_type in ("number", "string_literal", "boolean_literal"):
-                        return (node_type, part.get("value"))
-                    if node_type == "binop":
-                        return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
-                    if node_type == "sum":
-                        local_iterators = {
-                            it.get("iterator")
-                            for it in (part.get("iterators") or [])
-                            if isinstance(it, dict) and it.get("iterator")
-                        }
-                        env_snapshot = tuple(
-                            sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-                        )
-                        return (
-                            "sum",
-                            str(part.get("iterators")),
-                            env_snapshot,
-                            _bound_key(part.get("expression")),
-                            _bound_key(part.get("index_constraint")),
-                        )
-                    return (node_type, str(part))
-
-                # Unwrap any parenthesized_expression layers
-                while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                    n = n.get("expression")
-                if not isinstance(n, dict):
-                    return ("lit", n)
-                t = n.get("type")
-                if t == "constraint" and n.get("op") == "==":
-                    left = n["left"]
-                    right = n["right"]
-
-                    def is_num01(x):
-                        return isinstance(x, dict) and x.get("type") == "number" and x.get("value") in (0, 1)
-
-                    def is_var(x):
-                        return isinstance(x, dict) and x.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    if is_var(left) and is_num01(right):
-                        vname = (
-                            self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                        )
-                        return ("atom", vname, right["value"])
-                    if is_var(right) and is_num01(left):
-                        vname = (
-                            self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                        )
-                        return ("atom", vname, left["value"])
-                if t == "not":
-                    return ("not", struct_key(n["value"]))
-                if t in ("and", "or"):
-                    kl = struct_key(n["left"])
-                    kr = struct_key(n["right"])
-                    # If an operand is an eq_link (var == composite) collapse to composite part for hashing
-                    if isinstance(kl, tuple) and len(kl) >= 3 and kl[0] == "eq_link":
-                        kl = kl[2]
-                    if isinstance(kr, tuple) and len(kr) >= 3 and kr[0] == "eq_link":
-                        kr = kr[2]
-                    # commutative: sort keys (after collapsing)
-                    pair = tuple(sorted([kl, kr]))
-                    return (t, pair)
-                if t == "binop" and n.get("sem_type") == "boolean" and n.get("op") in ("<=", ">=", "!=", "=="):
-                    # Special case: boolean variable equality with AND/OR composite should key on composite only
-                    if n.get("op") == "==" and isinstance(n.get("left"), dict) and isinstance(n.get("right"), dict):
-                        left = n["left"]
-                        right = n["right"]
-
-                        def _is_bool_var(x):
-                            return (
-                                isinstance(x, dict)
-                                and x.get("type") in ("name", "indexed_name")
-                                and x.get("sem_type") == "boolean"
-                            )
-
-                        def _is_bool_composite(x):
-                            return (
-                                isinstance(x, dict)
-                                and x.get("sem_type") == "boolean"
-                                and x.get("type") in ("and", "or", "binop", "parenthesized_expression")
-                            )
-
-                        if _is_bool_var(left) and _is_bool_composite(right):
-                            return (
-                                "eq_link",
-                                _bound_key(left),
-                                struct_key(right),
-                            )
-                        if _is_bool_var(right) and _is_bool_composite(left):
-                            return (
-                                "eq_link",
-                                _bound_key(right),
-                                struct_key(left),
-                            )
-                    return ("cmp", n.get("op"), _bound_key(n.get("left")), _bound_key(n.get("right")))
-                return ("unknown", id(n))  # fallback prevents accidental merging
-
-            sk = struct_key(node)
-            if sk in subtree_var_cache:
-                return subtree_var_cache[sk]
-            if env_memo_key in expr_memo:
-                return expr_memo[env_memo_key]
-            if not isinstance(node, dict):
-                raise SemanticError("Invalid boolean expr node (not a dict): {}".format(repr(node)))
-            t = node.get("type")
-            # Handle special aux_var node for boolean XOR
-            if t == "aux_var" and node.get("sem_type") == "boolean":
-                vname = node["name"]
-                # Register the variable if not already present
-                if vname not in self.var_indices:
-                    self.var_names.append(vname)
-                    self.var_indices[vname] = len(self.var_names) - 1
-                    self.bounds.append([0, 1])
-                    if hasattr(self, "integrality"):
-                        self.integrality.append(1)
-                    else:
-                        self.integrality = [1]
-                    if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                        self.c.append(0.0)
-                    logger.debug(f"[DEBUG] Registered aux_var node: {vname} (idx={self.var_indices[vname]})")
-                else:
-                    logger.debug(f"[DEBUG] aux_var node already registered: {vname} (idx={self.var_indices[vname]})")
-                subtree_var_cache[sk] = vname
-                expr_memo[env_memo_key] = vname
-                return vname
-            # Unwrap parentheses early
-            if t == "parenthesized_expression":
-                inner = node.get("expression")
-                return _bool_expr_var(inner, env)
-            # Boolean variable equality with composite (var == (and/or/...)) should reuse composite aux directly
-            # Handle both 'binop' and 'constraint' nodes with op '!=' and both sides boolean
-            is_binop_neq = t == "binop" and node.get("sem_type") == "boolean" and node.get("op") == "!="
-            is_constraint_neq = t == "constraint" and node.get("op") == "!="
-            if is_binop_neq or is_constraint_neq:
-                left = node["left"]
-                right = node["right"]
-
-                def _is_bool_expr(x):
-                    return isinstance(x, dict) and (
-                        x.get("sem_type") == "boolean"
-                        or x.get("type") == "boolean_literal"
-                        or (
-                            x.get("type") == "constraint"
-                            and x.get("op") == "=="
-                            and (
-                                (isinstance(x.get("left"), dict) and x["left"].get("type") in ("name", "indexed_name"))
-                                or (isinstance(x.get("right"), dict) and x["right"].get("type") in ("name", "indexed_name"))
-                            )
-                        )
-                        or (x.get("type") in ("and", "or", "not"))
-                    )
-
-                if _is_bool_expr(left) and _is_bool_expr(right):
-                    x = _bool_expr_var(left, env)
-                    y = _bool_expr_var(right, env)
-                    z = _new_aux()
-                    # z >= x - y
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[x]] = -1.0
-                    row[self.var_indices[y]] = 1.0
-                    append_ub_row(row, 0.0)
-                    # z >= y - x
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[x]] = 1.0
-                    row[self.var_indices[y]] = -1.0
-                    append_ub_row(row, 0.0)
-                    # z <= x + y
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = -1.0
-                    row[self.var_indices[x]] = 1.0
-                    row[self.var_indices[y]] = 1.0
-                    append_ub_row(row, 0.0)
-                    # z <= 2 - (x + y)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[x]] = 1.0
-                    row[self.var_indices[y]] = 1.0
-                    append_ub_row(row, 2.0)
-                    subtree_var_cache[sk] = z
-                    expr_memo[env_memo_key] = z
-                    return z
-            # Continue with original binop logic for other ops
-            if t == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
-                op = node.get("op")
-                # Handle special equality rewrite first
-                if op == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
-                    left = node["left"]
-                    right = node["right"]
-
-                    def _is_bool_var(x):
-                        return (
-                            isinstance(x, dict)
-                            and x.get("type") in ("name", "indexed_name")
-                            and x.get("sem_type") == "boolean"
-                        )
-
-                    def _is_bool_composite(x):
-                        return (
-                            isinstance(x, dict)
-                            and x.get("sem_type") == "boolean"
-                            and x.get("type") in ("and", "or", "binop", "parenthesized_expression", "not")
-                        )
-
-                    # Normalize pattern so var_side holds the variable, expr_side the composite expression
-                    var_side = None
-                    expr_side = None
-                    if _is_bool_var(left) and _is_bool_composite(right):
-                        var_side, expr_side = left, right
-                    elif _is_bool_var(right) and _is_bool_composite(left):
-                        var_side, expr_side = right, left
-                    if var_side is not None and expr_side is not None:
-                        # Obtain / build variable representing expr_side
-                        expr_var = _bool_expr_var(expr_side, env)
-                        # Tie var_side to expr_var with equality if not already tied
-                        vname = (
-                            self._multi_indexed_var_name(var_side, env)
-                            if var_side.get("type") == "indexed_name"
-                            else var_side["value"]
-                        )
-                        # Avoid duplicating equality row: check existing row pattern quickly
-                        # (Simple heuristic: only add if either row not yet produced linking vname & expr_var)
-                        if vname in self.var_indices and expr_var in self.var_indices:
-                            already = False
-                            if "A_eq" in self.__dict__:
-                                v_idx = self.var_indices[vname]
-                                e_idx = self.var_indices[expr_var]
-                                for r in range(len(self.A_eq)):
-                                    row = self.A_eq[r]
-                                    if abs(row[v_idx]) == 1 and abs(row[e_idx]) == 1:
-                                        already = True
-                                        break
-                            if not already:
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[vname]] = 1.0
-                                row[self.var_indices[expr_var]] = -1.0
-                                append_eq_row(row, 0.0)
-                        subtree_var_cache[sk] = vname
-                        expr_memo[env_memo_key] = vname
-                        return vname
-                # Fallback to generic comparison truth var
-                bcmp = _comparison_truth_var(node, env)
-                subtree_var_cache[sk] = bcmp
-                expr_memo[env_memo_key] = bcmp
-                return bcmp
-            if t == "constraint" and node.get("op") == "==":
-                vname, pol = _atomic_bool(node, env)
-                if pol == 1:
-                    expr_memo[env_memo_key] = vname
-                    subtree_var_cache[sk] = vname
-                    return vname
-                if vname in neg_cache:
-                    expr_memo[env_memo_key] = neg_cache[vname]
-                    subtree_var_cache[sk] = neg_cache[vname]
-                    return neg_cache[vname]
-                z = _new_aux()
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[vname]] = 1.0
-                append_eq_row(row, 1.0)
-                neg_cache[vname] = z
-                expr_memo[env_memo_key] = z
-                subtree_var_cache[sk] = z
-                return z
-            if t == "not":
-                inner = _bool_expr_var(node["value"], env)
-                if inner in neg_cache:
-                    subtree_var_cache[sk] = neg_cache[inner]
-                    return neg_cache[inner]
-                z = _new_aux()
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[inner]] = 1.0
-                append_eq_row(row, 1.0)
-                neg_cache[inner] = z
-                subtree_var_cache[sk] = z
-                return z
-            if t in ("and", "or"):
-                # Use tuple-based struct_key for normalization and sharing
-                sk = struct_key(node)
-                if sk in subtree_var_cache:
-                    shared_aux = subtree_var_cache[sk]
-                    expr_memo[env_memo_key] = shared_aux
-                    # Tie all relevant variables to shared_aux
-                    tie_vars = []
-
-                    def _extract_var_equality(n):
-                        n_norm = n
-                        while isinstance(n_norm, dict) and n_norm.get("type") == "parenthesized_expression":
-                            n_norm = n_norm.get("expression")
-                        if (
-                            isinstance(n_norm, dict)
-                            and n_norm.get("type") == "binop"
-                            and n_norm.get("op") == "=="
-                            and isinstance(n_norm.get("left"), dict)
-                            and isinstance(n_norm.get("right"), dict)
-                        ):
-                            left = n_norm["left"]
-                            right = n_norm["right"]
-
-                            def _is_bool_var(x):
-                                return (
-                                    isinstance(x, dict)
-                                    and x.get("type") in ("name", "indexed_name")
-                                    and x.get("sem_type") == "boolean"
-                                )
-
-                            if (
-                                _is_bool_var(left)
-                                and right.get("sem_type") == "boolean"
-                                and right.get("type") not in ("name", "indexed_name")
-                            ):
-                                return (left, right)
-                            if (
-                                _is_bool_var(right)
-                                and left.get("sem_type") == "boolean"
-                                and left.get("type") not in ("name", "indexed_name")
-                            ):
-                                return (right, left)
-                        return None
-
-                    left_node = node["left"]
-                    right_node = node["right"]
-                    left_eq = _extract_var_equality(left_node)
-                    if left_eq:
-                        tie_vars.append(left_eq[0])
-                    right_eq = _extract_var_equality(right_node)
-                    if right_eq:
-                        tie_vars.append(right_eq[0])
-                    for var_node in tie_vars:
-                        vname = (
-                            self._multi_indexed_var_name(var_node, env)
-                            if var_node.get("type") == "indexed_name"
-                            else var_node["value"]
-                        )
-                        if vname in self.var_indices and shared_aux in self.var_indices:
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[vname]] = 1.0
-                            row[self.var_indices[shared_aux]] = -1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            b_eq.append(0.0)
-                            eq_row_idx += 1
-                    return shared_aux
-                # Otherwise, create new aux and record
-                tie_vars = []
-
-                def _extract_var_equality(n):
-                    if (
-                        isinstance(n, dict)
-                        and n.get("type") == "binop"
-                        and n.get("op") == "=="
-                        and isinstance(n.get("left"), dict)
-                        and isinstance(n.get("right"), dict)
-                    ):
-                        left = n["left"]
-                        right = n["right"]
-
-                        def _is_bool_var(x):
-                            return (
-                                isinstance(x, dict)
-                                and x.get("type") in ("name", "indexed_name")
-                                and x.get("sem_type") == "boolean"
-                            )
-
-                        if (
-                            _is_bool_var(left)
-                            and right.get("sem_type") == "boolean"
-                            and right.get("type") not in ("name", "indexed_name")
-                        ):
-                            return (left, right)
-                        if (
-                            _is_bool_var(right)
-                            and left.get("sem_type") == "boolean"
-                            and left.get("type") not in ("name", "indexed_name")
-                        ):
-                            return (right, left)
-
-                left_node = node["left"]
-                right_node = node["right"]
-                left_eq = _extract_var_equality(left_node)
-                if left_eq:
-                    tie_vars.append(left_eq[0])
-                    left_node = left_eq[1]
-                right_eq = _extract_var_equality(right_node)
-                if right_eq:
-                    tie_vars.append(right_eq[0])
-                    right_node = right_eq[1]
-                left_v = _bool_expr_var(left_node, env)
-                right_v = _bool_expr_var(right_node, env)
-                if left_v == right_v:
-                    expr_memo[env_memo_key] = left_v
-                    subtree_var_cache[sk] = left_v
-                    for var_node in tie_vars:
-                        vname = (
-                            self._multi_indexed_var_name(var_node, env)
-                            if var_node.get("type") == "indexed_name"
-                            else var_node["value"]
-                        )
-                        if vname in self.var_indices and left_v in self.var_indices:
-                            row = [0.0] * len(self.var_names)
-                            v_idx = self.var_indices[vname]
-                            e_idx = self.var_indices[left_v]
-                            row[v_idx] = 1.0
-                            row[e_idx] = -1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            b_eq.append(0.0)
-                            eq_row_idx += 1
-                    return left_v
-                z = _new_aux()
-                if t == "and":
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[left_v]] = -1.0
-                    append_ub_row(row, 0.0)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[right_v]] = -1.0
-                    append_ub_row(row, 0.0)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = -1.0
-                    row[self.var_indices[left_v]] += 1.0
-                    row[self.var_indices[right_v]] += 1.0
-                    append_ub_row(row, 1.0)
-                else:  # or
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = -1.0
-                    row[self.var_indices[left_v]] = 1.0
-                    append_ub_row(row, 0.0)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = -1.0
-                    row[self.var_indices[right_v]] = 1.0
-                    append_ub_row(row, 0.0)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[z]] = 1.0
-                    row[self.var_indices[left_v]] -= 1.0
-                    row[self.var_indices[right_v]] -= 1.0
-                    append_ub_row(row, 0.0)
-                expr_memo[env_memo_key] = z
-                subtree_var_cache[sk] = z
-                for var_node in tie_vars:
-                    vname = (
-                        self._multi_indexed_var_name(var_node, env)
-                        if var_node.get("type") == "indexed_name"
-                        else var_node["value"]
-                    )
-                    if vname in self.var_indices and z in self.var_indices:
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[vname]] = 1.0
-                        row[self.var_indices[z]] = -1.0
-                        append_eq_row(row, 0.0)
-                return z
-            # Lower 'implies' to (not left) or right
-            if t == "implies":
-                not_left = {"type": "not", "value": node["left"]}
-                lowered = {"type": "or", "left": not_left, "right": node["right"]}
-                return _bool_expr_var(lowered, env)
-            # If we reach here, node cannot be resolved to a variable name
-            raise SemanticError(f"Unsupported or non-resolvable boolean expression node type: {t} ({repr(node)})")
+            ctx.state.eq_row_idx = eq_row_idx
+            ctx.state.ub_row_idx = ub_row_idx
+            result = self._bool_expr_var(node, env, ctx)
+            eq_row_idx = ctx.state.eq_row_idx
+            ub_row_idx = ctx.state.ub_row_idx
+            return result
 
         def handle_constraint(constr, env, constr_name_prefix=None):
             nonlocal eq_row_idx, ub_row_idx
@@ -4783,7 +4714,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 """
 
                 def _unwrap_bool_eq_true(node):
-                    nonlocal ub_row_idx
                     if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
                         return node
                     left = node.get("left")
