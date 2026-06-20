@@ -342,6 +342,29 @@ class TestPyOPLParser(TestPyOPL):
         self.assertEqual(len(parser.symbol_table.scopes), 1)
         self.assertEqual(parser._iterator_context_stack, [])
 
+    def test_parser_resets_iterator_context_after_failed_parse(self):
+        lexer = OPLLexer()
+        parser = OPLParser()
+        invalid_model = """
+        range I = 1..3;
+        dvar float x[I];
+        minimize max(i in I) true;
+        subject to { x[1] >= 0; }
+        """
+        valid_model = """
+        dvar float x;
+        maximize x;
+        subject to { x <= 1; }
+        """
+
+        with self.assertRaises(SemanticError):
+            parser.parse(lexer.tokenize(invalid_model))
+
+        ast = parser.parse(lexer.tokenize(valid_model))
+
+        self.assertEqual(ast["objective"]["type"], "maximize")
+        self.assertEqual(parser._iterator_context_stack, [])
+
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
         lexer = OPLLexer()

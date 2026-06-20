@@ -1409,6 +1409,7 @@ class OPLParser(Parser):
     def parse(self, tokens):
         # Materialize tokens so we can track the last line for EOF diagnostics
         self.symbol_table = SymbolTable()
+        self._iterator_context_stack = []
         self.current_tokens = list(tokens)
         if self.current_tokens:
             try:
