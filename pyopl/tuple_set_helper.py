@@ -19,12 +19,14 @@ class TupleSetHelper:
                     return [TupleSetHelper._to_tuple_recursive(t) for t in tuple_set["elements"]]
                 if "value" in tuple_set:
                     return [TupleSetHelper._to_tuple_recursive(t) for t in tuple_set["value"]]
-            elif isinstance(tuple_set, list):
+            elif isinstance(tuple_set, (list, tuple)):
                 return [TupleSetHelper._to_tuple_recursive(t) for t in tuple_set]
+            else:
+                return tuple_set
         # Fallback: try to find in AST declarations
         for decl in ast.get("declarations", []):
             if decl.get("name") == set_name:
-                if decl.get("type") in ("set", "set_of_tuples"):
+                if decl.get("type") in ("set", "set_of_tuples", "set_of_tuples_external"):
                     if "elements" in decl:
                         return [TupleSetHelper._to_tuple_recursive(t) for t in decl["elements"]]
                     if "value" in decl:

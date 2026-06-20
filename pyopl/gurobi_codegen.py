@@ -4,12 +4,10 @@ import logging
 import re
 
 from .semantic_error import SemanticError
+from .tuple_set_helper import TupleSetHelper
 
 # === Third-party imports ===
 # (none)
-
-# === Local imports ===
-
 
 # Module-level logger (no handler/formatter setup here)
 logger = logging.getLogger(__name__)
@@ -17,44 +15,6 @@ logger = logging.getLogger(__name__)
 # Numerical tolerances (single source of truth)
 EPS = 1e-5  # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
 EQ_TOL = 1e-6  # two-sided tolerance for equality reification
-
-
-# === TupleSetHelper ===
-class TupleSetHelper:
-    @staticmethod
-    def get_tuple_set(set_name, ast, data_dict):
-        """
-        Retrieve a set of tuples by name, preferring data_dict, falling back to AST.
-        For 1-field tuple sets, flatten to a list of values.
-        """
-
-        def to_tuple(val):
-            if isinstance(val, dict) and "elements" in val:
-                return tuple(to_tuple(e) for e in val["elements"])
-            elif isinstance(val, (list, tuple)):
-                return tuple(to_tuple(e) for e in val)
-            else:
-                return val
-
-        if set_name in data_dict:
-            tuple_set = data_dict[set_name]
-            if isinstance(tuple_set, dict) and "elements" in tuple_set:
-                elems = [to_tuple(t) for t in tuple_set["elements"]]
-                return elems
-            elif isinstance(tuple_set, list):
-                elems = [to_tuple(t) for t in tuple_set]
-                return elems
-            else:
-                return tuple_set
-        for decl in ast.get("declarations", []):
-            if decl.get("type") == "set_of_tuples" and decl.get("name") == set_name and decl.get("value") is not None:
-                elems = [
-                    (to_tuple(t["elements"]) if isinstance(t, dict) and "elements" in t else to_tuple(t))
-                    for t in decl["value"]
-                ]
-                return elems
-        return []
-
 
 # === GurobiCodeGenerator ===
 class GurobiCodeGenerator:
