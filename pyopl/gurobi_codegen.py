@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 EPS = 1e-5  # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
 EQ_TOL = 1e-6  # two-sided tolerance for equality reification
 
+
 # === GurobiCodeGenerator ===
 class GurobiCodeGenerator:
     def _expr_conditional(self, expr_node, current_iterators, symbolic):
