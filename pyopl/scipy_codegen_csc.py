@@ -1,6 +1,7 @@
 import itertools
 import logging
 from collections import defaultdict  # Needed for coefficient accumulation helpers
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 # === Local imports ===
@@ -16,6 +17,29 @@ from .tuple_set_helper import TupleSetHelper
 # Single source for big-M fallback and boolean epsilon tolerances.
 BIG_M_DEFAULT = 1_000_000.0  # Conservative default; refined per-expression when bounds available.
 BOOL_EPS = 1e-6  # Tolerance used for strict inequality flips / boolean reification.
+
+
+@dataclass
+class _ConstraintBuildState:
+    A_eq_rows: list[int] = field(default_factory=list)
+    A_eq_cols: list[int] = field(default_factory=list)
+    A_eq_data: list[float] = field(default_factory=list)
+    b_eq: list[float] = field(default_factory=list)
+    A_ub_rows: list[int] = field(default_factory=list)
+    A_ub_cols: list[int] = field(default_factory=list)
+    A_ub_data: list[float] = field(default_factory=list)
+    b_ub: list[float] = field(default_factory=list)
+    eq_row_idx: int = 0
+    ub_row_idx: int = 0
+
+
+@dataclass
+class _ConstraintBuildContext:
+    state: _ConstraintBuildState
+    comparison_truth_cache: dict[Any, Any]
+    subtree_var_cache: dict[Any, Any]
+    expr_memo: dict[Any, Any] = field(default_factory=dict)
+    neg_cache: dict[Any, Any] = field(default_factory=dict)
 
 # --- Logging Setup ---
 logger = logging.getLogger(__name__)
@@ -3790,18 +3814,336 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return lb_b, ub_b
         return (None, None)
 
+    def _append_sparse_row(self, state: _ConstraintBuildState, row: list[float], rhs: float, *, sense: str) -> None:
+        if sense == "eq":
+            row_idx = state.eq_row_idx
+            rows = state.A_eq_rows
+            cols = state.A_eq_cols
+            data = state.A_eq_data
+            rhs_values = state.b_eq
+        elif sense == "ub":
+            row_idx = state.ub_row_idx
+            rows = state.A_ub_rows
+            cols = state.A_ub_cols
+            data = state.A_ub_data
+            rhs_values = state.b_ub
+        else:
+            raise ValueError(f"Unsupported sparse row sense: {sense}")
+
+        for idx, coef in enumerate(row):
+            if abs(coef) > 1e-12:
+                rows.append(row_idx)
+                cols.append(idx)
+                data.append(coef)
+        rhs_values.append(rhs)
+
+        if sense == "eq":
+            state.eq_row_idx += 1
+        else:
+            state.ub_row_idx += 1
+
+    def _append_sparse_coef_row(
+        self,
+        state: _ConstraintBuildState,
+        coef_by_var: dict[Any, float],
+        rhs: float,
+        *,
+        sense: str,
+    ) -> None:
+        row = [0.0] * len(self.var_names)
+        for var_name, coef in coef_by_var.items():
+            idx = var_name if isinstance(var_name, int) else self.var_indices.get(var_name)
+            if idx is not None:
+                row[idx] += coef
+        self._append_sparse_row(state, row, rhs, sense=sense)
+
+    def _finalize_constraint_state(self, state: _ConstraintBuildState) -> None:
+        n_vars = len(self.var_names)
+        if len(state.b_eq) > 0:
+            dense_A_eq = [[0.0 for _ in range(n_vars)] for _ in range(len(state.b_eq))]
+            for row_idx, col_idx, value in zip(state.A_eq_rows, state.A_eq_cols, state.A_eq_data):
+                dense_A_eq[row_idx][col_idx] = value
+            self.A_eq = dense_A_eq
+        else:
+            self.A_eq = []
+        self.b_eq = state.b_eq
+
+        if len(state.b_ub) > 0:
+            dense_A_ub = [[0.0 for _ in range(n_vars)] for _ in range(len(state.b_ub))]
+            for row_idx, col_idx, value in zip(state.A_ub_rows, state.A_ub_cols, state.A_ub_data):
+                dense_A_ub[row_idx][col_idx] = value
+            self.A_ub = dense_A_ub
+        else:
+            self.A_ub = []
+        self.b_ub = state.b_ub
+
+        self._add_code_line("from scipy.sparse import csr_matrix")
+        self._add_code_line(f"A_eq_rows = {state.A_eq_rows}")
+        self._add_code_line(f"A_eq_cols = {state.A_eq_cols}")
+        self._add_code_line(f"A_eq_data = {state.A_eq_data}")
+        self._add_code_line(f"b_eq = {state.b_eq}")
+        self._add_code_line(f"A_ub_rows = {state.A_ub_rows}")
+        self._add_code_line(f"A_ub_cols = {state.A_ub_cols}")
+        self._add_code_line(f"A_ub_data = {state.A_ub_data}")
+        self._add_code_line(f"b_ub = {state.b_ub}")
+        self._add_code_line(
+            f"A_eq = csr_matrix((A_eq_data, (A_eq_rows, A_eq_cols)), shape=({len(state.b_eq)}, {n_vars})) if len(b_eq) > 0 else None"
+        )
+        self._add_code_line(
+            f"A_ub = csr_matrix((A_ub_data, (A_ub_rows, A_ub_cols)), shape=({len(state.b_ub)}, {n_vars})) if len(b_ub) > 0 else None"
+        )
+
+    def _comparison_key(self, node, env):
+        def _bound_key(part):
+            while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
+                part = part.get("expression")
+            if not isinstance(part, dict):
+                return ("lit", part)
+            node_type = part.get("type")
+            if node_type == "indexed_name":
+                try:
+                    return ("indexed", self._multi_indexed_var_name(part, env))
+                except Exception:
+                    return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
+            if node_type == "name":
+                name = part.get("value")
+                return ("name", env.get(name, name))
+            if node_type in ("number", "string_literal", "boolean_literal"):
+                return (node_type, part.get("value"))
+            if node_type == "binop":
+                return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
+            if node_type == "sum":
+                local_iterators = {
+                    it.get("iterator")
+                    for it in (part.get("iterators") or [])
+                    if isinstance(it, dict) and it.get("iterator")
+                }
+                env_snapshot = tuple(
+                    sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+                )
+                return (
+                    "sum",
+                    str(part.get("iterators")),
+                    env_snapshot,
+                    _bound_key(part.get("expression")),
+                    _bound_key(part.get("index_constraint")),
+                )
+            return (node_type, str(part))
+
+        op = node.get("op")
+        left = node.get("left")
+        right = node.get("right")
+        if op in ("==", "!="):
+            left_key = _bound_key(left)
+            right_key = _bound_key(right)
+            return ("cmp", op, left_key, right_key) if left_key <= right_key else ("cmp", op, right_key, left_key)
+        return ("cmp", op, _bound_key(left), _bound_key(right))
+
+    def _comparison_truth_var(self, node, env, ctx: _ConstraintBuildContext):
+        """Return a binary var name representing truth of a supported linear comparison."""
+        if not (
+            isinstance(node, dict)
+            and node.get("type") == "binop"
+            and node.get("sem_type") == "boolean"
+            and node.get("op") in ("<=", ">=", "!=", "==")
+        ):
+            raise SemanticError("Not a supported comparison binop for truth var")
+        comparison_truth_cache = ctx.comparison_truth_cache
+        key = self._comparison_key(node, env)
+        if key in comparison_truth_cache:
+            return comparison_truth_cache[key]
+        op = node.get("op")
+
+        def _local_unwrap_paren(expr_node):
+            while isinstance(expr_node, dict) and expr_node.get("type") == "parenthesized_expression":
+                expr_node = expr_node.get("expression")
+            return expr_node
+
+        def _local_is_simple_comparison(expr_node):
+            return (
+                isinstance(expr_node, dict)
+                and expr_node.get("type") == "binop"
+                and expr_node.get("op") in (">=", "<=", "==", ">", "<")
+                and expr_node.get("sem_type") == "boolean"
+            )
+
+        def _ground_numeric_value(expr_node, env_local):
+            coef_dict, const_val = self._eval_expr(expr_node, dict(env_local))
+            if coef_dict:
+                return None
+            if isinstance(const_val, bool):
+                return 1.0 if const_val else 0.0
+            if isinstance(const_val, (int, float)):
+                return float(const_val)
+            return None
+
+        def _sum_comparison_truth_vars(sum_node, env_local):
+            sum_node = _local_unwrap_paren(sum_node)
+            if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
+                return None
+            inner_cmp = _local_unwrap_paren(sum_node.get("expression"))
+            if not _local_is_simple_comparison(inner_cmp):
+                return None
+            iterators = sum_node.get("iterators", [])
+            loop_vars, loop_ranges = self._unroll_iterators(iterators)
+            z_names = []
+            for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
+                env2 = dict(env_local)
+                for var_name, value in zip(loop_vars, idx_tuple):
+                    env2[var_name] = value
+                idx_constr = sum_node.get("index_constraint")
+                if idx_constr is not None:
+                    cond_coef, cond_val = self._eval_expr(idx_constr, env2)
+                    if cond_coef or not bool(cond_val):
+                        continue
+                comp_inst = {
+                    "type": "binop",
+                    "op": inner_cmp.get("op"),
+                    "left": inner_cmp.get("left"),
+                    "right": inner_cmp.get("right"),
+                    "sem_type": "boolean",
+                }
+                z_names.append(self._comparison_truth_var(comp_inst, env2, ctx))
+            return z_names
+
+        if op == "==":
+            left_truths = _sum_comparison_truth_vars(node.get("left"), env)
+            right_truths = _sum_comparison_truth_vars(node.get("right"), env)
+            if left_truths is not None or right_truths is not None:
+                z_names = left_truths if left_truths is not None else right_truths
+                other_side = node.get("right") if left_truths is not None else node.get("left")
+                k_value = _ground_numeric_value(other_side, env)
+                if k_value is not None and abs(k_value - len(z_names)) < 1e-12:
+                    bname = f"cmp_flag_{len(comparison_truth_cache)}"
+                    self.var_names.append(bname)
+                    self.var_indices[bname] = len(self.var_names) - 1
+                    self.bounds.append([0, 1])
+                    if hasattr(self, "integrality"):
+                        self.integrality.append(1)
+                    else:
+                        self.integrality = [1]
+                    if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                        self.c.append(0.0)
+
+                    for z_name in z_names:
+                        row = [0.0] * len(self.var_names)
+                        row[self.var_indices[bname]] += 1.0
+                        row[self.var_indices[z_name]] -= 1.0
+                        self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+
+                    row = [0.0] * len(self.var_names)
+                    for z_name in z_names:
+                        row[self.var_indices[z_name]] += 1.0
+                    row[self.var_indices[bname]] -= 1.0
+                    self._append_sparse_row(ctx.state, row, float(len(z_names) - 1), sense="ub")
+
+                    comparison_truth_cache[key] = bname
+                    self._add_code_line("# comparison truth var for conjunction of sum-comparisons")
+                    return bname
+
+        lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
+        rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
+
+        def _coerce_numeric(value):
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, bool):
+                return 1.0 if value else 0.0
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    raise SemanticError(f"Non-numeric term '{value}' in linear comparison; cannot linearize")
+            raise SemanticError(f"Unsupported constant type {type(value)} in linear comparison")
+
+        lhs_const = _coerce_numeric(lhs_const)
+        rhs_const = _coerce_numeric(rhs_const)
+        expr_coef = dict(lhs_dict)
+        for var_name, coef in rhs_dict.items():
+            expr_coef[var_name] = expr_coef.get(var_name, 0.0) - coef
+        expr_const = lhs_const - rhs_const
+        bname = f"cmp_flag_{len(comparison_truth_cache)}"
+        self.var_names.append(bname)
+        self.var_indices[bname] = len(self.var_names) - 1
+        self.bounds.append([0, 1])
+        if hasattr(self, "integrality"):
+            self.integrality.append(1)
+        else:
+            self.integrality = [1]
+        if hasattr(self, "c") and len(self.c) < len(self.var_names):
+            self.c.append(0.0)
+        try:
+            big_m = self._big_m_for_comparison(node, env=env)
+        except Exception:
+            big_m = BIG_M_DEFAULT
+        eps = BOOL_EPS
+
+        def add_ub(row_coef_dict, rhs):
+            self._append_sparse_coef_row(ctx.state, row_coef_dict, rhs, sense="ub")
+
+        if op == "<=":
+            row1 = dict(expr_coef)
+            row1[bname] = row1.get(bname, 0.0) + big_m
+            add_ub(row1, big_m - expr_const)
+            row2 = {var_name: -coef for var_name, coef in expr_coef.items()}
+            row2[bname] = row2.get(bname, 0.0) - big_m
+            add_ub(row2, expr_const - eps)
+        elif op == ">=":
+            neg_coef = {var_name: -coef for var_name, coef in expr_coef.items()}
+            neg_const = -expr_const
+            row1 = dict(neg_coef)
+            row1[bname] = row1.get(bname, 0.0) + big_m
+            add_ub(row1, big_m - neg_const)
+            row2 = dict(expr_coef)
+            row2[bname] = row2.get(bname, 0.0) - big_m
+            add_ub(row2, -expr_const - eps)
+        elif op == "!=":
+            row_a = {var_name: -coef for var_name, coef in expr_coef.items()}
+            row_a[bname] = row_a.get(bname, 0.0) - big_m
+            add_ub(row_a, -1 - expr_const)
+            row_b = {var_name: -coef for var_name, coef in expr_coef.items()}
+            row_b[bname] = row_b.get(bname, 0.0) + big_m
+            add_ub(row_b, big_m - 1 - expr_const)
+        else:
+            row1 = dict(expr_coef)
+            row1[bname] = row1.get(bname, 0.0) + big_m
+            add_ub(row1, big_m - expr_const)
+            neg_coef = {var_name: -coef for var_name, coef in expr_coef.items()}
+            neg_coef[bname] = neg_coef.get(bname, 0.0) + big_m
+            add_ub(neg_coef, big_m + expr_const)
+        comparison_truth_cache[key] = bname
+        self._add_code_line(f"# comparison truth var for {op}")
+        return bname
+
     def _build_constraints(self):
-        eq_row_idx = 0
-        ub_row_idx = 0
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
         # Enable symbolic boolean evaluation during constraint build
         prev_sym = getattr(self, "_allow_symbolic_bool", False)
         self._allow_symbolic_bool = True
-        A_eq_rows, A_eq_cols, A_eq_data, b_eq = [], [], [], []
-        A_ub_rows, A_ub_cols, A_ub_data, b_ub = [], [], [], []
+        state = _ConstraintBuildState()
+        A_eq_rows, A_eq_cols, A_eq_data, b_eq = state.A_eq_rows, state.A_eq_cols, state.A_eq_data, state.b_eq
+        A_ub_rows, A_ub_cols, A_ub_data, b_ub = state.A_ub_rows, state.A_ub_cols, state.A_ub_data, state.b_ub
         eq_row_idx = 0
         ub_row_idx = 0
+
+        def append_eq_row(row, rhs):
+            nonlocal eq_row_idx
+            state.eq_row_idx = eq_row_idx
+            self._append_sparse_row(state, row, rhs, sense="eq")
+            eq_row_idx = state.eq_row_idx
+
+        def append_ub_row(row, rhs):
+            nonlocal ub_row_idx
+            state.ub_row_idx = ub_row_idx
+            self._append_sparse_row(state, row, rhs, sense="ub")
+            ub_row_idx = state.ub_row_idx
+
+        def append_ub_coef_row(row_coef_dict, rhs):
+            nonlocal ub_row_idx
+            state.ub_row_idx = ub_row_idx
+            self._append_sparse_coef_row(state, row_coef_dict, rhs, sense="ub")
+            ub_row_idx = state.ub_row_idx
 
         # Collected per-variable bounds from simple constraints (var >= c, var <= c, var == c)
         if not hasattr(self, "_collected_lbs"):
@@ -3810,10 +4152,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         # --- Mixed AND/OR auxiliary infrastructure ---
         self.aux_created = []  # list of created auxiliary boolean vars
-        neg_cache = {}  # var -> its negation auxiliary
-        expr_memo = {}  # id(node) -> var name (per build to avoid leaking id mappings)
+        ctx = _ConstraintBuildContext(
+            state=state,
+            comparison_truth_cache=self._comparison_truth_cache,
+            subtree_var_cache=self._bool_subtree_cache,
+        )
+        neg_cache = ctx.neg_cache  # var -> its negation auxiliary
+        expr_memo = ctx.expr_memo  # id(node) -> var name (per build to avoid leaking id mappings)
         # Reuse subtree boolean auxiliary vars across constraints via instance-level cache
-        subtree_var_cache = self._bool_subtree_cache
+        subtree_var_cache = ctx.subtree_var_cache
 
         def _new_aux():
             vname = f"_baux{len(self.aux_created)}"
@@ -3853,287 +4200,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return vname, (1 if left["value"] == 1 else -1)
             raise SemanticError("Unsupported atomic boolean literal")
 
-        # Reuse comparison truth vars across constraints (instance-level)
-        comparison_truth_cache = self._comparison_truth_cache
-
-        def _comparison_key(node, env):
-            def _bound_key(part):
-                while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
-                    part = part.get("expression")
-                if not isinstance(part, dict):
-                    return ("lit", part)
-                node_type = part.get("type")
-                if node_type == "indexed_name":
-                    try:
-                        return ("indexed", self._multi_indexed_var_name(part, env))
-                    except Exception:
-                        return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
-                if node_type == "name":
-                    name = part.get("value")
-                    return ("name", env.get(name, name))
-                if node_type in ("number", "string_literal", "boolean_literal"):
-                    return (node_type, part.get("value"))
-                if node_type == "binop":
-                    return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
-                if node_type == "sum":
-                    local_iterators = {
-                        it.get("iterator")
-                        for it in (part.get("iterators") or [])
-                        if isinstance(it, dict) and it.get("iterator")
-                    }
-                    env_snapshot = tuple(
-                        sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-                    )
-                    return (
-                        "sum",
-                        str(part.get("iterators")),
-                        env_snapshot,
-                        _bound_key(part.get("expression")),
-                        _bound_key(part.get("index_constraint")),
-                    )
-                return (node_type, str(part))
-
-            # Build structural key for a comparison binop (<=, >=, !=)
-            op = node.get("op")
-            left = node.get("left")
-            right = node.get("right")
-            # Normalize variable and constant ordering for symmetric ops (==, !=)
-            if op in ("==", "!="):
-                left_key = _bound_key(left)
-                right_key = _bound_key(right)
-                return ("cmp", op, left_key, right_key) if left_key <= right_key else ("cmp", op, right_key, left_key)
-            return ("cmp", op, _bound_key(left), _bound_key(right))
-
         def _comparison_truth_var(node, env):
-            """Return a binary var name representing truth of a linear comparison (<=, >=, !=).
-            Current implementation supports simple linear left/right expressions that _eval_expr can process.
-            """
-            nonlocal ub_row_idx
-            # nonlocal already declared at top of handle_constraint
-            if not (
-                isinstance(node, dict)
-                and node.get("type") == "binop"
-                and node.get("sem_type") == "boolean"
-                and node.get("op") in ("<=", ">=", "!=", "==")
-            ):
-                raise SemanticError("Not a supported comparison binop for truth var")
-            k = _comparison_key(node, env)
-            if k in comparison_truth_cache:
-                return comparison_truth_cache[k]
-            op = node.get("op")
-
-            def _local_unwrap_paren(expr_node):
-                while isinstance(expr_node, dict) and expr_node.get("type") == "parenthesized_expression":
-                    expr_node = expr_node.get("expression")
-                return expr_node
-
-            def _local_is_simple_comparison(expr_node):
-                return (
-                    isinstance(expr_node, dict)
-                    and expr_node.get("type") == "binop"
-                    and expr_node.get("op") in (">=", "<=", "==", ">", "<")
-                    and expr_node.get("sem_type") == "boolean"
-                )
-
-            def _ground_numeric_value(expr_node, env_local):
-                coef_dict, const_val = self._eval_expr(expr_node, dict(env_local))
-                if coef_dict:
-                    return None
-                if isinstance(const_val, bool):
-                    return 1.0 if const_val else 0.0
-                if isinstance(const_val, (int, float)):
-                    return float(const_val)
-                return None
-
-            def _sum_comparison_truth_vars(sum_node, env_local):
-                sum_node = _local_unwrap_paren(sum_node)
-                if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
-                    return None
-                inner_cmp = _local_unwrap_paren(sum_node.get("expression"))
-                if not _local_is_simple_comparison(inner_cmp):
-                    return None
-                iterators = sum_node.get("iterators", [])
-                loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                z_names = []
-                for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                    env2 = dict(env_local)
-                    for var_name, value in zip(loop_vars, idx_tuple):
-                        env2[var_name] = value
-                    idx_constr = sum_node.get("index_constraint")
-                    if idx_constr is not None:
-                        cond_coef, cond_val = self._eval_expr(idx_constr, env2)
-                        if cond_coef or not bool(cond_val):
-                            continue
-                    comp_inst = {
-                        "type": "binop",
-                        "op": inner_cmp.get("op"),
-                        "left": inner_cmp.get("left"),
-                        "right": inner_cmp.get("right"),
-                        "sem_type": "boolean",
-                    }
-                    z_names.append(_comparison_truth_var(comp_inst, env2))
-                return z_names
-
-            if op == "==":
-                left_truths = _sum_comparison_truth_vars(node.get("left"), env)
-                right_truths = _sum_comparison_truth_vars(node.get("right"), env)
-                if left_truths is not None or right_truths is not None:
-                    z_names = left_truths if left_truths is not None else right_truths
-                    other_side = node.get("right") if left_truths is not None else node.get("left")
-                    k_value = _ground_numeric_value(other_side, env)
-                    if k_value is not None and abs(k_value - len(z_names)) < 1e-12:
-                        bname = f"cmp_flag_{len(comparison_truth_cache)}"
-                        self.var_names.append(bname)
-                        self.var_indices[bname] = len(self.var_names) - 1
-                        self.bounds.append([0, 1])
-                        if hasattr(self, "integrality"):
-                            self.integrality.append(1)
-                        else:
-                            self.integrality = [1]
-                        if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                            self.c.append(0.0)
-
-                        for z_name in z_names:
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[bname]] += 1.0
-                            row[self.var_indices[z_name]] -= 1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(coef)
-                            b_ub.append(0.0)
-                            ub_row_idx += 1
-
-                        row = [0.0] * len(self.var_names)
-                        for z_name in z_names:
-                            row[self.var_indices[z_name]] += 1.0
-                        row[self.var_indices[bname]] -= 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(float(len(z_names) - 1))
-                        ub_row_idx += 1
-
-                        comparison_truth_cache[k] = bname
-                        self._add_code_line("# comparison truth var for conjunction of sum-comparisons")
-                        return bname
-
-            # Evaluate both sides into dict form f(x) = lhs - rhs
-            lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
-            rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
-
-            # Coerce constants to numeric if possible; raise clear semantic error otherwise.
-            def _coerce_numeric(v):
-                if isinstance(v, (int, float)):
-                    return float(v)
-                if isinstance(v, bool):
-                    return 1.0 if v else 0.0
-                if isinstance(v, str):
-                    # Attempt to parse simple numeric strings; ignore placeholders like "x['f']".
-                    try:
-                        return float(v)
-                    except ValueError:
-                        raise SemanticError(f"Non-numeric term '{v}' in linear comparison; cannot linearize")
-                # Unsupported type (e.g., tuple, list)
-                raise SemanticError(f"Unsupported constant type {type(v)} in linear comparison")
-
-            lhs_const = _coerce_numeric(lhs_const)
-            rhs_const = _coerce_numeric(rhs_const)
-            expr_coef = dict(lhs_dict)
-            for vn, cf in rhs_dict.items():
-                expr_coef[vn] = expr_coef.get(vn, 0.0) - cf
-            expr_const = lhs_const - rhs_const  # we model f = sum coef*var + expr_const
-            # Unified naming for comparison truth variables
-            bname = f"cmp_flag_{len(comparison_truth_cache)}"
-            self.var_names.append(bname)
-            self.var_indices[bname] = len(self.var_names) - 1
-            self.bounds.append([0, 1])
-            if hasattr(self, "integrality"):
-                self.integrality.append(1)
-            else:
-                self.integrality = [1]
-            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                self.c.append(0.0)
-            # Big-M estimation: delegate to unified helper for consistent tightening
-            try:
-                M = self._big_m_for_comparison(node, env=env)
-            except Exception:
-                M = BIG_M_DEFAULT  # final safety fallback
-            EPS = BOOL_EPS
-
-            # Helper to add row (row_coef_dict <= rhs)
-            def add_ub(row_coef_dict, rhs):
-                nonlocal ub_row_idx
-                row = [0.0] * len(self.var_names)
-                for vn, cf in row_coef_dict.items():
-                    if vn in self.var_indices:
-                        row[self.var_indices[vn]] += cf
-                for i, coef in enumerate(row):
-                    if abs(coef) > 1e-12:
-                        A_ub_rows.append(ub_row_idx)
-                        A_ub_cols.append(i)
-                        A_ub_data.append(coef)
-                b_ub.append(rhs)
-                ub_row_idx += 1
-
-            # Build linear form value f = sum(cf*var) + expr_const.
-            # For convenience treat expr_const by adding it to rhs.
-            # Encode operations:
-            if op == "<=":
-                # f <= 0 when b=1
-                # Constraint 1: f - M*(1-b) <= 0  => f - M + M*b <=0
-                row1 = dict(expr_coef)
-                row1[bname] = row1.get(bname, 0.0) + M
-                const1 = M - expr_const
-                add_ub(row1, const1)
-                # Constraint 2: ensure if f <=0 then b=1: f + EPS - M*b >= 0 -> -f - EPS + M*b <=0
-                row2 = {vn: -cf for vn, cf in expr_coef.items()}
-                row2[bname] = row2.get(bname, 0.0) - M
-                const2 = expr_const - EPS
-                add_ub(row2, const2)
-            elif op == ">=":
-                # f >=0 equivalent to -f <=0 handled like <= with -f
-                # Define g = -f
-                neg_coef = {vn: -cf for vn, cf in expr_coef.items()}
-                neg_const = -expr_const
-                # g <=0 pattern with same two constraints using neg_coef/neg_const
-                row1 = dict(neg_coef)
-                row1[bname] = row1.get(bname, 0.0) + M
-                const1 = M - neg_const
-                add_ub(row1, const1)
-                row2 = dict(expr_coef)
-                row2[bname] = row2.get(bname, 0.0) - M
-                const2 = -expr_const - EPS
-                add_ub(row2, const2)
-            elif op == "!=":
-                # Generic numeric != encoding via two big-M inequalities (may be tightened later)
-                delta = bname
-                # Constraint A: -f - M*delta <= -1 - expr_const
-                rowA = {vn: -cf for vn, cf in expr_coef.items()}
-                rowA[delta] = rowA.get(delta, 0.0) - M
-                constA = -1 - expr_const
-                add_ub(rowA, constA)
-                # Constraint B (current generic form): -f - M + M*delta <= -1 - expr_const  (equivalent to f + M - M*delta >= 1)
-                rowB = {vn: -cf for vn, cf in expr_coef.items()}
-                rowB[delta] = rowB.get(delta, 0.0) + M
-                constB = M - 1 - expr_const
-                add_ub(rowB, constB)
-            else:  # '==' (not yet fully supported for truth var; fall back by creating equality with tolerance)
-                # Soft encoding: |f| <= M*(1-b); if b=1 then both enforce f close to 0 (within EPS)
-                row1 = dict(expr_coef)
-                row1[bname] = row1.get(bname, 0.0) + M
-                const1 = M - expr_const
-                add_ub(row1, const1)
-                neg_coef = {vn: -cf for vn, cf in expr_coef.items()}
-                neg_coef[bname] = neg_coef.get(bname, 0.0) + M
-                const2 = M + expr_const
-                add_ub(neg_coef, const2)
-            comparison_truth_cache[k] = bname
-            self._add_code_line(f"# comparison truth var for {op}")
-            return bname
+            nonlocal eq_row_idx, ub_row_idx
+            ctx.state.eq_row_idx = eq_row_idx
+            ctx.state.ub_row_idx = ub_row_idx
+            result = self._comparison_truth_var(node, env, ctx)
+            eq_row_idx = ctx.state.eq_row_idx
+            ub_row_idx = ctx.state.ub_row_idx
+            return result
 
         def _bool_expr_var(node, env):
             nonlocal eq_row_idx, ub_row_idx
@@ -4322,49 +4396,25 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[x]] = -1.0
                     row[self.var_indices[y]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     # z >= y - x
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[x]] = 1.0
                     row[self.var_indices[y]] = -1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     # z <= x + y
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = -1.0
                     row[self.var_indices[x]] = 1.0
                     row[self.var_indices[y]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     # z <= 2 - (x + y)
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[x]] = 1.0
                     row[self.var_indices[y]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(2.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 2.0)
                     subtree_var_cache[sk] = z
                     expr_memo[env_memo_key] = z
                     return z
@@ -4422,13 +4472,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row = [0.0] * len(self.var_names)
                                 row[self.var_indices[vname]] = 1.0
                                 row[self.var_indices[expr_var]] = -1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
+                                append_eq_row(row, 0.0)
                         subtree_var_cache[sk] = vname
                         expr_memo[env_memo_key] = vname
                         return vname
@@ -4451,13 +4495,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 row = [0.0] * len(self.var_names)
                 row[self.var_indices[z]] = 1.0
                 row[self.var_indices[vname]] = 1.0
-                for i, coef in enumerate(row):
-                    if abs(coef) > 1e-12:
-                        A_eq_rows.append(eq_row_idx)
-                        A_eq_cols.append(i)
-                        A_eq_data.append(coef)
-                b_eq.append(1.0)
-                eq_row_idx += 1
+                append_eq_row(row, 1.0)
                 neg_cache[vname] = z
                 expr_memo[env_memo_key] = z
                 subtree_var_cache[sk] = z
@@ -4471,13 +4509,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 row = [0.0] * len(self.var_names)
                 row[self.var_indices[z]] = 1.0
                 row[self.var_indices[inner]] = 1.0
-                for i, coef in enumerate(row):
-                    if abs(coef) > 1e-12:
-                        A_eq_rows.append(eq_row_idx)
-                        A_eq_cols.append(i)
-                        A_eq_data.append(coef)
-                b_eq.append(1.0)
-                eq_row_idx += 1
+                append_eq_row(row, 1.0)
                 neg_cache[inner] = z
                 subtree_var_cache[sk] = z
                 return z
@@ -4625,66 +4657,30 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[left_v]] = -1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[right_v]] = -1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = -1.0
                     row[self.var_indices[left_v]] += 1.0
                     row[self.var_indices[right_v]] += 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(1.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 1.0)
                 else:  # or
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = -1.0
                     row[self.var_indices[left_v]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = -1.0
                     row[self.var_indices[right_v]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[z]] = 1.0
                     row[self.var_indices[left_v]] -= 1.0
                     row[self.var_indices[right_v]] -= 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                 expr_memo[env_memo_key] = z
                 subtree_var_cache[sk] = z
                 for var_node in tie_vars:
@@ -4697,13 +4693,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         row = [0.0] * len(self.var_names)
                         row[self.var_indices[vname]] = 1.0
                         row[self.var_indices[z]] = -1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(0.0)
-                        eq_row_idx += 1
+                        append_eq_row(row, 0.0)
                 return z
             # Lower 'implies' to (not left) or right
             if t == "implies":
@@ -4843,38 +4833,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                         row[idx] += 1.0
                                 # For >=, ==, <=, >, <
                                 if op_sym_top == ">=":
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(-coef)
-                                    b_ub.append(-k_val)
-                                    ub_row_idx += 1
+                                    append_ub_row([-coef for coef in row], -k_val)
                                 elif op_sym_top == "==":
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
-                                            A_eq_rows.append(eq_row_idx)
-                                            A_eq_cols.append(i)
-                                            A_eq_data.append(coef)
-                                    b_eq.append(k_val)
+                                    append_eq_row(row, k_val)
                                 elif op_sym_top == ">":
                                     # sum(aux_vars) > k_val  <=> sum(aux_vars) >= k_val+1
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(-coef)
-                                    b_ub.append(-(k_val + 1))
-                                    ub_row_idx += 1
+                                    append_ub_row([-coef for coef in row], -(k_val + 1))
                                 elif op_sym_top == "<":
                                     # sum(aux_vars) < k_val  <=> sum(aux_vars) <= k_val-1
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(k_val - 1)
-                                    ub_row_idx += 1
+                                    append_ub_row(row, k_val - 1)
                                 return
                     if _is_true(left):
                         expr_side = right
@@ -5032,39 +4999,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         # Add equality constraint row: aux == r
                         row = [0.0] * len(self.var_names)
                         row[self.var_indices[aux]] = 1.0
-                        b_eq.append(float(right.get("value", 0)))
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        eq_row_idx += 1
+                        append_eq_row(row, float(right.get("value", 0)))
                         return
                     elif constr.get("op") == ">=":
                         if isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
                             # Enforce aux >= 1 <=> aux == 1 for boolean
                             row = [0.0] * len(self.var_names)
                             row[self.var_indices[aux]] = 1.0
-                            b_eq.append(1.0)
-                            for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            eq_row_idx += 1
+                            append_eq_row(row, 1.0)
                             return
                     elif constr.get("op") == "!=":
                         if isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
                             # Enforce aux != 0 <=> aux == 1 for boolean
                             row = [0.0] * len(self.var_names)
                             row[self.var_indices[aux]] = 1.0
-                            b_eq.append(1.0)
-                            for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            eq_row_idx += 1
+                            append_eq_row(row, 1.0)
                             return
                     # For <= 0, >= 0, etc., fall through to generic logic
 
@@ -5196,13 +5145,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 ):
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[aux]] = 1.0
-                    b_eq.append(1.0)
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_eq_rows.append(eq_row_idx)
-                            A_eq_cols.append(i)
-                            A_eq_data.append(coef)
-                    eq_row_idx += 1
+                    append_eq_row(row, 1.0)
                     return
                 elif isinstance(right, dict) and (
                     (right.get("type") == "boolean_literal" and right.get("value") is False)
@@ -5210,13 +5153,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 ):
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[aux]] = 1.0
-                    b_eq.append(0.0)
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_eq_rows.append(eq_row_idx)
-                            A_eq_cols.append(i)
-                            A_eq_data.append(coef)
-                    eq_row_idx += 1
+                    append_eq_row(row, 0.0)
                     return
                 # Otherwise, fall through
             if constr.get("type") == "implication_constraint":
@@ -5332,13 +5269,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         if ant_vname in self.var_indices:
                             row[self.var_indices[ant_vname]] -= M
 
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(rhs_val)
-                        ub_row_idx += 1
+                        append_ub_row(row, rhs_val)
                         return
 
                     # Also accept equality to zero when x >= 0 (common with float+)
@@ -5366,13 +5297,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         if ant_vname in self.var_indices:
                             row[self.var_indices[ant_vname]] -= M
 
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(0.0)
-                        ub_row_idx += 1
+                        append_ub_row(row, 0.0)
                         return
 
                 # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
@@ -5455,13 +5380,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     row = [0.0] * len(self.var_names)
                     row[self.var_indices[x_name]] += 1.0
                     row[self.var_indices[y_name]] -= bigM
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
+                    append_ub_row(row, 0.0)
                     return
                 # --- General linear antecedent -> linear consequent (Option A canonical big-M) ---
                 if not ant_var_node:
@@ -5558,12 +5477,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     raise SemanticError(f"Variable '{v}' not indexed")
                                 row[self.var_indices[v]] += c
                             row[self.var_indices[flag_name]] += flag_coef
-                            for i, cv in enumerate(row):
-                                if abs(cv) > 1e-12:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(cv)
-                            b_ub.append(rhs)
+                            append_ub_row(row, rhs)
 
                         # Standard equality reification (diff==0 -> flag=1) using four inequalities:
                         # diff <=  bigM*(1-flag)
@@ -5572,15 +5486,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         # -diff >= -bigM*flag ->  diff <= bigM*flag
                         # First two: diff + bigM*flag <= bigM  and -diff + bigM*flag <= bigM
                         _add_row(ant_coef, bigM, bigM - ant_const)
-                        ub_row_idx += 1
                         neg_coef = {v: -c for v, c in ant_coef.items()}
                         _add_row(neg_coef, bigM, bigM + ant_const)
-                        ub_row_idx += 1
                         # Second pair: diff - bigM*flag <= 0  and -diff - bigM*flag <= 0
                         _add_row(ant_coef, -bigM, -ant_const)
-                        ub_row_idx += 1
                         _add_row(neg_coef, -bigM, ant_const)
-                        ub_row_idx += 1
 
                         # Proceed to consequent gating using flag_name
                         # Build consequent diff normalization below reusing logic after antecedent handling
@@ -5618,13 +5528,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for v, c in coefc.items():
                             row[self.var_indices[v]] += c
                         row[self.var_indices[flag_name]] += M_c
-                        for i, cv in enumerate(row):
-                            if abs(cv) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(cv)
-                        b_ub.append(rhs_c)
-                        ub_row_idx += 1
+                        append_ub_row(row, rhs_c)
                         return
 
                     # Helper: linearize expression (restricted to +,- of names and numbers)
@@ -5706,12 +5610,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 raise SemanticError(f"Variable '{var}' not indexed")
                             row[self.var_indices[var]] += coef
                         row[self.var_indices[flag_name]] += flag_coef
-                        for i, cv in enumerate(row):
-                            if abs(cv) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(cv)
-                        b_ub.append(rhs)
+                        append_ub_row(row, rhs)
 
                     # Big-M values
                     # M1 for antecedent activation (diff_a >= 0 when flag=1): use max(0, -diff_min)
@@ -5729,13 +5628,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     else:
                         rhs1 = M1
                     _add_le(coef1, M1, rhs1)
-                    ub_row_idx += 1
                     # 2) diff_a - U_a*flag <= 0 (forces flag=1 if diff_a>0)
                     coef2 = diff_a_coef.copy()
                     # diff_a = sum(c_i)x_i + diff_a_const -> sum(c_i)x_i - U_a*flag <= -diff_a_const
                     rhs2 = -diff_a_const
                     _add_le(coef2, -U_a, rhs2)
-                    ub_row_idx += 1
 
                     # Consequent normalization: enforce diff_c <= 0 (or both for equality)
                     def _emit_consequent(cons_node, op):
@@ -5768,7 +5665,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # sum(c_i)x_i + diff_c_const + M_c*flag <= M_c  -> sum(c_i)x_i + M_c*flag <= M_c - diff_c_const
                     rhs_c = M_c - diff_c_const
                     _add_le(coefc, M_c, rhs_c)
-                    ub_row_idx += 1
                     return
                 ant_name = (
                     self._multi_indexed_var_name(ant_var_node, env)
@@ -7411,46 +7307,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 rhs_value = rhs_const - lhs_const
                 logger.debug(f"[SciPyCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
                 if constr["op"] == "==":
-                    for i, v in enumerate(row):
-                        if abs(v) > 1e-12:
-                            A_eq_rows.append(eq_row_idx)
-                            A_eq_cols.append(i)
-                            A_eq_data.append(v)
-                    b_eq.append(rhs_value)
-                    eq_row_idx += 1
+                    append_eq_row(row, rhs_value)
                 elif constr["op"] == "<=":
-                    for i, v in enumerate(row):
-                        if abs(v) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(v)
-                    b_ub.append(rhs_value)
-                    ub_row_idx += 1
+                    append_ub_row(row, rhs_value)
                 elif constr["op"] == ">=":
-                    for i, v in enumerate(row):
-                        if abs(v) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(-v)
-                    b_ub.append(-rhs_value)
-                    ub_row_idx += 1
+                    append_ub_row([-v for v in row], -rhs_value)
                 elif constr["op"] in (">", "<"):
                     adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(constr["op"], rhs_value)
                     if adjusted_op == "<=":
-                        for i, v in enumerate(row):
-                            if abs(v) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(v)
-                        b_ub.append(adjusted_rhs)
+                        append_ub_row(row, adjusted_rhs)
                     else:
-                        for i, v in enumerate(row):
-                            if abs(v) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(-v)
-                        b_ub.append(-adjusted_rhs)
-                    ub_row_idx += 1
+                        append_ub_row([-v for v in row], -adjusted_rhs)
                 else:
                     logger.debug(f"Unsupported op: {constr['op']}")
             elif constr["type"] == "forall_constraint":
@@ -7491,40 +7358,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             # Always restore symbolic flag even if constraint handling raises
             self._allow_symbolic_bool = prev_sym
 
-        # For test compatibility: always set self.A_eq and self.A_ub to lists (never None)
-        n_vars = len(self.var_names)
-        if len(b_eq) > 0:
-            dense_A_eq = [[0.0 for _ in range(n_vars)] for _ in range(len(b_eq))]
-            for r, c, v in zip(A_eq_rows, A_eq_cols, A_eq_data):
-                dense_A_eq[r][c] = v
-            self.A_eq = dense_A_eq
-        else:
-            self.A_eq = []
-        self.b_eq = b_eq
-        if len(b_ub) > 0:
-            dense_A_ub = [[0.0 for _ in range(n_vars)] for _ in range(len(b_ub))]
-            for r, c, v in zip(A_ub_rows, A_ub_cols, A_ub_data):
-                dense_A_ub[r][c] = v
-            self.A_ub = dense_A_ub
-        else:
-            self.A_ub = []
-        self.b_ub = b_ub
-        # Generated code still uses sparse matrices
-        self._add_code_line("from scipy.sparse import csr_matrix")
-        self._add_code_line(f"A_eq_rows = {A_eq_rows}")
-        self._add_code_line(f"A_eq_cols = {A_eq_cols}")
-        self._add_code_line(f"A_eq_data = {A_eq_data}")
-        self._add_code_line(f"b_eq = {b_eq}")
-        self._add_code_line(f"A_ub_rows = {A_ub_rows}")
-        self._add_code_line(f"A_ub_cols = {A_ub_cols}")
-        self._add_code_line(f"A_ub_data = {A_ub_data}")
-        self._add_code_line(f"b_ub = {b_ub}")
-        self._add_code_line(
-            f"A_eq = csr_matrix((A_eq_data, (A_eq_rows, A_eq_cols)), shape=({len(b_eq)}, {n_vars})) if len(b_eq) > 0 else None"
-        )
-        self._add_code_line(
-            f"A_ub = csr_matrix((A_ub_data, (A_ub_rows, A_ub_cols)), shape=({len(b_ub)}, {n_vars})) if len(b_ub) > 0 else None"
-        )
+        state.eq_row_idx = eq_row_idx
+        state.ub_row_idx = ub_row_idx
+        self._finalize_constraint_state(state)
         # Always reconcile metadata (objective c, var_names, bounds, integrality) in case
         for i, line in enumerate(self.scipy_code_lines):
             if line.startswith("var_names = "):
