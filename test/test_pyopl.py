@@ -458,9 +458,12 @@ class TestPyOPLParser(TestPyOPL):
                 f.write("dvar float x; maximize x; subject to { x <= 1; }")
 
             generated_code = "raise RuntimeError('boom')"
-            with patch("pyopl.pyopl_core.gp", None), patch(
-                "pyopl.pyopl_core.load_opl_model",
-                return_value=({"declarations": [], "objective": {}, "constraints": []}, generated_code, {}),
+            with (
+                patch("pyopl.pyopl_core.gp", None),
+                patch(
+                    "pyopl.pyopl_core.load_opl_model",
+                    return_value=({"declarations": [], "objective": {}, "constraints": []}, generated_code, {}),
+                ),
             ):
                 result = solve_with_gurobi(model_file)
 

@@ -3137,7 +3137,9 @@ class OPLCompiler:
         self.syntax_error_reporting = self._normalize_syntax_error_reporting(syntax_error_reporting)
 
     def _raise_masked_syntax_error(self, exc: SemanticError, reporting: Optional[str] = None) -> None:
-        effective_reporting = self.syntax_error_reporting if reporting is None else self._normalize_syntax_error_reporting(reporting)
+        effective_reporting = (
+            self.syntax_error_reporting if reporting is None else self._normalize_syntax_error_reporting(reporting)
+        )
         if effective_reporting == "masked":
             raise SyntaxError("Syntax error") from None
         lineno = getattr(exc, "lineno", None)

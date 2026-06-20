@@ -82,6 +82,30 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
             f"Did not detect two distinct big-M inequalities for x != y; rows={gen.A_ub}, b_ub={gen.b_ub}, M={M}, delta={delta}",
         )
 
+    def test_strict_constraints_are_normalized(self):
+        opl = """
+        dvar float x; minimize 0; subject to { x > 1; x < 5; }
+        """
+        gen = self.gen(opl)
+        x_idx = gen.var_indices["x"]
+        found_gt = any(abs(row[x_idx] + 1.0) < 1e-9 and abs(rhs + 1.000001) < 1e-9 for row, rhs in zip(gen.A_ub, gen.b_ub))
+        found_lt = any(abs(row[x_idx] - 1.0) < 1e-9 and abs(rhs - 4.999999) < 1e-9 for row, rhs in zip(gen.A_ub, gen.b_ub))
+        self.assertTrue(found_gt, f"Did not find x >= 1 + BOOL_EPS row; A_ub={gen.A_ub}, b_ub={gen.b_ub}")
+        self.assertTrue(found_lt, f"Did not find x <= 5 - BOOL_EPS row; A_ub={gen.A_ub}, b_ub={gen.b_ub}")
+
+    def test_strict_implication_consequent_is_normalized(self):
+        opl = """
+        dvar boolean b; dvar float x; minimize 0; subject to { b == 1 => x < 5; }
+        """
+        gen = self.gen(opl)
+        x_idx = gen.var_indices["x"]
+        flag_idx = gen.var_indices["b"]
+        found = any(
+            abs(row[x_idx] - 1.0) < 1e-9 and row[flag_idx] > 0 and abs(rhs - (row[flag_idx] + 4.999999)) < 1e-6
+            for row, rhs in zip(gen.A_ub, gen.b_ub)
+        )
+        self.assertTrue(found, f"Did not find strict consequent gated row; A_ub={gen.A_ub}, b_ub={gen.b_ub}")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

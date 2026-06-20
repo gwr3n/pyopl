@@ -1338,6 +1338,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 else:
                     vector[idx] = coef
 
+    @staticmethod
+    def _strict_adjusted_rhs(op: str, rhs_value: float) -> tuple[str, float]:
+        if op == ">":
+            return ">=", rhs_value + BOOL_EPS
+        if op == "<":
+            return "<=", rhs_value - BOOL_EPS
+        return op, rhs_value
+
     def _resolve_tuple_index_varname(self, vname: str) -> Optional[int]:
         """
         Helper to resolve a variable name with a tuple index to its index in var_indices.
@@ -5739,6 +5747,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             diff_c_coef, diff_c_const = _diff_imp(cons_node.get("right"), cons_node.get("left"))
                         else:
                             raise SemanticError("Unsupported consequent operator")
+                        if op in ("<", ">"):
+                            diff_c_const += BOOL_EPS
                         return diff_c_coef, diff_c_const
 
                     diff_c_coef, diff_c_const = _emit_consequent(cons_c, cons_op)
@@ -5821,6 +5831,32 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             A_ub_cols.append(i)
                             A_ub_data.append(coef)
                     b_ub.append(1.0)
+                    ub_row_idx += 1
+                    return
+                if op_c in ("<=", "<", ">=", ">"):
+                    lhs_dict, lhs_const = self._accumulate_sum_to_dict(lc, env, sign=1)
+                    rhs_dict, rhs_const = self._accumulate_sum_to_dict(rc, env, sign=1)
+                    row_coef = dict(lhs_dict)
+                    for vname, coef in rhs_dict.items():
+                        row_coef[vname] = row_coef.get(vname, 0.0) - coef
+                    rhs_value = rhs_const - lhs_const
+                    adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(op_c, rhs_value)
+                    if adjusted_op == ">=":
+                        row_coef = {vname: -coef for vname, coef in row_coef.items()}
+                        adjusted_rhs = -adjusted_rhs
+                    big_m = BIG_M_DEFAULT
+                    row = [0.0] * len(self.var_names)
+                    for vname, coef in row_coef.items():
+                        idx = self.var_indices.get(vname)
+                        if idx is not None:
+                            row[idx] += coef
+                    row[self.var_indices[ant_name]] += big_m
+                    for i, coef in enumerate(row):
+                        if abs(coef) > 1e-12:
+                            A_ub_rows.append(ub_row_idx)
+                            A_ub_cols.append(i)
+                            A_ub_data.append(coef)
+                    b_ub.append(adjusted_rhs + big_m)
                     ub_row_idx += 1
                     return
                 raise SemanticError("Unsupported implication consequent form")
@@ -7397,6 +7433,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             A_ub_cols.append(i)
                             A_ub_data.append(-v)
                     b_ub.append(-rhs_value)
+                    ub_row_idx += 1
+                elif constr["op"] in (">", "<"):
+                    adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(constr["op"], rhs_value)
+                    if adjusted_op == "<=":
+                        for i, v in enumerate(row):
+                            if abs(v) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(v)
+                        b_ub.append(adjusted_rhs)
+                    else:
+                        for i, v in enumerate(row):
+                            if abs(v) > 1e-12:
+                                A_ub_rows.append(ub_row_idx)
+                                A_ub_cols.append(i)
+                                A_ub_data.append(-v)
+                        b_ub.append(-adjusted_rhs)
                     ub_row_idx += 1
                 else:
                     logger.debug(f"Unsupported op: {constr['op']}")

@@ -35,6 +35,49 @@ class TestNotEqualRewriteGurobi(unittest.TestCase):
         self.assertIn("x - y + 1000000.0 * neq_flag_c0 >= 1", code)
         self.assertIn("y - x + 1000000.0 * (1 - neq_flag_c0) >= 1", code)
 
+    def test_strict_constraints_are_normalized_for_gurobi(self):
+        opl = """
+        dvar float x;
+        minimize 0;
+        subject to {
+            x > 1;
+            x < 5;
+        }
+        """
+        code = self.gen_code(opl)
+        self.assertIn("model.addConstr(x >= (1) + 1e-05", code)
+        self.assertIn("model.addConstr(x <= (5) - 1e-05", code)
+        self.assertNotIn("model.addConstr(x > 1", code)
+        self.assertNotIn("model.addConstr(x < 5", code)
+
+    def test_strict_indicator_consequent_is_normalized_for_gurobi(self):
+        opl = """
+        dvar boolean b;
+        dvar float x;
+        minimize 0;
+        subject to { b == 1 => x < 5; }
+        """
+        code = self.gen_code(opl)
+        self.assertIn("model.addGenConstrIndicator(b, 1, x <= (5) - 1e-05", code)
+        self.assertNotIn("model.addGenConstrIndicator(b, 1, x < 5", code)
+
+    def test_integer_neq_bigM_uses_difference_bounds(self):
+        opl = """
+        dvar int x;
+        dvar int y;
+        minimize 0;
+        subject to {
+            x >= 0;
+            x <= 100;
+            y >= 100;
+            y <= 200;
+            x != y;
+        }
+        """
+        code = self.gen_code(opl)
+        self.assertIn("x - y + 201.0 * neq_flag_c4 >= 1", code)
+        self.assertIn("y - x + 201.0 * (1 - neq_flag_c4) >= 1", code)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -1322,6 +1322,13 @@ class GurobiCodeGenerator:
         # Fallback: literal compile-time name
         return repr(base_prefix + (suffix or ""))
 
+    def _gurobi_comparison_expr(self, left_expr: str, op: str, right_expr: str) -> str:
+        if op == ">":
+            return f"{left_expr} >= ({right_expr}) + {EPS}"
+        if op == "<":
+            return f"{left_expr} <= ({right_expr}) - {EPS}"
+        return f"{left_expr} {op} {right_expr}"
+
     # NEW: build a Python expression for a label template inside a forall loop
     def _compute_label_expr(self, label_template: dict) -> str:
         """
@@ -1841,22 +1848,25 @@ class GurobiCodeGenerator:
                     binval = int(rhs_val)
                     # Consequent must be a linear constraint
                     if cons_op in ("==", ">=", "<=", ">", "<"):
+                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, {binval}, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
+                            f"model.addGenConstrIndicator({ant_left_expr}, {binval}, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
                 elif ant_op == ">=" and rhs_val == 1:
                     # (binvar >= 1) is equivalent to (binvar == 1)
                     if cons_op in ("==", ">=", "<=", ">", "<"):
+                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 1, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
+                            f"model.addGenConstrIndicator({ant_left_expr}, 1, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
                 elif ant_op == "<=" and rhs_val == 0:
                     # (binvar <= 0) is equivalent to (binvar == 0)
                     if cons_op in ("==", ">=", "<=", ">", "<"):
+                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
                         self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 0, {cons_left_expr} {cons_op} {cons_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
+                            f"model.addGenConstrIndicator({ant_left_expr}, 0, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
                         )
                         indicator_used = True
             except Exception:
@@ -2414,12 +2424,9 @@ class GurobiCodeGenerator:
             if lB is not None and rB is not None and None not in (*lB, *rB):
                 lL, lU = lB
                 rL, rU = rB
-                width_left = max(0.0, lU - lL) if lU is not None and lL is not None else None
-                width_right = max(0.0, rU - rL) if rU is not None and rL is not None else None
-                if width_left is not None and width_right is not None:
-                    bigM = max(1.0, max(width_left, width_right) + 1.0)
-                else:
-                    bigM = bigM_default
+                diff_lower = lL - rU
+                diff_upper = lU - rL
+                bigM = max(1.0, 1.0 - diff_lower, 1.0 + diff_upper)
             else:
                 bigM = bigM_default
             # Encode as specified: a - b + M*δ >= 1 ; b - a + M*(1-δ) >= 1
@@ -2439,17 +2446,14 @@ class GurobiCodeGenerator:
         ):
             left_expr_str = self._traverse_expression(left_node, current_iterators)
             right_expr_str = self._traverse_expression(right_node, current_iterators)
-            self._add_code_line(
-                f"model.addConstr({left_expr_str} {op} {right_expr_str}, name={self._format_name_expr(constr_name_prefix)}"
-                f")"
-            )
+            comparison_expr = self._gurobi_comparison_expr(left_expr_str, op, right_expr_str)
+            self._add_code_line(f"model.addConstr({comparison_expr}, name={self._format_name_expr(constr_name_prefix)}" f")")
             return
         # Generic path
         left_expr_str = self._traverse_expression(left_node, current_iterators)
         right_expr_str = self._traverse_expression(right_node, current_iterators)
-        self._add_code_line(
-            f"model.addConstr({left_expr_str} {op} {right_expr_str}, name={self._format_name_expr(constr_name_prefix)})"
-        )
+        comparison_expr = self._gurobi_comparison_expr(left_expr_str, op, right_expr_str)
+        self._add_code_line(f"model.addConstr({comparison_expr}, name={self._format_name_expr(constr_name_prefix)})")
 
     def _emit_index_condition(self, node, current_iterators):
         """
