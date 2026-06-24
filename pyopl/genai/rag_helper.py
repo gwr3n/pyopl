@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import logging
-import sys
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -45,25 +44,20 @@ def _read_text(path: Path, max_chars: int = 100_000) -> str:
 
 def rank_problem_descriptions(
     query: str,
-    models_dir: Optional[Path | str] = None,
+    models_dir: Path | str,
     top_k: int = 10,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> List[Dict[str, Any]]:
     """
-    Rank problem description .txt files under 'opl_models' by semantic similarity to the query.
+    Rank problem description .txt files under models_dir by semantic similarity to the query.
 
     Args:
         query: The problem description to search with.
         models_dir: Root folder containing subfolders with .txt descriptions.
-                    Defaults to '<repo_root>/opl_models'.
         top_k: Number of top matches to return.
         model_name: Sentence embedding model to use.
-
-    Returns:
-        A list of dicts with: path, score, preview.
     """
-    repo_root = Path(__file__).resolve().parent
-    models_dir = Path(models_dir) if models_dir else (repo_root / "opl_models")
+    models_dir = Path(models_dir)
 
     if not models_dir.exists():
         raise FileNotFoundError(f"Models directory not found: {models_dir}")
@@ -81,6 +75,8 @@ def rank_problem_descriptions(
     files, texts = zip(*nonempty)
 
     model = _load_model(model_name)
+    if model is None:
+        return []
 
     # Encode with normalized embeddings for cosine similarity via dot product
     # Using convert_to_tensor True for efficient cosine similarity
@@ -120,21 +116,3 @@ def rank_problem_descriptions(
     )
 
     return ranked[: top_k if top_k > 0 else len(ranked)]
-
-
-if __name__ == "__main__":
-    # CLI usage:
-    #   python rag.py "your problem description here"
-    query = " ".join(sys.argv[1:]).strip()
-    if not query:
-        print('Usage: python rag.py "your problem description here"')
-        sys.exit(1)
-
-    results = rank_problem_descriptions(query=query, top_k=10)
-    if not results:
-        print("No descriptions found.")
-        sys.exit(0)
-
-    for i, r in enumerate(results, 1):
-        print(f"{i:2d}. {r['path']}  score={r['score']:.4f}")
-        # print(f"    {r['preview']}")
