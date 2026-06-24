@@ -4451,7 +4451,7 @@ class OPLIDE(tk.Tk):
                         pass
 
             widget.configure(yscrollcommand=_set_visibility)
-            self.after_idle(lambda: _set_visibility(*widget.yview()))
+            self.after_idle(lambda: _set_visibility(*(str(value) for value in widget.yview())))
         except Exception:
             pass
 

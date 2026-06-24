@@ -10,6 +10,43 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
+        class DummyWidget:
+            def __init__(self):
+                self.yscrollcommand = None
+
+            def configure(self, **kwargs):
+                self.yscrollcommand = kwargs["yscrollcommand"]
+
+            def yview(self):
+                return (0.0, 1.0)
+
+        class DummyScrollbar:
+            def __init__(self):
+                self.set_calls = []
+                self.removed = False
+
+            def winfo_manager(self):
+                return "grid"
+
+            def set(self, first, last):
+                self.set_calls.append((first, last))
+
+            def grid(self):
+                self.removed = False
+
+            def grid_remove(self):
+                self.removed = True
+
+        widget = DummyWidget()
+        scrollbar = DummyScrollbar()
+        dummy = SimpleNamespace(after_idle=lambda callback: callback())
+
+        OPLIDE._bind_autohide_vertical_scrollbar(dummy, widget, scrollbar)
+
+        self.assertEqual(scrollbar.set_calls, [("0.0", "1.0")])
+        self.assertTrue(scrollbar.removed)
+
     def test_apply_theme_colors_keeps_genai_button_font_independent_of_editor_font_size(self):
         class DummyVar:
             def __init__(self, value):

@@ -1655,6 +1655,24 @@ class TestModellingConstructs(unittest.TestCase):
             "Expected OPL or symbolic comment for range(2, T + 1) not found in SciPy code",
         )
 
+    def test_gurobi_forall_constraint_accepts_numeric_literal_rhs(self):
+        opl_code = """
+        int T = 3;
+        dvar float+ x[1..T];
+        minimize sum(t in 1..T) x[t];
+        subject to {
+          forall(t in 1..T)
+            x[t] <= 1;
+        }
+        """
+        lexer = OPLLexer()
+        parser = OPLParser()
+        ast = parser.parse(lexer.tokenize(opl_code))
+
+        gurobi_code = GurobiCodeGenerator(ast).generate_code()
+
+        self.assertIn("model.addConstr(x[t] <= 1", gurobi_code)
+
     def test_conditional_expression(self):
         # Test conditional expression in objective and constraint
         ast = {

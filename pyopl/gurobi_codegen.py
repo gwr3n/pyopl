@@ -1283,7 +1283,10 @@ class GurobiCodeGenerator:
         # Fallback: literal compile-time name
         return repr(base_prefix + (suffix or ""))
 
-    def _gurobi_comparison_expr(self, left_expr: str, op: str, right_expr: str) -> str:
+    def _gurobi_comparison_expr(self, left_expr, op, right_expr) -> str:
+        left_expr = str(left_expr)
+        op = str(op)
+        right_expr = str(right_expr)
         if op == ">":
             return f"{left_expr} >= ({right_expr}) + {EPS}"
         if op == "<":
@@ -2622,7 +2625,7 @@ class GurobiCodeGenerator:
         return f"max({', '.join(parts)})"
 
     def _expr_number(self, expr_node, current_iterators, symbolic):
-        return expr_node["value"]
+        return str(expr_node["value"])
 
     def _expr_name(self, expr_node, current_iterators, symbolic):
         name = expr_node["value"]
