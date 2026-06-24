@@ -3315,7 +3315,7 @@ class GurobiCodeGenerator:
 
     def _expr_boolean_literal(self, expr_node, current_iterators, symbolic):
         # Return 1 for True, 0 for False
-        return 1 if expr_node["value"] else 0
+        return "1" if expr_node["value"] else "0"
 
     def _expr_string_literal(self, expr_node, current_iterators, symbolic):
         # Return a quoted Python string literal for use in codegen

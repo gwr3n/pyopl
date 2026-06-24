@@ -1673,6 +1673,24 @@ class TestModellingConstructs(unittest.TestCase):
 
         self.assertIn("model.addConstr(x[t] <= 1", gurobi_code)
 
+    def test_gurobi_boolean_literal_expression_is_code_string(self):
+        ast = {
+            "declarations": [],
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "left": {"type": "boolean_literal", "value": True},
+                    "op": "==",
+                    "right": {"type": "number", "value": 1},
+                }
+            ],
+        }
+
+        gurobi_code = GurobiCodeGenerator(ast).generate_code()
+
+        self.assertIn("model.addConstr(1 == 1", gurobi_code)
+
     def test_conditional_expression(self):
         # Test conditional expression in objective and constraint
         ast = {
