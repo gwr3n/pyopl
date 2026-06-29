@@ -154,6 +154,8 @@ class OPLIDE(tk.Tk):
         self.geometry("1150x700")
         self.model_file: Optional[str] = None
         self.data_file: Optional[str] = None
+        self._model_saved_text = ""
+        self._data_saved_text = ""
         self.current_font_size = 12
         self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
         self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
@@ -293,6 +295,7 @@ class OPLIDE(tk.Tk):
             self._load_session()
         except Exception:
             pass
+        self._mark_editor_baselines_saved()
 
         # Initial status update
         self._update_caret_position(self.model_text)
@@ -695,6 +698,7 @@ class OPLIDE(tk.Tk):
 
         self.highlight(self.model_text)
         self.highlight(self.data_text, is_data=True)
+        self._mark_editor_baselines_saved()
         self.status_var.set("New model created. Ready.")
 
         # Clear output with a message
@@ -730,6 +734,7 @@ class OPLIDE(tk.Tk):
                 self.data_file = None
             except Exception:
                 self.data_file = None
+            self._mark_editor_baselines_saved()
 
             # Reset tab labels and focus
             try:
@@ -1976,6 +1981,9 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(current_data_file)}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
+        mark_baselines_saved = getattr(self, "_mark_editor_baselines_saved", None)
+        if callable(mark_baselines_saved):
+            mark_baselines_saved()
         self._append_output("\nRevisions applied to editors.\n", session_id)
         self.status_var.set("GenAI: revisions applied")
         self._clear_pending_genai_revisions()
@@ -2569,6 +2577,7 @@ class OPLIDE(tk.Tk):
                 self.model_text.delete(1.0, tk.END)
                 self.model_text.insert(tk.END, f.read())
             self.model_file = fname
+            self._model_saved_text = self._get_editor_text(self.model_text)
             self.highlight(self.model_text)
             self._update_caret_position(self.model_text)
 
@@ -2587,6 +2596,7 @@ class OPLIDE(tk.Tk):
                 self.data_text.delete(1.0, tk.END)
                 self.data_text.insert(tk.END, f.read())
             self.data_file = fname
+            self._data_saved_text = self._get_editor_text(self.data_text)
             self.highlight(self.data_text, is_data=True)
             self._update_caret_position(self.data_text)
 
@@ -2609,6 +2619,7 @@ class OPLIDE(tk.Tk):
         content = self.model_text.get("1.0", "end-1c")
         with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
+        self._model_saved_text = self._get_editor_text(self.model_text)
         # Update tab title
         try:
             self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
@@ -2632,6 +2643,7 @@ class OPLIDE(tk.Tk):
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
+        self._data_saved_text = self._get_editor_text(self.data_text)
         # Update tab title
         try:
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
@@ -2654,6 +2666,7 @@ class OPLIDE(tk.Tk):
         content = self.model_text.get(1.0, tk.END).rstrip("\n")
         with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
+        self._model_saved_text = self._get_editor_text(self.model_text)
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         try:
             self._save_session()
@@ -2672,6 +2685,7 @@ class OPLIDE(tk.Tk):
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
+        self._data_saved_text = self._get_editor_text(self.data_text)
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
         try:
             self._save_session()
@@ -4194,6 +4208,7 @@ class OPLIDE(tk.Tk):
                     # Highlight
                     self.highlight(self.model_text, is_data=False)
                     self.highlight(self.data_text, is_data=True)
+                    self._mark_editor_baselines_saved()
                     # Output and status
                     self._append_output("\nGenAI: Generation complete.\n", operation.session_id)
                     if assessment:
@@ -4836,8 +4851,49 @@ class OPLIDE(tk.Tk):
         except Exception as e:
             print(f"Warning: failed to save settings: {e}")
 
+    def _get_editor_text(self, text_widget: tk.Text) -> str:
+        """Return editor content without Tk's implicit trailing newline."""
+        return text_widget.get("1.0", "end-1c")
+
+    def _mark_editor_baselines_saved(self) -> None:
+        """Record the current model/data editor contents as the clean close baseline."""
+        try:
+            self._model_saved_text = self._get_editor_text(self.model_text)
+        except Exception:
+            self._model_saved_text = ""
+        try:
+            self._data_saved_text = self._get_editor_text(self.data_text)
+        except Exception:
+            self._data_saved_text = ""
+
+    def _has_unsaved_editor_changes(self) -> bool:
+        """Return True when either model or data editor differs from its saved baseline."""
+        try:
+            if self._get_editor_text(self.model_text) != self._model_saved_text:
+                return True
+        except Exception:
+            pass
+        try:
+            if self._get_editor_text(self.data_text) != self._data_saved_text:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _confirm_quit_with_unsaved_changes(self) -> bool:
+        """Ask whether to quit with unsaved model/data editor changes."""
+        return bool(
+            messagebox.askyesno(
+                "Unsaved Changes",
+                "Are you sure you want to quit? There are unsaved changes",
+                parent=self,
+            )
+        )
+
     def _on_close(self) -> None:
         """Persist settings and close the app."""
+        if self._has_unsaved_editor_changes() and not self._confirm_quit_with_unsaved_changes():
+            return
         setattr(self, "_shutting_down", True)
         try:
             self.stop_model()  # ensure no stray solver process
@@ -4866,6 +4922,7 @@ class OPLIDE(tk.Tk):
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
         self.bind_all("<Control-e>", self._genai_solve_and_explain_shortcut)
         self.bind_all("<Control-f>", self._find_shortcut)
+        self.bind_all("<Control-q>", self._close_shortcut)
 
         if sys.platform == "darwin":
             self.bind_all("<Command-s>", self.save_current_buffer)
@@ -4875,6 +4932,12 @@ class OPLIDE(tk.Tk):
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
             self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
             self.bind_all("<Command-f>", self._find_shortcut)
+            self.bind_all("<Command-q>", self._close_shortcut)
+
+    def _close_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        """Keyboard shortcut handler for closing the IDE."""
+        self._on_close()
+        return "break"
 
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
