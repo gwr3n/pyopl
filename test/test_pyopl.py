@@ -586,6 +586,76 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("matrix = [[(1, 1.0), (2, 2.0)]]", scipy_code)
         self.assertIn("A_eq_data = [-1.0, -2.0]", scipy_code)
 
+    def test_indexed_tuple_set_array_allows_empty_rows(self):
+        model_code = '''
+                int numVars = ...;
+                int numConstraints = ...;
+                range Vars = 1..numVars;
+                range Constraints = 1..numConstraints;
+                float objOffset = ...;
+                float objCoef[Vars] = ...;
+                float lb[Vars] = ...;
+                float ub[Vars] = ...;
+                int isBinary[Vars] = ...;
+                int isInteger[Vars] = ...;
+                tuple MatrixElement { int v; float val; };
+                int numElements = ...;
+                {MatrixElement} matrix[Constraints] = ...;
+                float rhs[Constraints] = ...;
+                string sense[Constraints] = ...;
+                {int} BinaryVars = {v | v in Vars: isBinary[v] == 1};
+                {int} IntegerVars = {v | v in Vars: isInteger[v] == 1};
+                {int} ContinuousVars = {v | v in Vars: isBinary[v] == 0 && isInteger[v] == 0};
+                dvar boolean xBinary[BinaryVars];
+                dvar int xInteger[IntegerVars];
+                dvar float xContinuous[ContinuousVars];
+                dexpr float x[v in Vars] =
+                    sum(b in BinaryVars: b == v) xBinary[b] +
+                    sum(i in IntegerVars: i == v) xInteger[i] +
+                    sum(c in ContinuousVars: c == v) xContinuous[c];
+                minimize objOffset + sum(v in Vars) objCoef[v] * x[v];
+                subject to {
+                    forall(v in Vars) {
+                        lower_bound: x[v] >= lb[v];
+                        upper_bound: x[v] <= ub[v];
+                    }
+                    forall(c in Constraints) {
+                        ct_row:
+                            if (sense[c] == "E")
+                                sum(e in matrix[c]) e.val * x[e.v] == rhs[c];
+                            else if (sense[c] == "L")
+                                sum(e in matrix[c]) e.val * x[e.v] <= rhs[c];
+                            else
+                                sum(e in matrix[c]) e.val * x[e.v] >= rhs[c];
+                    }
+                }
+        '''
+        data_code = '''
+                numVars = 2;
+                numConstraints = 3;
+                objOffset = 0;
+                objCoef = [1,2];
+                lb = [0,0];
+                ub = [10,10];
+                isBinary = [1,0];
+                isInteger = [0,0];
+                numElements = 2;
+                matrix = [
+                    { <1,1.0>, <2,2.0> },
+                    {  },
+                    { <1,-1.0> }
+                ];
+                rhs = [5,0,0];
+                sense = ["E", "E", "G"];
+        '''
+
+        _, gurobi_code, data = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
+        self.assertEqual(data["matrix"], [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]])
+        self.assertIn("matrix = {1: [(1, 1.0), (2, 2.0)], 2: [], 3: [(1, -1.0)]}", gurobi_code)
+
+        _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
+        self.assertIn("matrix = [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]]", scipy_code)
+
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
         lexer = OPLLexer()

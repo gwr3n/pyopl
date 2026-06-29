@@ -3290,6 +3290,10 @@ class OPLDataParser(Parser):
     def tuple_set_value(self, p):
         return p.tuple_literal_list
 
+    @_('"{" "}"')  # type: ignore
+    def tuple_set_value(self, p):
+        return []
+
     def error(self, p):
         # Unexpected token
         if p is not None:

@@ -3391,8 +3391,7 @@ class OPLIDE(tk.Tk):
         if "message" in results:
             buf.append(f"Message: {results['message']}\n")
 
-        for s in buf:
-            self._append_output(s, session_id)
+        self._append_output("".join(buf), session_id)
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
 
