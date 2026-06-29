@@ -2372,7 +2372,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return list(set_vals)
             if rt == "indexed_set":
                 set_name = cast(str, rng.get("name"))
-                set_vals: Any = self.data_dict.get(set_name, [])
+                set_vals = self.data_dict.get(set_name, [])
                 for dim in rng.get("dimensions", []) or []:
                     _, idx_val = self._eval_index_expr(cast(Dict[str, Any], dim), env)
                     if isinstance(set_vals, dict):
@@ -2752,7 +2752,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("try:")
         self.indent_level += 1
         self._add_code_line("start_time = time.time()")
-        self._add_code_line("print(f'PyOPL/SciPy-HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')")
+        self._add_code_line(
+            "print(f'PyOPL/SciPy-HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')"
+        )
         # Only include integrality if needed
         if any(self.integrality):
             self._add_code_line(
@@ -2767,7 +2769,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 "bounds=bounds, method='highs', options={'disp': True})"
             )
         self._add_code_line("end_time = time.time()")
-        self._add_code_line("print(f'PyOPL/SciPy-HiGHS: status={res.status}, success={res.success}, iterations={getattr(res, \"nit\", None)}, time={end_time - start_time:.3f}s')")
+        self._add_code_line(
+            "print(f'PyOPL/SciPy-HiGHS: status={res.status}, success={res.success}, iterations={getattr(res, \"nit\", None)}, time={end_time - start_time:.3f}s')"
+        )
         self._add_code_line("status_map = {0: 'OPTIMAL', 1: 'ITERATION_LIMIT', 2: 'INFEASIBLE', 3: 'UNBOUNDED'}")
         self._add_code_line("status_str = status_map.get(res.status, 'ERROR')")
         self._add_code_line("if res.success and res.status == 0:")

@@ -369,7 +369,7 @@ class TestPyOPLParser(TestPyOPL):
     def test_opl_style_indexed_dvar_bounds_and_if_chain_parse(self):
         lexer = OPLLexer()
         parser = OPLParser()
-        opl_code = '''
+        opl_code = """
         int numVars = ...;
         int numConstraints = ...;
         range Vars = 1..numVars;
@@ -404,7 +404,7 @@ class TestPyOPLParser(TestPyOPL):
                     x[v] == 0 || x[v] == 1;
             }
         }
-        '''
+        """
 
         ast = parser.parse(lexer.tokenize(opl_code))
 
@@ -417,9 +417,11 @@ class TestPyOPLParser(TestPyOPL):
         row_if = ast["constraints"][0]["constraints"][0]
         self.assertEqual(row_if["type"], "if_constraint")
         self.assertEqual(row_if["then_constraints"][0]["label_template"], {"name": "ct_row", "iterators": ["c"]})
-        self.assertEqual(ast["constraints"][1]["constraints"][0]["label_template"], {"name": "binary_restriction", "iterators": ["v"]})
+        self.assertEqual(
+            ast["constraints"][1]["constraints"][0]["label_template"], {"name": "binary_restriction", "iterators": ["v"]}
+        )
 
-        data_code = '''
+        data_code = """
         numVars = 2;
         numConstraints = 1;
         numElements = 1;
@@ -430,7 +432,7 @@ class TestPyOPLParser(TestPyOPL):
         matrix = [<1,1,1.0>];
         rhs = [1.0];
         sense = ["E"];
-        '''
+        """
         _, full_gurobi_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="gurobi")
         self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_gurobi_code)
         self.assertNotIn("zip(Elements", full_gurobi_code)
@@ -440,23 +442,23 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_scipy_code)
         self.assertNotIn("zip(Elements", full_scipy_code)
 
-        string_indexed_model = '''
+        string_indexed_model = """
         tuple Rec { int demand; float price; };
         {string} Foods = ...;
         Rec Food[Foods] = ...;
         dvar float+ x[Foods];
         maximize sum(f in Foods) Food[f].price * x[f];
         subject to { forall(f in Foods) x[f] <= Food[f].demand; }
-        '''
-        string_indexed_data = '''
+        """
+        string_indexed_data = """
         Foods = {"Meal1", "Meal2"};
         Food = [<3000,9>, <2000,7>];
-        '''
+        """
         _, string_gurobi_code, _ = OPLCompiler().compile_model(string_indexed_model, string_indexed_data, solver="gurobi")
         self.assertIn("Food = {'Meal1': {'demand': 3000, 'price': 9", string_gurobi_code)
         self.assertNotIn("Food = {1:", string_gurobi_code)
 
-        codegen_model = '''
+        codegen_model = """
         int numVars = ...;
         range Vars = 1..numVars;
         float lb[Vars] = ...;
@@ -465,7 +467,7 @@ class TestPyOPLParser(TestPyOPL):
         dvar float x[v in Vars] in lb[v]..ub[v];
         minimize sum(v in Vars) objCoef[v] * x[v];
         subject to { x[1] >= 0; }
-        '''
+        """
         codegen_ast = parser.parse(lexer.tokenize(codegen_model))
         data = {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 0.0}, "ub": {1: 1.0, 2: 1.0}}
         code = GurobiCodeGenerator(codegen_ast, data).generate_code()
@@ -479,7 +481,7 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
 
     def test_typed_scalar_set_comprehension_split_variables_parse(self):
-        model_code = '''
+        model_code = """
         int numVars = ...;
         range Vars = 1..numVars;
         float objCoef[Vars] = ...;
@@ -497,14 +499,14 @@ class TestPyOPLParser(TestPyOPL):
 
         minimize sum(v in Vars) objCoef[v] * x[v];
         subject to { }
-        '''
-        data_code = '''
+        """
+        data_code = """
         numVars = 3;
         objCoef = [1,2,3];
         lb = [0,0,0];
         ub = [1,10,1];
         isBinary = [1,0,1];
-        '''
+        """
 
         ast, gurobi_code, data_dict = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
 
@@ -512,7 +514,9 @@ class TestPyOPLParser(TestPyOPL):
         self.assertEqual(data_dict["ContinuousVars"], [2])
         self.assertNotIn("typed_set_comprehension", repr(ast.get("declarations")))
         self.assertIn("xBinary = model.addVars(BinaryVars, vtype=GRB.BINARY, name='xBinary')", gurobi_code)
-        self.assertIn("xContinuous = model.addVars(ContinuousVars, vtype=GRB.CONTINUOUS, name='xContinuous', lb=lb, ub=ub)", gurobi_code)
+        self.assertIn(
+            "xContinuous = model.addVars(ContinuousVars, vtype=GRB.CONTINUOUS, name='xContinuous', lb=lb, ub=ub)", gurobi_code
+        )
 
         _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
         self.assertIn("var_names = ['xBinary_1', 'xBinary_3', 'xContinuous_2']", scipy_code)
@@ -520,7 +524,7 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("integrality = [1, 1, 0]", scipy_code)
 
     def test_indexed_tuple_set_array_iterator_domain(self):
-        model_code = '''
+        model_code = """
                 int numVars = ...;
                 int numConstraints = ...;
                 range Vars = 1..numVars;
@@ -562,8 +566,8 @@ class TestPyOPLParser(TestPyOPL):
                                 sum(e in matrix[c]) e.val * x[e.v] >= rhs[c];
                     }
                 }
-        '''
-        data_code = '''
+        """
+        data_code = """
                 numVars = 2;
                 numConstraints = 1;
                 objOffset = 0;
@@ -576,7 +580,7 @@ class TestPyOPLParser(TestPyOPL):
                 matrix = [{<1,1.0>, <2,2.0>}];
                 rhs = [5];
                 sense = ["E"];
-        '''
+        """
 
         _, gurobi_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
         self.assertIn("matrix = {1: [(1, 1.0), (2, 2.0)]}", gurobi_code)
@@ -587,7 +591,7 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("A_eq_data = [-1.0, -2.0]", scipy_code)
 
     def test_indexed_tuple_set_array_allows_empty_rows(self):
-        model_code = '''
+        model_code = """
                 int numVars = ...;
                 int numConstraints = ...;
                 range Vars = 1..numVars;
@@ -629,8 +633,8 @@ class TestPyOPLParser(TestPyOPL):
                                 sum(e in matrix[c]) e.val * x[e.v] >= rhs[c];
                     }
                 }
-        '''
-        data_code = '''
+        """
+        data_code = """
                 numVars = 2;
                 numConstraints = 3;
                 objOffset = 0;
@@ -647,7 +651,7 @@ class TestPyOPLParser(TestPyOPL):
                 ];
                 rhs = [5,0,0];
                 sense = ["E", "E", "G"];
-        '''
+        """
 
         _, gurobi_code, data = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
         self.assertEqual(data["matrix"], [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]])

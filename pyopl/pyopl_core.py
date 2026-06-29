@@ -46,6 +46,7 @@ class _TeeStdout(StringIO):
         self._stream.flush()
         return super().flush()
 
+
 # --- Reserved identifiers that must not appear as model/data names.
 # Python keywords are invalid as generated identifiers, and a small built-in set
 # remains blocked because code generators may emit those names directly.
@@ -484,7 +485,12 @@ class OPLParser(Parser):
             value={"base_type": base_type, "elements": None},
             lineno=p.lineno,
         )
-        return {"type": "typed_set_comprehension", "base_type": base_type, "name": p.NAME, "comprehension": p.scalar_comprehension}
+        return {
+            "type": "typed_set_comprehension",
+            "base_type": base_type,
+            "name": p.NAME,
+            "comprehension": p.scalar_comprehension,
+        }
 
     # NEW: Typed scalar set of floats: {float} S = { 1.0, 2 };
     @_('"{" FLOAT "}" NAME "=" "{" float_element_list "}" ";"')  # type: ignore
@@ -2200,7 +2206,7 @@ class OPLParser(Parser):
             # Fallback treat as named_range; semantic error will surface later if undeclared
             return {"type": "named_range", "name": p.NAME}
 
-    @_('NAME indexed_dimensions')  # type: ignore
+    @_("NAME indexed_dimensions")  # type: ignore
     def IN_RANGE(self, p):
         try:
             sym = self.symbol_table.get_symbol(p.NAME)
@@ -3716,7 +3722,9 @@ class OPLCompiler:
                 end = self._eval_bound_expr(rng["end"], working_data)
                 return list(range(int(start), int(end) + 1))
             if rng["type"] == "named_range":
-                start, end = self._resolve_named_range(model_ast, working_data, rng["name"], context=f"set comprehension for '{set_name}'")
+                start, end = self._resolve_named_range(
+                    model_ast, working_data, rng["name"], context=f"set comprehension for '{set_name}'"
+                )
                 return list(range(int(start), int(end) + 1))
             if rng["type"] in ("named_set", "named_set_dimension"):
                 set_obj = working_data.get(rng["name"], [])

@@ -13,9 +13,9 @@ This module intentionally avoids extra dependencies and uses `argparse`.
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stdout
 import json
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Optional
 

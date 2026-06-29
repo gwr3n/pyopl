@@ -86,7 +86,9 @@ class GurobiCodeGenerator:
         # Collect variable bounds before constraints for tighter big-M
         self._collect_variable_bounds(self.ast.get("constraints", []))
         self._generate_constraints(self.ast["constraints"])
-        self._add_code_line("print(f'PyOPL/Gurobi: variables={model.NumVars}, constraints={model.NumConstrs}, sense={model.ModelSense}')")
+        self._add_code_line(
+            "print(f'PyOPL/Gurobi: variables={model.NumVars}, constraints={model.NumConstrs}, sense={model.ModelSense}')"
+        )
         self._add_code_line("model.optimize()")
         # Disambiguate INF_OR_UNBD into INFEASIBLE or UNBOUNDED when possible
         self._add_code_line("if model.status == GRB.INF_OR_UNBD:")
@@ -2038,7 +2040,9 @@ class GurobiCodeGenerator:
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.BINARY, name='{name}')")
             elif var_type == "int+":
                 default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})")
+                self._add_code_line(
+                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
+                )
             elif var_type == "int":
                 default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
@@ -2046,7 +2050,9 @@ class GurobiCodeGenerator:
                 )
             elif var_type == "float+":
                 default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})")
+                self._add_code_line(
+                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
+                )
             elif var_type == "float":
                 default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
@@ -2087,11 +2093,7 @@ class GurobiCodeGenerator:
         iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
 
         def emit_bound_expr(expr):
-            if (
-                isinstance(expr, dict)
-                and expr.get("type") == "indexed_name"
-                and len(expr.get("dimensions", [])) == 1
-            ):
+            if isinstance(expr, dict) and expr.get("type") == "indexed_name" and len(expr.get("dimensions", [])) == 1:
                 dim = expr["dimensions"][0]
                 if isinstance(dim, dict) and dim.get("type") == "name_reference_index" and dim.get("name") in iterator_names:
                     return expr["name"]
@@ -3079,23 +3081,37 @@ class GurobiCodeGenerator:
         if t == "not":
             inner = self._boolean_expr_to_binary_expr(node["value"], current_iterators, constr_name_prefix)
             aux = self._new_boolean_aux("not", constr_name_prefix)
-            self._add_code_line(f"model.addConstr({aux} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, '_not')})")
+            self._add_code_line(
+                f"model.addConstr({aux} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, '_not')})"
+            )
             return aux
         if t == "and":
             left = self._boolean_expr_to_binary_expr(node["left"], current_iterators, constr_name_prefix)
             right = self._boolean_expr_to_binary_expr(node["right"], current_iterators, constr_name_prefix)
             aux = self._new_boolean_aux("and", constr_name_prefix)
-            self._add_code_line(f"model.addConstr({aux} <= {left}, name={self._format_name_expr(constr_name_prefix, '_and_l')})")
-            self._add_code_line(f"model.addConstr({aux} <= {right}, name={self._format_name_expr(constr_name_prefix, '_and_r')})")
-            self._add_code_line(f"model.addConstr({aux} >= {left} + {right} - 1, name={self._format_name_expr(constr_name_prefix, '_and_link')})")
+            self._add_code_line(
+                f"model.addConstr({aux} <= {left}, name={self._format_name_expr(constr_name_prefix, '_and_l')})"
+            )
+            self._add_code_line(
+                f"model.addConstr({aux} <= {right}, name={self._format_name_expr(constr_name_prefix, '_and_r')})"
+            )
+            self._add_code_line(
+                f"model.addConstr({aux} >= {left} + {right} - 1, name={self._format_name_expr(constr_name_prefix, '_and_link')})"
+            )
             return aux
         if t == "or":
             left = self._boolean_expr_to_binary_expr(node["left"], current_iterators, constr_name_prefix)
             right = self._boolean_expr_to_binary_expr(node["right"], current_iterators, constr_name_prefix)
             aux = self._new_boolean_aux("or", constr_name_prefix)
-            self._add_code_line(f"model.addConstr({aux} >= {left}, name={self._format_name_expr(constr_name_prefix, '_or_l')})")
-            self._add_code_line(f"model.addConstr({aux} >= {right}, name={self._format_name_expr(constr_name_prefix, '_or_r')})")
-            self._add_code_line(f"model.addConstr({aux} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, '_or_link')})")
+            self._add_code_line(
+                f"model.addConstr({aux} >= {left}, name={self._format_name_expr(constr_name_prefix, '_or_l')})"
+            )
+            self._add_code_line(
+                f"model.addConstr({aux} >= {right}, name={self._format_name_expr(constr_name_prefix, '_or_r')})"
+            )
+            self._add_code_line(
+                f"model.addConstr({aux} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, '_or_link')})"
+            )
             return aux
         raise ValueError(f"Unsupported boolean expression type for Gurobi constraint: {t}")
 

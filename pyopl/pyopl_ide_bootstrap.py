@@ -185,6 +185,7 @@ class OPLIDE(tk.Tk):
 
         # Track last syntax error per editor (prevents cross-editor contamination)
         self._last_syntax_error_by_widget: dict[int, Optional[str]] = {}
+        self._last_syntax_error: Optional[str] = None
 
         # GenAI selection state
         self.genai_selection_var = tk.StringVar(value="")  # format: "provider|model"
@@ -2716,7 +2717,7 @@ class OPLIDE(tk.Tk):
             lexer = OPLLexer()
             parser = OPLParser()
             tokens = []
-            lexer_error = None
+            lexer_error: Exception | None = None
             try:
                 tokens = list(lexer.tokenize(code))
             except Exception as e:
