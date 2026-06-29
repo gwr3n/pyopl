@@ -1958,6 +1958,8 @@ class GurobiCodeGenerator:
         name = decl["name"]
         var_type = decl["var_type"]
         dimensions = decl["dimensions"]
+        bound_args = self._decl_dvar_bound_args(decl)
+        has_explicit_lb = "lower_bound" in decl
         range_args = []
         for dim in dimensions:
             if dim["type"] == "range_index":
@@ -1993,43 +1995,72 @@ class GurobiCodeGenerator:
             if var_type == "boolean":
                 self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.BINARY, name='{name}')")
             elif var_type == "int+":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=0)")
+                default_lb = "" if has_explicit_lb else ", lb=0"
+                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})")
             elif var_type == "int":
+                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)"
+                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
                 )
             elif var_type == "float+":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=0)")
+                default_lb = "" if has_explicit_lb else ", lb=0"
+                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})")
             elif var_type == "float":
+                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)"
+                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
                 )
             else:
-                self._add_code_line(f"{name} = model.addVars({product_args}, name='{name}')")
+                self._add_code_line(f"{name} = model.addVars({product_args}, name='{name}'{bound_args})")
         else:
             if var_type == "boolean":
                 self._add_code_line(
                     f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.BINARY, name='{name}')"
                 )
             elif var_type == "int+":
+                default_lb = "" if has_explicit_lb else ", lb=0"
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}', lb=0)"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
                 )
             elif var_type == "int":
+                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}', lb=-GRB.INFINITY)"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
                 )
             elif var_type == "float+":
+                default_lb = "" if has_explicit_lb else ", lb=0"
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}', lb=0)"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
                 )
             elif var_type == "float":
+                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                 self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}', lb=-GRB.INFINITY)"
+                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
                 )
             else:
-                self._add_code_line(f"{name} = model.addVars({', '.join(map(str, range_args))}, name='{name}')")
+                self._add_code_line(f"{name} = model.addVars({', '.join(map(str, range_args))}, name='{name}'{bound_args})")
         self.gurobi_var_map[name] = name
+
+    def _decl_dvar_bound_args(self, decl):
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+
+        def emit_bound_expr(expr):
+            if (
+                isinstance(expr, dict)
+                and expr.get("type") == "indexed_name"
+                and len(expr.get("dimensions", [])) == 1
+            ):
+                dim = expr["dimensions"][0]
+                if isinstance(dim, dict) and dim.get("type") == "name_reference_index" and dim.get("name") in iterator_names:
+                    return expr["name"]
+            return self._traverse_expression(expr, {}, symbolic=True)
+
+        args = []
+        if "lower_bound" in decl:
+            args.append(f"lb={emit_bound_expr(decl['lower_bound'])}")
+        if "upper_bound" in decl:
+            args.append(f"ub={emit_bound_expr(decl['upper_bound'])}")
+        return "" if not args else ", " + ", ".join(args)
 
     def _decl_range_declaration_inline(self, decl):
         name = decl["name"]

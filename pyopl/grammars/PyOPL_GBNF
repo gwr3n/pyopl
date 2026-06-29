@@ -35,8 +35,14 @@ constraint ::=
     | NAME _ ":" _ expression _ ";" _
     | "forall" _ forall_index_header _ constraint _
     | "forall" _ forall_index_header _ constraint_block _
+    | "if" _ "(" _ expression _ ")" _ constraint _
+    | "if" _ "(" _ expression _ ")" _ constraint _ "else" _ constraint _
+    | NAME _ ":" _ "if" _ "(" _ expression _ ")" _ constraint _
+    | NAME _ ":" _ "if" _ "(" _ expression _ ")" _ constraint _ "else" _ constraint _
     | "if" _ "(" _ expression _ ")" _ constraint_block _
     | "if" _ "(" _ expression _ ")" _ constraint_block _ "else" _ constraint_block _
+    | NAME _ ":" _ "if" _ "(" _ expression _ ")" _ constraint_block _
+    | NAME _ ":" _ "if" _ "(" _ expression _ ")" _ constraint_block _ "else" _ constraint_block _
 
 constraint_block ::= "{" _ constraint_list _ "}" _
 
@@ -61,6 +67,7 @@ type      ::= "int" | "float" | "int+" | "float+" | "boolean" | "string" | NAME
 dvar_declaration ::=
       "dvar" _ dvar_type _ NAME _ ";" _
     | "dvar" _ dvar_type _ NAME _ indexed_dimensions _ ";" _
+    | "dvar" _ dvar_type _ NAME _ dexpr_index_headers _ "in" _ expression _ ".." _ expression _ ";" _
 
 // --- range
 range_declaration ::=

@@ -24,7 +24,7 @@ The grammar supports:
   - labelled constraints
   - quantified constraints with `forall` (single or block)
   - implication constraints using `=>`
-  - conditional constraints `if (...) { ... } [else { ... }]` (condition must be ground)
+  - conditional constraints `if (...) constraint [else constraint]` and `if (...) { ... } [else { ... }]` (condition must be ground)
 - Expressions:
   - arithmetic `+ - * / %`, unary `-`
   - logical `&& || !`
@@ -85,8 +85,12 @@ Clarification:
                | 'forall' <forall_index_header> <NAME> ':' <expression> ';'  // labelled-single inside forall
                | 'forall' <forall_index_header> <constraint>     // single (including implication)
                | 'forall' <forall_index_header> <constraint_block>
+               | 'if' '(' <expression> ')' <constraint>          // single-statement conditional
+               | 'if' '(' <expression> ')' <constraint> 'else' <constraint>
+               | <NAME> ':' 'if' '(' <expression> ')' <constraint> ['else' <constraint>]
                | 'if' '(' <expression> ')' <constraint_block>    // condition must be ground (no dvars)
                | 'if' '(' <expression> ')' <constraint_block> 'else' <constraint_block>
+               | <NAME> ':' 'if' '(' <expression> ')' <constraint_block> ['else' <constraint_block>]
 
 <constraint_block> ::= '{' <constraint_list> '}'
 ```
@@ -235,6 +239,9 @@ Decision expressions (expanded on use):
 
 // Indexed dexpr with strict nested headers:
                      | 'dexpr' <type> <NAME> <dexpr_index_headers> '=' <expression> ';'
+
+// Iterator-style indexed decision variable with per-index bounds:
+<dvar_declaration>  ::= 'dvar' <type> <NAME> <dexpr_index_headers> 'in' <expression> '..' <expression> ';'
 
 // dexpr index headers:
 <dexpr_index_header>  ::= '[' <dexpr_index_list> ']'
@@ -502,7 +509,7 @@ From lowest to highest binding power:
 - Model typed scalar sets `{string}`, `{int}`, `{float}`, `{boolean}` are validated; floats coerce ints to floats.
 - Untyped sets in model: only set-of-tuples assignments with tuple literals are allowed; scalar sets in model must be typed.
 - Decision expressions (`dexpr`) are expanded on use (scalar and indexed forms).
-- Conditional constraints: `if (cond) { ... } [else { ... }]` — cond must be ground; within `forall`, cond may reference iterators and parameters only.
+- Conditional constraints: `if (cond) constraint [else constraint]` and `if (cond) { ... } [else { ... }]` — cond must be ground; within `forall`, cond may reference iterators and parameters only.
 - String is not a valid decision variable domain. Use string only for:
   - tuple fields,
   - typed scalar sets in models/data,

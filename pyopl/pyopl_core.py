@@ -1520,6 +1520,35 @@ class OPLParser(Parser):
             "dimensions": processed_dimensions,
         }
 
+    @_('DVAR type NAME dexpr_index_headers IN expression DOTDOT expression ";"')  # type: ignore
+    def declaration(self, p):
+        if p.type == "string":
+            self._cleanup_iterator_header(p.dexpr_index_headers)
+            raise SemanticError(
+                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
+                lineno=p.lineno,
+            )
+        iterators = p.dexpr_index_headers["iterators"]
+        dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
+        self._cleanup_iterator_header(p.dexpr_index_headers)
+
+        self.symbol_table.add_symbol(
+            p.NAME,
+            p.type,
+            dimensions=dimensions,
+            is_dvar=True,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "dvar_indexed",
+            "var_type": p.type,
+            "name": p.NAME,
+            "iterators": iterators,
+            "dimensions": dimensions,
+            "lower_bound": p.expression0,
+            "upper_bound": p.expression1,
+        }
+
     # --- Range declaration with general integer expressions as bounds ---
     @_('RANGE NAME "=" range_expr DOTDOT range_expr ";"')  # type: ignore
     def declaration(self, p):
@@ -1818,6 +1847,69 @@ class OPLParser(Parser):
         )
 
     # --- NEW: Conditional constraints ---
+    def _apply_label_to_constraint_tree(self, node, label):
+        if isinstance(node, dict) and node.get("type") == "constraint":
+            labelled = dict(node)
+            labelled.setdefault("label", label)
+            return labelled
+        if isinstance(node, dict) and node.get("type") == "if_constraint":
+            labelled_if = dict(node)
+            labelled_if["then_constraints"] = [
+                self._apply_label_to_constraint_tree(c, label) for c in (node.get("then_constraints") or [])
+            ]
+            if node.get("else_constraints") is not None:
+                labelled_if["else_constraints"] = [
+                    self._apply_label_to_constraint_tree(c, label) for c in (node.get("else_constraints") or [])
+                ]
+            return labelled_if
+        if isinstance(node, dict):
+            labelled = dict(node)
+            labelled.setdefault("label", label)
+            return labelled
+        return node
+
+    @_('NAME ":" IF "(" expression ")" constraint ELSE constraint')
+    def constraint(self, p):
+        node = {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [self._apply_label_to_constraint_tree(p.constraint0, p.NAME)],
+            "else_constraints": [self._apply_label_to_constraint_tree(p.constraint1, p.NAME)],
+            "lineno": getattr(p, "lineno", None),
+        }
+        return node
+
+    @_('NAME ":" IF "(" expression ")" constraint')
+    def constraint(self, p):
+        node = {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [self._apply_label_to_constraint_tree(p.constraint, p.NAME)],
+            "else_constraints": None,
+            "lineno": getattr(p, "lineno", None),
+        }
+        return node
+
+    @_('NAME ":" IF "(" expression ")" constraint_block ELSE constraint_block')
+    def constraint(self, p):
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [self._apply_label_to_constraint_tree(c, p.NAME) for c in p.constraint_block0],
+            "else_constraints": [self._apply_label_to_constraint_tree(c, p.NAME) for c in p.constraint_block1],
+            "lineno": getattr(p, "lineno", None),
+        }
+
+    @_('NAME ":" IF "(" expression ")" constraint_block')
+    def constraint(self, p):
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [self._apply_label_to_constraint_tree(c, p.NAME) for c in p.constraint_block],
+            "else_constraints": None,
+            "lineno": getattr(p, "lineno", None),
+        }
+
     # if (<ground_condition>) { <list-of-constraints> } else { <list-of-constraints> }
     @_('IF "(" expression ")" constraint_block ELSE constraint_block')
     def constraint(self, p):
@@ -1830,6 +1922,17 @@ class OPLParser(Parser):
             "lineno": getattr(p, "lineno", None),
         }
 
+    # if (<ground_condition>) <constraint> else <constraint>
+    @_('IF "(" expression ")" constraint ELSE constraint')
+    def constraint(self, p):
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [p.constraint0],
+            "else_constraints": [p.constraint1],
+            "lineno": getattr(p, "lineno", None),
+        }
+
     # if (<ground_condition>) { <list-of-constraints> }
     @_('IF "(" expression ")" constraint_block')
     def constraint(self, p):
@@ -1837,6 +1940,17 @@ class OPLParser(Parser):
             "type": "if_constraint",
             "condition": p.expression,
             "then_constraints": p.constraint_block,
+            "else_constraints": None,
+            "lineno": getattr(p, "lineno", None),
+        }
+
+    # if (<ground_condition>) <constraint>
+    @_('IF "(" expression ")" constraint')
+    def constraint(self, p):
+        return {
+            "type": "if_constraint",
+            "condition": p.expression,
+            "then_constraints": [p.constraint],
             "else_constraints": None,
             "lineno": getattr(p, "lineno", None),
         }
@@ -1955,6 +2069,11 @@ class OPLParser(Parser):
         def attach_label_template(node):
             if isinstance(node, dict) and "label" in node and "label_template" not in node:
                 node["label_template"] = {"name": node["label"], "iterators": list(it_names)}
+            if isinstance(node, dict) and node.get("type") == "if_constraint":
+                for branch_name in ("then_constraints", "else_constraints"):
+                    branch = node.get(branch_name)
+                    if isinstance(branch, list):
+                        node[branch_name] = [attach_label_template(child) for child in branch]
             return node
 
         if isinstance(constraint_or_block, list):

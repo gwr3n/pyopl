@@ -1576,6 +1576,39 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         name = decl["name"]
         dims = decl["dimensions"]
         logger.debug(f"[SciPyCSCCodeGenerator] _handle_indexed_variable_declaration: name={name}, dims={dims}")
+
+        def default_bounds_for_type(vtype: object) -> tuple[object, object, int]:
+            if vtype == "boolean":
+                return 0, 1, 1
+            if vtype == "int+":
+                return 0, None, 1
+            if vtype == "int":
+                return None, None, 1
+            if vtype == "float+":
+                return 0, None, 0
+            if vtype == "float":
+                return None, None, 0
+            return None, None, 0
+
+        def eval_decl_bound(expr: object, env: dict) -> object:
+            if expr is None:
+                return None
+            if not isinstance(expr, dict):
+                return expr
+            coef, value = self._eval_expr(expr, env)
+            if coef:
+                raise SemanticError("Decision variables are not supported in dvar declaration bounds.")
+            return value
+
+        def bounds_for_index(vtype: object, env: dict) -> tuple[list, int]:
+            lower, upper, int_flag = default_bounds_for_type(vtype)
+            if "lower_bound" in decl:
+                lower = eval_decl_bound(decl.get("lower_bound"), env)
+            if "upper_bound" in decl:
+                upper = eval_decl_bound(decl.get("upper_bound"), env)
+            return [lower, upper], int_flag
+
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
         # If indexed over a set_of_tuples, flatten as tuple keys
         if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
             set_name = dims[0]["name"]
@@ -1606,24 +1639,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 var_names.append(vname)
                 self.var_indices[vname] = len(var_names) - 1
                 vtype = decl.get("var_type")
-                if vtype == "boolean":
-                    bounds.append([0, 1])
-                    integrality.append(1)
-                elif vtype == "int+":
-                    bounds.append([0, None])
-                    integrality.append(1)
-                elif vtype == "int":
-                    bounds.append([None, None])
-                    integrality.append(1)
-                elif vtype == "float+":
-                    bounds.append([0, None])
-                    integrality.append(0)
-                elif vtype == "float":
-                    bounds.append([None, None])
-                    integrality.append(0)
-                else:
-                    bounds.append([None, None])
-                    integrality.append(0)
+                env = {iterator_names[0]: k} if iterator_names else {}
+                bound, int_flag = bounds_for_index(vtype, env)
+                bounds.append(bound)
+                integrality.append(int_flag)
             return
         # Fallback: treat as before (should not happen for tuple-indexed)
         logger.debug(f"[SciPyCSCCodeGenerator] Fallback for {name}, dims={dims}")
@@ -1681,24 +1700,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {vname}")
             var_names.append(vname)
             self.var_indices[vname] = len(var_names) - 1
-            if vtype == "boolean":
-                bounds.append([0, 1])
-                integrality.append(1)
-            elif vtype == "int+":
-                bounds.append([0, None])
-                integrality.append(1)
-            elif vtype == "int":
-                bounds.append([None, None])
-                integrality.append(1)
-            elif vtype == "float+":
-                bounds.append([0, None])
-                integrality.append(0)
-            elif vtype == "float":
-                bounds.append([None, None])
-                integrality.append(0)
-            else:
-                bounds.append([None, None])
-                integrality.append(0)
+            env = {iterator_names[i]: value for i, value in enumerate(idx_tuple) if i < len(iterator_names)}
+            bound, int_flag = bounds_for_index(vtype, env)
+            bounds.append(bound)
+            integrality.append(int_flag)
 
     # === Section: Index/Range/Iterator Utilities ===
     @staticmethod

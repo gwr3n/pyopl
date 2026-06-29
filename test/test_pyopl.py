@@ -15,6 +15,7 @@ from pyopl.pyopl_core import (
     load_opl_model,
     solve,
 )
+from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 def setUpModule():
@@ -364,6 +365,79 @@ class TestPyOPLParser(TestPyOPL):
 
         self.assertEqual(ast["objective"]["type"], "maximize")
         self.assertEqual(parser._iterator_context_stack, [])
+
+    def test_opl_style_indexed_dvar_bounds_and_if_chain_parse(self):
+        lexer = OPLLexer()
+        parser = OPLParser()
+        opl_code = '''
+        int numVars = ...;
+        int numConstraints = ...;
+        range Vars = 1..numVars;
+        range Constraints = 1..numConstraints;
+        float objCoef[Vars] = ...;
+        float lb[Vars] = ...;
+        float ub[Vars] = ...;
+        int isBinary[Vars] = ...;
+
+        tuple MatrixElement { int c; int v; float val; };
+        int numElements = ...;
+        range Elements = 1..numElements;
+        MatrixElement matrix[Elements] = ...;
+        float rhs[Constraints] = ...;
+        string sense[Constraints] = ...;
+
+        dvar float x[v in Vars] in lb[v]..ub[v];
+        minimize sum(v in Vars) objCoef[v] * x[v];
+        subject to {
+            forall(c in Constraints) {
+                ct_row:
+                    if (sense[c] == "E")
+                        sum(e in Elements: matrix[e].c == c) matrix[e].val * x[matrix[e].v] == rhs[c];
+                    else if (sense[c] == "L")
+                        sum(e in Elements: matrix[e].c == c) matrix[e].val * x[matrix[e].v] <= rhs[c];
+                    else
+                        sum(e in Elements: matrix[e].c == c) matrix[e].val * x[matrix[e].v] >= rhs[c];
+            }
+
+            forall(v in Vars: isBinary[v] == 1) {
+                binary_restriction:
+                    x[v] == 0 || x[v] == 1;
+            }
+        }
+        '''
+
+        ast = parser.parse(lexer.tokenize(opl_code))
+
+        x_decl = next(d for d in ast["declarations"] if d.get("name") == "x")
+        self.assertEqual(x_decl["type"], "dvar_indexed")
+        self.assertEqual(x_decl["dimensions"][0]["type"], "named_range_dimension")
+        self.assertEqual(x_decl["dimensions"][0]["name"], "Vars")
+        self.assertEqual(x_decl["lower_bound"]["name"], "lb")
+        self.assertEqual(x_decl["upper_bound"]["name"], "ub")
+        row_if = ast["constraints"][0]["constraints"][0]
+        self.assertEqual(row_if["type"], "if_constraint")
+        self.assertEqual(row_if["then_constraints"][0]["label_template"], {"name": "ct_row", "iterators": ["c"]})
+        self.assertEqual(ast["constraints"][1]["constraints"][0]["label_template"], {"name": "binary_restriction", "iterators": ["v"]})
+
+        codegen_model = '''
+        int numVars = ...;
+        range Vars = 1..numVars;
+        float lb[Vars] = ...;
+        float ub[Vars] = ...;
+        float objCoef[Vars] = ...;
+        dvar float x[v in Vars] in lb[v]..ub[v];
+        minimize sum(v in Vars) objCoef[v] * x[v];
+        subject to { x[1] >= 0; }
+        '''
+        codegen_ast = parser.parse(lexer.tokenize(codegen_model))
+        data = {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 0.0}, "ub": {1: 1.0, 2: 1.0}}
+        code = GurobiCodeGenerator(codegen_ast, data).generate_code()
+        self.assertIn("x = model.addVars(range(1, Vars + 1), vtype=GRB.CONTINUOUS, name='x', lb=lb, ub=ub)", code)
+        scipy_code = SciPyCSCCodeGenerator(
+            codegen_ast,
+            {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 1.0}, "ub": {1: 3.0, 2: 4.0}},
+        ).generate_code()
+        self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
 
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
