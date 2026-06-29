@@ -305,8 +305,19 @@ class OPLIDE(tk.Tk):
 
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._register_macos_quit_handler()
         self.after(0, self._stabilize_initial_side_panel_width)
         self.bind("<Configure>", self._on_window_resize, add="+")
+
+    def _register_macos_quit_handler(self) -> None:
+        """Route macOS app-menu Quit through the IDE close handler."""
+        if sys.platform != "darwin":
+            return
+        try:
+            self.createcommand("::pyopl_macos_quit", self._on_close)
+            self.tk.call("proc", "::tk::mac::Quit", "", "::pyopl_macos_quit")
+        except Exception:
+            pass
 
     def _configure_macos_application_identity(self, app_name: str) -> None:
         """Best-effort macOS app naming so the menu bar does not keep the generic Python label."""
@@ -4932,7 +4943,6 @@ class OPLIDE(tk.Tk):
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
             self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
             self.bind_all("<Command-f>", self._find_shortcut)
-            self.bind_all("<Command-q>", self._close_shortcut)
 
     def _close_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for closing the IDE."""
