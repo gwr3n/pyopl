@@ -460,6 +460,17 @@ class OPLParser(Parser):
         self.symbol_table.add_symbol(p.NAME, "set", value={"base_type": base_type, "elements": None}, lineno=p.lineno)
         return {"type": "typed_set_external", "base_type": base_type, "name": p.NAME, "value": None}
 
+    @_('"{" INT "}" NAME "=" "{" scalar_comprehension "}" ";"')  # type: ignore
+    def declaration(self, p):
+        base_type = "int"
+        self.symbol_table.add_symbol(
+            p.NAME,
+            "set",
+            value={"base_type": base_type, "elements": None},
+            lineno=p.lineno,
+        )
+        return {"type": "typed_set_comprehension", "base_type": base_type, "name": p.NAME, "comprehension": p.scalar_comprehension}
+
     # NEW: Typed scalar set of floats: {float} S = { 1.0, 2 };
     @_('"{" FLOAT "}" NAME "=" "{" float_element_list "}" ";"')  # type: ignore
     def declaration(self, p):
@@ -547,6 +558,28 @@ class OPLParser(Parser):
             "iterators": p.sum_index_list,
             "index_constraint": p.opt_index_constraint,
         }
+
+    @_('scalar_comprehension_value "|" sum_index_list opt_index_constraint')  # type: ignore
+    def scalar_comprehension(self, p):
+        return {
+            "type": "scalar_comprehension",
+            "expression": p.scalar_comprehension_value,
+            "iterators": p.sum_index_list,
+            "index_constraint": p.opt_index_constraint,
+        }
+
+    @_("NAME")  # type: ignore
+    def scalar_comprehension_value(self, p):
+        return {"type": "name", "value": p.NAME}
+
+    @_("NUMBER")  # type: ignore
+    def scalar_comprehension_value(self, p):
+        sem_type = "int" if isinstance(p.NUMBER, int) else "float"
+        return {"type": "number", "value": p.NUMBER, "sem_type": sem_type}
+
+    @_("STRING_LITERAL")  # type: ignore
+    def scalar_comprehension_value(self, p):
+        return {"type": "string_literal", "value": p.STRING_LITERAL, "sem_type": "string"}
 
     # --- DEXPR: decision expressions (expand-on-use) ---
 
@@ -3404,6 +3437,84 @@ class OPLCompiler:
 
         raise SemanticError(f"Named range '{rng_name}' not found for {context}.")
 
+    def _eval_comprehension_expr(self, expr: Any, env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+        if not isinstance(expr, dict):
+            return expr
+        expr_type = expr.get("type")
+        if expr_type == "number":
+            return expr.get("value")
+        if expr_type == "boolean_literal":
+            return bool(expr.get("value"))
+        if expr_type == "string_literal":
+            return expr.get("value")
+        if expr_type == "name":
+            name = expr.get("value")
+            if isinstance(name, str) and name in env:
+                return env[name]
+            if isinstance(name, str) and name in working_data:
+                return working_data[name]
+            raise SemanticError(f"Unknown name '{name}' in set comprehension.")
+        if expr_type == "name_reference_index":
+            name = expr.get("name")
+            if isinstance(name, str) and name in env:
+                return env[name]
+            if isinstance(name, str) and name in working_data:
+                return working_data[name]
+            raise SemanticError(f"Unknown index name '{name}' in set comprehension.")
+        if expr_type == "number_literal_index":
+            return expr.get("value")
+        if expr_type == "indexed_name":
+            name = expr.get("name")
+            if not isinstance(name, str):
+                raise SemanticError("Indexed name in set comprehension is missing a name.")
+            value = working_data.get(name)
+            indices = [self._eval_comprehension_expr(index, env, working_data) for index in expr.get("dimensions", [])]
+            for index in indices:
+                if isinstance(value, dict):
+                    value = value[index]
+                elif isinstance(value, (list, tuple)):
+                    if isinstance(index, float) and index.is_integer():
+                        index = int(index)
+                    if not isinstance(index, int):
+                        raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
+                    value = value[index - 1]
+                else:
+                    raise SemanticError(f"Cannot index '{name}' in set comprehension.")
+            return value
+        if expr_type == "parenthesized_expression":
+            return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
+        if expr_type == "not":
+            return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data))
+        if expr_type in ("and", "or"):
+            left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data))
+            right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
+            return left and right if expr_type == "and" else left or right
+        if expr_type == "binop":
+            op = expr.get("op")
+            left = self._eval_comprehension_expr(expr.get("left"), env, working_data)
+            right = self._eval_comprehension_expr(expr.get("right"), env, working_data)
+            if op == "+":
+                return left + right
+            if op == "-":
+                return left - right
+            if op == "*":
+                return left * right
+            if op == "/":
+                return left / right
+            if op == "==":
+                return left == right
+            if op == "!=":
+                return left != right
+            if op == "<":
+                return left < right
+            if op == "<=":
+                return left <= right
+            if op == ">":
+                return left > right
+            if op == ">=":
+                return left >= right
+        raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
+
     def _materialize_set_of_tuples_comprehensions(
         self,
         model_ast: dict[str, Any],
@@ -3510,6 +3621,70 @@ class OPLCompiler:
                     "tuple_type": decl.get("tuple_type"),
                     "name": decl.get("name"),
                     "value": tuples,
+                }
+            )
+
+        model_ast["declarations"] = rewritten_declarations
+
+    def _materialize_typed_set_comprehensions(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
+        declarations = model_ast.get("declarations")
+        if not isinstance(declarations, list):
+            return
+
+        def domain_for_range(rng: dict[str, Any], set_name: str) -> list[Any]:
+            if rng["type"] == "range_specifier":
+                start = self._eval_bound_expr(rng["start"], working_data)
+                end = self._eval_bound_expr(rng["end"], working_data)
+                return list(range(int(start), int(end) + 1))
+            if rng["type"] == "named_range":
+                start, end = self._resolve_named_range(model_ast, working_data, rng["name"], context=f"set comprehension for '{set_name}'")
+                return list(range(int(start), int(end) + 1))
+            if rng["type"] in ("named_set", "named_set_dimension"):
+                set_obj = working_data.get(rng["name"], [])
+                if isinstance(set_obj, dict) and "elements" in set_obj:
+                    set_obj = set_obj["elements"]
+                return list(set_obj or [])
+            raise SemanticError(f"Unsupported iterator range type '{rng['type']}' in set comprehension for '{set_name}'.")
+
+        rewritten_declarations = []
+        for decl in declarations:
+            if decl.get("type") != "typed_set_comprehension":
+                rewritten_declarations.append(decl)
+                continue
+            comp = decl.get("comprehension") or {}
+            expr = comp.get("expression")
+            iterators = comp.get("iterators") or []
+            index_constraint = comp.get("index_constraint")
+            iterator_names = [iterator["iterator"] for iterator in iterators]
+            domains = [domain_for_range(iterator["range"], decl.get("name", "")) for iterator in iterators]
+            values: list[Any] = []
+
+            def recurse(depth: int, env: dict[str, Any]) -> None:
+                if depth == len(iterator_names):
+                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
+                        value = self._eval_comprehension_expr(expr, env, working_data)
+                        if isinstance(value, float) and value.is_integer():
+                            value = int(value)
+                        values.append(value)
+                    return
+                iterator_name = iterator_names[depth]
+                for value in domains[depth]:
+                    env[iterator_name] = value
+                    recurse(depth + 1, env)
+                env.pop(iterator_name, None)
+
+            recurse(0, {})
+            working_data[decl["name"]] = values
+            rewritten_declarations.append(
+                {
+                    "type": "typed_set",
+                    "base_type": decl.get("base_type"),
+                    "name": decl.get("name"),
+                    "value": values,
                 }
             )
 
@@ -4081,6 +4256,7 @@ class OPLCompiler:
         data_dict = dict(working_data)
 
         self._materialize_set_of_tuples_comprehensions(model_ast, working_data)
+        self._materialize_typed_set_comprehensions(model_ast, working_data)
         self._materialize_computed_parameters(model_ast, working_data)
         data_dict = dict(working_data)
 

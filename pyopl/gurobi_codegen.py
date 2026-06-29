@@ -1248,16 +1248,18 @@ class GurobiCodeGenerator:
                         if vtype == "boolean"
                         else ("GRB.INTEGER" if vtype.startswith("int") else "GRB.CONTINUOUS")
                     )
+                    bound_args = self._decl_dvar_bound_args(decl)
+                    has_explicit_lb = "lower_bound" in decl
                     # Ensure lower bounds match domain semantics for tuple-indexed variables
                     if vtype == "boolean":
                         lb_arg = ""  # binaries are [0,1] by default
                     elif vtype in ("int+", "float+"):
-                        lb_arg = ", lb=0"
+                        lb_arg = "" if has_explicit_lb else ", lb=0"
                     else:
                         # plain int/float: allow negative domain
-                        lb_arg = ", lb=-GRB.INFINITY"
+                        lb_arg = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
                     self._add_code_line(
-                        f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg})"
+                        f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg}{bound_args})"
                     )
                     # Register decision variable name so expression emission treats it as a variable
                     self.gurobi_var_map[decl["name"]] = decl["name"]

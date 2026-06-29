@@ -476,6 +476,47 @@ class TestPyOPLParser(TestPyOPL):
         ).generate_code()
         self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
 
+    def test_typed_scalar_set_comprehension_split_variables_parse(self):
+        model_code = '''
+        int numVars = ...;
+        range Vars = 1..numVars;
+        float objCoef[Vars] = ...;
+        float lb[Vars] = ...;
+        float ub[Vars] = ...;
+        int isBinary[Vars] = ...;
+
+        {int} BinaryVars = {v | v in Vars: isBinary[v] == 1};
+        {int} ContinuousVars = {v | v in Vars: isBinary[v] == 0};
+        dvar boolean xBinary[BinaryVars];
+        dvar float xContinuous[v in ContinuousVars] in lb[v]..ub[v];
+        dexpr float x[v in Vars] =
+          sum(b in BinaryVars: b == v) xBinary[b] +
+          sum(c in ContinuousVars: c == v) xContinuous[c];
+
+        minimize sum(v in Vars) objCoef[v] * x[v];
+        subject to { }
+        '''
+        data_code = '''
+        numVars = 3;
+        objCoef = [1,2,3];
+        lb = [0,0,0];
+        ub = [1,10,1];
+        isBinary = [1,0,1];
+        '''
+
+        ast, gurobi_code, data_dict = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
+
+        self.assertEqual(data_dict["BinaryVars"], [1, 3])
+        self.assertEqual(data_dict["ContinuousVars"], [2])
+        self.assertNotIn("typed_set_comprehension", repr(ast.get("declarations")))
+        self.assertIn("xBinary = model.addVars(BinaryVars, vtype=GRB.BINARY, name='xBinary')", gurobi_code)
+        self.assertIn("xContinuous = model.addVars(ContinuousVars, vtype=GRB.CONTINUOUS, name='xContinuous', lb=lb, ub=ub)", gurobi_code)
+
+        _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
+        self.assertIn("var_names = ['xBinary_1', 'xBinary_3', 'xContinuous_2']", scipy_code)
+        self.assertIn("bounds = [[0, 1], [0, 1], [0.0, 10.0]]", scipy_code)
+        self.assertIn("integrality = [1, 1, 0]", scipy_code)
+
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
         lexer = OPLLexer()
