@@ -31,6 +31,21 @@ from .gurobi_codegen import GurobiCodeGenerator
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 
+
+class _TeeStdout(StringIO):
+    def __init__(self, stream):
+        super().__init__()
+        self._stream = stream
+
+    def write(self, s):
+        self._stream.write(s)
+        self._stream.flush()
+        return super().write(s)
+
+    def flush(self):
+        self._stream.flush()
+        return super().flush()
+
 # --- Reserved identifiers that must not appear as model/data names.
 # Python keywords are invalid as generated identifiers, and a small built-in set
 # remains blocked because code generators may emit those names directly.
@@ -5501,7 +5516,7 @@ def solve_with_gurobi(model_file, data_file=None):
 
         logger.info("\n--- GurobiPy Model Output ---")
         old_stdout = sys.stdout
-        redirected_output = sys.stdout = StringIO()
+        redirected_output = sys.stdout = _TeeStdout(old_stdout)
 
         exec_globals = {
             "gp": gp,
@@ -5585,7 +5600,7 @@ def solve_with_scipy(model_file, data_file=None):
 
         logger.info("\n--- SciPy linprog Model Output ---")
         old_stdout = sys.stdout
-        redirected_output = sys.stdout = StringIO()
+        redirected_output = sys.stdout = _TeeStdout(old_stdout)
         try:
             exec_globals = {
                 "json": json,

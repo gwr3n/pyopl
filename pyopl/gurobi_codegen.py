@@ -78,12 +78,15 @@ class GurobiCodeGenerator:
         self._add_code_line("")
         self._generate_data_declarations(self.data_dict)
         self._add_code_line("model = gp.Model('OPLModel')")
+        self._add_code_line("model.Params.OutputFlag = 1")
+        self._add_code_line("model.Params.LogToConsole = 1")
         self._add_code_line("")
         self._generate_declarations(self.ast["declarations"])
         self._generate_objective(self.ast["objective"])
         # Collect variable bounds before constraints for tighter big-M
         self._collect_variable_bounds(self.ast.get("constraints", []))
         self._generate_constraints(self.ast["constraints"])
+        self._add_code_line("print(f'PyOPL/Gurobi: variables={model.NumVars}, constraints={model.NumConstrs}, sense={model.ModelSense}')")
         self._add_code_line("model.optimize()")
         # Disambiguate INF_OR_UNBD into INFEASIBLE or UNBOUNDED when possible
         self._add_code_line("if model.status == GRB.INF_OR_UNBD:")

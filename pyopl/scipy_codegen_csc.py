@@ -2718,20 +2718,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("try:")
         self.indent_level += 1
         self._add_code_line("start_time = time.time()")
+        self._add_code_line("print(f'PyOPL/SciPy-HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')")
         # Only include integrality if needed
         if any(self.integrality):
             self._add_code_line(
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs', integrality=integrality)"
+                "bounds=bounds, method='highs', integrality=integrality, options={'disp': True})"
             )
         else:
             self._add_code_line(
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs')"
+                "bounds=bounds, method='highs', options={'disp': True})"
             )
         self._add_code_line("end_time = time.time()")
+        self._add_code_line("print(f'PyOPL/SciPy-HiGHS: status={res.status}, success={res.success}, iterations={getattr(res, \"nit\", None)}, time={end_time - start_time:.3f}s')")
         self._add_code_line("status_map = {0: 'OPTIMAL', 1: 'ITERATION_LIMIT', 2: 'INFEASIBLE', 3: 'UNBOUNDED'}")
         self._add_code_line("status_str = status_map.get(res.status, 'ERROR')")
         self._add_code_line("if res.success and res.status == 0:")

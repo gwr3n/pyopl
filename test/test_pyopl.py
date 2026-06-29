@@ -469,11 +469,13 @@ class TestPyOPLParser(TestPyOPL):
         codegen_ast = parser.parse(lexer.tokenize(codegen_model))
         data = {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 0.0}, "ub": {1: 1.0, 2: 1.0}}
         code = GurobiCodeGenerator(codegen_ast, data).generate_code()
+        self.assertIn("model.Params.LogToConsole = 1", code)
         self.assertIn("x = model.addVars(range(1, Vars + 1), vtype=GRB.CONTINUOUS, name='x', lb=lb, ub=ub)", code)
         scipy_code = SciPyCSCCodeGenerator(
             codegen_ast,
             {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 1.0}, "ub": {1: 3.0, 2: 4.0}},
         ).generate_code()
+        self.assertIn("options={'disp': True}", scipy_code)
         self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
 
     def test_typed_scalar_set_comprehension_split_variables_parse(self):

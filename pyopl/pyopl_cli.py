@@ -13,6 +13,7 @@ This module intentionally avoids extra dependencies and uses `argparse`.
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
 import json
 import sys
 from pathlib import Path
@@ -140,7 +141,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             if args.out == "json":
-                results = _run_solve(model_path, data_path, solver_key)
+                with redirect_stdout(sys.stderr):
+                    results = _run_solve(model_path, data_path, solver_key)
                 out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
                 if args.out_file:
                     _write_text(Path(args.out_file), out_text)
@@ -206,7 +208,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             # Solve generated model
             try:
-                results = _run_solve(Path(model_path), Path(data_path), solver_key)
+                with redirect_stdout(sys.stderr):
+                    results = _run_solve(Path(model_path), Path(data_path), solver_key)
             except Exception as e:
                 print(f"Error solving generated model: {e}", file=sys.stderr)
                 return 1

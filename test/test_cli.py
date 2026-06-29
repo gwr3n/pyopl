@@ -38,6 +38,9 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(ret, 0)
         out = buf.getvalue().strip()
         self.assertTrue(out, "No output produced")
+        self.assertTrue(out.startswith("{"), out[:200])
+        self.assertNotIn("Running HiGHS", out)
+        self.assertNotIn("PyOPL/SciPy-HiGHS", out)
         payload = json.loads(out)
         self.assertTrue("status" in payload or "objective_value" in payload)
 
