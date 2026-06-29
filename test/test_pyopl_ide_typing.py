@@ -195,6 +195,43 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
+    def test_highlight_suppresses_model_eof_while_typing(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+                self.tags = []
+
+            def get(self, *_args):
+                return self.value
+
+            def count(self, *_args):
+                return (len(self.value),)
+
+            def tag_add(self, tag, *ranges):
+                for start, end in zip(ranges[0::2], ranges[1::2]):
+                    self.tags.append((tag, start, end))
+
+            def tag_remove(self, *_args):
+                pass
+
+        text = DummyText("dvar float+ x;\nminimize x;\nsubject to {\n")
+        dummy = SimpleNamespace(
+            _last_syntax_error_by_widget={},
+            _last_syntax_error="old error",
+        )
+        dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
+        dummy._disable_highlight_for_large_text = lambda text_widget: OPLIDE._disable_highlight_for_large_text(
+            dummy, text_widget
+        )
+        dummy._clear_highlight_tags = lambda text_widget: OPLIDE._clear_highlight_tags(dummy, text_widget)
+        dummy._is_transient_live_parse_error = OPLIDE._is_transient_live_parse_error
+
+        OPLIDE.highlight(dummy, text, is_data=False, validate=True)
+
+        self.assertFalse(any(tag == "ERROR" for tag, _start, _end in text.tags))
+        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
+        self.assertIsNone(dummy._last_syntax_error)
+
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
             def __init__(self):

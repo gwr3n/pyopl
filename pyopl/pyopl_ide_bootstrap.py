@@ -2679,6 +2679,12 @@ class OPLIDE(tk.Tk):
             pass
 
     # --- Syntax Highlighting ---
+    @staticmethod
+    def _is_transient_live_parse_error(exc: Exception) -> bool:
+        """Return True for parser errors that are expected while typing incomplete text."""
+        message = str(exc).splitlines()[0] if str(exc) else ""
+        return "end of file (EOF)" in message
+
     def highlight(self, text_widget: tk.Text, is_data: bool = False, validate: bool = True) -> None:
         """Apply syntax highlighting to the given text widget."""
         if (not is_data) and (not validate):
@@ -2736,14 +2742,15 @@ class OPLIDE(tk.Tk):
                 try:
                     parser.parse(iter(tokens))
                 except Exception as e:
-                    lineno = getattr(e, "lineno", 1)
-                    if not isinstance(lineno, int) or lineno is None:
-                        lineno = 1
-                    error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                    text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                    msg = f"Parser Error on line {lineno}: {error_message}"
-                    self._last_syntax_error_by_widget[id(text_widget)] = msg
-                    self._last_syntax_error = msg
+                    if not self._is_transient_live_parse_error(e):
+                        lineno = getattr(e, "lineno", 1)
+                        if not isinstance(lineno, int) or lineno is None:
+                            lineno = 1
+                        error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
+                        text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
+                        msg = f"Parser Error on line {lineno}: {error_message}"
+                        self._last_syntax_error_by_widget[id(text_widget)] = msg
+                        self._last_syntax_error = msg
 
             # Batch tag application to reduce Tcl overhead
             tag_ranges: dict[str, list[str]] = {}
