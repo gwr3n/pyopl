@@ -3210,24 +3210,25 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
                     fields = self.tuple_types[tuple_type]
                     field_names = [f["name"] for f in fields]
-                    tuple_dicts = []
-                    for t in data_list:
+                    index_vals = data_dict.get(index_set)
+                    if isinstance(data_list, dict):
+                        items = sorted(data_list.items(), key=lambda kv: kv[0])
+                    elif isinstance(index_vals, list) and len(index_vals) == len(data_list):
+                        items = zip(index_vals, data_list)
+                    else:
+                        items = enumerate(data_list, start=1)
+                    structured = {}
+                    for key, t in items:
+                        if isinstance(t, dict):
+                            structured[key] = {fn: t.get(fn) for fn in field_names if fn in t}
+                            continue
                         d = {}
                         for i, fn in enumerate(field_names):
                             if i < len(t):
                                 d[fn] = t[i]
-                        tuple_dicts.append(d)
-                    self._add_code_line(f"{arr_name}_data = {repr(tuple_dicts)}")
-                    self._add_code_line(f"{arr_name} = {{idx: rec for idx, rec in zip({index_set}, {arr_name}_data)}}")
-                    # Patch: also update internal data_dict so ExpressionEvaluator sees structured dicts
-                    try:
-                        index_vals = data_dict.get(index_set)
-                        if isinstance(index_vals, list) and len(index_vals) == len(tuple_dicts):
-                            structured = {idx: rec for idx, rec in zip(index_vals, tuple_dicts)}
-                            # Mutate self.data_dict (not the passed-in view) to keep evaluation consistent
-                            self.data_dict[arr_name] = structured
-                    except Exception:
-                        pass
+                        structured[key] = d
+                    self._add_code_line(f"{arr_name} = {repr(structured)}")
+                    self.data_dict[arr_name] = structured
             elif decl.get("type") == "parameter_inline_indexed":
                 # Only emit dict for tuple-indexed, else emit as list
                 dims = decl.get("dimensions", [])

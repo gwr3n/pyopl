@@ -369,6 +369,26 @@ class GurobiCodeGenerator:
         # Emit tuple types and sets of tuples from AST declarations (if present)
         # Track parameters we transform into dict (or nested dict) so expression code can index via symbolic keys
         self.dict_params = set()
+
+        def _tuple_array_records(data_value, field_names, index_values=None):
+            if isinstance(data_value, dict):
+                items = sorted(data_value.items(), key=lambda kv: kv[0])
+            elif isinstance(index_values, list) and len(index_values) == len(data_value):
+                items = zip(index_values, data_value)
+            else:
+                items = enumerate(data_value, start=1)
+            records = {}
+            for key, rec in items:
+                if isinstance(rec, dict):
+                    records[key] = {fn: rec.get(fn) for fn in field_names if fn in rec}
+                    continue
+                d = {}
+                for i, fn in enumerate(field_names):
+                    if i < len(rec):
+                        d[fn] = rec[i]
+                records[key] = d
+            return records
+
         if hasattr(self, "ast") and "declarations" in self.ast:
             for decl in self.ast["declarations"]:
                 if decl.get("type") == "tuple_type":
@@ -397,15 +417,8 @@ class GurobiCodeGenerator:
                     if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
                         fields = self.tuple_types[tuple_type]
                         field_names = [f["name"] for f in fields]
-                        tuple_dicts = []
-                        for t in data_list:
-                            d = {}
-                            for i, fn in enumerate(field_names):
-                                if i < len(t):
-                                    d[fn] = t[i]
-                            tuple_dicts.append(d)
-                        self._add_code_line(f"{arr_name}_data = {json.dumps(tuple_dicts)}")
-                        self._add_code_line(f"{arr_name} = {{idx: rec for idx, rec in zip({index_set}, {arr_name}_data)}}")
+                        tuple_dicts = _tuple_array_records(data_list, field_names, data_dict.get(index_set))
+                        self._add_code_line(f"{arr_name} = {repr(tuple_dicts)}")
         # Build a working_data that merges .dat data with inline model values (typed sets, params)
         working_data = dict(data_dict or {})
         if hasattr(self, "ast") and "declarations" in self.ast:
@@ -846,15 +859,8 @@ class GurobiCodeGenerator:
                     if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
                         fields = self.tuple_types[tuple_type]
                         field_names = [f["name"] for f in fields]
-                        tuple_dicts = []
-                        for t in data_list:
-                            d = {}
-                            for i, fn in enumerate(field_names):
-                                if i < len(t):
-                                    d[fn] = t[i]
-                            tuple_dicts.append(d)
-                        self._add_code_line(f"{arr_name}_data = {json.dumps(tuple_dicts)}")
-                        self._add_code_line(f"{arr_name} = {{idx: rec for idx, rec in zip({index_set}, {arr_name}_data)}}")
+                        tuple_dicts = _tuple_array_records(data_list, field_names, data_dict.get(index_set))
+                        self._add_code_line(f"{arr_name} = {repr(tuple_dicts)}")
         # If truly nothing to emit, still end section cleanly
         # Rebuild param_decl_map (unchanged)
         param_decl_map = {

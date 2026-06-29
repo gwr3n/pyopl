@@ -419,6 +419,41 @@ class TestPyOPLParser(TestPyOPL):
         self.assertEqual(row_if["then_constraints"][0]["label_template"], {"name": "ct_row", "iterators": ["c"]})
         self.assertEqual(ast["constraints"][1]["constraints"][0]["label_template"], {"name": "binary_restriction", "iterators": ["v"]})
 
+        data_code = '''
+        numVars = 2;
+        numConstraints = 1;
+        numElements = 1;
+        objCoef = [1.0, 2.0];
+        lb = [0.0, 0.0];
+        ub = [10.0, 10.0];
+        isBinary = [0, 0];
+        matrix = [<1,1,1.0>];
+        rhs = [1.0];
+        sense = ["E"];
+        '''
+        _, full_gurobi_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="gurobi")
+        self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_gurobi_code)
+        self.assertNotIn("zip(Elements", full_gurobi_code)
+        _, full_scipy_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="scipy")
+        self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_scipy_code)
+        self.assertNotIn("zip(Elements", full_scipy_code)
+
+        string_indexed_model = '''
+        tuple Rec { int demand; float price; };
+        {string} Foods = ...;
+        Rec Food[Foods] = ...;
+        dvar float+ x[Foods];
+        maximize sum(f in Foods) Food[f].price * x[f];
+        subject to { forall(f in Foods) x[f] <= Food[f].demand; }
+        '''
+        string_indexed_data = '''
+        Foods = {"Meal1", "Meal2"};
+        Food = [<3000,9>, <2000,7>];
+        '''
+        _, string_gurobi_code, _ = OPLCompiler().compile_model(string_indexed_model, string_indexed_data, solver="gurobi")
+        self.assertIn("Food = {'Meal1': {'demand': 3000, 'price': 9", string_gurobi_code)
+        self.assertNotIn("Food = {1:", string_gurobi_code)
+
         codegen_model = '''
         int numVars = ...;
         range Vars = 1..numVars;
