@@ -6,6 +6,7 @@ build/
 dist/
 gen_ai/
 misc/
+mps-to-opl/
 tmp/
 venv*
 .venv*
