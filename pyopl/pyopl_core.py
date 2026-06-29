@@ -925,7 +925,7 @@ class OPLParser(Parser):
     # Helper nonterminal for bare aggregate bodies.
     # This lets `sum(i in I) a[i] * x[i]` bind the full product into the sum
     # without greedily swallowing surrounding `+`, `-`, or comparison context.
-    @_("multiplicative")  # type: ignore
+    @_("multiplicative %prec NONPAREN_AGG_BODY")  # type: ignore
     def nonparen_expression(self, p):
         return p.multiplicative
 
@@ -973,9 +973,13 @@ class OPLParser(Parser):
             ">",
             "<",
         ),  # comparisons (non-associative)
+        ("nonassoc", "IF_WITHOUT_ELSE"),
+        ("nonassoc", "ELSE"),
         ("left", "+", "-"),
+        ("nonassoc", "NONPAREN_AGG_BODY"),
         ("left", "*", "/", "%"),
         ("right", "!"),  # unary logical NOT
+        ("nonassoc", "PRIMARY_AS_UNARY"),
         ("right", "DOT"),  # field access binds tightest
     )
 
@@ -1205,7 +1209,7 @@ class OPLParser(Parser):
             raise SemanticError("Cannot apply unary minus to a boolean expression.")
         return {"type": "uminus", "value": p.unary, "sem_type": expr_type}
 
-    @_("primary")
+    @_("primary %prec PRIMARY_AS_UNARY")
     def unary(self, p):
         return p.primary
 
@@ -1675,19 +1679,9 @@ class OPLParser(Parser):
         self.symbol_table.add_symbol(p.NAME, "set", is_dvar=False, lineno=p.lineno)
         return {"type": "set_declaration", "name": p.NAME}
 
-    # --- Start of "param" optional rules and new explicit external parameter syntax ---
+    # --- Start of parameter declarations: allow both 'param type Name' and 'type Name' ---
 
-    # --- Optional 'param' keyword: allows both 'param type Name' and 'type Name' ---
-    @_("PARAM")  # type: ignore
-    def opt_PARAM(self, p):
-        return True
-
-    # Empty rule: needed to allow omission of 'param' keyword (i.e., 'type Name')
-    @_("")  # type: ignore
-    def opt_PARAM(self, p):
-        return False
-
-    @_('opt_PARAM type NAME ";"')  # type: ignore
+    @_("PARAM type NAME ';'", "type NAME ';'")  # type: ignore
     def declaration(self, p):
         """
         Rule for scalar external parameter declaration.
@@ -1697,14 +1691,14 @@ class OPLParser(Parser):
         self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
         return {"type": "parameter_external", "var_type": var_type, "name": name}
 
-    @_('opt_PARAM type NAME "=" ELLIPSIS ";"')  # type: ignore
+    @_("PARAM type NAME '=' ELLIPSIS ';'", "type NAME '=' ELLIPSIS ';'")  # type: ignore
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
         self.symbol_table.add_symbol(name, var_type, is_dvar=False, lineno=p.lineno)
         return {"type": "parameter_external", "var_type": var_type, "name": name}
 
-    @_('opt_PARAM type NAME indexed_dimensions ";"')  # type: ignore
+    @_("PARAM type NAME indexed_dimensions ';'", "type NAME indexed_dimensions ';'")  # type: ignore
     def declaration(self, p):
         """
         Rule for indexed external parameter declaration.
@@ -1727,7 +1721,10 @@ class OPLParser(Parser):
             "dimensions": processed_dimensions,
         }
 
-    @_('opt_PARAM type NAME indexed_dimensions "=" ELLIPSIS ";"')  # type: ignore
+    @_(
+        "PARAM type NAME indexed_dimensions '=' ELLIPSIS ';'",
+        "type NAME indexed_dimensions '=' ELLIPSIS ';'",
+    )  # type: ignore
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
@@ -1958,7 +1955,7 @@ class OPLParser(Parser):
         }
         return node
 
-    @_('NAME ":" IF "(" expression ")" constraint')
+    @_('NAME ":" IF "(" expression ")" constraint %prec IF_WITHOUT_ELSE')
     def constraint(self, p):
         node = {
             "type": "if_constraint",
@@ -1979,7 +1976,7 @@ class OPLParser(Parser):
             "lineno": getattr(p, "lineno", None),
         }
 
-    @_('NAME ":" IF "(" expression ")" constraint_block')
+    @_('NAME ":" IF "(" expression ")" constraint_block %prec IF_WITHOUT_ELSE')
     def constraint(self, p):
         return {
             "type": "if_constraint",
@@ -2013,7 +2010,7 @@ class OPLParser(Parser):
         }
 
     # if (<ground_condition>) { <list-of-constraints> }
-    @_('IF "(" expression ")" constraint_block')
+    @_('IF "(" expression ")" constraint_block %prec IF_WITHOUT_ELSE')
     def constraint(self, p):
         return {
             "type": "if_constraint",
@@ -2024,7 +2021,7 @@ class OPLParser(Parser):
         }
 
     # if (<ground_condition>) <constraint>
-    @_('IF "(" expression ")" constraint')
+    @_('IF "(" expression ")" constraint %prec IF_WITHOUT_ELSE')
     def constraint(self, p):
         return {
             "type": "if_constraint",
@@ -2756,7 +2753,7 @@ class OPLParser(Parser):
         }
 
     # NEW: scalar parameter with general expression on RHS (e.g., float C = 5 / 6;)
-    @_('opt_PARAM type NAME "=" expression ";"')  # type: ignore
+    @_("PARAM type NAME '=' expression ';'", "type NAME '=' expression ';'")  # type: ignore
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
@@ -2782,7 +2779,7 @@ class OPLParser(Parser):
 
     # NEW: computed indexed parameter with strict OPL nested headers: float W[i in I][j in J] = ...
     # NEW: float W[i in I][j in J] = ...
-    @_('opt_PARAM type NAME dexpr_index_headers "=" expression ";"')  # type: ignore
+    @_("PARAM type NAME dexpr_index_headers '=' expression ';'", "type NAME dexpr_index_headers '=' expression ';'")  # type: ignore
     def declaration(self, p):
         name = p.NAME
         var_type = p.type
@@ -2812,7 +2809,7 @@ class OPLParser(Parser):
             "expression": p.expression,
         }
 
-    @_('opt_PARAM type NAME indexed_dimensions "=" array_value ";"')  # type: ignore
+    @_("PARAM type NAME indexed_dimensions '=' array_value ';'", "type NAME indexed_dimensions '=' array_value ';'")  # type: ignore
     def declaration(self, p):
         # Indexed parameter with direct value assignment (e.g., float w[1..5] = [1,2,3,4,5];)
         name = p.NAME
