@@ -434,6 +434,8 @@ class TestPyOPLParser(TestPyOPL):
         _, full_gurobi_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="gurobi")
         self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_gurobi_code)
         self.assertNotIn("zip(Elements", full_gurobi_code)
+        self.assertIn("_or_bool_", full_gurobi_code)
+        self.assertIn("_or_link", full_gurobi_code)
         _, full_scipy_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="scipy")
         self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_scipy_code)
         self.assertNotIn("zip(Elements", full_scipy_code)

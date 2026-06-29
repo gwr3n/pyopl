@@ -2224,6 +2224,18 @@ class GurobiCodeGenerator:
             L = _unwrap(left_node)
             R = _unwrap(right_node)
 
+        if op == "==" and isinstance(R, dict) and R.get("type") == "boolean_literal" and self._is_boolean_expr_node(L):
+            bool_expr = self._boolean_expr_to_binary_expr(L, current_iterators, constr_name_prefix)
+            target = 1 if R.get("value") else 0
+            self._add_code_line(f"model.addConstr({bool_expr} == {target}, name={self._format_name_expr(constr_name_prefix)})")
+            return
+
+        if op == "==" and isinstance(L, dict) and L.get("type") == "boolean_literal" and self._is_boolean_expr_node(R):
+            bool_expr = self._boolean_expr_to_binary_expr(R, current_iterators, constr_name_prefix)
+            target = 1 if L.get("value") else 0
+            self._add_code_line(f"model.addConstr({bool_expr} == {target}, name={self._format_name_expr(constr_name_prefix)})")
+            return
+
         def _is_bool_dvar_node(node):
             if not isinstance(node, dict):
                 return False
@@ -2984,13 +2996,66 @@ class GurobiCodeGenerator:
             return f"{meta['name']}[{key_expr}]"
         return meta["name"]
 
+    def _is_boolean_expr_node(self, node):
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        return isinstance(node, dict) and (
+            node.get("type") in ("and", "or", "not")
+            or (node.get("type") in ("binop", "constraint") and node.get("op") in (">=", "<=", "==", "!=", ">", "<"))
+            or node.get("type") == "boolean_literal"
+        )
+
+    def _new_boolean_aux(self, prefix, constr_name_prefix):
+        if not hasattr(self, "_bool_aux_counter"):
+            self._bool_aux_counter = 0
+        self._bool_aux_counter += 1
+        name = f"_{prefix}_bool_{self._bool_aux_counter}"
+        if getattr(self, "_materialized_loop_depth", 0) > 0:
+            self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY)")
+        else:
+            self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}_{constr_name_prefix}')")
+        return name
+
+    def _boolean_expr_to_binary_expr(self, node, current_iterators, constr_name_prefix):
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        if not isinstance(node, dict):
+            raise ValueError(f"Unsupported boolean expression node: {node!r}")
+        t = node.get("type")
+        if t == "boolean_literal":
+            return "1" if node.get("value") else "0"
+        if t in ("binop", "constraint") and node.get("op") in (">=", "<=", "==", "!=", ">", "<"):
+            return self._reify_scoped_comparison(node, current_iterators)
+        if t == "not":
+            inner = self._boolean_expr_to_binary_expr(node["value"], current_iterators, constr_name_prefix)
+            aux = self._new_boolean_aux("not", constr_name_prefix)
+            self._add_code_line(f"model.addConstr({aux} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, '_not')})")
+            return aux
+        if t == "and":
+            left = self._boolean_expr_to_binary_expr(node["left"], current_iterators, constr_name_prefix)
+            right = self._boolean_expr_to_binary_expr(node["right"], current_iterators, constr_name_prefix)
+            aux = self._new_boolean_aux("and", constr_name_prefix)
+            self._add_code_line(f"model.addConstr({aux} <= {left}, name={self._format_name_expr(constr_name_prefix, '_and_l')})")
+            self._add_code_line(f"model.addConstr({aux} <= {right}, name={self._format_name_expr(constr_name_prefix, '_and_r')})")
+            self._add_code_line(f"model.addConstr({aux} >= {left} + {right} - 1, name={self._format_name_expr(constr_name_prefix, '_and_link')})")
+            return aux
+        if t == "or":
+            left = self._boolean_expr_to_binary_expr(node["left"], current_iterators, constr_name_prefix)
+            right = self._boolean_expr_to_binary_expr(node["right"], current_iterators, constr_name_prefix)
+            aux = self._new_boolean_aux("or", constr_name_prefix)
+            self._add_code_line(f"model.addConstr({aux} >= {left}, name={self._format_name_expr(constr_name_prefix, '_or_l')})")
+            self._add_code_line(f"model.addConstr({aux} >= {right}, name={self._format_name_expr(constr_name_prefix, '_or_r')})")
+            self._add_code_line(f"model.addConstr({aux} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, '_or_link')})")
+            return aux
+        raise ValueError(f"Unsupported boolean expression type for Gurobi constraint: {t}")
+
     def _reify_scoped_comparison(self, comp_node, current_iterators):
         while isinstance(comp_node, dict) and comp_node.get("type") == "parenthesized_expression":
             comp_node = comp_node.get("expression")
         if not (
             isinstance(comp_node, dict)
             and comp_node.get("type") in ("binop", "constraint")
-            and comp_node.get("op") in (">=", "<=", "==", ">", "<")
+            and comp_node.get("op") in (">=", "<=", "==", "!=", ">", "<")
         ):
             return self._traverse_expression(comp_node, current_iterators)
 
@@ -3252,6 +3317,7 @@ class GurobiCodeGenerator:
           op in {>=, >}: enforce diff >= 0 when aux=1; diff <= M*aux
           op in {<=, <}: enforce -diff >= 0 when aux=1; -diff <= M*aux
           op == '==': symmetric two-sided with four inequalities (can be tightened later).
+                    op == '!=': aux=1 iff left and right differ by at least EPS in either direction.
         """
 
         def _estimate_M(left, right):
@@ -3309,6 +3375,21 @@ class GurobiCodeGenerator:
             )
             lines.append(
                 f"model.addConstr({right_expr} - {left_expr} >= -{eq_tol} - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_eq4_{aux_sym}')} )"
+            )
+        elif op == "!=":
+            delta = f"{aux_sym}_neq_side"
+            lines.append(f"{delta} = model.addVar(vtype=GRB.BINARY)")
+            lines.append(
+                f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM} * (1 - {delta}) - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_neq1_{aux_sym}')} )"
+            )
+            lines.append(
+                f"model.addConstr({right_expr} - {left_expr} >= {eps} - {bigM} * {delta} - {bigM} * (1 - {aux_sym}), name={self._format_name_expr('aux', f'_reify_neq2_{aux_sym}')} )"
+            )
+            lines.append(
+                f"model.addConstr({left_expr} - {right_expr} <= {eq_tol} + {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_neq_eq1_{aux_sym}')} )"
+            )
+            lines.append(
+                f"model.addConstr({right_expr} - {left_expr} <= {eq_tol} + {bigM} * {aux_sym}, name={self._format_name_expr('aux', f'_reify_neq_eq2_{aux_sym}')} )"
             )
         else:
             lines.append(f"model.addConstr({aux_sym} == 0, name={self._format_name_expr('aux', f'_reify_unk_{aux_sym}')} )")
