@@ -137,6 +137,37 @@ class TestCLI(unittest.TestCase):
             code = out_py.read_text(encoding="utf-8")
             self.assertTrue(len(code) > 10)
 
+    def test_cli_outfile_lp_and_mps(self):
+        model_text = "dvar float+ x; minimize 2 * x + 3; subject to { x >= 1; x <= 4; }"
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            model = td_path / "model.mod"
+            out_lp = td_path / "model.lp"
+            out_mps = td_path / "model.mps"
+            model.write_text(model_text, encoding="utf-8")
+
+            ret = pyopl_cli.main(["solve", str(model), "--out", "lp", "--out-file", str(out_lp)])
+            self.assertEqual(ret, 0)
+            self.assertTrue(out_lp.exists())
+            lp_text = out_lp.read_text(encoding="utf-8")
+            self.assertIn("obj:", lp_text)
+
+            ret = pyopl_cli.main(["solve", str(model), "--out", "mps", "--out-file", str(out_mps)])
+            self.assertEqual(ret, 0)
+            self.assertTrue(out_mps.exists())
+            self.assertGreater(out_mps.stat().st_size, 0)
+
+    def test_cli_lp_mps_requires_out_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            model = Path(td) / "model.mod"
+            model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            err_buf = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                ret = pyopl_cli.main(["solve", str(model), "--out", "lp"])
+            self.assertEqual(ret, 2)
+            self.assertIn("requires --out-file", err_buf.getvalue())
+
     def test_genai_generate_outfile(self):
         gen_stats = {"status": "ok", "iterations": 1}
         with tempfile.TemporaryDirectory() as td:

@@ -32,7 +32,9 @@ from .genai.model_discovery import (
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
+from .linear_problem_highs import export_linear_problem
 from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
+from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -3397,7 +3399,7 @@ class OPLIDE(tk.Tk):
         self.status_var.set(msg)
 
     def export_model(self) -> None:
-        """Export the current model as a standalone Python file using the selected solver."""
+        """Export the current model as Python, LP, or MPS using the selected solver/lowering."""
         if not self._ensure_no_active_operation("Export model"):
             return
         try:
@@ -3412,28 +3414,6 @@ class OPLIDE(tk.Tk):
 
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
-            # Compile through OPLCompiler so all AST rewrites/validation are applied
-            try:
-                compiler = OPLCompiler()
-                _ast, generated_code, _data_dict = compiler.compile_model(
-                    model_code,
-                    data_code if data_code.strip() else None,
-                    solver=solver_choice,
-                )
-                if not generated_code:
-                    raise ValueError("Compiler returned no generated code.")
-            except Exception as e:
-                detail = f"{type(e).__name__}: {e}"
-                self._append_output(f"\nExport failed:\n{detail}\n\n{traceback.format_exc()}\n")
-                self.status_var.set(f"Error: Export failed: {detail}")
-                messagebox.showerror("Export model", f"Export failed:\n{detail}")
-                return
-
-            # Preserve existing behavior
-            lines = generated_code.rstrip("\n").split("\n")
-            if lines:
-                generated_code = "\n".join(lines[:-1])
-
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
             if self.model_file:
                 base = os.path.splitext(os.path.basename(self.model_file or ""))[0]
@@ -3442,13 +3422,57 @@ class OPLIDE(tk.Tk):
             dest_path = filedialog.asksaveasfilename(
                 defaultextension=".py",
                 initialfile=default_name,
-                filetypes=[("Python files", "*.py"), ("All files", "*.*")],
+                filetypes=[
+                    ("Python files", "*.py"),
+                    ("LP files", "*.lp"),
+                    ("MPS files", "*.mps"),
+                    ("All files", "*.*"),
+                ],
             )
             if not dest_path:
                 return
 
-            with open(dest_path, "w", encoding="utf-8") as f:
-                f.write(generated_code)
+            export_ext = Path(dest_path).suffix.lower()
+            if export_ext not in {".py", ".lp", ".mps"}:
+                messagebox.showwarning(
+                    "Export model",
+                    "Choose a supported export extension: .py, .lp, or .mps.",
+                )
+                return
+
+            # Compile through OPLCompiler so all AST rewrites/validation are applied.
+            try:
+                compiler = OPLCompiler()
+                if export_ext == ".py":
+                    _ast, generated_code, _data_dict = compiler.compile_model(
+                        model_code,
+                        data_code if data_code.strip() else None,
+                        solver=solver_choice,
+                    )
+                    if not generated_code:
+                        raise ValueError("Compiler returned no generated code.")
+
+                    # Preserve existing behavior
+                    lines = generated_code.rstrip("\n").split("\n")
+                    if lines:
+                        generated_code = "\n".join(lines[:-1])
+
+                    with open(dest_path, "w", encoding="utf-8") as f:
+                        f.write(generated_code)
+                else:
+                    ast, _generated_code, data_dict = compiler.compile_model(
+                        model_code,
+                        data_code if data_code.strip() else None,
+                        solver="scipy",
+                    )
+                    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
+                    export_linear_problem(problem, dest_path)
+            except Exception as e:
+                detail = f"{type(e).__name__}: {e}"
+                self._append_output(f"\nExport failed:\n{detail}\n\n{traceback.format_exc()}\n")
+                self.status_var.set(f"Error: Export failed: {detail}")
+                messagebox.showerror("Export model", f"Export failed:\n{detail}")
+                return
 
             self.status_var.set(f"Exported model to {dest_path}")
         except Exception as e:

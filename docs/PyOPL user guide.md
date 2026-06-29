@@ -614,6 +614,27 @@ The `solve` function returns a dictionary with the following keys:
 
 Gurobi or SciPy/HiGHS output will be printed, including variable values and objective value if optimal.
 
+### Exporting LP and MPS files
+
+PyOPL can also lower a model to its linear problem representation and export a solver file through HiGHS. This is useful for inspecting the generated linear/MIP model or passing it to another solver tool.
+
+```python
+from pyopl.pyopl_core import OPLCompiler
+from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.linear_problem_highs import export_linear_problem
+
+model_text = open("model.mod", encoding="utf-8").read()
+data_text = open("data.dat", encoding="utf-8").read()
+
+ast, _code, data = OPLCompiler().compile_model(model_text, data_text, solver="scipy")
+problem = SciPyCSCCodeGenerator(ast, data).build_problem()
+
+export_linear_problem(problem, "model.lp")
+export_linear_problem(problem, "model.mps")
+```
+
+The CLI provides the same export path with `--out lp` or `--out mps`.
+
 Solver specifics:
 - Gurobi (default): linear and mixed-integer models; uses indicator constraints for many logical patterns and big-M encodings with automatic tightening.
 - SciPy/HiGHS: linear programs and (if supported by your SciPy version) MIP. Integrality is passed to `linprog`; boolean/logic and implications are compiled via big-M with automatic tightening; some composite boolean antecedents for implications may be limited.
@@ -718,7 +739,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
 - Default behavior: running `python -m pyopl` with no arguments still launches the IDE.
 - Subcommands:
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
-  - `solve <model.mod> [data.dat]`: compile and solve a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py` (use `--out-file` to write to a file).
+  - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it).
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/google/ollama).
     - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
@@ -731,11 +752,16 @@ Usage examples:
 # Solve a model and print JSON
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out json
 
+# Export the compiled SciPy/HiGHS model to LP or MPS
+python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out lp --out-file tmp/lot_sizing.lp
+python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out mps --out-file tmp/lot_sizing.mps
+
 # Generate insight (GenAI) and save to Markdown
 python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
 ```
 
 Notes:
+- LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 

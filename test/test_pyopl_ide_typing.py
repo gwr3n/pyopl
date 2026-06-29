@@ -10,6 +10,53 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_export_model_dialog_supports_lp_and_mps(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        class DummyVar:
+            def __init__(self, value="gurobi"):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        dummy = SimpleNamespace(
+            model_text=DummyText("dvar float+ x; minimize x; subject to { x >= 1; }"),
+            data_text=DummyText(""),
+            solver=DummyVar("gurobi"),
+            model_file="example.mod",
+            status_var=DummyVar(),
+            _append_output=lambda *_args, **_kwargs: None,
+            _clear_output=lambda *_args, **_kwargs: None,
+            _ensure_no_active_operation=lambda _label: True,
+        )
+
+        captured = {}
+
+        def fake_saveas(**kwargs):
+            captured.update(kwargs)
+            return "/tmp/example.lp"
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", side_effect=fake_saveas),
+            mock.patch.object(pyopl_ide_bootstrap, "export_linear_problem") as export_linear_problem,
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning"),
+        ):
+            OPLIDE.export_model(dummy)
+
+        self.assertIn(("LP files", "*.lp"), captured.get("filetypes", []))
+        self.assertIn(("MPS files", "*.mps"), captured.get("filetypes", []))
+        export_linear_problem.assert_called_once()
+
     def test_schedule_highlight_skips_large_model_text(self):
         class DummyText:
             def __init__(self):

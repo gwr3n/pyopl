@@ -5,7 +5,8 @@ Behavior:
 - Use `solve model.mod [data.dat]` to run a model from the command-line.
 - Solver selection: `--solver highs` (default) or `--solver gurobi`.
 - Output: `--out json` (default) prints JSON result to stdout (or file with `--out-file`).
-  Use `--out py` to export the compiled model code as a Python module.
+    Use `--out py` to export the compiled model code as a Python module.
+    Use `--out lp` or `--out mps` with `--out-file` to export a solver model file.
 
 This module intentionally avoids extra dependencies and uses `argparse`.
 """
@@ -25,8 +26,10 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
+from .linear_problem_highs import export_linear_problem
 from .pyopl_core import OPLCompiler
 from .pyopl_ide_bootstrap import OPLIDE
+from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 def _read_text(path: Path) -> str:
@@ -55,6 +58,15 @@ def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> 
     return code_str
 
 
+def _export_lp_mps(model_path: Path, data_path: Optional[Path], out_file: Path) -> Path:
+    model_code = _read_text(model_path)
+    data_code = _read_text(data_path) if data_path else None
+    compiler = OPLCompiler()
+    ast, _code_str, data_dict = compiler.compile_model(model_code, data_code, solver="scipy")
+    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
+    return export_linear_problem(problem, out_file)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="pyopl", description="PyOPL command-line interface")
 
@@ -69,7 +81,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_solve.add_argument("model", help="Path to model (.mod)")
     p_solve.add_argument("data", nargs="?", help="Optional data (.dat)")
     p_solve.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
-    p_solve.add_argument("--out", choices=["json", "py"], default="json", help="Output format")
+    p_solve.add_argument("--out", choices=["json", "py", "lp", "mps"], default="json", help="Output format")
     p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
 
     # genai group
@@ -156,6 +168,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                     _write_text(Path(args.out_file), code)
                 else:
                     print(code)
+                return 0
+
+            if args.out in ("lp", "mps"):
+                if not args.out_file:
+                    print(f"Error: --out {args.out} requires --out-file", file=sys.stderr)
+                    return 2
+                out_path = Path(args.out_file)
+                if out_path.suffix.lower() != f".{args.out}":
+                    print(f"Error: --out {args.out} requires an output file ending in .{args.out}", file=sys.stderr)
+                    return 2
+                with redirect_stdout(sys.stderr):
+                    _export_lp_mps(model_path, data_path, out_path)
                 return 0
         except Exception as e:
             print(f"Error during solve/export: {e}", file=sys.stderr)
