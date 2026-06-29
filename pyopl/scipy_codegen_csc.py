@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 # === Local imports ===
+from .linear_problem import LinearProblem, ObjectiveSense
 from .scipy_codegen_base import SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 from .tuple_set_helper import TupleSetHelper
@@ -2643,60 +2644,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _add_code_line(self, line: str) -> None:
         self.scipy_code_lines.append(self._indent() + line)
 
-    def generate_code(self) -> str:
-        self._add_code_line("import numpy as np")
-        self._add_code_line("import time")
-        self._add_code_line("from scipy.optimize import linprog")
-        self._add_code_line("from scipy.sparse import csr_matrix")
-        # Ensure results_container exists
-        self._add_code_line("try:")
-        self.indent_level += 1
-        self._add_code_line("results_container")
-        self.indent_level -= 1
-        self._add_code_line("except NameError:")
-        self.indent_level += 1
-        self._add_code_line("results_container = {}")
-        self.indent_level -= 1
-        # Emit sense variable for use in sign fix
-        sense = self.ast.get("objective", {}).get("type", "minimize")
-        self._add_code_line(f"sense = '{sense}'")
-        self._add_code_line("")
-        self._generate_data_declarations(self.data_dict)
-        self._add_code_line("")
-        self._add_code_line("# Build LP vectors/matrices")
-        self._build_variables()
-        self._build_objective()
-        self._build_constraints()
-
-        # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
-        if len(self.var_names) == 0:
-            # Feasibility: with no variables, equalities require 0 == b_eq[i], inequalities require 0 <= b_ub[i]
-            beq_ok = all(abs(b) <= 1e-9 for b in (self.b_eq or []))
-            bub_ok = all(b >= -1e-9 for b in (self.b_ub or []))
-            feasible = beq_ok and bub_ok
-            # Constant objective value (evaluate at codegen time)
-            try:
-                _, obj_const = self._eval_expr(self.ast["objective"]["expression"], {})
-                obj_val = float(obj_const) if isinstance(obj_const, (int, float)) else 0.0
-            except Exception:
-                obj_val = 0.0
-
-            # Preserve previously emitted data/headers; append short-circuit result without calling linprog
-            self._add_code_line("")
-            self._add_code_line("# No decision variables: short-circuit without linprog")
-            self._add_code_line("results = {}")
-            if feasible:
-                self._add_code_line("results['status'] = 'OPTIMAL'")
-                self._add_code_line(f"results['objective_value'] = {obj_val}")
-            else:
-                self._add_code_line("results['status'] = 'INFEASIBLE'")
-                self._add_code_line("results['objective_value'] = None")
-            self._add_code_line("results['solution'] = {}")
-            self._add_code_line("results_container['scipy_output'] = results")
-            return "\n".join(self.scipy_code_lines)
-        # <<< END NEW >>>
-
-        # Patch: Enforce top-level explicit assignments for binary variables
+    def _apply_top_level_binary_assignments(self) -> None:
         for constr in self.ast.get("constraints", []):
             if (
                 constr.get("type") == "constraint"
@@ -2719,42 +2667,129 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     idx = self.var_indices[vname]
                     row = [0.0] * len(self.var_names)
                     row[idx] = 1.0
-                    # Only add if not already present in b_eq for this variable
                     already = False
-                    for r, c, v in zip(self.A_eq, self.b_eq, self.var_names):
-                        if abs(row[self.var_indices[v]]) == 1 and abs(c - constr["right"]["value"]) < 1e-8:
+                    for _row, rhs_value, var_name in zip(self.A_eq, self.b_eq, self.var_names):
+                        if abs(row[self.var_indices[var_name]]) == 1 and abs(rhs_value - constr["right"]["value"]) < 1e-8:
                             already = True
                             break
                     if not already:
                         self.A_eq.append(row)
                         self.b_eq.append(float(constr["right"]["value"]))
-        # Reconcile auxiliary vars (added during constraints) with var_names/bounds/integrality
-        # If new aux variables were appended, extend bounds/integrality and re-emit declarations.
-        if len(self.var_names) > 0:
-            if len(self.bounds) < len(self.var_names):
-                while len(self.bounds) < len(self.var_names):
-                    self.bounds.append([0, 1])  # assume binary aux
-            if hasattr(self, "integrality") and len(self.integrality) < len(self.var_names):
-                while len(self.integrality) < len(self.var_names):
-                    self.integrality.append(1)
-            # Remove previous lines for var_names/bounds/integrality and re-add at end of header block
-            filtered = []
-            for line in self.scipy_code_lines:
-                if (
-                    line.strip().startswith("var_names = ")
-                    or line.strip().startswith("bounds = ")
-                    or line.strip().startswith("integrality = ")
-                ):
-                    continue
-                filtered.append(line)
-            self.scipy_code_lines = filtered
-            bounds_py = "[" + ", ".join(f'[{b[0]}, {b[1] if b[1] is not None else "None"}]' for b in self.bounds) + "]"
-            # Insert updated arrays before matrices section; find insertion point (# Constraints or objective value lines not yet added)
-            # Simpler: append now (acceptable for execution order)
+
+    def _reconcile_problem_metadata(self) -> None:
+        while len(self.bounds) < len(self.var_names):
+            self.bounds.append([0, 1])
+        while len(self.integrality) < len(self.var_names):
+            self.integrality.append(1)
+        if len(self.c) < len(self.var_names):
+            self.c.extend([0.0] * (len(self.var_names) - len(self.c)))
+        elif len(self.c) > len(self.var_names):
+            self.c = self.c[: len(self.var_names)]
+
+    def _refresh_problem_metadata_code_lines(self) -> None:
+        bounds_py = "[" + ", ".join(f'[{b[0]}, {b[1] if b[1] is not None else "None"}]' for b in self.bounds) + "]"
+        found_var_names = False
+        found_bounds = False
+        found_integrality = False
+        found_c = False
+        for i, line in enumerate(self.scipy_code_lines):
+            if line.startswith("var_names = "):
+                self.scipy_code_lines[i] = f"var_names = {repr(self.var_names)}"
+                found_var_names = True
+            elif line.startswith("bounds = "):
+                self.scipy_code_lines[i] = f"bounds = {bounds_py}"
+                found_bounds = True
+            elif line.startswith("integrality = "):
+                self.scipy_code_lines[i] = f"integrality = {self.integrality}"
+                found_integrality = True
+            elif line.startswith("c = "):
+                self.scipy_code_lines[i] = f"c = {self.c}"
+                found_c = True
+        if not found_var_names:
             self._add_code_line(f"var_names = {repr(self.var_names)}")
+        if not found_bounds:
             self._add_code_line(f"bounds = {bounds_py}")
-            if hasattr(self, "integrality"):
-                self._add_code_line(f"integrality = {self.integrality}")
+        if not found_integrality:
+            self._add_code_line(f"integrality = {self.integrality}")
+        if not found_c:
+            self._add_code_line(f"c = {self.c}")
+
+    def _snapshot_linear_problem(self) -> LinearProblem:
+        sense = self.ast.get("objective", {}).get("type", "minimize")
+        if sense not in ("minimize", "maximize"):
+            sense = "minimize"
+        return LinearProblem(
+            sense=cast(ObjectiveSense, sense),
+            var_names=list(self.var_names),
+            bounds=[list(bound) for bound in self.bounds],
+            integrality=list(self.integrality),
+            c=list(self.c),
+            A_eq=[list(row) for row in self.A_eq],
+            b_eq=list(self.b_eq),
+            A_ub=[list(row) for row in self.A_ub],
+            b_ub=list(self.b_ub),
+            objective_offset=float(self.obj_const_offset),
+        )
+
+    def build_problem(self) -> LinearProblem:
+        self._generate_data_declarations(self.data_dict)
+        self._add_code_line("")
+        self._add_code_line("# Build LP vectors/matrices")
+        self._build_variables()
+        self._build_objective()
+        self._build_constraints()
+        self._apply_top_level_binary_assignments()
+        self._reconcile_problem_metadata()
+        self._refresh_problem_metadata_code_lines()
+        return self._snapshot_linear_problem()
+
+    def generate_code(self) -> str:
+        self._add_code_line("import numpy as np")
+        self._add_code_line("import time")
+        self._add_code_line("from scipy.optimize import linprog")
+        self._add_code_line("from scipy.sparse import csr_matrix")
+        # Ensure results_container exists
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("results_container")
+        self.indent_level -= 1
+        self._add_code_line("except NameError:")
+        self.indent_level += 1
+        self._add_code_line("results_container = {}")
+        self.indent_level -= 1
+        # Emit sense variable for use in sign fix
+        sense = self.ast.get("objective", {}).get("type", "minimize")
+        self._add_code_line(f"sense = '{sense}'")
+        self._add_code_line("")
+        problem = self.build_problem()
+
+        # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
+        if len(problem.var_names) == 0:
+            # Feasibility: with no variables, equalities require 0 == b_eq[i], inequalities require 0 <= b_ub[i]
+            beq_ok = all(abs(b) <= 1e-9 for b in (problem.b_eq or []))
+            bub_ok = all(b >= -1e-9 for b in (problem.b_ub or []))
+            feasible = beq_ok and bub_ok
+            # Constant objective value (evaluate at codegen time)
+            try:
+                _, obj_const = self._eval_expr(self.ast["objective"]["expression"], {})
+                obj_val = float(obj_const) if isinstance(obj_const, (int, float)) else 0.0
+            except Exception:
+                obj_val = 0.0
+
+            # Preserve previously emitted data/headers; append short-circuit result without calling linprog
+            self._add_code_line("")
+            self._add_code_line("# No decision variables: short-circuit without linprog")
+            self._add_code_line("results = {}")
+            if feasible:
+                self._add_code_line("results['status'] = 'OPTIMAL'")
+                self._add_code_line(f"results['objective_value'] = {obj_val}")
+            else:
+                self._add_code_line("results['status'] = 'INFEASIBLE'")
+                self._add_code_line("results['objective_value'] = None")
+            self._add_code_line("results['solution'] = {}")
+            self._add_code_line("results_container['scipy_output'] = results")
+            return "\n".join(self.scipy_code_lines)
+        # <<< END NEW >>>
         self._add_code_line("")
         self._add_code_line(f"{self.results_varname} = {{}}")
         self._add_code_line("try:")
