@@ -84,6 +84,8 @@ TOKEN_COLORS = {
     "COMMENT": "#5c6370",  # Darker grey (not a token, but for comments)
 }
 
+MAX_HIGHLIGHT_CHARS = 10_000
+
 
 # GenAI prompt payload shape (kept loose to avoid importing genai modules/types here).
 # Either:
@@ -2442,6 +2444,38 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
 
+    def _text_too_large_for_highlight(self, text_widget: tk.Text) -> bool:
+        try:
+            count = text_widget.count("1.0", "end-1c", "chars")
+            if count:
+                return int(count[0]) > MAX_HIGHLIGHT_CHARS
+        except Exception:
+            pass
+        try:
+            return len(text_widget.get("1.0", "end-1c")) > MAX_HIGHLIGHT_CHARS
+        except Exception:
+            return False
+
+    def _clear_highlight_tags(self, text_widget: tk.Text) -> None:
+        for previous_tag in TOKEN_COLORS.keys():
+            try:
+                text_widget.tag_remove(previous_tag, "1.0", tk.END)
+            except Exception:
+                pass
+        try:
+            text_widget.tag_remove("ERROR", "1.0", tk.END)
+        except Exception:
+            pass
+
+    def _disable_highlight_for_large_text(self, text_widget: tk.Text) -> None:
+        self._clear_highlight_tags(text_widget)
+        self._last_syntax_error_by_widget[id(text_widget)] = None
+        self._last_syntax_error = None
+        try:
+            self.status_syntax_var.set("Syntax highlighting disabled for large text")
+        except Exception:
+            pass
+
     def _schedule_highlight(self, text_widget: tk.Text, is_data: bool) -> None:
         """Debounce highlight work to keep typing responsive."""
         if getattr(self, "_shutting_down", False):
@@ -2450,6 +2484,10 @@ class OPLIDE(tk.Tk):
         # Cancel any pending runs for this widget
         self._cancel_scheduled_highlight(text_widget, "fast")
         self._cancel_scheduled_highlight(text_widget, "validate")
+
+        if self._text_too_large_for_highlight(text_widget):
+            self._disable_highlight_for_large_text(text_widget)
+            return
 
         if is_data:
             # Data: fast regex highlight shortly after typing, then expensive validate after idle
@@ -2643,10 +2681,12 @@ class OPLIDE(tk.Tk):
         if (not is_data) and (not validate):
             return
 
+        if self._text_too_large_for_highlight(text_widget):
+            self._disable_highlight_for_large_text(text_widget)
+            return
+
         # Remove previous tags
-        for previous_tag in TOKEN_COLORS.keys():
-            text_widget.tag_remove(previous_tag, "1.0", tk.END)
-        text_widget.tag_remove("ERROR", "1.0", tk.END)
+        self._clear_highlight_tags(text_widget)
 
         code = text_widget.get("1.0", tk.END)
 

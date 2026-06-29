@@ -10,6 +10,51 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_schedule_highlight_skips_large_model_text(self):
+        class DummyText:
+            def __init__(self):
+                self.removed = []
+
+            def count(self, *_args):
+                return (pyopl_ide_bootstrap.MAX_HIGHLIGHT_CHARS + 1,)
+
+            def tag_remove(self, tag, start, end):
+                self.removed.append((tag, start, end))
+
+        class DummyStatus:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        dummy = SimpleNamespace(
+            _shutting_down=False,
+            _highlight_after_ids={},
+            _last_syntax_error_by_widget={},
+            _last_syntax_error="old error",
+            status_syntax_var=DummyStatus(),
+            after=lambda *args, **kwargs: "after-id",
+            after_cancel=lambda _after_id: None,
+        )
+        dummy._cancel_scheduled_highlight = lambda text_widget, kind: OPLIDE._cancel_scheduled_highlight(
+            dummy, text_widget, kind
+        )
+        dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
+        dummy._clear_highlight_tags = lambda text_widget: OPLIDE._clear_highlight_tags(dummy, text_widget)
+        dummy._disable_highlight_for_large_text = lambda text_widget: OPLIDE._disable_highlight_for_large_text(
+            dummy, text_widget
+        )
+        text = DummyText()
+
+        OPLIDE._schedule_highlight(dummy, text, is_data=False)
+
+        self.assertEqual(dummy._highlight_after_ids, {})
+        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
+        self.assertIsNone(dummy._last_syntax_error)
+        self.assertEqual(dummy.status_syntax_var.value, "Syntax highlighting disabled for large text")
+        self.assertTrue(any(tag == "ERROR" for tag, _start, _end in text.removed))
+
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
             def __init__(self):
