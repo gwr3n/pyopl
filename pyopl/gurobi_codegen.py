@@ -392,6 +392,15 @@ class GurobiCodeGenerator:
                 records[key] = d
             return records
 
+        def _tuple_set_array_records(data_value, index_values=None):
+            if isinstance(data_value, dict):
+                items = sorted(data_value.items(), key=lambda kv: kv[0])
+            elif isinstance(index_values, list) and len(index_values) == len(data_value):
+                items = zip(index_values, data_value)
+            else:
+                items = enumerate(data_value, start=1)
+            return {key: list(records or []) for key, records in items}
+
         if hasattr(self, "ast") and "declarations" in self.ast:
             for decl in self.ast["declarations"]:
                 if decl.get("type") == "tuple_type":
@@ -402,6 +411,17 @@ class GurobiCodeGenerator:
                     tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
                     if tuple_list:
                         self._add_code_line(f"{set_name} = {repr(tuple_list)}")
+                elif decl.get("type") == "set_of_tuples_array_external":
+                    set_name = decl["name"]
+                    dimensions = decl.get("dimensions") or []
+                    index_values = None
+                    if len(dimensions) == 1:
+                        dim = dimensions[0]
+                        if dim.get("type") in ("named_range_dimension", "named_set_dimension"):
+                            index_values = data_dict.get(dim.get("name"))
+                    data_value = data_dict.get(set_name)
+                    if data_value is not None:
+                        self._add_code_line(f"{set_name} = {repr(_tuple_set_array_records(data_value, index_values))}")
                 elif decl.get("type") in ("typed_set", "typed_set_external"):
                     set_name = decl["name"]
                     elements = decl.get("value")
@@ -844,6 +864,17 @@ class GurobiCodeGenerator:
                     tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
                     if tuple_list:
                         self._add_code_line(f"{set_name} = {repr(tuple_list)}")
+                elif decl.get("type") == "set_of_tuples_array_external":
+                    set_name = decl["name"]
+                    dimensions = decl.get("dimensions") or []
+                    index_values = None
+                    if len(dimensions) == 1:
+                        dim = dimensions[0]
+                        if dim.get("type") in ("named_range_dimension", "named_set_dimension"):
+                            index_values = data_dict.get(dim.get("name"))
+                    data_value = data_dict.get(set_name)
+                    if data_value is not None:
+                        self._add_code_line(f"{set_name} = {repr(_tuple_set_array_records(data_value, index_values))}")
                 elif decl.get("type") in ("typed_set", "typed_set_external"):
                     set_name = decl["name"]
                     elements = decl.get("value")
@@ -1230,7 +1261,7 @@ class GurobiCodeGenerator:
                 )
             decl_type = decl.get("type")
             # Treat set_of_tuples_external as set_of_tuples for codegen
-            if decl_type in ("set_of_tuples", "set_of_tuples_external"):
+            if decl_type in ("set_of_tuples", "set_of_tuples_external", "set_of_tuples_array_external"):
                 # Both handled by _decl_set_of_tuples (which is a no-op)
                 self._decl_set_of_tuples(decl)
                 continue
@@ -2592,6 +2623,20 @@ class GurobiCodeGenerator:
             start = self._traverse_expression(rng["start"], current_iterators, symbolic=True)
             end = self._traverse_expression(rng["end"], current_iterators, symbolic=True)
             return f"range({start}, {end} + 1)"
+        elif rng["type"] == "indexed_set":
+            idx_expr = self._expr_indexed_name(
+                {"type": "indexed_name", "name": rng["name"], "dimensions": rng.get("dimensions", [])},
+                current_iterators,
+                symbolic=True,
+            )
+            if " if isinstance(" in idx_expr:
+                return idx_expr
+            if len(rng.get("dimensions", [])) == 1:
+                dim = rng["dimensions"][0]
+                if isinstance(dim, dict) and dim.get("type") == "name_reference_index":
+                    key = dim["name"]
+                    return f"({rng['name']}[{key}] if isinstance({rng['name']}, dict) else {idx_expr})"
+            return idx_expr
         elif rng["type"] == "named_range":
             try:
                 return self._emit_range_from_declaration(rng["name"], current_iterators, True)
@@ -3178,6 +3223,18 @@ class GurobiCodeGenerator:
                         loop_ranges.append(set_name)
                     else:
                         raise ValueError(f"Range or set '{rng['name']}' not found in declarations.")
+            elif rng["type"] == "indexed_set":
+                idx_expr = self._expr_indexed_name(
+                    {"type": "indexed_name", "name": rng["name"], "dimensions": rng.get("dimensions", [])},
+                    temp_iter_map,
+                    symbolic=True,
+                )
+                if " if isinstance(" not in idx_expr and len(rng.get("dimensions", [])) == 1:
+                    dim = rng["dimensions"][0]
+                    if isinstance(dim, dict) and dim.get("type") == "name_reference_index":
+                        key = dim["name"]
+                        idx_expr = f"({rng['name']}[{key}] if isinstance({rng['name']}, dict) else {idx_expr})"
+                loop_ranges.append(idx_expr)
             elif rng["type"] in ("named_set", "named_set_dimension"):
                 set_name = self._emit_set_name_if_declared(rng["name"])
                 if set_name:

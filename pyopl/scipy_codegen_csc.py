@@ -2211,6 +2211,25 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         loop_ranges.append(set_val)
                     else:
                         raise self._not_found_error("range or set", rng["name"])
+            elif rng["type"] == "indexed_set":
+                set_name = rng["name"]
+                indices = []
+                for dim in rng.get("dimensions", []):
+                    if isinstance(dim, dict):
+                        _, idx_val = self._eval_index_expr(dim, {})
+                        indices.append(idx_val)
+                set_val = self.data_dict.get(set_name, [])
+                for idx_val in indices:
+                    if isinstance(set_val, dict):
+                        set_val = set_val[idx_val]
+                    elif isinstance(set_val, (list, tuple)):
+                        if isinstance(idx_val, float) and idx_val.is_integer():
+                            idx_val = int(idx_val)
+                        set_val = set_val[int(idx_val) - 1]
+                    else:
+                        set_val = []
+                        break
+                loop_ranges.append(list(set_val or []))
             else:
                 raise self._unsupported_type_error("iterator range type", rng["type"])
             loop_vars.append(name)
@@ -2351,6 +2370,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     else:
                         set_vals = []
                 return list(set_vals)
+            if rt == "indexed_set":
+                set_name = cast(str, rng.get("name"))
+                set_vals: Any = self.data_dict.get(set_name, [])
+                for dim in rng.get("dimensions", []) or []:
+                    _, idx_val = self._eval_index_expr(cast(Dict[str, Any], dim), env)
+                    if isinstance(set_vals, dict):
+                        set_vals = set_vals[idx_val]
+                    elif isinstance(set_vals, (list, tuple)):
+                        if isinstance(idx_val, float) and idx_val.is_integer():
+                            idx_val = int(idx_val)
+                        set_vals = set_vals[int(idx_val) - 1]
+                    else:
+                        set_vals = []
+                        break
+                return list(set_vals or [])
             raise self._unsupported_type_error("iterator range type", rt)
 
         def rec(idx: int, env: dict, acc: list):
@@ -3415,6 +3449,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if decl["type"] in (
                 "set_of_tuples",
                 "set_of_tuples_external",
+                "set_of_tuples_array_external",
                 "typed_set",
                 "typed_set_external",
                 "tuple_array",

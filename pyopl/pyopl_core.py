@@ -780,6 +780,27 @@ class OPLParser(Parser):
     """
 
     # --- External set of tuples declaration: {Arc} arcs = ...; ---
+    @_('"{" NAME "}" NAME indexed_dimensions "=" ELLIPSIS ";"')  # type: ignore
+    def declaration(self, p):
+        tuple_type = p.NAME0
+        set_name = p.NAME1
+        dimensions = [self._normalize_declaration_dimension(dim_spec, p.lineno) for dim_spec in p.indexed_dimensions]
+        self.symbol_table.add_symbol(
+            set_name,
+            "set_array",
+            value={"tuple_type": tuple_type},
+            dimensions=dimensions,
+            is_dvar=False,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "set_of_tuples_array_external",
+            "tuple_type": tuple_type,
+            "name": set_name,
+            "dimensions": dimensions,
+            "value": None,
+        }
+
     @_('"{" NAME "}" NAME "=" ELLIPSIS ";"')  # type: ignore
     def declaration(self, p):
         # External set of tuples declaration with ellipsis (e.g., {Arc} arcs = ...;)
@@ -1370,6 +1391,10 @@ class OPLParser(Parser):
                     sem_type = "string"
             elif rtype == "range_specifier":
                 sem_type = "int"
+            elif rtype == "indexed_set":
+                tuple_type = rng.get("tuple_type")
+                if isinstance(tuple_type, str):
+                    sem_type = tuple_type
 
             it_types[iterator] = sem_type
 
@@ -2175,6 +2200,21 @@ class OPLParser(Parser):
             # Fallback treat as named_range; semantic error will surface later if undeclared
             return {"type": "named_range", "name": p.NAME}
 
+    @_('NAME indexed_dimensions')  # type: ignore
+    def IN_RANGE(self, p):
+        try:
+            sym = self.symbol_table.get_symbol(p.NAME)
+        except SemanticError as exc:
+            raise SemanticError(exc.message, lineno=p.lineno) from exc
+        if sym.get("type") != "set_array":
+            raise SemanticError(f"Symbol '{p.NAME}' used as indexed iterator domain is not a set array.", lineno=p.lineno)
+        return {
+            "type": "indexed_set",
+            "name": p.NAME,
+            "dimensions": p.indexed_dimensions,
+            "tuple_type": (sym.get("value") or {}).get("tuple_type"),
+        }
+
     @_("expression DOTDOT expression")  # type: ignore
     def index_specifier(self, p):
         start_val = p.expression0
@@ -2362,6 +2402,10 @@ class OPLParser(Parser):
                     f"Symbol '{rng['name']}' used in 'in' clause is not a declared range or set.",
                     lineno=p.lineno,
                 )
+        elif rng["type"] == "indexed_set":
+            tuple_type = rng.get("tuple_type")
+            if isinstance(tuple_type, str):
+                iterator_type = tuple_type
         if p.NAME not in current_scope:
             # Store the tuple/base type name as the type for iterators
             self.symbol_table.add_symbol(p.NAME, iterator_type, is_dvar=False, lineno=p.lineno)
@@ -3233,6 +3277,18 @@ class OPLDataParser(Parser):
     @_("array_value")  # type: ignore
     def row_list(self, p):
         return _list_with_item(p.array_value)
+
+    @_('row_list "," tuple_set_value')  # type: ignore
+    def row_list(self, p):
+        return _append_list_item(p.row_list, p.tuple_set_value)
+
+    @_("tuple_set_value")  # type: ignore
+    def row_list(self, p):
+        return _list_with_item(p.tuple_set_value)
+
+    @_('"{" tuple_literal_list "}"')  # type: ignore
+    def tuple_set_value(self, p):
+        return p.tuple_literal_list
 
     def error(self, p):
         # Unexpected token
