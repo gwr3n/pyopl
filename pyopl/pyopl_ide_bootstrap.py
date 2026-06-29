@@ -4462,8 +4462,9 @@ class OPLIDE(tk.Tk):
                 return
             if isinstance(current_vbar, ttk.Scrollbar):
                 return
+            parent = getattr(text_widget, "frame", text_widget.master)
             current_vbar.destroy()
-            replacement_vbar = ttk.Scrollbar(text_widget, orient=tk.VERTICAL, command=text_widget.yview)
+            replacement_vbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text_widget.yview)
             replacement_vbar.pack(side=tk.RIGHT, fill=tk.Y)
             text_widget.configure(yscrollcommand=replacement_vbar.set)
             text_widget.vbar = replacement_vbar
