@@ -7,7 +7,7 @@ import sys
 from .genai.pyopl_generative import generative_feedback, generative_solve
 from .pyopl_core import solve
 
-__version__ = "1.8.4"
+__version__ = "1.8.5"
 __year__ = "2026"
 __author__ = "Roberto Rossi"
 __email__ = "robros@gmail.com"
