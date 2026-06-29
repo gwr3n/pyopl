@@ -2472,7 +2472,7 @@ class OPLIDE(tk.Tk):
         self._last_syntax_error_by_widget[id(text_widget)] = None
         self._last_syntax_error = None
         try:
-            self.status_syntax_var.set("Syntax highlighting disabled for large text")
+            self.status_syntax_var.set("Syntax validation disabled for large text")
         except Exception:
             pass
 
@@ -2890,6 +2890,14 @@ class OPLIDE(tk.Tk):
                 else:
                     caret_line, caret_col = 1, 0
 
+                caret_msg = f"Ln {caret_line}, Col {caret_col}"
+                self.status_caret_var.set(caret_msg)
+                self._refresh_status_context()
+
+                if self._text_too_large_for_highlight(text_widget):
+                    self.status_syntax_var.set("Syntax validation disabled for large text")
+                    return
+
                 # Collect all error lines
                 error_lines = []
                 if text_widget.tag_ranges("ERROR"):
@@ -2919,10 +2927,9 @@ class OPLIDE(tk.Tk):
                         error_msg = _strip_hint(last_error)
                     else:
                         error_msg = f"Syntax Error on line {first_err_line}"
+                elif last_error:
+                    error_msg = _strip_hint(last_error)
 
-                caret_msg = f"Ln {caret_line}, Col {caret_col}"
-                self.status_caret_var.set(caret_msg)
-                self._refresh_status_context()
                 if error_msg:
                     self.status_syntax_var.set(error_msg)
                 else:

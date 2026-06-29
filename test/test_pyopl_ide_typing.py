@@ -52,8 +52,94 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy._highlight_after_ids, {})
         self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
         self.assertIsNone(dummy._last_syntax_error)
-        self.assertEqual(dummy.status_syntax_var.value, "Syntax highlighting disabled for large text")
+        self.assertEqual(dummy.status_syntax_var.value, "Syntax validation disabled for large text")
         self.assertTrue(any(tag == "ERROR" for tag, _start, _end in text.removed))
+
+    def test_update_caret_preserves_large_text_status(self):
+        class DummyText:
+            def count(self, *_args):
+                return (pyopl_ide_bootstrap.MAX_HIGHLIGHT_CHARS + 1,)
+
+            def winfo_exists(self):
+                return True
+
+            def index(self, _index):
+                return "7.3"
+
+        class DummyVar:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        dummy = SimpleNamespace(
+            status_caret_var=DummyVar(),
+            status_syntax_var=DummyVar(),
+            status_solver_var=DummyVar(),
+            status_genai_var=DummyVar(),
+            solver=SimpleNamespace(get=lambda: "gurobi"),
+            genai_provider=None,
+            genai_model=None,
+            genai_method_var=SimpleNamespace(get=lambda: "pyopl_generative"),
+            _genai_methods=[("SyntAGM", "pyopl_generative")],
+        )
+        dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
+        dummy._refresh_status_context = lambda: OPLIDE._refresh_status_context(dummy)
+        dummy._label_for_method = lambda key: OPLIDE._label_for_method(dummy, key)
+
+        OPLIDE._update_caret_position(dummy, DummyText())
+
+        self.assertEqual(dummy.status_caret_var.value, "Ln 7, Col 3")
+        self.assertEqual(dummy.status_syntax_var.value, "Syntax validation disabled for large text")
+
+    def test_update_caret_shows_stored_eof_syntax_error_without_error_tag(self):
+        class DummyText:
+            def __init__(self):
+                self.widget_id = id(self)
+
+            def count(self, *_args):
+                return (100,)
+
+            def winfo_exists(self):
+                return True
+
+            def index(self, _index):
+                return "13.0"
+
+            def tag_ranges(self, _tag):
+                return []
+
+        class DummyVar:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        text = DummyText()
+        dummy = SimpleNamespace(
+            status_caret_var=DummyVar(),
+            status_syntax_var=DummyVar(),
+            status_solver_var=DummyVar(),
+            status_genai_var=DummyVar(),
+            solver=SimpleNamespace(get=lambda: "gurobi"),
+            genai_provider=None,
+            genai_model=None,
+            genai_method_var=SimpleNamespace(get=lambda: "pyopl_generative"),
+            _genai_methods=[("SyntAGM", "pyopl_generative")],
+            _last_syntax_error_by_widget={
+                id(text): "Parser Error on line 13: Semantic Error (Line 13): Syntax error in .dat file at end of file (EOF)."
+            },
+            _last_syntax_error=None,
+        )
+        dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
+        dummy._refresh_status_context = lambda: OPLIDE._refresh_status_context(dummy)
+        dummy._label_for_method = lambda key: OPLIDE._label_for_method(dummy, key)
+
+        OPLIDE._update_caret_position(dummy, text)
+
+        self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
