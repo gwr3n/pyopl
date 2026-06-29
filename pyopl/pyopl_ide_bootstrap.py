@@ -3403,8 +3403,6 @@ class OPLIDE(tk.Tk):
         if not self._ensure_no_active_operation("Export model"):
             return
         try:
-            self._clear_output("Export model...")
-
             model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
             data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
@@ -3469,15 +3467,16 @@ class OPLIDE(tk.Tk):
                     export_linear_problem(problem, dest_path)
             except Exception as e:
                 detail = f"{type(e).__name__}: {e}"
-                self._append_output(f"\nExport failed:\n{detail}\n\n{traceback.format_exc()}\n")
+                logging.getLogger(__name__).exception("Export failed")
                 self.status_var.set(f"Error: Export failed: {detail}")
                 messagebox.showerror("Export model", f"Export failed:\n{detail}")
                 return
 
             self.status_var.set(f"Exported model to {dest_path}")
+            print(f"Model exported to {export_ext.lstrip('.').upper()}")
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
-            self._append_output(f"\nUnexpected export error:\n{detail}\n\n{traceback.format_exc()}\n")
+            logging.getLogger(__name__).exception("Unexpected export error")
             self.status_var.set(f"Unexpected error during export: {detail}")
             messagebox.showerror("Export model", f"Unexpected error:\n{detail}")
             self.status_var.set(f"Export failed: {detail}")

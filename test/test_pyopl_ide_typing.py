@@ -1,4 +1,6 @@
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -34,8 +36,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
             solver=DummyVar("gurobi"),
             model_file="example.mod",
             status_var=DummyVar(),
-            _append_output=lambda *_args, **_kwargs: None,
-            _clear_output=lambda *_args, **_kwargs: None,
+            _append_output=mock.Mock(),
+            _clear_output=mock.Mock(),
             _ensure_no_active_operation=lambda _label: True,
         )
 
@@ -51,11 +53,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning"),
         ):
-            OPLIDE.export_model(dummy)
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                OPLIDE.export_model(dummy)
 
         self.assertIn(("LP files", "*.lp"), captured.get("filetypes", []))
         self.assertIn(("MPS files", "*.mps"), captured.get("filetypes", []))
         export_linear_problem.assert_called_once()
+        dummy._clear_output.assert_not_called()
+        dummy._append_output.assert_not_called()
+        self.assertIn("Model exported to LP", stdout.getvalue())
 
     def test_schedule_highlight_skips_large_model_text(self):
         class DummyText:

@@ -1,10 +1,10 @@
 # Use module-level logger, no handler/formatter setup here
 import logging
 
+from .linear_problem_highs import build_highs_model, export_linear_problem
 from .scipy_codegen_base import SciPyCodeGeneratorBase
 from .scipy_codegen_csc import LinearProblem, SciPyCSCCodeGenerator
 from .semantic_error import SemanticError
-from .linear_problem_highs import build_highs_model, export_linear_problem
 
 # --- Logging Setup ---
 logger = logging.getLogger(__name__)
