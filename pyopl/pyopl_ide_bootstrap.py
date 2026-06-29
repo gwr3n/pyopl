@@ -1850,7 +1850,7 @@ class OPLIDE(tk.Tk):
         try:
             if self._genai_diff_preview_window is None or not self._genai_diff_preview_window.winfo_exists():
                 window = tk.Toplevel(self)
-                window.title("Review Ask Changes")
+                window.title("Review Changes")
                 window.geometry("980x700")
                 window.transient(self)
                 window.rowconfigure(0, weight=1)
