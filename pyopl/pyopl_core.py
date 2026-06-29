@@ -2265,6 +2265,7 @@ class OPLParser(Parser):
             "parenthesized_expression",
             "field_access",
             "field_access_index",
+            "indexed_name",
             "string_literal",
             "tuple_literal",
         ]:

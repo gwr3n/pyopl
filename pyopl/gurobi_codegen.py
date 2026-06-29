@@ -2773,6 +2773,8 @@ class GurobiCodeGenerator:
                 return str(dim_expr["value"])
             elif t == "name_reference_index":
                 return str(dim_expr["name"])
+            elif t == "indexed_name":
+                return self._expr_indexed_name(dim_expr, current_iterators, symbolic)
             elif t == "string_literal":  # <-- emit quoted string for string index
                 return repr(dim_expr["value"])
             elif t == "binop":

@@ -466,6 +466,13 @@ class ExpressionEvaluator:
                 except Exception:
                     pass
             return {}, val
+        elif tt == "indexed_name":
+            _, index_val = self._eval_indexed_name(dim_expr, env)
+            if isinstance(index_val, dict):
+                raise SemanticError("Indexed expression used as an index must resolve to a scalar value")
+            if isinstance(index_val, float) and float(index_val).is_integer():
+                index_val = int(index_val)
+            return {}, index_val
         elif tt == "string_literal":  # <-- explicit support for string index literals
             return {}, dim_expr.get("value")
         elif tt == "binop":
@@ -792,7 +799,7 @@ class ExpressionEvaluator:
 
     def _eval_sum(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
         iterators = expr["iterators"]
-        loop_vars, loop_ranges = self.parent._unroll_iterators(iterators)
+        loop_vars, loop_ranges = self.parent._unroll_iterators(iterators, env)
         # Narrow types to satisfy mypy
         coef_dict_total: Dict[str, float] = {}
         const_total: Union[float, str] = 0.0
@@ -2140,7 +2147,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         # If not found, raise with the actual name and indices for clarity
         raise SemanticError(f"AST parameter '{name}' with indices {indices} not found.")
 
-    def _unroll_iterators(self, iterators: list) -> tuple[list, list]:
+    def _unroll_iterators(self, iterators: list, env: dict | None = None) -> tuple[list, list]:
         """
         Given a list of OPL-style iterators, return (loop_vars, loop_ranges).
         Each iterator is a dict with 'iterator' and 'range'.
@@ -2150,6 +2157,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         loop_vars = []
         loop_ranges = []
+        env = env or {}
         for it in iterators:
             name = it["iterator"]
             rng = it["range"]
@@ -2216,7 +2224,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 indices = []
                 for dim in rng.get("dimensions", []):
                     if isinstance(dim, dict):
-                        _, idx_val = self._eval_index_expr(dim, {})
+                        _, idx_val = self._eval_index_expr(dim, env)
                         indices.append(idx_val)
                 set_val = self.data_dict.get(set_name, [])
                 for idx_val in indices:
@@ -5385,22 +5393,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         def _lin_eq(expr):
                             if not isinstance(expr, dict):
                                 raise SemanticError("Unsupported expression in implication linearization")
-                            t = expr.get("type")
-                            if t == "parenthesized_expression":
-                                return _lin_eq(expr.get("expression"))
-                            if t in ("name", "indexed_name"):
-                                v = self._multi_indexed_var_name(expr, env) if t == "indexed_name" else expr["value"]
-                                return {v: 1.0}, 0.0
-                            if t == "number":
-                                return {}, float(expr.get("value", 0))
-                            if t == "binop" and expr.get("op") in ("+", "-"):
-                                ld, lc = _lin_eq(expr.get("left"))
-                                rd, rc = _lin_eq(expr.get("right"))
-                                coef = ld.copy()
-                                for k, v in rd.items():
-                                    coef[k] = coef.get(k, 0.0) + (v if expr.get("op") == "+" else -v)
-                                return coef, lc + (rc if expr.get("op") == "+" else -rc)
-                            raise SemanticError("Unsupported linear expression form in implication")
+                            try:
+                                coef, const = self._eval_expr(expr, dict(env or {}))
+                            except Exception as exc:
+                                raise SemanticError("Unsupported linear expression form in implication") from exc
+                            if not isinstance(const, (int, float)):
+                                raise SemanticError("Unsupported linear expression form in implication")
+                            return dict(coef), float(const)
 
                         def _diff_eq(left, right):
                             ld, lc = _lin_eq(left)
@@ -5512,22 +5511,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     def _lin_imp(expr):
                         if not isinstance(expr, dict):
                             raise SemanticError("Unsupported expression in implication linearization")
-                        t = expr.get("type")
-                        if t == "parenthesized_expression":
-                            return _lin_imp(expr.get("expression"))
-                        if t in ("name", "indexed_name"):
-                            v = self._multi_indexed_var_name(expr, env) if t == "indexed_name" else expr["value"]
-                            return {v: 1.0}, 0.0
-                        if t == "number":
-                            return {}, float(expr.get("value", 0))
-                        if t == "binop" and expr.get("op") in ("+", "-"):
-                            ld, lc = _lin_imp(expr.get("left"))
-                            rd, rc = _lin_imp(expr.get("right"))
-                            coef = ld.copy()
-                            for k, v in rd.items():
-                                coef[k] = coef.get(k, 0.0) + (v if expr.get("op") == "+" else -v)
-                            return coef, lc + (rc if expr.get("op") == "+" else -rc)
-                        raise SemanticError("Unsupported linear expression form in implication")
+                        try:
+                            coef, const = self._eval_expr(expr, dict(env or {}))
+                        except Exception as exc:
+                            raise SemanticError("Unsupported linear expression form in implication") from exc
+                        if not isinstance(const, (int, float)):
+                            raise SemanticError("Unsupported linear expression form in implication")
+                        return dict(coef), float(const)
 
                     def _diff_imp(left, right):
                         ld, lc = _lin_imp(left)
