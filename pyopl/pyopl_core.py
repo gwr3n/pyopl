@@ -3656,20 +3656,6 @@ class OPLCompiler:
                         return eval_tuple(expr.get("expression"), env)
                 return expr
 
-            def eval_bool(expr: Any, env: dict[str, Any]) -> bool:
-                if isinstance(expr, dict):
-                    expr_type = expr.get("type")
-                    if expr_type == "number":
-                        return bool(expr.get("value"))
-                    if expr_type == "name":
-                        name = expr.get("value")
-                        if not isinstance(name, str):
-                            raise SemanticError("Boolean comprehension name expression is missing an identifier.")
-                        return bool(env.get(name))
-                    if expr_type == "parenthesized_expression":
-                        return eval_bool(expr.get("expression"), env)
-                return bool(expr)
-
             def normalize_tuple_value(value: Any) -> Any:
                 if isinstance(value, float) and value.is_integer():
                     return int(value)
@@ -3683,7 +3669,9 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or eval_bool(index_constraint, env):
+                    if index_constraint is None or bool(
+                        self._eval_comprehension_expr(index_constraint, env, working_data)
+                    ):
                         tuple_value = eval_tuple(tuple_expr, env)
                         tuples.append(normalize_tuple_value(tuple_value))
                     return
