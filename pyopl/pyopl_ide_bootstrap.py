@@ -2,6 +2,7 @@
 import difflib
 import json
 import logging
+import math
 import multiprocessing
 import os
 import queue
@@ -104,7 +105,13 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
         except ImportError:
             from pyopl.pyopl_core import solve  # type: ignore
 
-        results = solve(model_file, data_file, solver=solver_choice)
+        def _progress(event: dict[str, Any]) -> None:
+            try:
+                q.put(("progress", event))
+            except Exception:
+                pass
+
+        results = solve(model_file, data_file, solver=solver_choice, progress_callback=_progress)
         q.put(("success", results))
     except Exception as e:
         q.put(("error", f"{e}\n\n{traceback.format_exc()}"))
@@ -168,6 +175,15 @@ class OPLIDE(tk.Tk):
         self._solver_process: Optional[multiprocessing.Process] = None
         self._solver_queue: Optional[multiprocessing.Queue] = None
         self._current_solver_choice: str = "gurobi"
+        self._solver_progress_window: Optional[tk.Toplevel] = None
+        self._solver_progress_canvas: Optional[tk.Canvas] = None
+        self._solver_progress_stats_frame: Optional[ttk.Frame] = None
+        self._solver_progress_status_var: Optional[tk.StringVar] = None
+        self._solver_progress_stat_vars: dict[str, tk.StringVar] = {}
+        self._solver_progress_samples: list[dict[str, Any]] = []
+        self._solver_progress_pending_sample: Optional[dict[str, Any]] = None
+        self._solver_progress_update_after_id: Optional[str] = None
+        self._solver_progress_rolling_seconds = 120.0
 
         # --- Run timer (status bar elapsed time while solving) ---
         self._run_started_at: Optional[float] = None
@@ -3080,6 +3096,272 @@ class OPLIDE(tk.Tk):
         # Reschedule
         self._run_timer_after_id = self.after(1000, self._tick_run_timer)
 
+    def _reset_solver_progress_window(self, solver_choice: str) -> None:
+        """Create or reset the solve progress window."""
+        if self._solver_progress_update_after_id:
+            try:
+                self.after_cancel(self._solver_progress_update_after_id)
+            except Exception:
+                pass
+        self._solver_progress_update_after_id = None
+        self._solver_progress_samples = []
+        self._solver_progress_pending_sample = None
+        if self._solver_progress_window is None or not self._solver_progress_window.winfo_exists():
+            window = tk.Toplevel(self)
+            window.title("Solve Progress")
+            window.geometry("760x460")
+            window.transient(self)
+            window.rowconfigure(1, weight=1)
+            window.columnconfigure(0, weight=1)
+            window.protocol("WM_DELETE_WINDOW", window.withdraw)
+
+            header = ttk.Frame(window, padding=(12, 10, 12, 4))
+            header.grid(row=0, column=0, sticky="ew")
+            header.columnconfigure(0, weight=1)
+            status_var = tk.StringVar(value="Waiting for solver progress...")
+            ttk.Label(header, text="Solve Progress", font=(self.interface_font_family, 13, "bold")).grid(
+                row=0, column=0, sticky="w"
+            )
+            ttk.Label(header, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+            canvas = tk.Canvas(window, height=260, highlightthickness=1, highlightbackground="#d6d8dc", bg="#ffffff")
+            canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 8))
+            canvas.bind("<Configure>", lambda _event: self._redraw_solver_progress_chart())
+
+            stats_frame = ttk.Frame(window, padding=(12, 0, 12, 12))
+            stats_frame.grid(row=2, column=0, sticky="ew")
+            for col in range(4):
+                stats_frame.columnconfigure(col, weight=1)
+
+            self._solver_progress_window = window
+            self._solver_progress_canvas = canvas
+            self._solver_progress_stats_frame = stats_frame
+            self._solver_progress_status_var = status_var
+
+        self._solver_progress_stat_vars = {}
+        if self._solver_progress_stats_frame is not None:
+            for child in self._solver_progress_stats_frame.winfo_children():
+                child.destroy()
+
+        self._set_solver_progress_status(f"{solver_choice}: solving...")
+        self._redraw_solver_progress_chart()
+        try:
+            self._solver_progress_window.deiconify()
+            self._solver_progress_window.lift()
+        except Exception:
+            pass
+
+    def _set_solver_progress_status(self, text: str) -> None:
+        if self._solver_progress_status_var is not None:
+            self._solver_progress_status_var.set(text)
+
+    def _format_progress_value(self, value: Any) -> str:
+        try:
+            number = float(value)
+            if not math.isfinite(number):
+                return "-"
+            if abs(number) >= 1_000_000 or (0 < abs(number) < 0.001):
+                return f"{number:.3g}"
+            return f"{number:.6g}"
+        except Exception:
+            return "-" if value is None else str(value)
+
+    def _record_solver_progress(self, event: dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        sample = dict(event)
+        lb = sample.get("lower_bound")
+        ub = sample.get("upper_bound")
+        try:
+            lb_float = float(lb)
+            ub_float = float(ub)
+            if math.isfinite(lb_float) and math.isfinite(ub_float) and ub_float != 0:
+                sample["gap"] = abs(ub_float - lb_float) / max(1.0, abs(ub_float))
+        except Exception:
+            pass
+        self._solver_progress_pending_sample = sample
+        if self._solver_progress_update_after_id is None:
+            self._solver_progress_update_after_id = self.after(1000, self._flush_solver_progress_update)
+
+    def _flush_solver_progress_update(self) -> None:
+        self._solver_progress_update_after_id = None
+        sample = self._solver_progress_pending_sample
+        self._solver_progress_pending_sample = None
+        if sample is None:
+            return
+        self._append_solver_progress_sample(sample)
+
+    def _progress_sample_time(self, sample: dict[str, Any]) -> Optional[float]:
+        for key in ("runtime", "time"):
+            try:
+                value = float(sample.get(key))
+            except Exception:
+                continue
+            if math.isfinite(value):
+                return value
+        return None
+
+    def _trim_solver_progress_samples(self) -> None:
+        latest = None
+        for sample in reversed(self._solver_progress_samples):
+            latest = self._progress_sample_time(sample)
+            if latest is not None:
+                break
+        if latest is None:
+            self._solver_progress_samples = self._solver_progress_samples[-120:]
+            return
+
+        cutoff = latest - self._solver_progress_rolling_seconds
+        trimmed: list[dict[str, Any]] = []
+        for sample in self._solver_progress_samples:
+            sample_time = self._progress_sample_time(sample)
+            if sample_time is None or sample_time >= cutoff:
+                trimmed.append(sample)
+        self._solver_progress_samples = trimmed[-180:]
+
+    def _append_solver_progress_sample(self, sample: dict[str, Any]) -> None:
+        self._solver_progress_samples.append(sample)
+        self._trim_solver_progress_samples()
+        self._update_solver_progress_stats(sample)
+        self._redraw_solver_progress_chart()
+
+    def _update_solver_progress_stats(self, sample: dict[str, Any]) -> None:
+        stats = [
+            ("LB", sample.get("lower_bound")),
+            ("UB", sample.get("upper_bound")),
+            ("Gap", sample.get("gap")),
+            ("Nodes", sample.get("nodes")),
+            ("Solutions", sample.get("solutions")),
+            ("Runtime", sample.get("runtime")),
+        ]
+        if self._solver_progress_stats_frame is None:
+            return
+        for index, (label, value) in enumerate(stats):
+            var = self._solver_progress_stat_vars.get(label)
+            if var is None:
+                var = tk.StringVar(value="-")
+                self._solver_progress_stat_vars[label] = var
+                frame = ttk.Frame(self._solver_progress_stats_frame)
+                frame.grid(row=index // 4, column=index % 4, sticky="ew", padx=(0, 12), pady=(0, 8))
+                ttk.Label(frame, text=label, font=(self.interface_font_family, 9, "bold")).grid(row=0, column=0, sticky="w")
+                ttk.Label(frame, textvariable=var).grid(row=1, column=0, sticky="w")
+            if label == "Gap" and value is not None:
+                try:
+                    var.set(f"{float(value) * 100:.4g}%")
+                    continue
+                except Exception:
+                    pass
+            elif label == "Runtime" and value is not None:
+                try:
+                    var.set(f"{float(value):.2f}s")
+                    continue
+                except Exception:
+                    pass
+            var.set(self._format_progress_value(value))
+
+    def _finish_solver_progress(self, results: Optional[dict[str, Any]] = None, status: str = "complete") -> None:
+        if isinstance(results, dict):
+            sample: dict[str, Any] = {}
+            objective = results.get("objective_value")
+            if objective is not None:
+                sample["upper_bound"] = objective
+                sample["lower_bound"] = objective
+                sample["gap"] = 0.0
+            stats = results.get("stats")
+            if isinstance(stats, dict):
+                sample.update(
+                    {
+                        "gap": stats.get("MIPGap", sample.get("gap")),
+                        "runtime": stats.get("Runtime", stats.get("time")),
+                        "nodes": stats.get("NodeCount"),
+                        "iterations": stats.get("IterCount", stats.get("nit")),
+                    }
+                )
+            if sample:
+                self._update_solver_progress_stats(sample)
+                if sample.get("lower_bound") is not None and sample.get("upper_bound") is not None:
+                    self._append_solver_progress_sample(sample)
+        if self._solver_progress_update_after_id:
+            try:
+                self.after_cancel(self._solver_progress_update_after_id)
+            except Exception:
+                pass
+            self._solver_progress_update_after_id = None
+        self._solver_progress_pending_sample = None
+        self._set_solver_progress_status(f"Solve {status}. Window will stay open until closed.")
+
+    def _redraw_solver_progress_chart(self) -> None:
+        canvas = self._solver_progress_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        width = max(200, canvas.winfo_width())
+        height = max(160, canvas.winfo_height())
+        pad_left, pad_right, pad_top, pad_bottom = 56, 20, 24, 38
+        plot_w = max(1, width - pad_left - pad_right)
+        plot_h = max(1, height - pad_top - pad_bottom)
+        canvas.create_line(pad_left, pad_top, pad_left, pad_top + plot_h, fill="#6b7280")
+        canvas.create_line(pad_left, pad_top + plot_h, pad_left + plot_w, pad_top + plot_h, fill="#6b7280")
+        canvas.create_text(pad_left, 10, text="LB / UB", anchor="w", fill="#374151")
+        canvas.create_text(
+            pad_left + plot_w,
+            height - 12,
+            text=f"last {int(self._solver_progress_rolling_seconds)}s",
+            anchor="e",
+            fill="#374151",
+        )
+
+        samples = [
+            s
+            for s in self._solver_progress_samples
+            if s.get("lower_bound") is not None and s.get("upper_bound") is not None
+        ]
+        values: list[float] = []
+        clean_samples: list[tuple[float, float]] = []
+        for sample in samples:
+            try:
+                lb = float(sample.get("lower_bound"))
+                ub = float(sample.get("upper_bound"))
+            except Exception:
+                continue
+            if not (math.isfinite(lb) and math.isfinite(ub)):
+                continue
+            clean_samples.append((lb, ub))
+            values.extend([lb, ub])
+        if not clean_samples:
+            canvas.create_text(width / 2, height / 2, text="Waiting for LB/UB samples...", fill="#6b7280")
+            return
+
+        min_y = min(values)
+        max_y = max(values)
+        if min_y == max_y:
+            min_y -= 1.0
+            max_y += 1.0
+        span = max_y - min_y
+
+        def point(index: int, value: float) -> tuple[float, float]:
+            x = pad_left + (plot_w * index / max(1, len(clean_samples) - 1))
+            y = pad_top + plot_h - ((value - min_y) / span * plot_h)
+            return x, y
+
+        lb_points: list[float] = []
+        ub_points: list[float] = []
+        for index, (lb, ub) in enumerate(clean_samples):
+            lb_points.extend(point(index, lb))
+            ub_points.extend(point(index, ub))
+        if len(lb_points) >= 4:
+            canvas.create_line(*lb_points, fill="#2563eb", width=2, smooth=True)
+            canvas.create_line(*ub_points, fill="#dc2626", width=2, smooth=True)
+        else:
+            x, y = lb_points
+            canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#2563eb", outline="")
+            x, y = ub_points
+            canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#dc2626", outline="")
+        canvas.create_text(width - 88, 18, text="LB", fill="#2563eb", anchor="w")
+        canvas.create_line(width - 115, 18, width - 94, 18, fill="#2563eb", width=2)
+        canvas.create_text(width - 44, 18, text="UB", fill="#dc2626", anchor="w")
+        canvas.create_line(width - 71, 18, width - 50, 18, fill="#dc2626", width=2)
+
     # --- Model Execution ---
     def run_model(
         self,
@@ -3189,6 +3471,8 @@ class OPLIDE(tk.Tk):
 
         self._set_run_menu_running(True)
 
+        self._reset_solver_progress_window(solver_choice)
+
         # Start elapsed-time status updates (every second)
         self._start_run_timer("Solving model...")
 
@@ -3215,6 +3499,7 @@ class OPLIDE(tk.Tk):
         active = getattr(self, "_active_operation", None)
         self._append_output("\nExecution stopped by user.\n", active.session_id if active is not None else None)
         self.status_var.set("Execution stopped.")
+        self._finish_solver_progress(status="stopped")
         self._set_run_menu_running(False)
         self._finish_foreground_operation(active)
 
@@ -3245,27 +3530,34 @@ class OPLIDE(tk.Tk):
         if not p or not q:
             return
 
-        try:
-            kind, payload = q.get_nowait()
-        except queue.Empty:
-            if p.is_alive():
-                self.after(100, self._poll_solver, operation)
+        while True:
+            try:
+                kind, payload = q.get_nowait()
+            except queue.Empty:
+                if p.is_alive():
+                    self.after(100, self._poll_solver, operation)
+                    return
+
+                # Process ended but no terminal message
+                self._set_run_menu_running(False)
+                self._append_output(
+                    "\nError: Solver process terminated unexpectedly.\n",
+                    operation.session_id if operation is not None else None,
+                )
+
+                # Stop timer updates
+                self._stop_run_timer()
+
+                self.status_var.set("Error: Solver process terminated.")
+                self._finish_solver_progress(status="ended unexpectedly")
+                self._cleanup_solver_ipc(cancel_queue_thread=True)
+                self._finish_foreground_operation(operation)
                 return
-
-            # Process ended but no message
-            self._set_run_menu_running(False)
-            self._append_output(
-                "\nError: Solver process terminated unexpectedly.\n",
-                operation.session_id if operation is not None else None,
-            )
-
-            # Stop timer updates
-            self._stop_run_timer()
-
-            self.status_var.set("Error: Solver process terminated.")
-            self._cleanup_solver_ipc(cancel_queue_thread=True)
-            self._finish_foreground_operation(operation)
-            return
+            if kind == "progress":
+                if isinstance(payload, dict):
+                    self._record_solver_progress(payload)
+                continue
+            break
 
         # Got a message => process should be done
         try:
@@ -3280,6 +3572,7 @@ class OPLIDE(tk.Tk):
         self._stop_run_timer()
 
         if kind == "success":
+            self._finish_solver_progress(payload if isinstance(payload, dict) else None, status="complete")
             self._display_solve_results(
                 payload,
                 session_id=operation.session_id if operation is not None else None,
@@ -3393,6 +3686,7 @@ class OPLIDE(tk.Tk):
                 pass
             self._finish_foreground_operation(operation)
         else:
+            self._finish_solver_progress(status="failed")
             self._append_output(f"\nError:\n{payload}\n", operation.session_id if operation is not None else None)
             self.status_var.set("Error running model")
             self._finish_foreground_operation(operation)

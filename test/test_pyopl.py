@@ -1,4 +1,5 @@
 import os
+import ast as py_ast
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -75,6 +76,19 @@ class TestPyOPL(unittest.TestCase):
     def assert_objective_close(self, gurobi, scipy, tol=1e-6):
         if gurobi["status"] == "OPTIMAL":
             self.assertAlmostEqual(gurobi["objective_value"], scipy["objective_value"], delta=tol)
+
+    def test_gurobi_codegen_accepts_optional_progress_callback(self):
+        model = """
+        dvar int x;
+        maximize x;
+        subject to { x <= 3; }
+        """
+
+        _ast, code, _data = OPLCompiler().compile_model(model, solver="gurobi")
+
+        py_ast.parse(code)
+        self.assertIn("model.optimize(_pyopl_progress_callback)", code)
+        self.assertIn("_pyopl_progress_callback = None", code)
 
 
 class TestPyOPLLexer(TestPyOPL):

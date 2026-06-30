@@ -89,12 +89,34 @@ class GurobiCodeGenerator:
         self._add_code_line(
             "print(f'PyOPL/Gurobi: variables={model.NumVars}, constraints={model.NumConstrs}, sense={model.ModelSense}')"
         )
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("_pyopl_progress_callback")
+        self.indent_level -= 1
+        self._add_code_line("except NameError:")
+        self.indent_level += 1
+        self._add_code_line("_pyopl_progress_callback = None")
+        self.indent_level -= 1
+        self._add_code_line("if _pyopl_progress_callback is not None:")
+        self.indent_level += 1
+        self._add_code_line("model.optimize(_pyopl_progress_callback)")
+        self.indent_level -= 1
+        self._add_code_line("else:")
+        self.indent_level += 1
         self._add_code_line("model.optimize()")
+        self.indent_level -= 1
         # Disambiguate INF_OR_UNBD into INFEASIBLE or UNBOUNDED when possible
         self._add_code_line("if model.status == GRB.INF_OR_UNBD:")
         self.indent_level += 1
         self._add_code_line("model.setParam(GRB.Param.DualReductions, 0)")
+        self._add_code_line("if _pyopl_progress_callback is not None:")
+        self.indent_level += 1
+        self._add_code_line("model.optimize(_pyopl_progress_callback)")
+        self.indent_level -= 1
+        self._add_code_line("else:")
+        self.indent_level += 1
         self._add_code_line("model.optimize()")
+        self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("")
         # Results capture

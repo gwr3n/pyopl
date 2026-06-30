@@ -14,9 +14,10 @@ import keyword
 import logging
 import os
 import sys
+import time
 import traceback
 from io import StringIO
-from typing import Any, Optional, cast  # typing helpers
+from typing import Any, Callable, Optional, cast  # typing helpers
 
 # === Third-party imports ===
 from sly import Lexer, Parser  # type: ignore[import-untyped]
@@ -5517,7 +5518,12 @@ def load_opl_model(model_file_name, data_file_name=None, solver="gurobi"):
 
 
 # --- Function to solve an OPL model ---
-def solve(model_file: str, data_file: Optional[str] = None, solver: str = "gurobi") -> dict[str, Any]:
+def solve(
+    model_file: str,
+    data_file: Optional[str] = None,
+    solver: str = "gurobi",
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+) -> dict[str, Any]:
     """
     Solves an OPL model using the specified solver.
 
@@ -5531,14 +5537,14 @@ def solve(model_file: str, data_file: Optional[str] = None, solver: str = "gurob
               or status/error information otherwise.
     """
     if solver == "gurobi":
-        return solve_with_gurobi(model_file, data_file)
+        return solve_with_gurobi(model_file, data_file, progress_callback=progress_callback)
     elif solver == "scipy":
         return solve_with_scipy(model_file, data_file)
     else:
         raise ValueError(f"Unsupported solver: {solver}")
 
 
-def solve_with_gurobi(model_file, data_file=None):
+def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Callable[[dict[str, Any]], None]] = None):
     """
     Loads an OPL model and optional data from disk,
     generates GurobiPy code, and executes it to solve the model.
@@ -5584,10 +5590,40 @@ def solve_with_gurobi(model_file, data_file=None):
         old_stdout = sys.stdout
         redirected_output = sys.stdout = _TeeStdout(old_stdout)
 
+        def _pyopl_progress_callback(model, where):
+            if progress_callback is None:
+                return
+            try:
+                if where == GRB.Callback.MIP:
+                    best_bound = model.cbGet(GRB.Callback.MIP_OBJBND)
+                    incumbent = model.cbGet(GRB.Callback.MIP_OBJBST)
+                    if getattr(model, "ModelSense", 1) == -1:
+                        lower_bound = incumbent
+                        upper_bound = best_bound
+                    else:
+                        lower_bound = best_bound
+                        upper_bound = incumbent
+                    progress_callback(
+                        {
+                            "solver": "gurobi",
+                            "event": "mip",
+                            "time": time.time(),
+                            "runtime": model.cbGet(GRB.Callback.RUNTIME),
+                            "lower_bound": lower_bound,
+                            "upper_bound": upper_bound,
+                            "gap": None,
+                            "nodes": model.cbGet(GRB.Callback.MIP_NODCNT),
+                            "solutions": model.cbGet(GRB.Callback.MIP_SOLCNT),
+                        }
+                    )
+            except Exception:
+                pass
+
         exec_globals = {
             "gp": gp,
             "GRB": GRB,
             "results_container": {},  # This will hold the results from the executed code
+            "_pyopl_progress_callback": _pyopl_progress_callback,
         }
 
         try:
