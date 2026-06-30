@@ -1895,13 +1895,22 @@ class OPLIDE(tk.Tk):
         label = labels.get(path) if isinstance(labels, dict) else None
         return label or path
 
+    def _list_label_for_genai_attachment_path(self, path: str) -> str:
+        """Return the compact label shown in the composer attachment list."""
+        label = OPLIDE._label_for_genai_attachment_path(self, path)
+        if label == path:
+            return os.path.basename(path)
+        match = re.match(r"^(.*\.pdf)( page \d+)$", label, re.IGNORECASE)
+        if match:
+            return f"{os.path.basename(match.group(1))}{match.group(2)}"
+        return label
+
     def _refresh_genai_attachment_list(self) -> None:
         """Refresh the composer attachment list."""
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.delete(0, tk.END)
             for path in self._genai_attachment_paths:
-                label = self._label_for_genai_attachment_path(path)
-                self.genai_attachment_listbox.insert(tk.END, label if label != path else os.path.basename(path))
+                self.genai_attachment_listbox.insert(tk.END, self._list_label_for_genai_attachment_path(path))
         self._refresh_genai_panel_state()
 
     def _genai_add_images(self) -> None:

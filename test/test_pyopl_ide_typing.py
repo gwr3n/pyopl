@@ -1159,6 +1159,26 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIn("- /Users/gwren/Downloads/diet-problem.pdf page 1\n", formatted)
         self.assertNotIn("/tmp/rendered/page_1.png", formatted)
 
+    def test_attachment_list_label_compacts_rendered_pdf_page(self):
+        dummy = SimpleNamespace(
+            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+        )
+
+        self.assertEqual(
+            OPLIDE._list_label_for_genai_attachment_path(dummy, "/tmp/rendered/page_1.png"),
+            "diet-problem.pdf page 1",
+        )
+
+    def test_attachment_list_label_keeps_image_basename(self):
+        dummy = SimpleNamespace(_genai_attachment_display_labels={})
+
+        self.assertEqual(
+            OPLIDE._list_label_for_genai_attachment_path(
+                dummy, "/Users/gwren/Downloads/Screenshot 2026-06-30 at 21.37.52.png"
+            ),
+            "Screenshot 2026-06-30 at 21.37.52.png",
+        )
+
     def test_genai_add_images_converts_pdf_to_rendered_paths(self):
         dummy = SimpleNamespace(
             _genai_attachment_paths=["/tmp/existing.png"],
