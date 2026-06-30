@@ -248,11 +248,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -451,11 +447,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -642,11 +634,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -818,11 +806,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -1103,11 +1087,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -1302,11 +1282,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -1633,11 +1609,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -1835,11 +1807,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -2191,11 +2159,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -2371,11 +2335,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -2548,11 +2508,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -2727,11 +2683,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -2931,11 +2883,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -3075,11 +3023,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            # If both solvers are infeasible, test passes
-            if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-                return  # Test passes
-
-            # Otherwise, require both to be optimal and compare objectives
+            # Require both to be optimal and compare objectives
             self.assertEqual(results["scipy"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
             self.assertIn("objective_value", results["scipy"])
@@ -3482,11 +3426,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -3588,11 +3528,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -3731,11 +3667,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -3836,11 +3768,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -3971,11 +3899,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -4291,11 +4215,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -4435,11 +4355,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
@@ -4574,11 +4490,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
-            return  # Test passes
-
-        # Otherwise, require both to be optimal and compare objectives
+        # Require both to be optimal and compare objectives
         self.assertEqual(results["scipy"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertIn("objective_value", results["scipy"])
