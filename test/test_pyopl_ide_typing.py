@@ -1145,6 +1145,105 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIn("- /tmp/chart.png\n", formatted)
         self.assertIn("- /tmp/table.png\n", formatted)
 
+    def test_format_prompt_for_output_uses_friendly_attachment_labels(self):
+        dummy = SimpleNamespace(
+            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+        )
+
+        formatted = OPLIDE._format_prompt_for_output(
+            dummy,
+            "Prompt",
+            {"text": "Build this model.", "images": [{"path": "/tmp/rendered/page_1.png"}]},
+        )
+
+        self.assertIn("- /Users/gwren/Downloads/diet-problem.pdf page 1\n", formatted)
+        self.assertNotIn("/tmp/rendered/page_1.png", formatted)
+
+    def test_genai_add_images_converts_pdf_to_rendered_paths(self):
+        dummy = SimpleNamespace(
+            _genai_attachment_paths=["/tmp/existing.png"],
+            _genai_attachment_display_labels={},
+            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png"]),
+            _refresh_genai_attachment_list=mock.Mock(),
+        )
+
+        with mock.patch.object(
+            pyopl_ide_bootstrap.filedialog,
+            "askopenfilenames",
+            return_value=("/tmp/sketch.pdf", "/tmp/photo.png"),
+        ):
+            OPLIDE._genai_add_images(dummy)
+
+        self.assertEqual(
+            dummy._genai_attachment_paths,
+            ["/tmp/existing.png", "/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png", "/tmp/photo.png"],
+        )
+        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/sketch.pdf")
+        dummy._refresh_genai_attachment_list.assert_called_once()
+
+    def test_render_genai_pdf_attachment_rejects_large_pdf(self):
+        class FakeDocument:
+            page_count = pyopl_ide_bootstrap.GENAI_MAX_PDF_PAGES + 1
+
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        fake_document = FakeDocument()
+        fake_fitz = SimpleNamespace(open=mock.Mock(return_value=fake_document))
+        dummy = SimpleNamespace()
+
+        with (
+            mock.patch.dict("sys.modules", {"fitz": fake_fitz}),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
+        ):
+            rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/too-large.pdf")
+
+        self.assertEqual(rendered, [])
+        showwarning.assert_called_once()
+        self.assertTrue(fake_document.closed)
+
+    def test_render_genai_pdf_attachment_writes_page_images(self):
+        class FakePixmap:
+            def save(self, path):
+                Path(path).write_text("png", encoding="utf-8")
+
+        class FakePage:
+            def get_pixmap(self, matrix, alpha):
+                return FakePixmap()
+
+        class FakeDocument:
+            page_count = 2
+
+            def load_page(self, page_index):
+                return FakePage()
+
+            def close(self):
+                pass
+
+        class FakeMatrix:
+            def __init__(self, x_scale, y_scale):
+                self.x_scale = x_scale
+                self.y_scale = y_scale
+
+        with TemporaryDirectory() as tmpdir:
+            dummy = SimpleNamespace(_genai_pdf_temp_dir=tmpdir, _genai_attachment_display_labels={})
+            dummy._ensure_genai_pdf_temp_dir = lambda: OPLIDE._ensure_genai_pdf_temp_dir(dummy)
+            fake_fitz = SimpleNamespace(open=mock.Mock(return_value=FakeDocument()), Matrix=FakeMatrix)
+
+            with mock.patch.dict("sys.modules", {"fitz": fake_fitz}):
+                rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/sketch.pdf")
+
+            self.assertEqual(len(rendered), 2)
+            self.assertTrue(rendered[0].endswith("page_1.png"))
+            self.assertTrue(rendered[1].endswith("page_2.png"))
+            self.assertTrue(Path(rendered[0]).exists())
+            self.assertTrue(Path(rendered[1]).exists())
+            self.assertEqual(dummy._genai_attachment_display_labels[rendered[0]], "/tmp/sketch.pdf page 1")
+            self.assertEqual(dummy._genai_attachment_display_labels[rendered[1]], "/tmp/sketch.pdf page 2")
+
     def test_append_output_to_prompt_input_text_only(self):
         merged = OPLIDE._append_output_to_prompt_input(
             None,

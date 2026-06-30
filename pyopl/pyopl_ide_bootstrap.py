@@ -8,7 +8,9 @@ import os
 import queue
 import re
 import select
+import shutil
 import sys
+import tempfile
 import threading
 
 # --- Third-Party Imports ---
@@ -89,6 +91,8 @@ TOKEN_COLORS = {
 }
 
 MAX_HIGHLIGHT_CHARS = 10_000
+GENAI_MAX_PDF_PAGES = 5
+GENAI_PDF_RENDER_DPI = 180
 
 
 # GenAI prompt payload shape (kept loose to avoid importing genai modules/types here).
@@ -360,9 +364,11 @@ class OPLIDE(tk.Tk):
         self.genai_prompt_title_var = tk.StringVar(value="Describe the optimization problem")
         self.genai_submit_label_var = tk.StringVar(value="Generate")
         self.genai_context_var = tk.StringVar(value="No GenAI model selected")
-        self.genai_attachment_summary_var = tk.StringVar(value="No images attached")
+        self.genai_attachment_summary_var = tk.StringVar(value="No visual attachments")
         self.genai_pending_var = tk.StringVar(value="")
         self._genai_attachment_paths: list[str] = []
+        self._genai_attachment_display_labels: dict[str, str] = {}
+        self._genai_pdf_temp_dir: Optional[str] = None
         self._genai_pending_revisions: Optional[dict[str, Any]] = None
 
         # Output sessions
@@ -1644,7 +1650,7 @@ class OPLIDE(tk.Tk):
         self.genai_attachment_listbox = tk.Listbox(attachments, height=4, exportselection=False, activestyle="none")
         self.genai_attachment_listbox.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.genai_attachment_menu = tk.Menu(self, tearoff=0)
-        self.genai_attachment_menu.add_command(label="Attach images...", command=self._genai_add_images)
+        self.genai_attachment_menu.add_command(label="Attach images or short PDFs...", command=self._genai_add_images)
         self.genai_attachment_menu.add_command(label="Remove selected", command=self._genai_remove_selected_image)
         self.genai_attachment_menu.add_separator()
         self.genai_attachment_menu.add_command(label="Clear all", command=self._genai_clear_images)
@@ -1843,11 +1849,11 @@ class OPLIDE(tk.Tk):
 
         attachment_count = len(getattr(self, "_genai_attachment_paths", []))
         if attachment_count == 0:
-            self.genai_attachment_summary_var.set("No images attached")
+            self.genai_attachment_summary_var.set("No visual attachments")
         elif attachment_count == 1:
-            self.genai_attachment_summary_var.set("1 image attached")
+            self.genai_attachment_summary_var.set("1 visual attachment")
         else:
-            self.genai_attachment_summary_var.set(f"{attachment_count} images attached")
+            self.genai_attachment_summary_var.set(f"{attachment_count} visual attachments")
 
         active = getattr(self, "_active_operation", None)
         if hasattr(self, "genai_submit_button"):
@@ -1879,23 +1885,34 @@ class OPLIDE(tk.Tk):
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.delete("1.0", tk.END)
         self._genai_attachment_paths.clear()
+        self._genai_attachment_display_labels.clear()
+        self._cleanup_genai_pdf_temp_dir()
         self._refresh_genai_attachment_list()
+
+    def _label_for_genai_attachment_path(self, path: str) -> str:
+        """Return a user-facing label for an attachment path."""
+        labels = getattr(self, "_genai_attachment_display_labels", {})
+        label = labels.get(path) if isinstance(labels, dict) else None
+        return label or path
 
     def _refresh_genai_attachment_list(self) -> None:
         """Refresh the composer attachment list."""
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.delete(0, tk.END)
             for path in self._genai_attachment_paths:
-                self.genai_attachment_listbox.insert(tk.END, os.path.basename(path))
+                label = self._label_for_genai_attachment_path(path)
+                self.genai_attachment_listbox.insert(tk.END, label if label != path else os.path.basename(path))
         self._refresh_genai_panel_state()
 
     def _genai_add_images(self) -> None:
-        """Attach one or more images to the docked GenAI composer."""
+        """Attach one or more visual files to the docked GenAI composer."""
         try:
             paths = filedialog.askopenfilenames(
-                title="Attach images",
+                title="Attach images or short PDFs",
                 filetypes=[
+                    ("Images and short PDFs", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff *.pdf"),
                     ("Image files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff"),
+                    ("PDF files", "*.pdf"),
                     ("All files", "*.*"),
                 ],
             )
@@ -1905,9 +1922,84 @@ class OPLIDE(tk.Tk):
             return
         for path in paths:
             path_str = str(path)
-            if path_str and path_str not in self._genai_attachment_paths:
+            if not path_str:
+                continue
+            if path_str.lower().endswith(".pdf"):
+                for rendered_path in self._render_genai_pdf_attachment(path_str):
+                    if rendered_path not in self._genai_attachment_paths:
+                        self._genai_attachment_paths.append(rendered_path)
+            elif path_str not in self._genai_attachment_paths:
                 self._genai_attachment_paths.append(path_str)
         self._refresh_genai_attachment_list()
+
+    def _ensure_genai_pdf_temp_dir(self) -> str:
+        """Return the temporary directory used for rendered PDF attachment pages."""
+        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
+        if temp_dir and os.path.isdir(temp_dir):
+            return temp_dir
+        temp_dir = tempfile.mkdtemp(prefix="rhetor_syntagm_pdf_")
+        self._genai_pdf_temp_dir = temp_dir
+        return temp_dir
+
+    def _cleanup_genai_pdf_temp_dir(self) -> None:
+        """Remove temporary rendered PDF attachment pages."""
+        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
+        if temp_dir:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._genai_pdf_temp_dir = None
+
+    def _render_genai_pdf_attachment(self, pdf_path: str) -> list[str]:
+        """Render a short PDF attachment to image paths accepted by SyntAGM."""
+        try:
+            import fitz  # type: ignore[import-not-found]
+        except Exception:
+            messagebox.showerror(
+                "GenAI",
+                "PDF attachments require PyMuPDF. Install it with: pip install PyMuPDF",
+                parent=self,
+            )
+            return []
+
+        try:
+            document = fitz.open(pdf_path)
+        except Exception as exc:
+            messagebox.showerror("GenAI", f"Could not open PDF attachment:\n{exc}", parent=self)
+            return []
+
+        rendered_paths: list[str] = []
+        try:
+            raw_page_count = getattr(document, "page_count", None)
+            page_count = int(raw_page_count if raw_page_count is not None else len(document))
+            if page_count > GENAI_MAX_PDF_PAGES:
+                messagebox.showwarning(
+                    "GenAI",
+                    f"SyntAGM accepts PDFs up to {GENAI_MAX_PDF_PAGES} pages. "
+                    "For longer documents, attach screenshots of the relevant formulation.",
+                    parent=self,
+                )
+                return []
+
+            stem = Path(pdf_path).stem or "attachment"
+            temp_dir = tempfile.mkdtemp(prefix=f"{stem}_", dir=self._ensure_genai_pdf_temp_dir())
+            scale = GENAI_PDF_RENDER_DPI / 72.0
+            matrix = fitz.Matrix(scale, scale)
+            for page_index in range(page_count):
+                page = document.load_page(page_index)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                image_path = os.path.join(temp_dir, f"page_{page_index + 1}.png")
+                pixmap.save(image_path)
+                self._genai_attachment_display_labels[image_path] = f"{pdf_path} page {page_index + 1}"
+                rendered_paths.append(image_path)
+        except Exception as exc:
+            messagebox.showerror("GenAI", f"Could not render PDF attachment:\n{exc}", parent=self)
+            return []
+        finally:
+            document.close()
+
+        return rendered_paths
 
     def _genai_remove_selected_image(self) -> None:
         """Remove the selected attachment from the composer."""
@@ -1918,12 +2010,15 @@ class OPLIDE(tk.Tk):
             return
         idx = int(sel[0])
         if 0 <= idx < len(self._genai_attachment_paths):
-            self._genai_attachment_paths.pop(idx)
+            removed_path = self._genai_attachment_paths.pop(idx)
+            self._genai_attachment_display_labels.pop(removed_path, None)
         self._refresh_genai_attachment_list()
 
     def _genai_clear_images(self) -> None:
         """Clear all attached images from the composer."""
         self._genai_attachment_paths.clear()
+        self._genai_attachment_display_labels.clear()
+        self._cleanup_genai_pdf_temp_dir()
         self._refresh_genai_attachment_list()
 
     def _on_genai_attachment_right_click(self, event: Optional[tk.Event]) -> None:
@@ -2018,10 +2113,25 @@ class OPLIDE(tk.Tk):
         self._submit_genai_request()
         return "break"
 
+    def _selected_genai_method_supports_images(self) -> bool:
+        """Return whether the selected GenAI method can consume attached images."""
+        try:
+            return self.genai_method_var.get() == "pyopl_generative"
+        except Exception:
+            return False
+
     def _submit_genai_request(self) -> None:
         """Dispatch the docked GenAI composer based on the selected mode."""
         if not self.genai_provider or not self.genai_model:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
+            return
+
+        if self._genai_attachment_paths and not self._selected_genai_method_supports_images():
+            method_label = self._label_for_method(self.genai_method_var.get())
+            messagebox.showwarning(
+                "GenAI",
+                f"{method_label} does not support image attachments. Use SyntAGM or remove the attached images.",
+            )
             return
 
         prompt_input = self._collect_genai_prompt_input()
@@ -4212,7 +4322,7 @@ class OPLIDE(tk.Tk):
                 for image in images:
                     path = str(image.get("path", "")).strip() if isinstance(image, dict) else str(image).strip()
                     if path:
-                        lines.append(f"- {path}\n")
+                        lines.append(f"- {OPLIDE._label_for_genai_attachment_path(self, path)}\n")
             lines.append("\n")
             return "".join(lines)
 
@@ -5586,6 +5696,7 @@ class OPLIDE(tk.Tk):
             self._save_session()
         except Exception:
             pass
+        self._cleanup_genai_pdf_temp_dir()
         try:
             self.destroy()
         finally:
