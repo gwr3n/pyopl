@@ -10,15 +10,17 @@
   - [Tuple Types and Sets of Tuples](#tuple-types-and-sets-of-tuples)
   - [Tuple arrays](#tuple-arrays)
   - [Data Input (`.dat` files)](#data-input-dat-files)
+  - [Nested Tuples, Sets, and Parameter Indexing](#nested-tuples-sets-and-parameter-indexing)
 - [2. Objective Section](#2-objective-section)
 - [3. Constraints Section](#3-constraints-section)
   - [Simple Constraints](#simple-constraints)
   - [Boolean logic in constraints (and/or/not)](#boolean-logic-in-constraints-andornot)
   - [Cardinality over comparisons](#cardinality-over-comparisons)
-  - [Reified cardinality](#reified-cardinality-boolean-equality-to-a-cardinality-condition)
-  - [Implication Constraints (`=>`)](#implication-constraints-=>)
+  - [Reified cardinality (boolean equality to a cardinality condition)](#reified-cardinality-boolean-equality-to-a-cardinality-condition)
+  - [Implication Constraints (`=>`)](#implication-constraints)
   - [Conditional Expressions](#conditional-expressions)
   - [Boolean Objectives and Constraints](#boolean-objectives-and-constraints)
+  - [Boolean Expression Trees in Constraints](#boolean-expression-trees-in-constraints)
   - [Field Access](#field-access)
   - [Multi-indexed and Tuple-indexed Constraints](#multi-indexed-and-tuple-indexed-constraints)
   - [`forall` Constraints](#forall-constraints)
@@ -27,8 +29,13 @@
 - [Expressions](#expressions)
 - [Comments](#comments)
 - [Example Models](#example-models)
+  - [1) Typed set indexing and tuple-indexed variable](#1-typed-set-indexing-and-tuple-indexed-variable)
+  - [2) Tuple arrays and field access](#2-tuple-arrays-and-field-access)
+  - [3) Cardinality and reification](#3-cardinality-and-reification)
+  - [4) Implications](#4-implications)
 - [Error Handling](#error-handling)
 - [Solving a Model](#solving-a-model)
+  - [Exporting LP and MPS files](#exporting-lp-and-mps-files)
 - [Limitations](#limitations)
 - [GenAI Assistants](#genai-assistants)
 - [PyOPL IDE](#pyopl-ide)
@@ -303,7 +310,7 @@ PyOPL supports rich boolean and arithmetic composition beyond basic comparisons.
 - Multi-indexed, tuple-indexed constraints; tuple field access in expressions
 - Conditional (ternary) expressions with ground (non-dvar) condition
 
-### Simple Constraints:
+### Simple Constraints
 ```opl
 subject to {
     x <= 10;
@@ -372,7 +379,7 @@ Solver notes:
   - Supports linear antecedents and consequents with big-M encoding and automatic tightening.
   - Composite boolean antecedents and reified forms are supported via auxiliary binaries; prefer a single linear comparison or `bin == 1` for robustness and performance.
 
-### Conditional Expressions: 
+### Conditional Expressions
 Use conditional (ternary) expressions in objectives and constraints:
 ```opl
 minimize (x > 0) ? x : 0;

@@ -2,8 +2,15 @@
 
 Core package badges:
 
-![Codecov (with branch)](https://img.shields.io/codecov/c/gh/gwr3n/pyopl/main)
- ![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Fpython-package.yml) ![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/.github%2Fworkflows%2Flint-type.yml?branch=main&label=lint%20%2B%20type-check) [![PyPI](https://img.shields.io/pypi/v/pyopl)](https://pypi.org/project/pyopl/) [![Python versions](https://img.shields.io/pypi/pyversions/pyopl)](https://pypi.org/project/pyopl/) [![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE) [![Downloads](https://static.pepy.tech/badge/pyopl)](https://pepy.tech/project/pyopl) [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) [![Wheel](https://img.shields.io/pypi/wheel/pyopl)](https://pypi.org/project/pyopl/)
+[![Codecov](https://img.shields.io/codecov/c/gh/gwr3n/pyopl/main)](https://codecov.io/gh/gwr3n/pyopl)
+[![Python package](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/python-package.yml?branch=main&label=python%20package)](https://github.com/gwr3n/pyopl/actions/workflows/python-package.yml) 
+[![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/lint-type.yml?branch=main&label=lint%20%2B%20type-check)](https://github.com/gwr3n/pyopl/actions/workflows/lint-type.yml) 
+[![Rhetor on PyPI](https://img.shields.io/pypi/v/rhetor)](https://pypi.org/project/rhetor/)
+[![Python versions](https://img.shields.io/pypi/pyversions/rhetor)](https://pypi.org/project/rhetor/)
+[![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE.txt)
+[![Downloads](https://img.shields.io/pypi/dm/rhetor)](https://pypistats.org/packages/rhetor) 
+[![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) 
+[![Wheel](https://img.shields.io/pypi/wheel/rhetor)](https://pypi.org/project/rhetor/)
 
 Quality and tooling:
 
@@ -15,13 +22,15 @@ Project/community:
 
 Docs:
 
-[![Docs](https://img.shields.io/badge/docs-site-blue)](https://github.com/gwr3n/pyopl)
+[![Docs](https://img.shields.io/badge/docs-user%20guide-blue)](docs/PyOPL%20user%20guide.md)
 
 `pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
 
 [1] Van Hentenryck, P. (1999). The OPL optimization programming language. London, England: MIT Press.
 
 ## Installation
+
+The GitHub project and importable compiler package are named `pyopl`; the published PyPI distribution is named `rhetor`.
 
 Install via pip (recommended):
 
@@ -52,7 +61,7 @@ You can use the `solve` function to load and solve an OPL model (and optional da
 ```python
 from pyopl import solve
 results = solve('model.mod', 'data.dat', solver='gurobi')  # Use Gurobi (default)
-results = solve('model.mod', 'data.dat', solver='scipy')   # Use SciPy/HiGHS (LP or MIP, if supported)
+results = solve('model.mod', 'data.dat', solver='scipy')   # Use SciPy/HiGHS
 ```
 
 #### Example
@@ -157,13 +166,44 @@ PyOPL includes the Rhetor graphical IDE for editing, running, and debugging OPL 
 
 ### Launching the IDE
 
-You can launch the IDE from the command line or if installed as a package:
+You can launch the IDE from the command line: 
 
 ```sh
 python -m pyopl
 ```
 
+If installed as a package, the `pyopl` console command can be used in place of `python -m pyopl`.
+
 This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or SciPy/HiGHS as the solver from the IDE's menu bar.
+
+
+
+## PyOPL CLI
+
+PyOPL also includes a command-line interface for solving models, exporting generated artifacts, and using GenAI helpers from scripts or terminals.
+
+Basic usage:
+
+```sh
+python -m pyopl solve model.mod data.dat --solver highs --out json
+```
+
+The CLI supports:
+
+- `python -m pyopl solve <model.mod> [data.dat]` to compile and solve a model
+- `--solver highs|gurobi` to choose the backend solver
+- `--out json|py|lp|mps` to print results, export generated Python, or write LP/MPS solver files
+- `--out-file <path>` to write output to a file
+
+Examples:
+
+```sh
+python -m pyopl solve knapsack.mod knapsack.dat --solver highs --out json
+python -m pyopl solve knapsack.mod knapsack.dat --solver highs --out lp --out-file knapsack.lp
+python -m pyopl solve knapsack.mod knapsack.dat --solver highs --out mps --out-file knapsack.mps
+```
+
+
 
 ## User Guide
 
