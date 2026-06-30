@@ -1470,6 +1470,38 @@ class OPLParser(Parser):
             lineno=lineno,
         )
 
+    def _tuple_array_declaration_if_applicable(self, tuple_type, array_name, dimensions, lineno, *, external=False):
+        try:
+            symbol_info = self.symbol_table.get_symbol(tuple_type)
+        except SemanticError:
+            return None
+        if symbol_info.get("type") != "tuple_type" or len(dimensions) != 1:
+            return None
+
+        dim = dimensions[0]
+        if dim["type"] not in ("named_set_dimension", "named_range_dimension"):
+            return None
+        index_set = dim["name"]
+        value = {"tuple_type": tuple_type, "index_set": index_set}
+        if not external:
+            value["elements"] = None
+
+        self.symbol_table.add_symbol(
+            array_name,
+            "tuple_array",
+            value=value,
+            dimensions=dimensions,
+            lineno=lineno,
+        )
+        return {
+            "type": "tuple_array_external" if external else "tuple_array",
+            "tuple_type": tuple_type,
+            "name": array_name,
+            "index_set": index_set,
+            "dimensions": dimensions,
+            "value": None,
+        }
+
     def _iterator_range_to_declaration_dimension(self, rng):
         if rng["type"] == "range_specifier":
             return {"type": "range_index", "start": rng["start"], "end": rng["end"]}
@@ -1708,6 +1740,10 @@ class OPLParser(Parser):
         var_type = p.type
         processed_dimensions = [self._normalize_declaration_dimension(dim_spec, p.lineno) for dim_spec in p.indexed_dimensions]
 
+        tuple_array = self._tuple_array_declaration_if_applicable(var_type, name, processed_dimensions, p.lineno)
+        if tuple_array is not None:
+            return tuple_array
+
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -1730,6 +1766,16 @@ class OPLParser(Parser):
         name = p.NAME
         var_type = p.type
         processed_dimensions = [self._normalize_declaration_dimension(dim_spec, p.lineno) for dim_spec in p.indexed_dimensions]
+        tuple_array = self._tuple_array_declaration_if_applicable(
+            var_type,
+            name,
+            processed_dimensions,
+            p.lineno,
+            external=True,
+        )
+        if tuple_array is not None:
+            return tuple_array
+
         self.symbol_table.add_symbol(
             name,
             var_type,
@@ -2834,53 +2880,6 @@ class OPLParser(Parser):
             "name": name,
             "dimensions": processed_dimensions,
             "value": value,
-        }
-
-    # --- Tuple array grammar support ---
-    # External tuple array: tupleType Arr[Set] = ...; (declare dimensions so existing indexed variable rule works)
-    @_('NAME NAME "[" NAME "]" "=" ELLIPSIS ";"')  # type: ignore
-    def declaration(self, p):
-        tuple_type = p.NAME0
-        array_name = p.NAME1
-        index_set = p.NAME2
-        dimensions = [{"type": "named_set_dimension", "name": index_set}]
-        self.symbol_table.add_symbol(
-            array_name,
-            "tuple_array",
-            value={"tuple_type": tuple_type, "index_set": index_set},
-            dimensions=dimensions,
-            lineno=p.lineno,
-        )
-        return {
-            "type": "tuple_array_external",
-            "tuple_type": tuple_type,
-            "name": array_name,
-            "index_set": index_set,
-            "dimensions": dimensions,
-            "value": None,
-        }
-
-    # Uninitialized tuple array: tupleType Arr[Set];
-    @_('NAME NAME "[" NAME "]" ";"')  # type: ignore
-    def declaration(self, p):
-        tuple_type = p.NAME0
-        array_name = p.NAME1
-        index_set = p.NAME2
-        dimensions = [{"type": "named_set_dimension", "name": index_set}]
-        self.symbol_table.add_symbol(
-            array_name,
-            "tuple_array",
-            value={"tuple_type": tuple_type, "index_set": index_set, "elements": None},
-            dimensions=dimensions,
-            lineno=p.lineno,
-        )
-        return {
-            "type": "tuple_array",
-            "tuple_type": tuple_type,
-            "name": array_name,
-            "index_set": index_set,
-            "dimensions": dimensions,
-            "value": None,
         }
 
     # --- element_list (model parser) for typed scalar sets ---
