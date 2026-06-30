@@ -3669,9 +3669,7 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or bool(
-                        self._eval_comprehension_expr(index_constraint, env, working_data)
-                    ):
+                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
                         tuple_value = eval_tuple(tuple_expr, env)
                         tuples.append(normalize_tuple_value(tuple_value))
                     return
@@ -5542,7 +5540,7 @@ def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Ca
         dict: A dictionary containing the optimization results if successful,
               or status/error information otherwise.
     """
-    results = {
+    results: dict[str, Any] = {
         "status": "FAILED",
         "message": "An unexpected error occurred during compilation or execution.",
         "solution": {},
@@ -5607,7 +5605,7 @@ def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Ca
             except Exception:
                 pass
 
-        exec_globals = {
+        exec_globals: dict[str, Any] = {
             "gp": gp,
             "GRB": GRB,
             "results_container": {},  # This will hold the results from the executed code

@@ -3173,6 +3173,8 @@ class OPLIDE(tk.Tk):
         lb = sample.get("lower_bound")
         ub = sample.get("upper_bound")
         try:
+            if lb is None or ub is None:
+                return
             lb_float = float(lb)
             ub_float = float(ub)
             if math.isfinite(lb_float) and math.isfinite(ub_float) and ub_float != 0:
@@ -3194,7 +3196,10 @@ class OPLIDE(tk.Tk):
     def _progress_sample_time(self, sample: dict[str, Any]) -> Optional[float]:
         for key in ("runtime", "time"):
             try:
-                value = float(sample.get(key))
+                raw_value = sample.get(key)
+                if raw_value is None:
+                    continue
+                value = float(raw_value)
             except Exception:
                 continue
             if math.isfinite(value):
@@ -3312,16 +3317,18 @@ class OPLIDE(tk.Tk):
         )
 
         samples = [
-            s
-            for s in self._solver_progress_samples
-            if s.get("lower_bound") is not None and s.get("upper_bound") is not None
+            s for s in self._solver_progress_samples if s.get("lower_bound") is not None and s.get("upper_bound") is not None
         ]
         values: list[float] = []
         clean_samples: list[tuple[float, float]] = []
         for sample in samples:
             try:
-                lb = float(sample.get("lower_bound"))
-                ub = float(sample.get("upper_bound"))
+                lower_bound = sample.get("lower_bound")
+                upper_bound = sample.get("upper_bound")
+                if lower_bound is None or upper_bound is None:
+                    continue
+                lb = float(lower_bound)
+                ub = float(upper_bound)
             except Exception:
                 continue
             if not (math.isfinite(lb) and math.isfinite(ub)):
