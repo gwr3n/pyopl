@@ -7,6 +7,7 @@ import multiprocessing
 import os
 import queue
 import re
+import select
 import sys
 import threading
 
@@ -97,9 +98,144 @@ MAX_HIGHLIGHT_CHARS = 10_000
 _PromptInput = Any
 
 
+class _QueueTextWriter:
+    """File-like stream that forwards solver logs to the IDE process."""
+
+    def __init__(self, q: multiprocessing.Queue) -> None:
+        self._queue = q
+        self._buffer = ""
+
+    def write(self, text: str) -> int:
+        text = str(text)
+        if not text:
+            return 0
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            self._send(line + "\n")
+        return len(text)
+
+    def flush(self) -> None:
+        if self._buffer:
+            self._send(self._buffer)
+            self._buffer = ""
+
+    def _send(self, text: str) -> None:
+        try:
+            self._queue.put(("log", text))
+        except Exception:
+            pass
+
+
+class _FdLogRedirector:
+    """Redirect process-level stdout/stderr file descriptors to the IDE log queue."""
+
+    def __init__(self, writer: _QueueTextWriter) -> None:
+        self._writer = writer
+        self._saved_fds: dict[int, int] = {}
+        self._pipe_read: Optional[int] = None
+        self._pipe_write: Optional[int] = None
+        self._thread: Optional[threading.Thread] = None
+        self._active = False
+
+    def __enter__(self) -> "_FdLogRedirector":
+        if not hasattr(os, "dup"):
+            return self
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        try:
+            pipe_read, pipe_write = os.pipe()
+            self._pipe_read = pipe_read
+            self._pipe_write = pipe_write
+            for fd in (1, 2):
+                self._saved_fds[fd] = os.dup(fd)
+                os.dup2(pipe_write, fd)
+            self._active = True
+            self._thread = threading.Thread(target=self._read_pipe, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._restore_fds()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        self._restore_fds()
+        if self._pipe_write is not None:
+            try:
+                os.close(self._pipe_write)
+            except Exception:
+                pass
+            self._pipe_write = None
+        if self._thread is not None:
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+            self._thread = None
+        if self._pipe_read is not None:
+            try:
+                os.close(self._pipe_read)
+            except Exception:
+                pass
+            self._pipe_read = None
+        self._writer.flush()
+
+    def _restore_fds(self) -> None:
+        if not self._saved_fds:
+            return
+        for fd, saved_fd in list(self._saved_fds.items()):
+            try:
+                os.dup2(saved_fd, fd)
+            except Exception:
+                pass
+            try:
+                os.close(saved_fd)
+            except Exception:
+                pass
+        self._saved_fds.clear()
+        self._active = False
+
+    def _read_pipe(self) -> None:
+        pipe_read = self._pipe_read
+        if pipe_read is None:
+            return
+        while True:
+            try:
+                ready, _write_ready, _errors = select.select([pipe_read], [], [], 0.1)
+            except Exception:
+                return
+            if not ready:
+                if not self._active:
+                    continue
+                continue
+            try:
+                chunk = os.read(pipe_read, 4096)
+            except Exception:
+                return
+            if not chunk:
+                return
+            try:
+                text = chunk.decode(errors="replace")
+            except Exception:
+                text = str(chunk)
+            self._writer.write(text)
+
+
 def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue) -> None:
     """Wrapper to run solve in a separate process."""
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    log_writer = _QueueTextWriter(q)
     try:
+        sys.stdout = log_writer
+        sys.stderr = log_writer
         try:
             from .pyopl_core import solve  # package import
         except ImportError:
@@ -111,10 +247,16 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
             except Exception:
                 pass
 
-        results = solve(model_file, data_file, solver=solver_choice, progress_callback=_progress)
+        with _FdLogRedirector(log_writer):
+            results = solve(model_file, data_file, solver=solver_choice, progress_callback=_progress)
+        log_writer.flush()
         q.put(("success", results))
     except Exception as e:
+        log_writer.flush()
         q.put(("error", f"{e}\n\n{traceback.format_exc()}"))
+    finally:
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
 
 class _CodeGenerator(Protocol):
@@ -242,6 +384,10 @@ class OPLIDE(tk.Tk):
             if isinstance(loaded_settings, dict):
                 self.current_font_size = int(loaded_settings.get("font-size", self.current_font_size))
                 desired_theme = loaded_settings.get("theme")
+                saved_solver = loaded_settings.get("solver")
+                if saved_solver in ("gurobi", "scipy"):
+                    self.solver.set(saved_solver)
+                    self._current_solver_choice = saved_solver
         except Exception:
             pass
         # LLM progress logs in Output (off by default unless launched with debug)
@@ -492,9 +638,9 @@ class OPLIDE(tk.Tk):
             accelerator=self._accel("R"),
         )
         solver_menu = tk.Menu(runmenu, tearoff=0)
-        solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._refresh_status_context)
+        solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._on_solver_selected)
         solver_menu.add_radiobutton(
-            label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._refresh_status_context
+            label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._on_solver_selected
         )
         solver_menu.add_separator()
         solver_menu.add_checkbutton(
@@ -1300,6 +1446,8 @@ class OPLIDE(tk.Tk):
 
         # Output text
         left = ttk.Frame(container)
+        self.output_text_container = left
+        self._solver_log_text: Optional[scrolledtext.ScrolledText] = None
         left.grid(row=0, column=0, sticky="nsew")
         self.output_text = scrolledtext.ScrolledText(
             left,
@@ -1316,6 +1464,103 @@ class OPLIDE(tk.Tk):
         self.output_text.pack(fill=tk.BOTH, expand=1)
 
         parent.add(output_frame, minsize=150)
+
+    def _show_solver_log_textbox(self) -> None:
+        """Temporarily replace the persistent output pane with solver logs."""
+        if not hasattr(self, "output_text_container"):
+            return
+        try:
+            existing_log_text = self._solver_log_text
+            if existing_log_text is not None and existing_log_text.winfo_exists():
+                existing_log_text.config(state="normal")
+                existing_log_text.delete("1.0", tk.END)
+                existing_log_text.config(state="disabled")
+                return
+        except Exception:
+            self._solver_log_text = None
+
+        try:
+            if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                self.output_text.pack_forget()
+        except Exception:
+            pass
+
+        try:
+            log_text = scrolledtext.ScrolledText(
+                self.output_text_container,
+                wrap=tk.WORD,
+                height=12,
+                font=(self.editor_font_family, self.current_font_size - 1),
+                state="disabled",
+                bg="#f8f9fa",
+                fg="#212529",
+                relief=tk.FLAT,
+                bd=0,
+            )
+            self._replace_scrolled_text_vbar(log_text)
+            log_text.pack(fill=tk.BOTH, expand=1)
+            self._solver_log_text = log_text
+            self._apply_theme_colors()
+        except Exception:
+            self._solver_log_text = None
+            try:
+                self._destroy_scrolled_text(log_text)
+                self.output_text.pack(fill=tk.BOTH, expand=1)
+            except Exception:
+                pass
+
+    def _destroy_scrolled_text(self, text_widget: Any) -> None:
+        """Destroy a ScrolledText widget and its wrapper frame when present."""
+        if text_widget is None:
+            return
+        try:
+            frame = getattr(text_widget, "frame", None)
+            if frame is not None and frame.winfo_exists():
+                frame.destroy()
+                return
+        except Exception:
+            pass
+        try:
+            if text_widget.winfo_exists():
+                text_widget.destroy()
+        except Exception:
+            pass
+
+    def _append_solver_log_text(self, text: str) -> None:
+        log_text = getattr(self, "_solver_log_text", None)
+        if log_text is None:
+            return
+        try:
+            if not log_text.winfo_exists():
+                return
+            log_text.config(state="normal")
+            log_text.insert(tk.END, str(text))
+            log_text.see(tk.END)
+            log_text.config(state="disabled")
+        except Exception:
+            pass
+
+    def _restore_output_textbox(self) -> None:
+        log_text = getattr(self, "_solver_log_text", None)
+        if log_text is not None:
+            self._destroy_scrolled_text(log_text)
+        self._solver_log_text = None
+        try:
+            if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                self.output_text.pack(fill=tk.BOTH, expand=1)
+            if hasattr(self, "output_text") and self.output_text.winfo_exists():
+                session_id = getattr(self, "_viewing_output_session_id", None) or getattr(
+                    self, "_current_output_session_id", None
+                )
+                if session_id:
+                    content = self._output_sessions.get(session_id, "")
+                    self.output_text.config(state="normal")
+                    self.output_text.delete("1.0", tk.END)
+                    self.output_text.insert(tk.END, content)
+                    self.output_text.see(tk.END)
+                    self.output_text.config(state="disabled")
+        except Exception:
+            pass
 
     def _setup_genai_panel(self, parent: tk.PanedWindow) -> None:
         """Create the GenAI composer panel for the top row."""
@@ -1538,6 +1783,14 @@ class OPLIDE(tk.Tk):
             self.status_genai_var.set(f"GenAI: {provider} • {model} • {method}")
         else:
             self.status_genai_var.set("GenAI: none")
+
+    def _on_solver_selected(self) -> None:
+        """Persist solver menu selection and refresh dependent status UI."""
+        solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
+        if solver_choice in ("gurobi", "scipy"):
+            self._current_solver_choice = solver_choice
+        self._refresh_status_context()
+        self._save_settings()
 
     def _setup_tag_configs(self) -> None:
         """Configure syntax highlighting tags for editors."""
@@ -3567,6 +3820,7 @@ class OPLIDE(tk.Tk):
             return
 
         self._set_run_menu_running(True)
+        self._show_solver_log_textbox()
 
         if self._display_solver_progress_enabled() and self._solver_tracks_progress(solver_choice):
             self._reset_solver_progress_window(solver_choice)
@@ -3578,23 +3832,32 @@ class OPLIDE(tk.Tk):
 
     def stop_model(self) -> None:
         p = self._solver_process
+        active = getattr(self, "_active_operation", None)
 
-        if p and p.is_alive():
-            try:
-                p.terminate()
+        if not (p and p.is_alive()):
+            self._cleanup_solver_ipc(cancel_queue_thread=True)
+            self._stop_run_timer()
+            self._restore_output_textbox()
+            self._set_run_menu_running(False)
+            if active is not None and active.kind == "solve":
+                self._finish_foreground_operation(active)
+            return
+
+        try:
+            p.terminate()
+            p.join(timeout=1.0)
+            if p.is_alive() and hasattr(p, "kill"):
+                p.kill()  # py3.7+ on Unix
                 p.join(timeout=1.0)
-                if p.is_alive() and hasattr(p, "kill"):
-                    p.kill()  # py3.7+ on Unix
-                    p.join(timeout=1.0)
-            except Exception:
-                pass
+        except Exception:
+            pass
 
         self._cleanup_solver_ipc(cancel_queue_thread=True)
 
         # Stop timer updates
         self._stop_run_timer()
 
-        active = getattr(self, "_active_operation", None)
+        self._restore_output_textbox()
         self._append_output("\nExecution stopped by user.\n", active.session_id if active is not None else None)
         self.status_var.set("Execution stopped.")
         self._finish_solver_progress(status="stopped")
@@ -3638,6 +3901,7 @@ class OPLIDE(tk.Tk):
 
                 # Process ended but no terminal message
                 self._set_run_menu_running(False)
+                self._restore_output_textbox()
                 self._append_output(
                     "\nError: Solver process terminated unexpectedly.\n",
                     operation.session_id if operation is not None else None,
@@ -3655,6 +3919,9 @@ class OPLIDE(tk.Tk):
                 if isinstance(payload, dict):
                     self._record_solver_progress(payload)
                 continue
+            if kind == "log":
+                self._append_solver_log_text(str(payload))
+                continue
             break
 
         # Got a message => process should be done
@@ -3668,6 +3935,7 @@ class OPLIDE(tk.Tk):
 
         # Stop timer updates
         self._stop_run_timer()
+        self._restore_output_textbox()
 
         if kind == "success":
             self._finish_solver_progress(payload if isinstance(payload, dict) else None, status="complete")
@@ -3915,7 +4183,12 @@ class OPLIDE(tk.Tk):
         sid = session_id or getattr(self, "_current_output_session_id", None)
         if sid:
             self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
-        if sid and getattr(self, "_viewing_output_session_id", None) == sid and self.output_text.winfo_exists():
+        if (
+            sid
+            and getattr(self, "_viewing_output_session_id", None) == sid
+            and self.output_text.winfo_exists()
+            and not getattr(self, "_solver_log_text", None)
+        ):
             self.output_text.config(state="normal")
             self.output_text.insert(tk.END, text)
             self.output_text.see(tk.END)
@@ -5241,6 +5514,9 @@ class OPLIDE(tk.Tk):
             payload = {
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
+                "solver": (
+                    self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "scipy") else "gurobi"
+                ),
                 "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else False,
                 "display-solver-progress": (
                     bool(self.display_solver_progress_var.get()) if hasattr(self, "display_solver_progress_var") else True

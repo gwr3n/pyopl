@@ -245,6 +245,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _finish_foreground_operation=mock.Mock(),
                 _append_output=mock.Mock(),
                 _set_run_menu_running=mock.Mock(),
+                _show_solver_log_textbox=mock.Mock(),
                 _reset_solver_progress_window=mock.Mock(),
                 _start_run_timer=mock.Mock(),
                 _poll_solver=mock.Mock(),
@@ -258,8 +259,134 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     OPLIDE.run_model(dummy, model_file_override=model_path, data_file_override=data_path)
 
         dummy._reset_solver_progress_window.assert_not_called()
+        dummy._show_solver_log_textbox.assert_called_once()
         dummy._start_run_timer.assert_called_once_with("Solving model...")
         dummy.after.assert_called_once()
+
+    def test_poll_solver_streams_logs_to_temporary_textbox(self):
+        class DummyProcess:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        class DummyQueue:
+            def __init__(self):
+                self.items = [("log", "first line\n"), ("success", {"status": "OPTIMAL"})]
+
+            def get_nowait(self):
+                if self.items:
+                    return self.items.pop(0)
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation(
+            kind="solve",
+            label="Solve Model",
+            session_id="session-1",
+            solver_choice="scipy",
+        )
+        dummy = SimpleNamespace(
+            _solver_process=DummyProcess(),
+            _solver_queue=DummyQueue(),
+            _set_run_menu_running=mock.Mock(),
+            _append_solver_log_text=mock.Mock(),
+            _record_solver_progress=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            _cleanup_solver_ipc=lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+                dummy, cancel_queue_thread=cancel_queue_thread
+            ),
+        )
+
+        OPLIDE._poll_solver(dummy, operation)
+
+        dummy._append_solver_log_text.assert_called_once_with("first line\n")
+        dummy._display_solve_results.assert_called_once_with(
+            {"status": "OPTIMAL"}, session_id="session-1", solver_choice="scipy"
+        )
+        dummy._restore_output_textbox.assert_called_once()
+
+    def test_restore_output_textbox_refreshes_hidden_session_history(self):
+        class DummyFrame:
+            def __init__(self):
+                self.destroyed = False
+
+            def winfo_exists(self):
+                return True
+
+            def destroy(self):
+                self.destroyed = True
+
+        class DummyLogText:
+            def __init__(self):
+                self.frame = DummyFrame()
+                self.destroyed = False
+
+            def winfo_exists(self):
+                return True
+
+            def destroy(self):
+                self.destroyed = True
+
+        class DummyOutputText:
+            def __init__(self):
+                self.content = "old visible content"
+                self.state = "disabled"
+                self.packed = False
+                self.seen = False
+
+            def winfo_exists(self):
+                return True
+
+            def winfo_manager(self):
+                return "pack"
+
+            def pack(self, **_kwargs):
+                self.packed = True
+
+            def config(self, **kwargs):
+                if "state" in kwargs:
+                    self.state = kwargs["state"]
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content += _args[-1]
+
+            def see(self, *_args):
+                self.seen = True
+
+        log_text = DummyLogText()
+        output_text = DummyOutputText()
+        dummy = SimpleNamespace(
+            _solver_log_text=log_text,
+            output_text=output_text,
+            _viewing_output_session_id="session-1",
+            _current_output_session_id="session-1",
+            _output_sessions={"session-1": "Solve header\nFinal result\n"},
+        )
+        dummy._destroy_scrolled_text = lambda text_widget: OPLIDE._destroy_scrolled_text(dummy, text_widget)
+
+        OPLIDE._restore_output_textbox(dummy)
+
+        self.assertTrue(log_text.frame.destroyed)
+        self.assertFalse(log_text.destroyed)
+        self.assertIsNone(dummy._solver_log_text)
+        self.assertTrue(output_text.packed)
+        self.assertEqual(output_text.content, "Solve header\nFinal result\n")
+        self.assertEqual(output_text.state, "disabled")
+        self.assertTrue(output_text.seen)
 
     def test_finish_solver_progress_for_scipy_opens_summary_without_chart(self):
         class DummyWindow:
@@ -396,6 +523,29 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._append_solver_progress_sample.assert_not_called()
         dummy._set_solver_progress_status.assert_not_called()
 
+    def test_stop_model_when_idle_does_not_finish_solver_progress(self):
+        dummy = SimpleNamespace(
+            _solver_process=None,
+            _solver_queue=None,
+            _active_operation=None,
+            _cleanup_solver_ipc=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+        )
+
+        OPLIDE.stop_model(dummy)
+
+        dummy._cleanup_solver_ipc.assert_called_once_with(cancel_queue_thread=True)
+        dummy._stop_run_timer.assert_called_once()
+        dummy._restore_output_textbox.assert_called_once()
+        dummy._set_run_menu_running.assert_called_once_with(False)
+        dummy._finish_solver_progress.assert_not_called()
+        dummy._append_output.assert_not_called()
+
     def test_save_settings_persists_display_solver_progress(self):
         class DummyVar:
             def __init__(self, value):
@@ -409,6 +559,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             dummy = SimpleNamespace(
                 _config_path=config_path,
                 theme_var=DummyVar("flatly"),
+                solver=DummyVar("scipy"),
                 current_font_size=12,
                 verbose_llm_var=DummyVar(False),
                 display_solver_progress_var=DummyVar(False),
@@ -422,6 +573,28 @@ class TestPyOPLIDETyping(unittest.TestCase):
             payload = pyopl_ide_bootstrap.json.loads(config_path.read_text(encoding="utf-8"))
 
         self.assertFalse(payload["display-solver-progress"])
+        self.assertEqual(payload["solver"], "scipy")
+
+    def test_solver_selection_persists_and_refreshes_status(self):
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        dummy = SimpleNamespace(
+            solver=DummyVar("scipy"),
+            _current_solver_choice="gurobi",
+            _refresh_status_context=mock.Mock(),
+            _save_settings=mock.Mock(),
+        )
+
+        OPLIDE._on_solver_selected(dummy)
+
+        self.assertEqual(dummy._current_solver_choice, "scipy")
+        dummy._refresh_status_context.assert_called_once()
+        dummy._save_settings.assert_called_once()
 
     def test_highlight_suppresses_model_eof_while_typing(self):
         class DummyText:
