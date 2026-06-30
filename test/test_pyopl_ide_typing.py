@@ -195,6 +195,234 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
+    def test_run_model_does_not_open_live_progress_window_for_scipy(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        class DummyVar:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        class DummyProcess:
+            def __init__(self, *args, **kwargs):
+                self.started = False
+
+            def start(self):
+                self.started = True
+
+            def is_alive(self):
+                return False
+
+        with TemporaryDirectory() as tmpdir:
+            model_path = str(Path(tmpdir) / "model.mod")
+            data_path = str(Path(tmpdir) / "data.dat")
+            operation = pyopl_ide_bootstrap._ForegroundOperation(
+                kind="solve",
+                label="Solve Model",
+                session_id="session-1",
+                solver_choice="scipy",
+            )
+            dummy = SimpleNamespace(
+                _solver_process=None,
+                _solver_queue=None,
+                model_text=DummyText("dvar float+ x;\nminimize x;\nsubject to { x >= 1; }"),
+                data_text=DummyText(""),
+                solver=DummyVar("scipy"),
+                data_file=None,
+                model_file=None,
+                status_var=DummyVar(),
+                _start_foreground_operation=mock.Mock(return_value=operation),
+                _finish_foreground_operation=mock.Mock(),
+                _append_output=mock.Mock(),
+                _set_run_menu_running=mock.Mock(),
+                _reset_solver_progress_window=mock.Mock(),
+                _start_run_timer=mock.Mock(),
+                _poll_solver=mock.Mock(),
+                after=mock.Mock(),
+            )
+            dummy._solver_tracks_progress = lambda solver_choice=None: OPLIDE._solver_tracks_progress(dummy, solver_choice)
+            dummy._display_solver_progress_enabled = lambda: OPLIDE._display_solver_progress_enabled(dummy)
+
+            with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", mock.Mock(return_value=mock.Mock())):
+                with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", DummyProcess):
+                    OPLIDE.run_model(dummy, model_file_override=model_path, data_file_override=data_path)
+
+        dummy._reset_solver_progress_window.assert_not_called()
+        dummy._start_run_timer.assert_called_once_with("Solving model...")
+        dummy.after.assert_called_once()
+
+    def test_finish_solver_progress_for_scipy_opens_summary_without_chart(self):
+        class DummyWindow:
+            def __init__(self):
+                self.geometry_values = []
+                self.rowconfigure_calls = []
+                self.deiconified = False
+
+            def winfo_exists(self):
+                return True
+
+            def geometry(self, value):
+                self.geometry_values.append(value)
+
+            def rowconfigure(self, *args, **kwargs):
+                self.rowconfigure_calls.append((args, kwargs))
+
+            def deiconify(self):
+                self.deiconified = True
+
+            def lift(self):
+                pass
+
+        class DummyCanvas:
+            def __init__(self):
+                self.removed = False
+                self.deleted = False
+
+            def winfo_exists(self):
+                return True
+
+            def grid(self, *args, **kwargs):
+                self.removed = False
+
+            def grid_remove(self):
+                self.removed = True
+
+            def delete(self, *_args):
+                self.deleted = True
+
+        class DummyStatsFrame:
+            def winfo_children(self):
+                return []
+
+        class DummyVar:
+            def __init__(self):
+                self.value = None
+
+            def set(self, value):
+                self.value = value
+
+        window = DummyWindow()
+        canvas = DummyCanvas()
+        status_var = DummyVar()
+        dummy = SimpleNamespace(
+            _current_solver_choice="scipy",
+            _solver_progress_update_after_id=None,
+            _solver_progress_samples=[],
+            _solver_progress_pending_sample=None,
+            _solver_progress_window=window,
+            _solver_progress_canvas=canvas,
+            _solver_progress_stats_frame=DummyStatsFrame(),
+            _solver_progress_status_var=status_var,
+            _solver_progress_stat_vars={},
+            _solver_progress_rolling_seconds=120.0,
+            after_cancel=mock.Mock(),
+            _update_solver_progress_stats=mock.Mock(),
+            _append_solver_progress_sample=mock.Mock(),
+        )
+        dummy._solver_tracks_progress = lambda solver_choice=None: OPLIDE._solver_tracks_progress(dummy, solver_choice)
+        dummy._display_solver_progress_enabled = lambda: OPLIDE._display_solver_progress_enabled(dummy)
+        dummy._set_solver_progress_status = lambda text: OPLIDE._set_solver_progress_status(dummy, text)
+        dummy._reset_solver_progress_window = lambda solver_choice: OPLIDE._reset_solver_progress_window(dummy, solver_choice)
+
+        scipy_stats = OPLIDE._solver_progress_stats(
+            dummy,
+            {"objective_value": 3.0, "runtime": 1.2, "iterations": 4, "nodes": 9, "solutions": 2},
+        )
+        self.assertEqual([label for label, _value in scipy_stats], ["Objective", "Runtime", "Iterations"])
+
+        OPLIDE._finish_solver_progress(dummy, {"objective_value": 3.0}, status="complete")
+
+        self.assertEqual(window.geometry_values[-1], "520x220")
+        self.assertTrue(canvas.removed)
+        self.assertFalse(canvas.deleted)
+        self.assertTrue(window.deiconified)
+        self.assertEqual(status_var.value, "Solve complete.")
+
+        OPLIDE._redraw_solver_progress_chart(dummy)
+        self.assertFalse(canvas.deleted)
+
+    def test_solver_progress_display_can_be_disabled(self):
+        class DummyWindow:
+            def __init__(self):
+                self.withdrawn = False
+
+            def winfo_exists(self):
+                return True
+
+            def withdraw(self):
+                self.withdrawn = True
+
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        window = DummyWindow()
+        dummy = SimpleNamespace(
+            display_solver_progress_var=DummyVar(False),
+            _solver_progress_update_after_id="after-id",
+            _solver_progress_pending_sample={"runtime": 1.0},
+            _solver_progress_window=window,
+            after_cancel=mock.Mock(),
+            _solver_tracks_progress=lambda *_args: True,
+            _reset_solver_progress_window=mock.Mock(),
+            _update_solver_progress_stats=mock.Mock(),
+            _append_solver_progress_sample=mock.Mock(),
+            _set_solver_progress_status=mock.Mock(),
+        )
+        dummy._display_solver_progress_enabled = lambda: OPLIDE._display_solver_progress_enabled(dummy)
+        dummy._hide_solver_progress_window = lambda: OPLIDE._hide_solver_progress_window(dummy)
+
+        OPLIDE._finish_solver_progress(dummy, {"objective_value": 3.0}, status="complete")
+
+        dummy.after_cancel.assert_called_once_with("after-id")
+        self.assertIsNone(dummy._solver_progress_update_after_id)
+        self.assertIsNone(dummy._solver_progress_pending_sample)
+        self.assertTrue(window.withdrawn)
+        dummy._reset_solver_progress_window.assert_not_called()
+        dummy._update_solver_progress_stats.assert_not_called()
+        dummy._append_solver_progress_sample.assert_not_called()
+        dummy._set_solver_progress_status.assert_not_called()
+
+    def test_save_settings_persists_display_solver_progress(self):
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+        with TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "settings.json"
+            dummy = SimpleNamespace(
+                _config_path=config_path,
+                theme_var=DummyVar("flatly"),
+                current_font_size=12,
+                verbose_llm_var=DummyVar(False),
+                display_solver_progress_var=DummyVar(False),
+                genai_provider=None,
+                genai_model=None,
+                genai_method_var=DummyVar("pyopl_generative"),
+            )
+
+            OPLIDE._save_settings(dummy)
+
+            payload = pyopl_ide_bootstrap.json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(payload["display-solver-progress"])
+
     def test_highlight_suppresses_model_eof_while_typing(self):
         class DummyText:
             def __init__(self, value):

@@ -250,6 +250,10 @@ class OPLIDE(tk.Tk):
             # If launched with debug, honor saved value but default to True for convenience
             default_verbose = bool(loaded_settings.get("verbose-llm-logs", True))
         self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
+        display_solver_progress = loaded_settings.get("display-solver-progress", True)
+        if not isinstance(display_solver_progress, bool):
+            display_solver_progress = True
+        self.display_solver_progress_var = tk.BooleanVar(value=display_solver_progress)
         # Track font size selection for menu state
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
@@ -491,6 +495,14 @@ class OPLIDE(tk.Tk):
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._refresh_status_context)
         solver_menu.add_radiobutton(
             label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._refresh_status_context
+        )
+        solver_menu.add_separator()
+        solver_menu.add_checkbutton(
+            label="Display Solver Progress",
+            onvalue=True,
+            offvalue=False,
+            variable=self.display_solver_progress_var,
+            command=self._on_display_solver_progress_toggled,
         )
         runmenu.add_cascade(label="Solver", menu=solver_menu)
         menubar.add_cascade(label="Solve", menu=runmenu)
@@ -3096,8 +3108,44 @@ class OPLIDE(tk.Tk):
         # Reschedule
         self._run_timer_after_id = self.after(1000, self._tick_run_timer)
 
+    def _solver_tracks_progress(self, solver_choice: Optional[str] = None) -> bool:
+        solver_name = solver_choice or getattr(self, "_current_solver_choice", "gurobi")
+        return str(solver_name).lower() == "gurobi"
+
+    def _display_solver_progress_enabled(self) -> bool:
+        progress_var = getattr(self, "display_solver_progress_var", None)
+        if progress_var is None:
+            return True
+        try:
+            return bool(progress_var.get())
+        except Exception:
+            return True
+
+    def _hide_solver_progress_window(self) -> None:
+        if self._solver_progress_update_after_id:
+            try:
+                self.after_cancel(self._solver_progress_update_after_id)
+            except Exception:
+                pass
+            self._solver_progress_update_after_id = None
+        self._solver_progress_pending_sample = None
+        if self._solver_progress_window is not None:
+            try:
+                if self._solver_progress_window.winfo_exists():
+                    self._solver_progress_window.withdraw()
+            except Exception:
+                pass
+
+    def _on_display_solver_progress_toggled(self) -> None:
+        self._save_settings()
+        if not self._display_solver_progress_enabled():
+            self._hide_solver_progress_window()
+
     def _reset_solver_progress_window(self, solver_choice: str) -> None:
         """Create or reset the solve progress window."""
+        if not self._display_solver_progress_enabled():
+            self._hide_solver_progress_window()
+            return
         if self._solver_progress_update_after_id:
             try:
                 self.after_cancel(self._solver_progress_update_after_id)
@@ -3138,13 +3186,30 @@ class OPLIDE(tk.Tk):
             self._solver_progress_stats_frame = stats_frame
             self._solver_progress_status_var = status_var
 
+        chart_visible = self._solver_tracks_progress(solver_choice)
+        if self._solver_progress_window is not None:
+            try:
+                self._solver_progress_window.geometry("760x460" if chart_visible else "520x220")
+                self._solver_progress_window.rowconfigure(1, weight=1 if chart_visible else 0)
+            except Exception:
+                pass
+        if self._solver_progress_canvas is not None:
+            try:
+                if chart_visible:
+                    self._solver_progress_canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 8))
+                else:
+                    self._solver_progress_canvas.grid_remove()
+            except Exception:
+                pass
+
         self._solver_progress_stat_vars = {}
         if self._solver_progress_stats_frame is not None:
             for child in self._solver_progress_stats_frame.winfo_children():
                 child.destroy()
 
         self._set_solver_progress_status(f"{solver_choice}: solving...")
-        self._redraw_solver_progress_chart()
+        if chart_visible:
+            self._redraw_solver_progress_chart()
         try:
             self._solver_progress_window.deiconify()
             self._solver_progress_window.lift()
@@ -3167,6 +3232,10 @@ class OPLIDE(tk.Tk):
             return "-" if value is None else str(value)
 
     def _record_solver_progress(self, event: dict[str, Any]) -> None:
+        if not self._display_solver_progress_enabled():
+            return
+        if not self._solver_tracks_progress():
+            return
         if not isinstance(event, dict):
             return
         sample = dict(event)
@@ -3230,15 +3299,26 @@ class OPLIDE(tk.Tk):
         self._update_solver_progress_stats(sample)
         self._redraw_solver_progress_chart()
 
-    def _update_solver_progress_stats(self, sample: dict[str, Any]) -> None:
+    def _solver_progress_stats(self, sample: dict[str, Any]) -> list[tuple[str, Any]]:
+        if self._solver_tracks_progress():
+            return [
+                ("LB", sample.get("lower_bound")),
+                ("UB", sample.get("upper_bound")),
+                ("Gap", sample.get("gap")),
+                ("Nodes", sample.get("nodes")),
+                ("Solutions", sample.get("solutions")),
+                ("Runtime", sample.get("runtime")),
+            ]
+
         stats = [
-            ("LB", sample.get("lower_bound")),
-            ("UB", sample.get("upper_bound")),
-            ("Gap", sample.get("gap")),
-            ("Nodes", sample.get("nodes")),
-            ("Solutions", sample.get("solutions")),
+            ("Objective", sample.get("objective_value", sample.get("upper_bound"))),
             ("Runtime", sample.get("runtime")),
+            ("Iterations", sample.get("iterations")),
         ]
+        return [(label, value) for label, value in stats if value is not None]
+
+    def _update_solver_progress_stats(self, sample: dict[str, Any]) -> None:
+        stats = self._solver_progress_stats(sample)
         if self._solver_progress_stats_frame is None:
             return
         for index, (label, value) in enumerate(stats):
@@ -3265,10 +3345,16 @@ class OPLIDE(tk.Tk):
             var.set(self._format_progress_value(value))
 
     def _finish_solver_progress(self, results: Optional[dict[str, Any]] = None, status: str = "complete") -> None:
+        if not self._display_solver_progress_enabled():
+            self._hide_solver_progress_window()
+            return
+        if not self._solver_tracks_progress():
+            self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "scipy"))
         if isinstance(results, dict):
             sample: dict[str, Any] = {}
             objective = results.get("objective_value")
             if objective is not None:
+                sample["objective_value"] = objective
                 sample["upper_bound"] = objective
                 sample["lower_bound"] = objective
                 sample["gap"] = 0.0
@@ -3293,9 +3379,13 @@ class OPLIDE(tk.Tk):
                 pass
             self._solver_progress_update_after_id = None
         self._solver_progress_pending_sample = None
-        self._set_solver_progress_status(f"Solve {status}. Window will stay open until closed.")
+        self._set_solver_progress_status(f"Solve {status}.")
 
     def _redraw_solver_progress_chart(self) -> None:
+        if not self._display_solver_progress_enabled():
+            return
+        if not self._solver_tracks_progress():
+            return
         canvas = self._solver_progress_canvas
         if canvas is None or not canvas.winfo_exists():
             return
@@ -3478,7 +3568,8 @@ class OPLIDE(tk.Tk):
 
         self._set_run_menu_running(True)
 
-        self._reset_solver_progress_window(solver_choice)
+        if self._display_solver_progress_enabled() and self._solver_tracks_progress(solver_choice):
+            self._reset_solver_progress_window(solver_choice)
 
         # Start elapsed-time status updates (every second)
         self._start_run_timer("Solving model...")
@@ -5151,6 +5242,9 @@ class OPLIDE(tk.Tk):
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
                 "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else False,
+                "display-solver-progress": (
+                    bool(self.display_solver_progress_var.get()) if hasattr(self, "display_solver_progress_var") else True
+                ),
                 "genai-selection": (
                     f"{self.genai_provider}|{self.genai_model}"
                     if getattr(self, "genai_provider", None) and getattr(self, "genai_model", None)
