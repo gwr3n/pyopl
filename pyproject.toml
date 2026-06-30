@@ -47,7 +47,7 @@ pyopl = "pyopl.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-exclude = ["test", "test.*"]
+include = ["pyopl", "pyopl.*"]
 
 [tool.setuptools.package-data]
 pyopl = ["*.pyi", "icon/mindset.png", "grammars/*", "opl_models/*"]

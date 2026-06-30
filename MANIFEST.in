@@ -2,5 +2,5 @@ recursive-include pyopl/icon *.png
 recursive-include pyopl *.pyi
 recursive-include pyopl/grammars *
 recursive-include pyopl/opl_models *
-exclude test/*
-prune gen_ai
+prune test
+global-exclude .DS_Store
