@@ -50,7 +50,7 @@ Dependencies are managed via `pyproject.toml` and are listed in [`requirements.t
 
 PyOPL requires Python 3.10+
 
-You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selectable in the API and the IDE. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
+You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selectable in the API and the Rhetor IME. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
 
 ## Usage
 
@@ -153,20 +153,24 @@ The function returns a dictionary with solver results and prints:
 
 
 
-## PyOPL IDE
+## PyOPL IME
 
-PyOPL includes the Rhetor graphical IDE for editing, running, and debugging OPL models and data files. The IDE features:
+PyOPL includes [Rhetor](https://gwr3n.github.io/rhetor), a GenAI-first integrated modelling environment (IME) for creating, revising, solving, exporting, and versioning OPL models and data files.
 
-- Syntax highlighting for OPL models and data files
-- Side-by-side model and data editors
-- Output panel for solver results and messages
-- File tree for easy switching between model and data
-- Solver selection (Gurobi or SciPy/HiGHS) — choose your preferred solver from the menu
-- Font size adjustment and modern UI
+The IME features:
 
-### Launching the IDE
+- GenAI-first modelling workflows for generating models, revising existing model/data pairs, asking questions about a formulation, and explaining solutions with OpenAI, Google/Gemini, or Ollama models when configured
+- Optional visual prompt attachments for supported GenAI workflows, including images and short PDFs
+- Session-based model version tracking: each run/request can keep a timestamped snapshot that can be previewed, diffed against the current editors, restored, renamed, or deleted
+- Output and session panels for reviewing recent runs, generated artifacts, model/data snapshots, and GenAI interactions
+- Syntax-highlighted model and data editors with open, save, save-as, undo, redo, find, and replace
+- Integrated solve workflow with Gurobi or SciPy/HiGHS selection, solver logs, elapsed-time status, and optional solver-progress display
+- Export support for compiled Python, LP, and MPS artifacts where supported by the selected backend
+- Light/dark themes and configurable editor font sizes, with settings saved between sessions
 
-You can launch the IDE from the command line: 
+### Launching the IME
+
+Running PyOPL with no subcommand launches the IME:
 
 ```sh
 python -m pyopl
@@ -174,7 +178,11 @@ python -m pyopl
 
 If installed as a package, the `pyopl` console command can be used in place of `python -m pyopl`.
 
-This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or SciPy/HiGHS as the solver from the IDE's menu bar.
+This opens the Rhetor IME window. You can open `.mod` model files and optional `.dat` data files, generate or revise formulations with GenAI assistance, edit them directly, solve them from the interface, export generated artifacts, and choose either Gurobi or SciPy/HiGHS from the Solve menu.
+
+### Sessions and Model Versions
+
+Rhetor keeps an IME session history in a `.pyopl_session` file in the current working directory. Session entries preserve output history and associated model/data snapshots, so you can track how a model changes over an interactive, GenAI-assisted modelling session. From the session list, use the context menu to preview a saved snapshot, diff it against the current editors, restore it into the editors, rename the session entry, or delete it.
 
 
 
