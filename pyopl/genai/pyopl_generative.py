@@ -337,7 +337,7 @@ def _describe_images_for_rag(
             input_text=prompt,
             images=images,
             max_tokens=IMAGE_RAG_MAX_TOKENS,
-            temperature=0.0,
+            temperature=None,
             stop=None,
             progress=progress,
             capture_usage=False,
