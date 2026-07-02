@@ -80,6 +80,183 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertEqual(usage.as_dict(), {"prompt_tokens": 4, "completion_tokens": 9})
         self.assertEqual(GenAIStrategyBase._coalesce_response_text(response), "loose dict")
 
+    def test_base_gather_and_render_few_shots(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger, few_shot_max_chars=100)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            desc = root / "sample.txt"
+            mod = root / "sample.mod"
+            dat = root / "sample.dat"
+            desc.write_text("description", encoding="utf-8")
+            mod.write_text("model", encoding="utf-8")
+            dat.write_text("data", encoding="utf-8")
+
+            with patch.object(strategy_base, "rag_rank", return_value=[{"path": str(desc), "score": 0.9}]):
+                examples = base.gather_few_shots("query", k=2, models_dir=root)
+
+        rendered = base.render_few_shots_section(examples)
+
+        self.assertEqual(examples[0]["description"], "description")
+        self.assertIn("few_shot_examples", rendered)
+        self.assertIn("model", rendered)
+
+    def test_base_image_payload_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            image_path = Path(td) / "tiny.png"
+            image_path.write_bytes(b"png-bytes")
+
+            data_url = GenAIStrategyBase._image_to_openai_image_url({"path": str(image_path), "mime_type": "image/png"})
+            openai_input = GenAIStrategyBase._build_openai_input(
+                input_text="describe", images=[{"data_base64": "YWJj", "mime_type": "text/plain"}]
+            )
+
+        self.assertTrue(data_url.startswith("data:image/png;base64,"))
+        self.assertEqual(openai_input[0]["role"], "user")
+        self.assertEqual(openai_input[0]["content"][0], {"type": "input_text", "text": "describe"})
+        self.assertEqual(
+            GenAIStrategyBase._image_to_openai_image_url({"url": "https://example.test/i.png"}), "https://example.test/i.png"
+        )
+
+    def test_base_gemini_part_helpers_with_fake_types(self) -> None:
+        class FakePart:
+            @staticmethod
+            def from_uri(file_uri, mime_type):
+                return ("uri", file_uri, mime_type)
+
+            @staticmethod
+            def from_bytes(data, mime_type):
+                return ("bytes", data, mime_type)
+
+        fake_types = SimpleNamespace(Part=FakePart)
+
+        self.assertEqual(
+            GenAIStrategyBase._image_to_gemini_part(img={"url": "https://example.test/i.png"}, genai_types=fake_types),
+            ("uri", "https://example.test/i.png", "image/png"),
+        )
+        self.assertEqual(
+            GenAIStrategyBase._image_to_gemini_part(
+                img={"data_base64": "data:text/plain;base64,YWJj"}, genai_types=fake_types
+            ),
+            ("bytes", b"abc", "text/plain"),
+        )
+
+    def test_base_openai_params_retry_and_generation(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        params = base._build_openai_create_params(
+            model_name="gpt-test",
+            input_content="prompt",
+            max_tokens=5,
+            temperature=0.2,
+            stop=["END"],
+            expected_json=True,
+        )
+
+        calls: list[dict[str, Any]] = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("unsupported parameter: 'response_format'")
+            return SimpleNamespace(output_text="ok", usage=SimpleNamespace(input_tokens=3, output_tokens=4))
+
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        response = base._call_openai_with_retry(client, params, retries=2, backoff_sec=0)
+
+        self.assertEqual(response.output_text, "ok")
+        self.assertIn("response_format", calls[0])
+        self.assertNotIn("response_format", calls[1])
+
+        with (
+            patch.object(base, "_openai_client", return_value=client),
+            patch.object(base, "_call_openai_with_retry", return_value=response),
+        ):
+            text, usage = base._generate_openai(
+                model_name="gpt-test",
+                input_text="prompt",
+                images=None,
+                mt=5,
+                temperature=None,
+                stop=None,
+                progress=None,
+                capture_usage=True,
+                expected_json=False,
+            )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(usage, {"prompt_tokens": 3, "completion_tokens": 4})
+
+    def test_base_gemini_and_ollama_generation_are_mockable(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        gemini_client = SimpleNamespace(
+            models=SimpleNamespace(
+                generate_content=lambda **kwargs: SimpleNamespace(
+                    text="gemini", usage_metadata={"prompt_token_count": 6, "candidates_token_count": 7}
+                )
+            )
+        )
+
+        gemini_text, gemini_usage = base._generate_gemini_newsdk(
+            gemini_client,
+            model_name="gemini-test",
+            input_text="prompt",
+            images=None,
+            mt=4,
+            temperature=0.0,
+            progress=None,
+            capture_usage=True,
+            expected_json=True,
+        )
+        with patch.object(
+            base, "_ollama_generate_text", return_value=("ollama", {"prompt_tokens": 1, "completion_tokens": 2})
+        ):
+            ollama_text, ollama_usage = base._generate_ollama(
+                model_name="llama",
+                input_text="prompt",
+                images=None,
+                mt=3,
+                progress=None,
+                capture_usage=True,
+                expected_json=True,
+            )
+
+        self.assertEqual(gemini_text, "gemini")
+        self.assertEqual(gemini_usage, {"prompt_tokens": 6, "completion_tokens": 7})
+        self.assertEqual(ollama_text, "ollama")
+        self.assertEqual(ollama_usage, {"prompt_tokens": 1, "completion_tokens": 2})
+
+    def test_base_dispatch_compile_write_and_cost_helpers(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+
+        with patch.object(base, "_generate_ollama", return_value=("text", {"prompt_tokens": 8, "completion_tokens": 9})):
+            generated = base.llm_generate_text(
+                provider=LLMProvider.OLLAMA,
+                model_name="llama",
+                input_text="prompt",
+                capture_usage=True,
+            )
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "nested" / "model.mod")
+            data_file = str(Path(td) / "nested" / "data.dat")
+            base.write_model_data_files(model_file, data_file, "model", "data")
+
+            self.assertEqual(Path(model_file).read_text(encoding="utf-8"), "model")
+            self.assertEqual(Path(data_file).read_text(encoding="utf-8"), "data")
+
+        with (
+            patch.object(strategy_base.OPLCompiler, "compile_model", return_value=None),
+            patch.object(strategy_base, "_estimate_costs", return_value={"total_cost": 1.2}),
+        ):
+            errors = base.compile_model_data("model", "data")
+            usage = Usage(prompt_tokens=2, completion_tokens=3)
+            cost = base.estimate_cost("gpt-test", usage)
+
+        self.assertEqual(generated, ("text", {"prompt_tokens": 8, "completion_tokens": 9}))
+        self.assertEqual(errors, [])
+        self.assertEqual(cost["estimated_costs"], {"total_cost": 1.2})
+        self.assertEqual(GenAIStrategyBase.infer_provider(None, "gemini-2"), LLMProvider.GOOGLE)
+        self.assertEqual(GenAIStrategyBase.infer_provider(None, "llama3"), LLMProvider.OLLAMA)
+
 
 class TestGenAIPricing(unittest.TestCase):
     def setUp(self) -> None:
@@ -711,7 +888,7 @@ class TestGraphChainHelpers(unittest.TestCase):
                         alignment_check=False,
                         few_shot=False,
                     )
-                )
+                ),
             )
             assessment = pyopl_generative_graphchain.generative_solve_graphchain(
                 "problem text",
