@@ -1337,13 +1337,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     "indexed_name",
                 ):
                     c = float(left.get("value", 0))
-                    vL, vU = self._var_bounds_safe(right)
+                    vL, vU = self._linear_bounds_safe(right)
                 elif right.get("type") == "number" and left.get("type") in (
                     "name",
                     "indexed_name",
                 ):
                     c = float(right.get("value", 0))
-                    vL, vU = self._var_bounds_safe(left)
+                    vL, vU = self._linear_bounds_safe(left)
                 else:
                     return (None, None)
                 if vL is None or vU is None:

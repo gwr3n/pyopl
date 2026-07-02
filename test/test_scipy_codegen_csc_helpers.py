@@ -62,7 +62,7 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         gen = evaluator.parent
         gen._build_variables()
 
-        with self.assertRaisesRegex(SemanticError, "minl\(\) requires"):
+        with self.assertRaisesRegex(SemanticError, r"minl\(\) requires"):
             evaluator.eval({"type": "minl", "args": []})
         with self.assertRaisesRegex(SemanticError, "Non-numeric argument"):
             evaluator.eval({"type": "maxl", "args": [{"type": "string_literal", "value": "abc"}]})
@@ -99,7 +99,7 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
             evaluator.eval(
                 {"type": "binop", "op": "/", "left": {"type": "number", "value": 1}, "right": {"type": "number", "value": 0}}
             )
-        with self.assertRaisesRegex(SemanticError, "variable \* variable"):
+        with self.assertRaisesRegex(SemanticError, r"variable \* variable"):
             evaluator.eval(
                 {"type": "binop", "op": "*", "left": {"type": "name", "value": "x"}, "right": {"type": "name", "value": "y"}}
             )
@@ -385,7 +385,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
             gen._linear_bounds_safe(
                 {"type": "binop", "op": "*", "left": {"type": "number", "value": -2}, "right": {"type": "name", "value": "x"}}
             ),
-            (None, None),
+            (-10.0, -4.0),
         )
         self.assertEqual(
             gen._linear_bounds_safe(
@@ -396,7 +396,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
 
         gen.var_indices["arc[('A', 'B')]"] = 3
         self.assertEqual(gen._resolve_tuple_index_varname("arc[('A', 'B')]"), 3)
-        with self.assertRaisesRegex(SemanticError, "Variable 'arc\[missing\]'"):
+        with self.assertRaisesRegex(SemanticError, r"Variable 'arc\[missing\]'"):
             gen._resolve_tuple_index_varname("arc[missing]")
 
 
