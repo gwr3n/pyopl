@@ -34,7 +34,7 @@ class DummyText:
         self.value = ""
 
     def insert(self, *_args):
-        text = _args[-1]
+        text = _args[1] if len(_args) > 1 else _args[-1]
         self.inserted.append(text)
         self.value += text
 
@@ -43,6 +43,26 @@ class DummyText:
 
     def config(self, **kwargs):
         self.configure(**kwargs)
+
+
+class ExistingDummyText(DummyText):
+    def __init__(self, value=""):
+        super().__init__(value)
+        self.seen = False
+        self.destroyed = False
+        self.tags = []
+
+    def winfo_exists(self):
+        return True
+
+    def see(self, *_args):
+        self.seen = True
+
+    def destroy(self):
+        self.destroyed = True
+
+    def tag_configure(self, *args, **kwargs):
+        self.tags.append((args, kwargs))
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
@@ -247,6 +267,408 @@ class TestIDEUtilitiesMore(unittest.TestCase):
         self.assertIsNone(dummy.data_file)
         self.assertEqual(dummy.status_var.value, "Model restored from session")
         self.assertEqual(dummy.highlight.call_count, 2)
+
+    def test_load_session_restores_history_artifacts_files_and_tabs(self):
+        """Session loading restores output history, normalized artifacts, editor files, and tab labels."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            data_path = Path(tmpdir) / "data.dat"
+            session_path = Path(tmpdir) / ".pyopl_session"
+            model_path.write_text("model text", encoding="utf-8")
+            data_path.write_text("data text", encoding="utf-8")
+            session_path.write_text(
+                pyopl_ide_bootstrap.json.dumps(
+                    {
+                        "output_sessions": {"s1": "output"},
+                        "output_session_ids": ["s1"],
+                        "output_session_display": {"s1": "2026-01-01 10:00:00 • Solve"},
+                        "output_session_artifacts": {"s1": {"model_text": 123, "data_text": None}, "bad": "skip"},
+                        "current_output_session_id": "s1",
+                        "viewing_output_session_id": "s1",
+                        "model_file": str(model_path),
+                        "data_file": str(data_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class Listbox:
+                def __init__(self):
+                    self.items = []
+                    self.selected = None
+                    self.active = None
+
+                def delete(self, *_args):
+                    self.items.clear()
+
+                def insert(self, _index, value):
+                    self.items.append(value)
+
+                def selection_clear(self, *_args):
+                    self.selected = None
+
+                def selection_set(self, index):
+                    self.selected = index
+
+                def activate(self, index):
+                    self.active = index
+
+            class Notebook:
+                def __init__(self):
+                    self.tabs = []
+
+                def tab(self, frame, **kwargs):
+                    self.tabs.append((frame, kwargs))
+
+            output_text = ExistingDummyText()
+            model_text = DummyText()
+            data_text = DummyText()
+            listbox = Listbox()
+            notebook = Notebook()
+            dummy = SimpleNamespace(
+                _session_file_path=lambda: str(session_path),
+                _output_sessions={},
+                _output_session_ids=[],
+                _output_session_display={},
+                _output_session_label={},
+                _output_session_timestamp={},
+                _output_session_artifacts={},
+                _current_output_session_id=None,
+                _viewing_output_session_id=None,
+                request_listbox=listbox,
+                output_text=output_text,
+                model_file=None,
+                data_file=None,
+                model_text=model_text,
+                data_text=data_text,
+                editor_notebook=notebook,
+                model_frame="model-frame",
+                data_frame="data-frame",
+            )
+
+            OPLIDE._load_session(dummy)
+
+        self.assertEqual(dummy._output_sessions, {"s1": "output"})
+        self.assertEqual(dummy._output_session_timestamp["s1"], "2026-01-01 10:00:00")
+        self.assertEqual(dummy._output_session_label["s1"], "Solve")
+        self.assertEqual(dummy._output_session_artifacts, {"s1": {"model_text": "123", "data_text": ""}})
+        self.assertEqual(listbox.items, ["2026-01-01 10:00:00 • Solve"])
+        self.assertEqual(listbox.selected, 0)
+        self.assertEqual(output_text.value, "output")
+        self.assertEqual(model_text.value, "model text")
+        self.assertEqual(data_text.value, "data text")
+        self.assertEqual(
+            notebook.tabs[-2:], [("model-frame", {"text": "Model: model.mod"}), ("data-frame", {"text": "Data: data.dat"})]
+        )
+
+    def test_populate_diff_preview_text_tags_headers_and_changes(self):
+        """Diff preview rendering writes headers and tags additions/removals/context."""
+        text = ExistingDummyText()
+        dummy = SimpleNamespace(theme_var=DummyVar("flatly"))
+        dummy._configure_diff_preview_tags = lambda text_widget: OPLIDE._configure_diff_preview_tags(dummy, text_widget)
+
+        OPLIDE._populate_diff_preview_text(dummy, text, "same\nold\n", "same\nnew\n")
+
+        self.assertIn("--- Historical", text.value)
+        self.assertIn("+++ Current", text.value)
+        self.assertIn("- old", text.value)
+        self.assertIn("+ new", text.value)
+        self.assertIn({"state": "normal"}, text.config_calls)
+        self.assertEqual(text.config_calls[-1], {"state": "disabled"})
+        configured_tags = {args[0] for args, _kwargs in text.tags}
+        self.assertTrue({"diff_header", "diff_add", "diff_remove", "diff_context"}.issubset(configured_tags))
+
+    def test_append_solver_log_text_and_stop_timer_cover_red_paths(self):
+        """Solver log append and run-timer stop handle visible widgets and cancellation."""
+        log_text = ExistingDummyText()
+        dummy = SimpleNamespace(_solver_log_text=log_text)
+
+        OPLIDE._append_solver_log_text(dummy, "solver line")
+
+        self.assertEqual(log_text.value, "solver line")
+        self.assertTrue(log_text.seen)
+        self.assertEqual(log_text.config_calls[0], {"state": "normal"})
+        self.assertEqual(log_text.config_calls[-1], {"state": "disabled"})
+
+        status_runtime_var = DummyVar("old")
+        dummy = SimpleNamespace(
+            _run_timer_after_id="after-id",
+            _run_started_at=123.0,
+            after_cancel=mock.Mock(),
+            status_runtime_var=status_runtime_var,
+        )
+        OPLIDE._stop_run_timer(dummy)
+        dummy.after_cancel.assert_called_once_with("after-id")
+        self.assertIsNone(dummy._run_timer_after_id)
+        self.assertIsNone(dummy._run_started_at)
+        self.assertEqual(status_runtime_var.value, "")
+
+    def test_save_as_helpers_write_files_and_update_session(self):
+        """Save-as helpers write editor contents, update baselines, tab labels, and save session."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "saved.mod"
+            data_path = Path(tmpdir) / "saved.dat"
+
+            class Notebook:
+                def __init__(self):
+                    self.calls = []
+
+                def tab(self, frame, **kwargs):
+                    self.calls.append((frame, kwargs))
+
+            notebook = Notebook()
+            dummy = SimpleNamespace(
+                model_file=None,
+                data_file=None,
+                model_text=DummyText("model body\n"),
+                data_text=DummyText("data body\n"),
+                editor_notebook=notebook,
+                model_frame="model-frame",
+                data_frame="data-frame",
+                _get_editor_text=lambda widget: widget.get(),
+                _save_session=mock.Mock(),
+            )
+
+            with mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(model_path)):
+                OPLIDE.save_model_as(dummy)
+            with mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(data_path)):
+                OPLIDE.save_data_as(dummy)
+
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "model body")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "data body")
+            self.assertEqual(dummy._model_saved_text, "model body\n")
+            self.assertEqual(dummy._data_saved_text, "data body\n")
+            self.assertEqual(
+                notebook.calls[-2:],
+                [("model-frame", {"text": "Model: saved.mod"}), ("data-frame", {"text": "Data: saved.dat"})],
+            )
+            self.assertEqual(dummy._save_session.call_count, 2)
+
+    def test_poll_solver_empty_queue_handles_running_and_unexpected_exit(self):
+        """Polling reschedules live solvers and reports dead solvers with no terminal message."""
+
+        class EmptyQueue:
+            def get_nowait(self):
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def cancel_join_thread(self):
+                pass
+
+        class Process:
+            def __init__(self, alive):
+                self.alive = alive
+
+            def is_alive(self):
+                return self.alive
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
+        running = SimpleNamespace(
+            _solver_process=Process(True),
+            _solver_queue=EmptyQueue(),
+            after=mock.Mock(),
+            _poll_solver=mock.Mock(),
+        )
+        OPLIDE._poll_solver(running, operation)
+        running.after.assert_called_once()
+
+        dead = SimpleNamespace(
+            _solver_process=Process(False),
+            _solver_queue=EmptyQueue(),
+            _set_run_menu_running=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _append_output=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            status_var=DummyVar(),
+            _finish_solver_progress=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        dead._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dead, cancel_queue_thread=cancel_queue_thread
+        )
+
+        OPLIDE._poll_solver(dead, operation)
+
+        dead._append_output.assert_called_once_with("\nError: Solver process terminated unexpectedly.\n", "s1")
+        self.assertEqual(dead.status_var.value, "Error: Solver process terminated.")
+        dead._finish_solver_progress.assert_called_once_with(status="ended unexpectedly")
+        dead._finish_foreground_operation.assert_called_once_with(operation)
+
+    def test_poll_solver_routes_progress_filters_non_dict_and_handles_error(self):
+        """Polling consumes progress/log messages and handles non-success terminal messages."""
+
+        class Process:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        class Queue:
+            def __init__(self):
+                self.items = [("progress", {"runtime": 1}), ("progress", "ignore"), ("log", "hello"), ("error", "boom")]
+
+            def get_nowait(self):
+                if self.items:
+                    return self.items.pop(0)
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
+        dummy = SimpleNamespace(
+            _solver_process=Process(),
+            _solver_queue=Queue(),
+            _record_solver_progress=mock.Mock(),
+            _append_solver_log_text=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=DummyVar(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dummy, cancel_queue_thread=cancel_queue_thread
+        )
+
+        OPLIDE._poll_solver(dummy, operation)
+
+        dummy._record_solver_progress.assert_called_once_with({"runtime": 1})
+        dummy._append_solver_log_text.assert_called_once_with("hello")
+        dummy._finish_solver_progress.assert_called_once_with(status="failed")
+        dummy._append_output.assert_called_once_with("\nError:\nboom\n", "s1")
+        self.assertEqual(dummy.status_var.value, "Error running model")
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
+
+    def test_poll_solver_solve_and_explain_skips_failed_solution(self):
+        """Solve-and-explain success path skips GenAI explanation when solver output is unsuccessful."""
+
+        class Process:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        class Queue:
+            def __init__(self):
+                self.items = [("success", {"status": "INFEASIBLE"})]
+
+            def get_nowait(self):
+                if self.items:
+                    return self.items.pop(0)
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation(
+            "solve", "Solve", "s1", solver_choice="gurobi", explain_after_solve=True
+        )
+        dummy = SimpleNamespace(
+            _solver_process=Process(),
+            _solver_queue=Queue(),
+            _set_run_menu_running=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _append_output=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dummy, cancel_queue_thread=cancel_queue_thread
+        )
+
+        OPLIDE._poll_solver(dummy, operation)
+
+        dummy._display_solve_results.assert_called_once_with({"status": "INFEASIBLE"}, session_id="s1", solver_choice="gurobi")
+        dummy._append_output.assert_called_once_with(
+            "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n",
+            "s1",
+        )
+        self.assertEqual(dummy._finish_foreground_operation.call_args_list, [mock.call(operation), mock.call(operation)])
+
+    def test_poll_solver_solve_and_explain_success_starts_feedback_thread(self):
+        """Successful solve-and-explain starts the asynchronous feedback worker and defers operation finish."""
+
+        class Process:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        class Queue:
+            def __init__(self):
+                self.items = [("success", {"status": "OPTIMAL", "solution": {"x": 1}})]
+
+            def get_nowait(self):
+                if self.items:
+                    return self.items.pop(0)
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        started = []
+
+        class ThreadFactory:
+            def __init__(self, target, daemon):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                started.append(self)
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation(
+            "solve",
+            "Solve",
+            "s1",
+            solver_choice="gurobi",
+            model_file="m.mod",
+            data_file="d.dat",
+            explain_after_solve=True,
+        )
+        dummy = SimpleNamespace(
+            _solver_process=Process(),
+            _solver_queue=Queue(),
+            _set_run_menu_running=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            genai_provider="openai",
+            genai_model="model",
+        )
+        dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dummy, cancel_queue_thread=cancel_queue_thread
+        )
+
+        with mock.patch.object(
+            pyopl_ide_bootstrap.threading, "Thread", side_effect=lambda target, daemon: ThreadFactory(target, daemon)
+        ):
+            OPLIDE._poll_solver(dummy, operation)
+
+        dummy._display_solve_results.assert_called_once()
+        dummy._finish_foreground_operation.assert_not_called()
+        self.assertEqual(len(started), 1)
+        self.assertTrue(started[0].daemon)
 
     def test_solver_progress_recording_trimming_and_stats(self):
         """Solver progress samples compute gap, trim rolling history, and update status values."""
