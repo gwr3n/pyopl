@@ -3,6 +3,8 @@ from collections import defaultdict
 
 from pyopl.gurobi_codegen import EPS, GurobiCodeGenerator
 from pyopl.pyopl_core import (
+    OPLCompiler,
+    SemanticError,
     _append_list_item,
     _coerce_float_set_element,
     _coerce_int_set_element,
@@ -18,8 +20,6 @@ from pyopl.pyopl_core import (
     _prepend_list_item,
     _string_label_value_pair,
     _unquote_string_literal,
-    OPLCompiler,
-    SemanticError,
 )
 from pyopl.scipy_codegen import SciPyCodeGenerator
 from pyopl.scipy_codegen_base import SciPyCodeGeneratorBase
@@ -109,7 +109,11 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
     def test_scipy_codegen_factory_rejects_unknown_mode(self):
-        ast = {"declarations": [], "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}}, "constraints": []}
+        ast = {
+            "declarations": [],
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+            "constraints": [],
+        }
 
         with self.assertRaisesRegex(ValueError, "Unknown mode: dense"):
             SciPyCodeGenerator(ast, mode="dense")
@@ -143,7 +147,10 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen = GurobiCodeGenerator({"declarations": [], "objective": {}, "constraints": []}, data_dict={"p": 9})
 
         self.assertEqual(gen._compute_label_expr({"name": "Cap"}), "'Cap'")
-        self.assertEqual(gen._compute_label_expr({"name": "Cap", "iterators": ["i", "j"]}), "('Cap' + '[' + ','.join(str(v) for v in [i, j]) + ']')")
+        self.assertEqual(
+            gen._compute_label_expr({"name": "Cap", "iterators": ["i", "j"]}),
+            "('Cap' + '[' + ','.join(str(v) for v in [i, j]) + ']')",
+        )
         self.assertEqual(gen._traverse_expression({"type": "number", "value": 7}, {}), "7")
         self.assertEqual(gen._traverse_expression({"type": "boolean_literal", "value": True}, {}), "1")
         self.assertEqual(gen._traverse_expression({"type": "boolean_literal", "value": False}, {}), "0")
@@ -201,8 +208,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
         self.assertIsInstance(gen._not_found_error("parameter", "p"), SemanticError)
         self.assertEqual(str(gen._not_found_error("parameter", "p")), "Semantic Error: Not found: parameter 'p'")
-        self.assertEqual(str(gen._unsupported_type_error("declaration", "tuple")), "Semantic Error: Semantic Error: Unsupported declaration type: tuple")
-        self.assertEqual(str(gen._unsupported_operator_error("constraint", "~")), "Semantic Error: Semantic Error: Unsupported operator in constraint: ~")
+        self.assertEqual(
+            str(gen._unsupported_type_error("declaration", "tuple")),
+            "Semantic Error: Semantic Error: Unsupported declaration type: tuple",
+        )
+        self.assertEqual(
+            str(gen._unsupported_operator_error("constraint", "~")),
+            "Semantic Error: Semantic Error: Unsupported operator in constraint: ~",
+        )
 
     def test_scipy_csc_indentation_and_symbolic_traversal(self):
         gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
@@ -213,7 +226,12 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen.tuple_types = {"Arc": [{"name": "from"}, {"name": "to"}]}
         expr = {
             "type": "conditional",
-            "condition": {"type": "binop", "op": ">=", "left": {"type": "name", "value": "x"}, "right": {"type": "number", "value": 0}},
+            "condition": {
+                "type": "binop",
+                "op": ">=",
+                "left": {"type": "name", "value": "x"},
+                "right": {"type": "number", "value": 0},
+            },
             "then": {"type": "indexed_name", "name": "cost", "dimensions": [{"type": "name_reference_index", "name": "i"}]},
             "else": {"type": "uminus", "value": {"type": "number", "value": 1}},
         }
@@ -222,7 +240,10 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             "base": {"type": "name", "value": "arc", "sem_type": "Arc"},
             "field": "to",
         }
-        tuple_expr = {"type": "tuple_literal", "elements": [{"type": "string_literal", "value": "A"}, {"type": "number_literal_index", "value": 2}]}
+        tuple_expr = {
+            "type": "tuple_literal",
+            "elements": [{"type": "string_literal", "value": "A"}, {"type": "number_literal_index", "value": 2}],
+        }
 
         self.assertEqual(gen._traverse_expression(expr), "(cost[i] if ((x >= 0)) else -(1))")
         self.assertEqual(gen._traverse_expression(field_expr), "arc[1]")
@@ -298,9 +319,16 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen._var_bounds_safe(_name("x")), (0.0, None))
         self.assertEqual(gen._var_bounds_safe(_num(7)), (7.0, 7.0))
 
-        expr = {"type": "binop", "op": "+", "left": _name("x"), "right": {"type": "binop", "op": "*", "left": _num(-2), "right": _name("b", "boolean")}}
+        expr = {
+            "type": "binop",
+            "op": "+",
+            "left": _name("x"),
+            "right": {"type": "binop", "op": "*", "left": _num(-2), "right": _name("b", "boolean")},
+        }
         self.assertEqual(gen._linear_bounds_safe(expr), (0.0, 5.0))
-        self.assertEqual(gen._linear_bounds_safe({"type": "binop", "op": "-", "left": _name("x"), "right": _name("y")}), (-2.0, 8.0))
+        self.assertEqual(
+            gen._linear_bounds_safe({"type": "binop", "op": "-", "left": _name("x"), "right": _name("y")}), (-2.0, 8.0)
+        )
 
         comp = _cmp({"type": "binop", "op": "-", "left": _name("x"), "right": _name("y")}, "<=", _num(1))
         self.assertEqual(gen._big_m_for_comparison(comp), 11.0)
@@ -328,7 +356,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen2 = SciPyCSCCodeGenerator({"declarations": []})
         gen2.var_names = ["x", "y"]
         gen2.var_indices = {"x": 0, "y": 1}
-        gen2._eval_expr = lambda node, env=None: ({node["value"]: 1.0}, 0.0) if node.get("type") == "name" else ({}, float(node["value"]))
+        gen2._eval_expr = lambda node, env=None: (
+            ({node["value"]: 1.0}, 0.0) if node.get("type") == "name" else ({}, float(node["value"]))
+        )
         gen2._accumulate_sum_to_dict = lambda node, env=None, sign=1: gen2._eval_expr(node, env)
         gen2._expand_and([_cmp(_name("x"), "==", _num(1)), _cmp(_name("x"), "<=", _num(3)), _cmp(_name("y"), ">=", _num(2))])
         self.assertEqual(len(gen2.A_eq), 1)
@@ -338,7 +368,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen = SciPyCSCCodeGenerator({"declarations": []})
         gen.var_indices = {"x_1": 0, "x_2": 1, "z": 2}
         gen._iterate_iterators_dynamic = lambda iterators, env: [({"i": 1}, (1,)), ({"i": 2}, (2,))]
-        gen._eval_expr = lambda expr, env=None: ({f"x_{env['i']}": 1.5}, env["i"]) if expr.get("type") == "indexed_name" else ({"z": 2.0}, 4.0)
+        gen._eval_expr = lambda expr, env=None: (
+            ({f"x_{env['i']}": 1.5}, env["i"]) if expr.get("type") == "indexed_name" else ({"z": 2.0}, 4.0)
+        )
         sum_expr = {"type": "sum", "iterators": [{"iterator": "i"}], "expression": {"type": "indexed_name", "name": "x"}}
         coef = defaultdict(float)
         const = [0.0]
@@ -432,13 +464,56 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
     def test_gurobi_data_declarations_cover_flattening_and_shape_errors(self):
         ast = {
             "declarations": [
-                {"type": "range_declaration_inline", "name": "T", "start": _num(2), "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)}},
+                {
+                    "type": "range_declaration_inline",
+                    "name": "T",
+                    "start": _num(2),
+                    "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)},
+                },
                 {"type": "typed_set", "base_type": "string", "name": "Products", "value": ["P1", "P2"]},
-                {"type": "parameter_external_indexed", "name": "by_range", "dimensions": [{"type": "named_range_dimension", "name": "T", "start": _num(2), "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)}}]},
-                {"type": "parameter_external_indexed", "name": "by_set", "dimensions": [{"type": "named_set_dimension", "name": "Products"}]},
-                {"type": "parameter_external_indexed", "name": "matrix", "dimensions": [{"type": "named_set_dimension", "name": "Products"}, {"type": "named_range_dimension", "name": "T", "start": _num(2), "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)}}]},
-                {"type": "parameter_external_indexed", "name": "grid", "dimensions": [{"type": "named_set_dimension", "name": "Products"}, {"type": "named_set_dimension", "name": "Products"}]},
-                {"type": "parameter_external_indexed", "name": "flat", "dimensions": [{"type": "named_set_dimension", "name": "Products"}]},
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "by_range",
+                    "dimensions": [
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": _num(2),
+                            "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)},
+                        }
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "by_set",
+                    "dimensions": [{"type": "named_set_dimension", "name": "Products"}],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "matrix",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Products"},
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": _num(2),
+                            "end": {"type": "binop", "op": "+", "left": _num(3), "right": _num(1)},
+                        },
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "grid",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Products"},
+                        {"type": "named_set_dimension", "name": "Products"},
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "flat",
+                    "dimensions": [{"type": "named_set_dimension", "name": "Products"}],
+                },
             ]
         }
         data = {
@@ -469,8 +544,20 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                 {"type": "typed_set", "base_type": "string", "name": "Products", "value": ["P1", "P2"]},
                 {"type": "range_declaration_inline", "name": "T", "start": _num(1), "end": _num(2)},
                 {"type": "tuple_array_external", "name": "nodes", "tuple_type": "Node", "index_set": "Products"},
-                {"type": "parameter_external_indexed", "name": "cube", "dimensions": [{"type": "named_set_dimension", "name": "Products"}, {"type": "named_range_dimension", "name": "T"}, {"type": "named_set_dimension", "name": "Products"}]},
-                {"type": "parameter_external_indexed", "name": "by_range", "dimensions": [{"type": "named_range_dimension", "name": "T"}]},
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "cube",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Products"},
+                        {"type": "named_range_dimension", "name": "T"},
+                        {"type": "named_set_dimension", "name": "Products"},
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "by_range",
+                    "dimensions": [{"type": "named_range_dimension", "name": "T"}],
+                },
             ]
         }
         data = {
@@ -495,7 +582,12 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         ast = {
             "declarations": [
                 {"type": "tuple_type", "name": "Pair", "fields": [{"name": "id"}, {"name": "weight"}]},
-                {"type": "set_of_tuples", "name": "Pairs", "tuple_type": "Pair", "value": [{"elements": ["A", 2]}, {"elements": ["B", 3]}]},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Pairs",
+                    "tuple_type": "Pair",
+                    "value": [{"elements": ["A", 2]}, {"elements": ["B", 3]}],
+                },
                 {"type": "range_declaration_inline", "name": "R", "start": _num(1), "end": _num(2)},
                 {"type": "parameter_inline", "var_type": "float", "name": "base", "value": 4},
                 {"type": "parameter_inline", "var_type": "float", "name": "arr", "value": [10, 20, 30]},
@@ -517,7 +609,11 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                     "name": "logic_value",
                     "expression": {
                         "type": "or",
-                        "left": {"type": "and", "left": {"type": "boolean_literal", "value": True}, "right": {"type": "not", "value": {"type": "boolean_literal", "value": False}}},
+                        "left": {
+                            "type": "and",
+                            "left": {"type": "boolean_literal", "value": True},
+                            "right": {"type": "not", "value": {"type": "boolean_literal", "value": False}},
+                        },
                         "right": _cmp(_num(1), "!=", _num(1)),
                     },
                 },
@@ -525,21 +621,54 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                     "type": "parameter_inline_indexed_expr",
                     "var_type": "float",
                     "name": "computed",
-                    "dimensions": [{"type": "named_set_dimension", "name": "Pairs"}, {"type": "named_range_dimension", "name": "R"}],
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Pairs"},
+                        {"type": "named_range_dimension", "name": "R"},
+                    ],
                     "iterators": [
                         {"iterator": "p", "range": {"type": "named_set", "name": "Pairs"}},
                         {"iterator": "i", "range": {"type": "named_range", "name": "R"}},
                     ],
                     "expression": {
                         "type": "conditional",
-                        "condition": {"type": "binop", "op": ">=", "left": {"type": "field_access", "base": _name("p", "Pair"), "field": "weight"}, "right": _num(3)},
+                        "condition": {
+                            "type": "binop",
+                            "op": ">=",
+                            "left": {"type": "field_access", "base": _name("p", "Pair"), "field": "weight"},
+                            "right": _num(3),
+                        },
                         "then": {
                             "type": "binop",
                             "op": "+",
-                            "left": {"type": "indexed_name", "name": "arr", "dimensions": [{"type": "parenthesized_expression", "expression": {"type": "binop", "op": "+", "left": {"type": "name_reference_index", "name": "i"}, "right": {"type": "number_literal_index", "value": 1}}}]},
-                            "right": {"type": "sum", "iterators": [{"iterator": "j", "range": {"type": "range_specifier", "start": _num(1), "end": _num(2)}}], "index_constraint": _cmp(_name("j"), "<=", _name("i")), "expression": _name("j")},
+                            "left": {
+                                "type": "indexed_name",
+                                "name": "arr",
+                                "dimensions": [
+                                    {
+                                        "type": "parenthesized_expression",
+                                        "expression": {
+                                            "type": "binop",
+                                            "op": "+",
+                                            "left": {"type": "name_reference_index", "name": "i"},
+                                            "right": {"type": "number_literal_index", "value": 1},
+                                        },
+                                    }
+                                ],
+                            },
+                            "right": {
+                                "type": "sum",
+                                "iterators": [
+                                    {"iterator": "j", "range": {"type": "range_specifier", "start": _num(1), "end": _num(2)}}
+                                ],
+                                "index_constraint": _cmp(_name("j"), "<=", _name("i")),
+                                "expression": _name("j"),
+                            },
                         },
-                        "else": {"type": "max_agg", "iterators": [{"iterator": "q", "range": {"type": "named_set", "name": "Pairs"}}], "expression": {"type": "field_access", "base": _name("q", "Pair"), "field": "weight"}},
+                        "else": {
+                            "type": "max_agg",
+                            "iterators": [{"iterator": "q", "range": {"type": "named_set", "name": "Pairs"}}],
+                            "expression": {"type": "field_access", "base": _name("q", "Pair"), "field": "weight"},
+                        },
                     },
                 },
             ]
@@ -561,7 +690,16 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
     def test_core_computed_parameter_error_branches(self):
         compiler = OPLCompiler()
-        ast = {"declarations": [{"type": "parameter_inline_expr", "var_type": "float", "name": "bad", "expression": {"type": "funcall", "name": "log", "args": [_num(1)]}}]}
+        ast = {
+            "declarations": [
+                {
+                    "type": "parameter_inline_expr",
+                    "var_type": "float",
+                    "name": "bad",
+                    "expression": {"type": "funcall", "name": "log", "args": [_num(1)]},
+                }
+            ]
+        }
 
         with self.assertRaisesRegex(SemanticError, "Unsupported function 'log'"):
             compiler._materialize_computed_parameters(ast, {})
@@ -569,7 +707,18 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         ast = {
             "declarations": [
                 {"type": "range_declaration_inline", "name": "R", "start": _num(1), "end": _num(1)},
-                {"type": "parameter_inline_indexed_expr", "var_type": "float", "name": "bad_idx", "dimensions": [{"type": "named_range_dimension", "name": "R"}], "iterators": [{"iterator": "i", "range": {"type": "named_range", "name": "R"}}], "expression": {"type": "indexed_name", "name": "arr", "dimensions": [{"type": "string_literal", "value": "x"}]}},
+                {
+                    "type": "parameter_inline_indexed_expr",
+                    "var_type": "float",
+                    "name": "bad_idx",
+                    "dimensions": [{"type": "named_range_dimension", "name": "R"}],
+                    "iterators": [{"iterator": "i", "range": {"type": "named_range", "name": "R"}}],
+                    "expression": {
+                        "type": "indexed_name",
+                        "name": "arr",
+                        "dimensions": [{"type": "string_literal", "value": "x"}],
+                    },
+                },
             ]
         }
         with self.assertRaisesRegex(SemanticError, "requires integer indices"):
@@ -589,14 +738,27 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen._collected_lbs = {"x": 1.0, "y": -2.0}
         gen._collected_ubs = {"x": 4.0, "y": 3.0}
 
-        self.assertEqual(gen._linear_bounds_safe({"type": "binop", "op": "+", "left": _name("x"), "right": _num(2)}), (3.0, 6.0))
-        self.assertEqual(gen._linear_bounds_safe({"type": "binop", "op": "*", "left": _num(-2), "right": _name("b", "boolean")}), (-2.0, -0.0))
+        self.assertEqual(
+            gen._linear_bounds_safe({"type": "binop", "op": "+", "left": _name("x"), "right": _num(2)}), (3.0, 6.0)
+        )
+        self.assertEqual(
+            gen._linear_bounds_safe({"type": "binop", "op": "*", "left": _num(-2), "right": _name("b", "boolean")}),
+            (-2.0, -0.0),
+        )
         self.assertIsNone(gen._linear_bounds_safe({"type": "binop", "op": "*", "left": _name("x"), "right": _name("y")}))
 
         implication = {
             "type": "implication_constraint",
-            "antecedent": {"type": "and", "left": _cmp(_name("x"), ">=", _num(1)), "right": {"type": "not", "value": _cmp(_name("y"), "<=", _num(0))}},
-            "consequent": {"type": "or", "left": _cmp(_name("x"), "<=", _num(4)), "right": {"type": "boolean_literal", "value": True}},
+            "antecedent": {
+                "type": "and",
+                "left": _cmp(_name("x"), ">=", _num(1)),
+                "right": {"type": "not", "value": _cmp(_name("y"), "<=", _num(0))},
+            },
+            "consequent": {
+                "type": "or",
+                "left": _cmp(_name("x"), "<=", _num(4)),
+                "right": {"type": "boolean_literal", "value": True},
+            },
         }
         gen._constraint_implication_constraint(implication, "c_imp", {})
         code = "\n".join(gen.gurobi_code_lines)

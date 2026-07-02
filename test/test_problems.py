@@ -22,8 +22,9 @@ def setUpModule():
 
 # Import pyopl interface
 try:
-    import pyopl
     import gurobipy  # noqa: F401
+
+    import pyopl
 
     GUROBI_AVAILABLE = True
 except ImportError:

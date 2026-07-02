@@ -1,5 +1,3 @@
-import io
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -50,6 +48,7 @@ class DummyText:
 class TestIDEUtilitiesMore(unittest.TestCase):
     def test_queue_text_writer_buffers_lines_and_ignores_queue_errors(self):
         """Solver-process text is forwarded line-by-line and queue failures are non-fatal."""
+
         class DummyQueue:
             def __init__(self):
                 self.items = []
@@ -79,9 +78,10 @@ class TestIDEUtilitiesMore(unittest.TestCase):
         redirector._restore_fds()
         self.assertFalse(redirector._active)
 
-        with mock.patch.object(pyopl_ide_bootstrap.os, "dup2") as dup2_mock, mock.patch.object(
-            pyopl_ide_bootstrap.os, "close"
-        ) as close_mock:
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.os, "dup2") as dup2_mock,
+            mock.patch.object(pyopl_ide_bootstrap.os, "close") as close_mock,
+        ):
             redirector._saved_fds = {1: 10, 2: 11}
             redirector._active = True
             redirector._restore_fds()
@@ -97,6 +97,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
     def test_find_and_toggle_run_menu_entry(self):
         """The Run menu item is found by label and toggled between solve and stop states."""
+
         class Menu:
             def __init__(self):
                 self.labels = ["Open", "Solve Model", "Other"]
@@ -131,6 +132,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
     def test_foreground_operation_lifecycle_and_editor_locking(self):
         """Foreground operations create an output session, lock editors, and block competing actions."""
+
         class Widget:
             def __init__(self):
                 self.state = "normal"
@@ -180,6 +182,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
     def test_selected_output_session_text_and_prompt_append(self):
         """GenAI prompt helpers use the selected output session and preserve attachment payloads."""
+
         class Listbox:
             def __init__(self, selection):
                 self.selection = selection
@@ -200,7 +203,9 @@ class TestIDEUtilitiesMore(unittest.TestCase):
         dummy._viewing_output_session_id = "s1"
         self.assertEqual(OPLIDE._get_selected_output_session_text(dummy), "first")
 
-        self.assertEqual(OPLIDE._append_output_to_prompt_input(dummy, "prompt", "out"), "prompt\n\n<session_output>\nout\n</session_output>")
+        self.assertEqual(
+            OPLIDE._append_output_to_prompt_input(dummy, "prompt", "out"), "prompt\n\n<session_output>\nout\n</session_output>"
+        )
         merged = OPLIDE._append_output_to_prompt_input(dummy, {"text": "prompt", "images": [1]}, "out")
         self.assertEqual(merged["images"], [1])
         self.assertIn("<session_output>", merged["text"])
@@ -290,6 +295,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
     def test_redraw_solver_progress_chart_waiting_line_and_points(self):
         """Progress chart rendering covers the waiting state and LB/UB line drawing path."""
+
         class Canvas:
             def __init__(self):
                 self.calls = []

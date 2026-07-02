@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import logging
 import tempfile
 import unittest
@@ -9,7 +10,10 @@ _ROOT_LOGGER = logging.getLogger()
 _ROOT_LOGGER_LEVEL = _ROOT_LOGGER.level
 _ROOT_LOGGER_HANDLERS = list(_ROOT_LOGGER.handlers)
 
-from pyopl import _pyopl_mcp, _rhetor_mcp, pyopl_mcp, rhetor_mcp
+_pyopl_mcp = importlib.import_module("pyopl._pyopl_mcp")
+_rhetor_mcp = importlib.import_module("pyopl._rhetor_mcp")
+pyopl_mcp = importlib.import_module("pyopl.pyopl_mcp")
+rhetor_mcp = importlib.import_module("pyopl.rhetor_mcp")
 
 _ROOT_LOGGER.handlers[:] = _ROOT_LOGGER_HANDLERS
 _ROOT_LOGGER.setLevel(_ROOT_LOGGER_LEVEL)
@@ -121,9 +125,12 @@ class TestRhetorMCP(unittest.TestCase):
         async def fake_async(prompt, model_file, data_file, **kwargs):
             return {"prompt": prompt, "model_file": model_file, "data_file": data_file, "kwargs": kwargs}
 
-        with patch.object(_rhetor_mcp, "_try_import_graphchain", return_value=fake_async), patch.object(
-            _rhetor_mcp, "_run_coro_in_thread", side_effect=lambda factory: asyncio.run(factory())
-        ) as coro_runner:
+        with (
+            patch.object(_rhetor_mcp, "_try_import_graphchain", return_value=fake_async),
+            patch.object(
+                _rhetor_mcp, "_run_coro_in_thread", side_effect=lambda factory: asyncio.run(factory())
+            ) as coro_runner,
+        ):
             result = _rhetor_mcp._generate_with_best_available_backend(
                 "prompt",
                 "model.mod",
@@ -140,9 +147,10 @@ class TestRhetorMCP(unittest.TestCase):
         coro_runner.assert_called_once()
 
     def test_generate_falls_back_to_sync_backend(self):
-        with patch.object(_rhetor_mcp, "_try_import_graphchain", return_value=None), patch.object(
-            _rhetor_mcp, "_run_in_thread", return_value={"stats": True}
-        ) as runner:
+        with (
+            patch.object(_rhetor_mcp, "_try_import_graphchain", return_value=None),
+            patch.object(_rhetor_mcp, "_run_in_thread", return_value={"stats": True}) as runner,
+        ):
             result = _rhetor_mcp._generate_with_best_available_backend(
                 "prompt",
                 "model.mod",
@@ -176,9 +184,11 @@ class TestRhetorMCP(unittest.TestCase):
         with patch.object(_rhetor_mcp, "LLMProvider", object()):
             self.assertEqual(_rhetor_mcp.list_providers(), ["openai", "google", "ollama"])
 
-        with patch.object(_rhetor_mcp, "list_openai_models", return_value=["gpt"]), patch.object(
-            _rhetor_mcp, "list_gemini_models", return_value=["gemini"]
-        ), patch.object(_rhetor_mcp, "list_ollama_models", return_value=["llama"]):
+        with (
+            patch.object(_rhetor_mcp, "list_openai_models", return_value=["gpt"]),
+            patch.object(_rhetor_mcp, "list_gemini_models", return_value=["gemini"]),
+            patch.object(_rhetor_mcp, "list_ollama_models", return_value=["llama"]),
+        ):
             self.assertEqual(_rhetor_mcp.list_models("openai"), ["gpt"])
             self.assertEqual(_rhetor_mcp.list_models("google", prefix="gem"), ["gemini"])
             self.assertEqual(_rhetor_mcp.list_models("ollama"), ["llama"])
@@ -203,9 +213,11 @@ class TestRhetorMCP(unittest.TestCase):
         run_mock.assert_called_once_with()
 
     def test_insight_tool_success_and_error_paths(self):
-        with patch.object(_rhetor_mcp, "_generate_with_best_available_backend", return_value={"generated": True}) as gen_mock, patch.object(
-            _rhetor_mcp, "solve", return_value={"status": "OPTIMAL", "objective_value": 1}
-        ) as solve_mock, patch.object(_rhetor_mcp, "_ask_for_feedback", return_value={"summary": "Looks good"}) as feedback_mock:
+        with (
+            patch.object(_rhetor_mcp, "_generate_with_best_available_backend", return_value={"generated": True}) as gen_mock,
+            patch.object(_rhetor_mcp, "solve", return_value={"status": "OPTIMAL", "objective_value": 1}) as solve_mock,
+            patch.object(_rhetor_mcp, "_ask_for_feedback", return_value={"summary": "Looks good"}) as feedback_mock,
+        ):
             result = _rhetor_mcp.insight_tool("Make a model", provider="openai", llm_model="m", iterations=2, solver="highs")
 
         self.assertTrue(Path(result["model_path"]).parent.exists())
@@ -218,9 +230,11 @@ class TestRhetorMCP(unittest.TestCase):
         solve_mock.assert_called_once()
         feedback_mock.assert_called_once()
 
-        with patch.object(_rhetor_mcp, "_generate_with_best_available_backend", return_value={"generated": True}), patch.object(
-            _rhetor_mcp, "solve", side_effect=RuntimeError("solve failed")
-        ), patch.object(_rhetor_mcp, "_ask_for_feedback", side_effect=RuntimeError("feedback failed")):
+        with (
+            patch.object(_rhetor_mcp, "_generate_with_best_available_backend", return_value={"generated": True}),
+            patch.object(_rhetor_mcp, "solve", side_effect=RuntimeError("solve failed")),
+            patch.object(_rhetor_mcp, "_ask_for_feedback", side_effect=RuntimeError("feedback failed")),
+        ):
             result = _rhetor_mcp.insight_tool("Make a model")
 
         self.assertIn("Error solving generated model", result["results"]["error"])
