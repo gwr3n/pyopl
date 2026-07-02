@@ -6,6 +6,24 @@ from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 class TestBoolCompositeAuxReuse(unittest.TestCase):
+    def _dump_state(self, label, gen):
+        if not os.environ.get("PYOPL_DEBUG_REUSE") and "FAIL" not in label:
+            return
+        print(f"\n[DEBUG] {label} var_names: {gen.var_names}")
+        print(f"[DEBUG] {label} var_indices: {gen.var_indices}")
+        print(f"[DEBUG] {label} _bool_subtree_cache: {getattr(gen, '_bool_subtree_cache', None)}")
+        print(f"[DEBUG] {label} A_eq ({len(gen.A_eq)} rows):")
+        for i, row in enumerate(gen.A_eq):
+            print(f"  [DEBUG] A_eq[{i}]: {row}")
+        print(f"[DEBUG] {label} b_eq: {getattr(gen, 'b_eq', None)}")
+        print(f"[DEBUG] {label} A_ub ({len(gen.A_ub)} rows):")
+        for i, row in enumerate(gen.A_ub):
+            print(f"  [DEBUG] A_ub[{i}]: {row}")
+        print(f"[DEBUG] {label} b_ub: {getattr(gen, 'b_ub', None)}")
+        constraints = getattr(gen, "_debug_ast", {}).get("constraints", [])
+        for idx, c in enumerate(constraints):
+            print(f"  [DEBUG] AST constraint[{idx}]: {c}")
+
     def gen(self, src: str):
         lexer = OPLLexer()
         parser = OPLParser()
@@ -28,24 +46,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
         """
         gen = self.gen(opl)
 
-        # Debug dump (always emit so we can see structure even on success)
-        def _dump_state(label):
-            if not os.environ.get("PYOPL_DEBUG_REUSE") and "FAIL" not in label:
-                return
-            print(f"\n[DEBUG] {label} var_names: {gen.var_names}")
-            print(f"[DEBUG] {label} var_indices: {gen.var_indices}")
-            print(f"[DEBUG] {label} _bool_subtree_cache: {getattr(gen, '_bool_subtree_cache', None)}")
-            print(f"[DEBUG] {label} A_eq ({len(gen.A_eq)} rows):")
-            for i, row in enumerate(gen.A_eq):
-                print(f"  [DEBUG] A_eq[{i}]: {row}")
-            print(f"[DEBUG] {label} b_eq: {getattr(gen, 'b_eq', None)}")
-            print(f"[DEBUG] {label} A_ub ({len(gen.A_ub)} rows):")
-            for i, row in enumerate(gen.A_ub):
-                print(f"  [DEBUG] A_ub[{i}]: {row}")
-            print(f"[DEBUG] {label} b_ub: {getattr(gen, 'b_ub', None)}")
-            constraints = gen._debug_ast.get("constraints", [])
-            for idx, c in enumerate(constraints):
-                print(f"  [DEBUG] AST constraint[{idx}]: {c}")
+        self._dump_state("AND_REUSE", gen)
 
         # Collect auxiliary boolean variables introduced (_baux*)
         baux_vars = [v for v in gen.var_indices if v.startswith("_baux")]
@@ -69,9 +70,9 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
                     if abs(row[vidx]) == 1:
                         candidate = v
                         break
-        self.assertIsNotNone(candidate, "Failed to locate AND composite auxiliary tied to b1")
         if candidate is None:
-            _dump_state("AND_REUSE_FAIL")
+            self._dump_state("AND_REUSE_FAIL", gen)
+        self.assertIsNotNone(candidate, "Failed to locate AND composite auxiliary tied to b1")
         z_idx = gen.var_indices[candidate]
         # Count ties for b1 and b2
         ties_b1 = sum(1 for row in gen.A_eq if abs(row[b1_idx]) == 1 and abs(row[z_idx]) == 1)
@@ -90,23 +91,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
         """
         gen = self.gen(opl)
 
-        def _dump_state(label):
-            if not os.environ.get("PYOPL_DEBUG_REUSE") and "FAIL" not in label:
-                return
-            print(f"\n[DEBUG] {label} var_names: {gen.var_names}")
-            print(f"[DEBUG] {label} var_indices: {gen.var_indices}")
-            print(f"[DEBUG] {label} _bool_subtree_cache: {getattr(gen, '_bool_subtree_cache', None)}")
-            print(f"[DEBUG] {label} A_eq ({len(gen.A_eq)} rows):")
-            for i, row in enumerate(gen.A_eq):
-                print(f"  [DEBUG] A_eq[{i}]: {row}")
-            print(f"[DEBUG] {label} b_eq: {getattr(gen, 'b_eq', None)}")
-            print(f"[DEBUG] {label} A_ub ({len(gen.A_ub)} rows):")
-            for i, row in enumerate(gen.A_ub):
-                print(f"  [DEBUG] A_ub[{i}]: {row}")
-            print(f"[DEBUG] {label} b_ub: {getattr(gen, 'b_ub', None)}")
-            constraints = gen._debug_ast.get("constraints", [])
-            for idx, c in enumerate(constraints):
-                print(f"  [DEBUG] AST constraint[{idx}]: {c}")
+        self._dump_state("OR_REUSE", gen)
 
         baux_vars = [v for v in gen.var_indices if v.startswith("_baux")]
         # Expect at most two auxiliaries: one for (y==0) negation and one for OR node.
@@ -123,7 +108,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
                 candidate = v
                 break
         if candidate is None:
-            _dump_state("OR_REUSE_FAIL")
+            self._dump_state("OR_REUSE_FAIL", gen)
         self.assertIsNotNone(
             candidate,
             "Failed to locate OR composite auxiliary reused for both equalities",
@@ -143,16 +128,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
         """
         gen = self.gen(opl)
 
-        def _dump_state(label):
-            if not os.environ.get("PYOPL_DEBUG_REUSE") and "FAIL" not in label:
-                return
-            print(f"\n[DEBUG] {label} var_names: {gen.var_names}")
-            print(f"[DEBUG] {label} var_indices: {gen.var_indices}")
-            print(f"[DEBUG] {label} _bool_subtree_cache: {getattr(gen, '_bool_subtree_cache', None)}")
-            print(f"[DEBUG] {label} A_eq ({len(gen.A_eq)} rows):")
-            for i, row in enumerate(gen.A_eq):
-                print(f"  [DEBUG] A_eq[{i}]: {row}")
-            print(f"[DEBUG] {label} b_eq: {getattr(gen, 'b_eq', None)}")
+        self._dump_state("NESTED_REUSE", gen)
 
         # helper to find shared aux for a pair of booleans
         def shared_aux(b_left, b_right):
@@ -169,14 +145,14 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
 
         and_aux = shared_aux("b1", "b2")
         if and_aux is None:
-            _dump_state("NESTED_AND_REUSE_FAIL")
+            self._dump_state("NESTED_AND_REUSE_FAIL", gen)
         self.assertIsNotNone(
             and_aux,
             "Nested parentheses AND reuse failed (expected shared auxiliary for b1,b2)",
         )
         or_aux = shared_aux("b3", "b4")
         if or_aux is None:
-            _dump_state("NESTED_OR_REUSE_FAIL")
+            self._dump_state("NESTED_OR_REUSE_FAIL", gen)
         self.assertIsNotNone(
             or_aux,
             "Nested parentheses OR reuse failed (expected shared auxiliary for b3,b4)",
@@ -195,15 +171,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
         """
         gen = self.gen(opl)
 
-        def _dump_state(label):
-            if not os.environ.get("PYOPL_DEBUG_REUSE") and "FAIL" not in label:
-                return
-            print(f"\n[DEBUG] {label} var_names: {gen.var_names}")
-            print(f"[DEBUG] {label} var_indices: {gen.var_indices}")
-            print(f"[DEBUG] {label} _bool_subtree_cache: {getattr(gen, '_bool_subtree_cache', None)}")
-            print(f"[DEBUG] {label} A_eq ({len(gen.A_eq)} rows):")
-            for i, row in enumerate(gen.A_eq):
-                print(f"  [DEBUG] A_eq[{i}]: {row}")
+        self._dump_state("MIXED_REUSE", gen)
 
         baux_vars = [v for v in gen.var_indices if v.startswith("_baux")]
         # Expected auxiliaries: at most one for (y==0) negation, one for AND, one for OR => <=3 total
@@ -223,7 +191,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
                 or_candidate = v
                 break
         if or_candidate is None:
-            _dump_state("MIXED_OR_REUSE_FAIL")
+            self._dump_state("MIXED_OR_REUSE_FAIL", gen)
         self.assertIsNotNone(
             or_candidate,
             "Failed to find shared OR auxiliary for duplicated AND disjunction",
