@@ -80,8 +80,9 @@ omit = [
   "genai_modelling.py",
   "examples.py",
   "_sparse_example.py",
-  "genai/*.py",
+  "test/*",
   "pyopl/__main__.py",
+  "pyopl/pyopl_ide_bootstrap.py",
 ]
 
 [tool.ruff]
