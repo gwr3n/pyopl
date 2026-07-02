@@ -74,6 +74,16 @@ exclude = '''
 max-line-length = 300
 extend-ignore = ["E203", "W503", "F811"]
 
+[tool.coverage.run]
+omit = [
+  "test_logger.py",
+  "genai_modelling.py",
+  "examples.py",
+  "_sparse_example.py",
+  "genai/*.py",
+  "pyopl/__main__.py",
+]
+
 [tool.ruff]
 line-length = 300
 target-version = "py39"
