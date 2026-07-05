@@ -325,7 +325,7 @@
       "required": ["type", "name", "args"],
       "properties": {
         "type": { "const": "funcall" },
-        "name": { "type": "string", "enum": ["sqrt"] },
+        "name": { "type": "string", "enum": ["abs", "ceil", "cos", "exp", "floor", "log", "round", "sin", "sqrt", "tan"] },
         "args": { "type": "array", "items": { "$ref": "#/$defs/Expression" }, "minItems": 1 },
         "sem_type": { "$ref": "#/$defs/SemType" }
       },

@@ -2461,6 +2461,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         # NEW: boolean literal for emitted Python expr
         elif t == "boolean_literal":
             return "True" if expr.get("value") else "False"
+        elif t == "funcall":
+            name = expr.get("name")
+            args = expr.get("args", [])
+            if len(args) == 1:
+                arg = self._emit_python_expr(args[0], env)
+                if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
+                    return f"math.{name}({arg})"
+                if name in {"abs", "round"}:
+                    return f"{name}({arg})"
+            return str(expr)
         # NEW: emit min/max for symbolic comments
         elif t in ("minl", "maxl"):
             args = expr.get("args", [])
@@ -2555,6 +2565,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         if t == "string_literal":  # <-- support in symbolic traversal
             return repr(expr.get("value"))
+
+        if t == "funcall":
+            name = expr.get("name")
+            args = expr.get("args", [])
+            if len(args) == 1:
+                arg = self._traverse_expression(args[0])
+                if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
+                    return f"math.{name}({arg})"
+                if name in {"abs", "round"}:
+                    return f"{name}({arg})"
+            return ""
 
         # NEW: symbolic minl/maxl
         if t in ("minl", "maxl"):
@@ -2745,6 +2766,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def generate_code(self) -> str:
         self._add_code_line("import numpy as np")
+        self._add_code_line("import math")
         self._add_code_line("import time")
         self._add_code_line("from scipy.optimize import linprog")
         self._add_code_line("from scipy.sparse import csr_matrix")

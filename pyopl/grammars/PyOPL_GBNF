@@ -211,9 +211,9 @@ primary ::=
     | max_aggregate
     | function_call
 
-// Function calls: sqrt(arg), maxl(a,...), minl(a,...)
+// Function calls: unary algebraic functions plus maxl/minl
 function_call ::=
-      "sqrt" _ "(" _ expression _ ")"
+  ("sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "abs" | "floor" | "ceil" | "round") _ "(" _ expression _ ")"
     | "maxl" _ "(" _ arg_list _ ")"     // require non-empty
     | "minl" _ "(" _ arg_list _ ")"     // require non-empty
 

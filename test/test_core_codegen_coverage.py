@@ -162,14 +162,18 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen = GurobiCodeGenerator({"declarations": [], "objective": {}, "constraints": []})
 
         sqrt_expr = {"type": "funcall", "name": "sqrt", "args": [{"type": "number", "value": 16}]}
+        abs_expr = {"type": "funcall", "name": "abs", "args": [{"type": "number", "value": -3}]}
+        log_expr = {"type": "funcall", "name": "log", "args": [{"type": "number", "value": 1}]}
         min_expr = {"type": "minl", "args": [{"type": "number", "value": 2}, {"type": "number", "value": 3}]}
         max_expr = {"type": "maxl", "args": [{"type": "number", "value": 2}, {"type": "number", "value": 3}]}
 
         self.assertEqual(gen._traverse_expression(sqrt_expr, {}), "math.sqrt(16)")
+        self.assertEqual(gen._traverse_expression(abs_expr, {}), "abs(-3)")
+        self.assertEqual(gen._traverse_expression(log_expr, {}), "math.log(1)")
         self.assertEqual(gen._traverse_expression(min_expr, {}), "min(2, 3)")
         self.assertEqual(gen._traverse_expression(max_expr, {}), "max(2, 3)")
-        with self.assertRaisesRegex(NotImplementedError, "Unsupported function call 'abs'"):
-            gen._traverse_expression({"type": "funcall", "name": "abs", "args": [{"type": "number", "value": 1}]}, {})
+        with self.assertRaisesRegex(NotImplementedError, "Unsupported function call 'unknown'"):
+            gen._traverse_expression({"type": "funcall", "name": "unknown", "args": [{"type": "number", "value": 1}]}, {})
 
     def test_scipy_csc_strict_rhs_and_vector_updates(self):
         gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
@@ -599,7 +603,12 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                     "expression": {
                         "type": "binop",
                         "op": "+",
-                        "left": {"type": "funcall", "name": "sqrt", "args": [_name("base")]},
+                        "left": {
+                            "type": "binop",
+                            "op": "+",
+                            "left": {"type": "funcall", "name": "sqrt", "args": [_name("base")]},
+                            "right": {"type": "funcall", "name": "floor", "args": [_num(2.9)]},
+                        },
                         "right": {"type": "maxl", "args": [_num(3), {"type": "minl", "args": [_num(8), _num(5)]}]},
                     },
                 },
@@ -682,7 +691,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
         compiler._materialize_computed_parameters(ast, working_data)
 
-        self.assertEqual(working_data["expr_value"], 7.0)
+        self.assertEqual(working_data["expr_value"], 9.0)
         self.assertTrue(working_data["logic_value"])
         self.assertEqual(working_data["computed"][0][0], 3.0)
         self.assertEqual(working_data["computed"][1][1], 33.0)
@@ -696,12 +705,12 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                     "type": "parameter_inline_expr",
                     "var_type": "float",
                     "name": "bad",
-                    "expression": {"type": "funcall", "name": "log", "args": [_num(1)]},
+                    "expression": {"type": "funcall", "name": "unknown", "args": [_num(1)]},
                 }
             ]
         }
 
-        with self.assertRaisesRegex(SemanticError, "Unsupported function 'log'"):
+        with self.assertRaisesRegex(SemanticError, "Unsupported function 'unknown'"):
             compiler._materialize_computed_parameters(ast, {})
 
         ast = {

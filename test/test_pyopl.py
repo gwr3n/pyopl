@@ -1,4 +1,5 @@
 import ast as py_ast
+import math
 import os
 import tempfile
 import unittest
@@ -894,6 +895,46 @@ class TestPyOPLParser(TestPyOPL):
 
 
 class TestPyOPLCompiler(TestPyOPL):
+    def test_computed_param_algebraic_functions(self):
+        model_code = """
+            range T = 1..3;
+            float demand[T] = ...;
+            float exp_value[t in T] = exp(demand[t] / 10);
+            float log_value[t in T] = log(demand[t]);
+            float sin_value[t in T] = sin(demand[t]);
+            float cos_value[t in T] = cos(demand[t]);
+            float tan_value[t in T] = tan(demand[t] / 100);
+            float abs_value[t in T] = abs(5 - demand[t]);
+            int floor_value[t in T] = floor(demand[t] / 7);
+            int ceil_value[t in T] = ceil(demand[t] / 7);
+            int round_value[t in T] = round(demand[t] / 7);
+
+            minimize 0;
+            subject to { }
+        """
+        data_code = """
+            demand = [8, 12, 16];
+        """
+
+        _ast, _code, data = OPLCompiler().compile_model(model_code, data_code=data_code, solver="gurobi")
+        values = [8, 12, 16]
+        expected = {
+            "exp_value": [math.exp(v / 10) for v in values],
+            "log_value": [math.log(v) for v in values],
+            "sin_value": [math.sin(v) for v in values],
+            "cos_value": [math.cos(v) for v in values],
+            "tan_value": [math.tan(v / 100) for v in values],
+            "abs_value": [abs(5 - v) for v in values],
+            "floor_value": [math.floor(v / 7) for v in values],
+            "ceil_value": [math.ceil(v / 7) for v in values],
+            "round_value": [round(v / 7) for v in values],
+        }
+        for name, expected_values in expected.items():
+            self.assertIn(name, data)
+            self.assertEqual(len(data[name]), len(expected_values))
+            for actual, wanted in zip(data[name], expected_values):
+                self.assertAlmostEqual(actual, wanted, places=9)
+
     def test_computed_param_general_expr_inline(self):
         model_code = """
             range T = 1..6;

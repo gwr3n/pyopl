@@ -30,7 +30,7 @@ The grammar supports:
   - logical `&& || !`
   - comparisons `== != <= >= < >`
   - conditional ternary `(? :)` with parenthesized condition
-  - function calls: `sqrt(expr)`, `maxl(arg1, ..., argN)`, `minl(arg1, ..., argN)`
+  - function calls: `sqrt(expr)`, `exp(expr)`, `log(expr)`, `sin(expr)`, `cos(expr)`, `tan(expr)`, `abs(expr)`, `floor(expr)`, `ceil(expr)`, `round(expr)`, `maxl(arg1, ..., argN)`, `minl(arg1, ..., argN)`
   - aggregates: `sum`, `min(... aggregate ...)`, `max(... aggregate ...)`
   - field access `a.b` on tuples (right-assoc)
   - names, indexed names (range, set, tuple indices), tuple literal indices
@@ -363,7 +363,7 @@ Functions and aggregates:
                   | 'max' <sum_index_header> <parenthesized_expression>
 
 // Function calls
-<function_call> ::= 'sqrt' '(' <expression> ')'
+<function_call> ::= ('sqrt' | 'exp' | 'log' | 'sin' | 'cos' | 'tan' | 'abs' | 'floor' | 'ceil' | 'round') '(' <expression> ')'
                   | 'maxl' '(' <arg_list> ')'
                   | 'minl' '(' <arg_list> ')'
 
@@ -375,7 +375,7 @@ Functions and aggregates:
 
 Notes:
 - `minl`/`maxl` require at least one argument; a single-argument call returns that argument.
-- `sqrt` is supported for ground computations that are evaluated during compilation (notably computed parameters). `sqrt` may parse in general expressions, but it is not supported by the SciPy backend and is not reliably supported for decision-variable expressions in the generated Gurobi code.
+- Unary algebraic functions are supported for ground computations that are evaluated during compilation (notably computed parameters). They may parse in general expressions, but nonlinear uses with decision variables are not reliably supported by linear/MIP backends.
 
 Sum/forall headers:
 

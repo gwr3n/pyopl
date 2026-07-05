@@ -2727,13 +2727,16 @@ class GurobiCodeGenerator:
             raise NotImplementedError(f"Expression type '{node_type}' is not supported by the Gurobi code generator.")
         return method(expr_node, current_iterators, symbolic)
 
-    # NEW: function call support (sqrt)
+    # NEW: function call support (unary algebraic functions)
     def _expr_funcall(self, expr_node, current_iterators, symbolic):
         name = expr_node.get("name")
         args = expr_node.get("args", [])
-        if name == "sqrt" and len(args) == 1:
+        if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"} and len(args) == 1:
             arg_str = self._traverse_expression(args[0], current_iterators, symbolic)
-            return f"math.sqrt({arg_str})"
+            return f"math.{name}({arg_str})"
+        if name in {"abs", "round"} and len(args) == 1:
+            arg_str = self._traverse_expression(args[0], current_iterators, symbolic)
+            return f"{name}({arg_str})"
         raise NotImplementedError(f"Unsupported function call '{name}' in expression.")
 
     # NEW: support minl/maxl (elementwise min/max over args) in Python-emitted expressions

@@ -12,6 +12,7 @@
 import json
 import keyword
 import logging
+import math
 import os
 import sys
 import time
@@ -58,6 +59,23 @@ RESERVED_PY_IDENTIFIERS: set[str] = set(keyword.kwlist) | set(getattr(keyword, "
 logger = logging.getLogger(__name__)
 
 SYNTAX_ERROR_REPORTING_MODES = {"full", "line", "masked"}
+UNARY_MATH_FUNCTIONS: dict[str, tuple[Callable[[float], float], str]] = {
+    "sqrt": (math.sqrt, "float"),
+    "exp": (math.exp, "float"),
+    "log": (math.log, "float"),
+    "sin": (math.sin, "float"),
+    "cos": (math.cos, "float"),
+    "tan": (math.tan, "float"),
+    "abs": (abs, "same"),
+    "floor": (math.floor, "int"),
+    "ceil": (math.ceil, "int"),
+    "round": (round, "int"),
+}
+
+
+def _supported_function_names_message() -> str:
+    names = sorted([*UNARY_MATH_FUNCTIONS.keys(), "maxl", "minl"])
+    return ", ".join(names)
 
 
 def _parser_error_with_hint(tok_type: object, tok_val: object) -> str:
@@ -2568,15 +2586,21 @@ class OPLParser(Parser):
     def arg_list(self, p):
         return _list_with_item(p.expression)
 
-    # --- Function calls: sqrt (1 arg), maxl/minl (>=1 arg) ---
+    # --- Function calls: unary algebraic functions (1 arg), maxl/minl (>=1 arg) ---
     @_("NAME '(' arg_list ')'")  # type: ignore
     def primary(self, p):
         func = p.NAME
         args = p.arg_list
-        if func == "sqrt":
+        if func in UNARY_MATH_FUNCTIONS:
             if len(args) != 1:
-                raise SemanticError("sqrt(...) takes exactly one argument.", lineno=p.lineno)
-            return {"type": "funcall", "name": "sqrt", "args": [args[0]], "sem_type": "float"}
+                raise SemanticError(f"{func}(...) takes exactly one argument.", lineno=p.lineno)
+            arg_type = args[0].get("sem_type")
+            if arg_type not in ("int", "int+", "float", "float+"):
+                raise SemanticError(f"{func}(...) expects a numeric argument.", lineno=p.lineno)
+            result_type = UNARY_MATH_FUNCTIONS[func][1]
+            if result_type == "same":
+                result_type = "float" if arg_type in ("float", "float+") else "int"
+            return {"type": "funcall", "name": func, "args": [args[0]], "sem_type": result_type}
         if func in ("maxl", "minl"):
             if len(args) == 0:
                 raise SemanticError(f"{func}(...) requires at least one argument.", lineno=p.lineno)
@@ -2587,7 +2611,9 @@ class OPLParser(Parser):
                     raise SemanticError(f"{func}(...) expects numeric arguments.", lineno=p.lineno)
             sem = "float" if any(a.get("sem_type") in ("float", "float+") for a in args) else "int"
             return {"type": func, "args": args, "sem_type": sem}
-        raise SemanticError(f"Unsupported function '{func}'. Only sqrt, maxl, minl are supported.", lineno=p.lineno)
+        raise SemanticError(
+            f"Unsupported function '{func}'. Supported functions: {_supported_function_names_message()}.", lineno=p.lineno
+        )
 
     # min(i in I : cond) expr   — juxtaposition
     @_("AGG_MIN sum_index_header nonparen_expression")
@@ -3766,8 +3792,6 @@ class OPLCompiler:
         if not isinstance(declarations, list):
             return
 
-        import math
-
         tuple_fields_by_type: dict[str, list[str]] = {}
         set_tuple_type_by_name: dict[str, str] = {}
         for decl in declarations:
@@ -4103,11 +4127,13 @@ class OPLCompiler:
             if expr_type == "funcall":
                 func_name = expr.get("name")
                 args = expr.get("args", [])
-                if func_name == "sqrt" and len(args) == 1:
+                if func_name in UNARY_MATH_FUNCTIONS and len(args) == 1:
                     arg = args[0]
                     if not isinstance(arg, dict):
                         raise SemanticError("Unsupported function argument in computed parameter expression.")
-                    return math.sqrt(float(eval_expr(arg, env)))
+                    func = UNARY_MATH_FUNCTIONS[func_name][0]
+                    value = func(float(eval_expr(arg, env)))
+                    return int(value) if UNARY_MATH_FUNCTIONS[func_name][1] == "int" else value
                 raise SemanticError(f"Unsupported function '{func_name}' in computed parameter expression.")
             if expr_type in ("maxl", "minl"):
                 values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
