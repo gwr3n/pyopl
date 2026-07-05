@@ -485,8 +485,13 @@ Expressions can include:
     - `o.pair.i` (nested tuple field access)
     - Supported in sum/forall, objectives, and constraints.
 - **Functions:**
-  - `sqrt(x)` (float result)
-  - `minl(a, b, c, ...)`, `maxl(a, b, c, ...)` over a list of numeric arguments (ground in parameters/computed expressions).
+  - Unary algebraic functions: `sqrt(x)`, `exp(x)`, `log(x)`, `sin(x)`, `cos(x)`, `tan(x)`, `abs(x)`, `floor(x)`, `ceil(x)`, `round(x)`.
+  - `sqrt`, `exp`, `log`, `sin`, `cos`, and `tan` return floats.
+  - `floor`, `ceil`, and `round` return ints.
+  - `abs` returns an int for integer input and a float for float input.
+  - `minl(a, b, c, ...)`, `maxl(a, b, c, ...)` over a list of numeric arguments.
+
+These functions are fully supported for ground/computed parameter expressions. Nonlinear uses involving decision variables may parse, but linear/MIP backends cannot generally solve expressions such as `exp(x)` or `sin(x)` where `x` is a decision variable.
 
 Additional notes:
 - Index expressions can be arithmetic or field accesses as long as they are integer-typed:
@@ -653,7 +658,7 @@ Solver specifics:
 - SciPy/HiGHS backend:
   - Composite boolean implication antecedents are supported via big‑M and auxiliaries; prefer simple forms for robustness.
   - Capabilities for larger MIP models depend on your SciPy/HiGHS version.
-- Non-linear arithmetic (e.g., variable*variable), piecewise linear, SOS, `<=>` bi-implication, global constraints, and general user-defined functions are not supported.
+- Non-linear arithmetic over decision variables (e.g., `variable*variable`, `exp(x)` for decision variable `x`), piecewise linear, SOS, `<=>` bi-implication, global constraints, and user-defined functions are not supported.
 - Big-M tightening uses declared types, simple expression spans, and collected bounds; when information is insufficient, conservative fallback M is used.
 
 ---
