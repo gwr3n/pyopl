@@ -2,23 +2,12 @@ import unittest
 
 from pyopl.linear_problem import LinearProblem
 from pyopl.milp_equivalence import EquivalenceResult, compare, prove_equivalent
-from pyopl.pyopl_core import OPLLexer, OPLParser
-from pyopl.scipy_codegen import SciPyCodeGenerator
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.pyopl_core import linear_problem_from_opl
 
 
 class CompareTests(unittest.TestCase):
-    def linear_problem_from_opl(self, model: str) -> LinearProblem:
-        lexer = OPLLexer()
-        parser = OPLParser()
-        ast = parser.parse(lexer.tokenize(model))
-        generator = SciPyCodeGenerator(ast)
-        if not isinstance(generator, SciPyCSCCodeGenerator):
-            raise AssertionError(f"Expected SciPyCSCCodeGenerator, got {type(generator).__name__}")
-        return generator.build_problem()
-
     def test_compare_accepts_equivalent_opl_models_compiled_by_scipy_codegen(self):
-        first = self.linear_problem_from_opl("""
+        first = linear_problem_from_opl("""
             dvar float+ x;
 
             minimize 2 * x;
@@ -27,7 +16,7 @@ class CompareTests(unittest.TestCase):
                 x <= 3;
             }
             """)
-        second = self.linear_problem_from_opl("""
+        second = linear_problem_from_opl("""
             dvar float+ y;
 
             minimize 2 * y;

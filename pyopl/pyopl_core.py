@@ -30,7 +30,9 @@ except Exception:  # pragma: no cover
 
 # === Local imports ===
 from .gurobi_codegen import GurobiCodeGenerator
+from .linear_problem import LinearProblem
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
+from .scipy_codegen_csc import SciPyCSCCodeGenerator
 from .semantic_error import SemanticError
 
 
@@ -5479,6 +5481,16 @@ def parse_model(model_code: str):
     compiler = OPLCompiler()
     ast, _code, _data = compiler.compile_model(model_code, data_code=None, solver="gurobi")
     return ast
+
+
+def linear_problem_from_opl(model_code: str, data_code: Optional[str] = None) -> LinearProblem:
+    """Compile an OPL model string into PyOPL's canonical linear-problem form."""
+    compiler = OPLCompiler()
+    ast, _code, data_dict = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
+    generator = SciPyCodeGenerator(ast, data_dict)
+    if not isinstance(generator, SciPyCSCCodeGenerator):
+        raise AssertionError(f"Expected SciPyCSCCodeGenerator, got {type(generator).__name__}")
+    return generator.build_problem()
 
 
 # --- Utility function to load OPL model from disk ---
