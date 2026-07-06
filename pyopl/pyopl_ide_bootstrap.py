@@ -3062,19 +3062,17 @@ class OPLIDE(tk.Tk):
             if fname:
                 target.set(fname)
 
-        def add_path_row(row: int, label: str, var: tk.StringVar, browse_command: Callable[[], None], optional: bool = False) -> None:
+        def add_path_row(row: int, label: str, var: tk.StringVar, browse_command: Callable[[], None]) -> None:
             ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             ttk.Entry(path_frame, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
-            ttk.Button(path_frame, text="Browse...", command=browse_command).grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
-            if optional:
-                ttk.Button(path_frame, text="Clear", command=lambda: var.set("")).grid(
-                    row=row, column=3, sticky="ew", padx=(8, 0), pady=4
-                )
+            ttk.Button(path_frame, text="Browse...", command=browse_command).grid(
+                row=row, column=2, sticky="ew", padx=(8, 0), pady=4
+            )
 
         add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
-        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var), optional=True)
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
         add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
-        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var), optional=True)
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
 
         result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
         result_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
