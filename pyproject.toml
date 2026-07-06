@@ -103,3 +103,7 @@ known-first-party = ["pyopl"]
 [[tool.mypy.overrides]]
 module = "pyopl.pyopl_ide_bootstrap"
 disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+module = ["networkx", "networkx.*", "scipy.optimize"]
+ignore_missing_imports = true

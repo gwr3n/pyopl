@@ -154,7 +154,7 @@ def prove_equivalent(
             proof_steps=("normalized both models", "checked user variable mapping"),
             counterexample=mapping_issue,
         )
-    proof_steps = (
+    proof_steps: tuple[str, ...] = (
         "normalized both models",
         "removed duplicate and solver-proven redundant rows",
     )
@@ -188,9 +188,7 @@ def prove_equivalent(
     matcher = isomorphism.GraphMatcher(
         left_graph,
         right_graph,
-        node_match=isomorphism.categorical_node_match(
-            ["kind", "attributes"], [None, None]
-        ),
+        node_match=isomorphism.categorical_node_match(["kind", "attributes"], [None, None]),
         edge_match=isomorphism.categorical_edge_match("coefficient", None),
     )
     proof_steps = proof_steps + ("tested labelled graph isomorphism",)
@@ -265,22 +263,12 @@ def _project_to_mapping(
     )
 
 
-def _drop_independent_auxiliaries(
-    problem: LinearProblem, kept_names: set[str], tolerance: float
-) -> LinearProblem | None:
-    kept_indices = [
-        index
-        for index, name in enumerate(problem.var_names)
-        if name in kept_names
-    ]
+def _drop_independent_auxiliaries(problem: LinearProblem, kept_names: set[str], tolerance: float) -> LinearProblem | None:
+    kept_indices = [index for index, name in enumerate(problem.var_names) if name in kept_names]
     if len(kept_indices) != len(kept_names):
         return None
 
-    auxiliary_indices = [
-        index
-        for index, name in enumerate(problem.var_names)
-        if name not in kept_names
-    ]
+    auxiliary_indices = [index for index, name in enumerate(problem.var_names) if name not in kept_names]
     for index in auxiliary_indices:
         if abs(float(problem.c[index])) > tolerance:
             return None
@@ -330,14 +318,8 @@ def _has_mapped_isomorphism(
     right: _NormalizedProblem,
     variable_mapping: dict[str, str],
 ) -> bool:
-    left_name_by_index = {
-        column_index: column.name
-        for column_index, column in enumerate(left.columns)
-    }
-    right_index_by_name = {
-        column.name: column_index
-        for column_index, column in enumerate(right.columns)
-    }
+    left_name_by_index = {column_index: column.name for column_index, column in enumerate(left.columns)}
+    right_index_by_name = {column.name: column_index for column_index, column in enumerate(right.columns)}
     required_node_mapping = {
         ("column", left_index): ("column", right_index_by_name[right_name])
         for left_index, left_name in left_name_by_index.items()
@@ -349,9 +331,7 @@ def _has_mapped_isomorphism(
     )
 
 
-def _canonicalize(
-    problem: LinearProblem, tolerance: float, max_iterations: int | None
-) -> _NormalizedProblem:
+def _canonicalize(problem: LinearProblem, tolerance: float, max_iterations: int | None) -> _NormalizedProblem:
     _validate(problem, tolerance)
     problem = _eliminate_affine_aliases(problem, tolerance)
     problem = _eliminate_slack_variables(problem, tolerance)
@@ -363,27 +343,20 @@ def _canonicalize(
             objective=_quantize(objective_sign * objective, tolerance),
             integrality=int(integrality),
         )
-        for var_name, objective, integrality in zip(
-            problem.var_names, problem.c, problem.integrality, strict=True
-        )
+        for var_name, objective, integrality in zip(problem.var_names, problem.c, problem.integrality, strict=True)
     )
-    rows = tuple(
-        _normalize_row("=", row, rhs, tolerance)
-        for row, rhs in zip(problem.A_eq, problem.b_eq, strict=True)
-    ) + tuple(
-        _normalize_row("<=", row, rhs, tolerance)
-        for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
-    ) + _bound_rows(problem.bounds, len(columns), tolerance)
+    rows = (
+        tuple(_normalize_row("=", row, rhs, tolerance) for row, rhs in zip(problem.A_eq, problem.b_eq, strict=True))
+        + tuple(_normalize_row("<=", row, rhs, tolerance) for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True))
+        + _bound_rows(problem.bounds, len(columns), tolerance)
+    )
     rows = _deduplicate_rows(rows)
     rows = _remove_redundant_rows(rows, columns, tolerance)
 
     row_colors, column_colors = _refine_colors(rows, columns, max_iterations)
     row_order = _row_order(rows, row_colors, column_colors)
     column_order = _column_order(rows, columns, row_colors, column_colors)
-    remapped_column_index = {
-        original_index: canonical_index
-        for canonical_index, original_index in enumerate(column_order)
-    }
+    remapped_column_index = {original_index: canonical_index for canonical_index, original_index in enumerate(column_order)}
 
     canonical_columns = tuple(columns[index] for index in column_order)
     canonical_rows = tuple(
@@ -392,8 +365,7 @@ def _canonicalize(
             rhs=rows[row_index].rhs,
             entries=tuple(
                 sorted(
-                    (remapped_column_index[column_index], coefficient)
-                    for column_index, coefficient in rows[row_index].entries
+                    (remapped_column_index[column_index], coefficient) for column_index, coefficient in rows[row_index].entries
                 )
             ),
         )
@@ -415,19 +387,11 @@ def _eliminate_affine_aliases(problem: LinearProblem, tolerance: float) -> Linea
         current = _substitute_affine_alias(current, alias)
 
 
-def _find_affine_alias(
-    problem: LinearProblem, tolerance: float
-) -> tuple[int, int] | None:
-    for column_index, (bounds, integrality) in enumerate(
-        zip(problem.bounds, problem.integrality, strict=True)
-    ):
+def _find_affine_alias(problem: LinearProblem, tolerance: float) -> tuple[int, int] | None:
+    for column_index, (bounds, integrality) in enumerate(zip(problem.bounds, problem.integrality, strict=True)):
         if integrality != 0 or bounds != [None, None]:
             continue
-        equality_rows = [
-            row_index
-            for row_index, row in enumerate(problem.A_eq)
-            if abs(float(row[column_index])) > tolerance
-        ]
+        equality_rows = [row_index for row_index, row in enumerate(problem.A_eq) if abs(float(row[column_index])) > tolerance]
         if len(equality_rows) != 1:
             continue
         row_index = equality_rows[0]
@@ -436,21 +400,12 @@ def _find_affine_alias(
     return None
 
 
-def _substitute_affine_alias(
-    problem: LinearProblem, alias: tuple[int, int]
-) -> LinearProblem:
+def _substitute_affine_alias(problem: LinearProblem, alias: tuple[int, int]) -> LinearProblem:
     alias_index, alias_row_index = alias
     alias_row = problem.A_eq[alias_row_index]
     alias_rhs = problem.b_eq[alias_row_index]
-    kept_indices = [
-        index
-        for index in range(len(problem.var_names))
-        if index != alias_index
-    ]
-    alias_coefficients = {
-        index: -alias_row[index]
-        for index in kept_indices
-    }
+    kept_indices = [index for index in range(len(problem.var_names)) if index != alias_index]
+    alias_coefficients = {index: -alias_row[index] for index in kept_indices}
     alias_constant = alias_rhs
     alias_objective = problem.c[alias_index]
 
@@ -459,10 +414,7 @@ def _substitute_affine_alias(
         var_names=[problem.var_names[index] for index in kept_indices],
         bounds=[problem.bounds[index] for index in kept_indices],
         integrality=[problem.integrality[index] for index in kept_indices],
-        c=[
-            problem.c[index] + alias_objective * alias_coefficients[index]
-            for index in kept_indices
-        ],
+        c=[problem.c[index] + alias_objective * alias_coefficients[index] for index in kept_indices],
         A_eq=[
             _substitute_alias_row(row, alias_index, alias_coefficients, kept_indices)
             for row_index, row in enumerate(problem.A_eq)
@@ -473,10 +425,7 @@ def _substitute_affine_alias(
             for row_index, (row, rhs) in enumerate(zip(problem.A_eq, problem.b_eq, strict=True))
             if row_index != alias_row_index
         ],
-        A_ub=[
-            _substitute_alias_row(row, alias_index, alias_coefficients, kept_indices)
-            for row in problem.A_ub
-        ],
+        A_ub=[_substitute_alias_row(row, alias_index, alias_coefficients, kept_indices) for row in problem.A_ub],
         b_ub=[
             _substitute_alias_rhs(row, rhs, alias_index, alias_constant)
             for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
@@ -492,15 +441,10 @@ def _substitute_alias_row(
     kept_indices: list[int],
 ) -> list[float]:
     alias_multiplier = row[alias_index]
-    return [
-        row[index] + alias_multiplier * alias_coefficients[index]
-        for index in kept_indices
-    ]
+    return [row[index] + alias_multiplier * alias_coefficients[index] for index in kept_indices]
 
 
-def _substitute_alias_rhs(
-    row: list[float], rhs: float, alias_index: int, alias_constant: float
-) -> float:
+def _substitute_alias_rhs(row: list[float], rhs: float, alias_index: int, alias_constant: float) -> float:
     return rhs - row[alias_index] * alias_constant
 
 
@@ -511,19 +455,9 @@ def _eliminate_slack_variables(problem: LinearProblem, tolerance: float) -> Line
 
     removed_columns = set(slack_columns)
     removed_equalities = set(slack_columns.values())
-    kept_indices = [
-        column_index
-        for column_index in range(len(problem.var_names))
-        if column_index not in removed_columns
-    ]
-    added_ub_rows = [
-        _remove_columns(problem.A_eq[row_index], kept_indices)
-        for row_index in removed_equalities
-    ]
-    added_ub_rhs = [
-        problem.b_eq[row_index]
-        for row_index in removed_equalities
-    ]
+    kept_indices = [column_index for column_index in range(len(problem.var_names)) if column_index not in removed_columns]
+    added_ub_rows = [_remove_columns(problem.A_eq[row_index], kept_indices) for row_index in removed_equalities]
+    added_ub_rhs = [problem.b_eq[row_index] for row_index in removed_equalities]
     return LinearProblem(
         sense=problem.sense,
         var_names=[problem.var_names[index] for index in kept_indices],
@@ -535,11 +469,7 @@ def _eliminate_slack_variables(problem: LinearProblem, tolerance: float) -> Line
             for row_index, row in enumerate(problem.A_eq)
             if row_index not in removed_equalities
         ],
-        b_eq=[
-            rhs
-            for row_index, rhs in enumerate(problem.b_eq)
-            if row_index not in removed_equalities
-        ],
+        b_eq=[rhs for row_index, rhs in enumerate(problem.b_eq) if row_index not in removed_equalities],
         A_ub=[_remove_columns(row, kept_indices) for row in problem.A_ub] + added_ub_rows,
         b_ub=[*problem.b_ub, *added_ub_rhs],
         objective_offset=problem.objective_offset,
@@ -560,11 +490,7 @@ def _find_slack_columns(problem: LinearProblem, tolerance: float) -> dict[int, i
             or upper_bound is not None
         ):
             continue
-        equality_rows = [
-            row_index
-            for row_index, row in enumerate(problem.A_eq)
-            if abs(float(row[column_index])) > tolerance
-        ]
+        equality_rows = [row_index for row_index, row in enumerate(problem.A_eq) if abs(float(row[column_index])) > tolerance]
         if len(equality_rows) != 1:
             continue
         row_index = equality_rows[0]
@@ -580,28 +506,18 @@ def _unique_value_items(items: dict[int, int]) -> dict[int, int]:
     value_counts: dict[int, int] = {}
     for value in items.values():
         value_counts[value] = value_counts.get(value, 0) + 1
-    return {
-        key: value
-        for key, value in items.items()
-        if value_counts[value] == 1
-    }
+    return {key: value for key, value in items.items() if value_counts[value] == 1}
 
 
 def _remove_columns(row: list[float], kept_indices: list[int]) -> list[float]:
     return [row[index] for index in kept_indices]
 
 
-def _eliminate_fixed_variables(
-    problem: LinearProblem, tolerance: float
-) -> LinearProblem:
+def _eliminate_fixed_variables(problem: LinearProblem, tolerance: float) -> LinearProblem:
     fixed_values: dict[int, float] = {}
     kept_indices: list[int] = []
     for column_index, (lower_bound, upper_bound) in enumerate(problem.bounds):
-        if (
-            lower_bound is not None
-            and upper_bound is not None
-            and abs(float(lower_bound) - float(upper_bound)) <= tolerance
-        ):
+        if lower_bound is not None and upper_bound is not None and abs(float(lower_bound) - float(upper_bound)) <= tolerance:
             fixed_values[column_index] = float(lower_bound)
         else:
             kept_indices.append(column_index)
@@ -610,8 +526,7 @@ def _eliminate_fixed_variables(
         return problem
 
     objective_offset = problem.objective_offset + sum(
-        problem.c[column_index] * value
-        for column_index, value in fixed_values.items()
+        problem.c[column_index] * value for column_index, value in fixed_values.items()
     )
     return LinearProblem(
         sense=problem.sense,
@@ -627,15 +542,11 @@ def _eliminate_fixed_variables(
     )
 
 
-def _substitute_fixed_row(
-    row: list[float], fixed_values: dict[int, float], kept_indices: list[int]
-) -> list[float]:
+def _substitute_fixed_row(row: list[float], fixed_values: dict[int, float], kept_indices: list[int]) -> list[float]:
     return [row[index] for index in kept_indices]
 
 
-def _substitute_fixed_rhs(
-    row: list[float], rhs: float, fixed_values: dict[int, float]
-) -> float:
+def _substitute_fixed_rhs(row: list[float], rhs: float, fixed_values: dict[int, float]) -> float:
     return rhs - sum(row[column_index] * value for column_index, value in fixed_values.items())
 
 
@@ -657,11 +568,7 @@ def _validate(problem: LinearProblem, tolerance: float) -> None:
         if len(bounds) != 2:
             raise ValueError(f"bounds[{index}] must contain lower and upper bounds")
         lower_bound, upper_bound = bounds
-        if (
-            lower_bound is not None
-            and upper_bound is not None
-            and float(lower_bound) > float(upper_bound) + tolerance
-        ):
+        if lower_bound is not None and upper_bound is not None and float(lower_bound) > float(upper_bound) + tolerance:
             raise ValueError(f"bounds[{index}] lower bound exceeds upper bound")
 
     _validate_matrix("A_eq", problem.A_eq, variable_count)
@@ -675,14 +582,10 @@ def _validate(problem: LinearProblem, tolerance: float) -> None:
 def _validate_matrix(name: str, matrix: list[list[float]], variable_count: int) -> None:
     for row_index, row in enumerate(matrix):
         if len(row) != variable_count:
-            raise ValueError(
-                f"{name}[{row_index}] length must match var_names length"
-            )
+            raise ValueError(f"{name}[{row_index}] length must match var_names length")
 
 
-def _normalize_row(
-    sense: Literal["<=", "="], row: list[float], rhs: float, tolerance: float
-) -> _Row:
+def _normalize_row(sense: Literal["<=", "="], row: list[float], rhs: float, tolerance: float) -> _Row:
     scale = max((abs(float(value)) for value in row), default=0.0)
     if scale <= tolerance:
         scale = abs(float(rhs)) or 1.0
@@ -701,9 +604,7 @@ def _normalize_row(
     return _Row(sense=sense, rhs=_quantize(scaled_rhs, tolerance), entries=entries)
 
 
-def _bound_rows(
-    bounds: list[list[BoundValue]], variable_count: int, tolerance: float
-) -> tuple[_Row, ...]:
+def _bound_rows(bounds: list[list[BoundValue]], variable_count: int, tolerance: float) -> tuple[_Row, ...]:
     rows: list[_Row] = []
     for column_index, (lower_bound, upper_bound) in enumerate(bounds):
         row = [0.0] * variable_count
@@ -721,11 +622,8 @@ def _deduplicate_rows(rows: tuple[_Row, ...]) -> tuple[_Row, ...]:
     return tuple(sorted(set(rows), key=_row_sort_key))
 
 
-def _remove_redundant_rows(
-    rows: tuple[_Row, ...], columns: tuple[_Column, ...], tolerance: float
-) -> tuple[_Row, ...]:
+def _remove_redundant_rows(rows: tuple[_Row, ...], columns: tuple[_Column, ...], tolerance: float) -> tuple[_Row, ...]:
     kept_rows = list(rows)
-    variable_count = len(columns)
     index = 0
     while index < len(kept_rows):
         row = kept_rows[index]
@@ -760,30 +658,12 @@ def _is_lp_redundant_row(
     objective = [-coefficient for coefficient in _row_coefficients(row, variable_count, tolerance)]
     result = linprog(
         c=objective,
-        A_ub=[
-            _row_coefficients(other_row, variable_count, tolerance)
-            for other_row in other_rows
-            if other_row.sense == "<="
-        ]
+        A_ub=[_row_coefficients(other_row, variable_count, tolerance) for other_row in other_rows if other_row.sense == "<="]
         or None,
-        b_ub=[
-            _row_rhs(other_row, tolerance)
-            for other_row in other_rows
-            if other_row.sense == "<="
-        ]
+        b_ub=[_row_rhs(other_row, tolerance) for other_row in other_rows if other_row.sense == "<="] or None,
+        A_eq=[_row_coefficients(other_row, variable_count, tolerance) for other_row in other_rows if other_row.sense == "="]
         or None,
-        A_eq=[
-            _row_coefficients(other_row, variable_count, tolerance)
-            for other_row in other_rows
-            if other_row.sense == "="
-        ]
-        or None,
-        b_eq=[
-            _row_rhs(other_row, tolerance)
-            for other_row in other_rows
-            if other_row.sense == "="
-        ]
-        or None,
+        b_eq=[_row_rhs(other_row, tolerance) for other_row in other_rows if other_row.sense == "="] or None,
         bounds=[(None, None)] * variable_count,
         method="highs",
     )
@@ -815,9 +695,7 @@ def _is_milp_redundant_row(
     return -float(result.fun) <= _row_rhs(row, tolerance) + tolerance
 
 
-def _linear_constraints(
-    rows: tuple[_Row, ...], variable_count: int, tolerance: float
-) -> list[LinearConstraint]:
+def _linear_constraints(rows: tuple[_Row, ...], variable_count: int, tolerance: float) -> list[LinearConstraint]:
     constraints: list[LinearConstraint] = []
     for row in rows:
         coefficients = _row_coefficients(row, variable_count, tolerance)
@@ -829,9 +707,7 @@ def _linear_constraints(
     return constraints
 
 
-def _row_coefficients(
-    row: _Row, variable_count: int, tolerance: float
-) -> list[float]:
+def _row_coefficients(row: _Row, variable_count: int, tolerance: float) -> list[float]:
     coefficients = [0.0] * variable_count
     for column_index, coefficient in row.entries:
         coefficients[column_index] = coefficient * tolerance
@@ -866,10 +742,7 @@ def _refine_colors(
             (
                 _column_local_key(columns[column_index]),
                 tuple(
-                    sorted(
-                        (coefficient, row_colors[row_index])
-                        for row_index, coefficient in column_neighbors[column_index]
-                    )
+                    sorted((coefficient, row_colors[row_index]) for row_index, coefficient in column_neighbors[column_index])
                 ),
             )
             for column_index in range(len(columns))
@@ -905,9 +778,7 @@ def _neighbors(
     return row_neighbors, column_neighbors
 
 
-def _row_order(
-    rows: tuple[_Row, ...], row_colors: tuple[int, ...], column_colors: tuple[int, ...]
-) -> tuple[int, ...]:
+def _row_order(rows: tuple[_Row, ...], row_colors: tuple[int, ...], column_colors: tuple[int, ...]) -> tuple[int, ...]:
     return tuple(
         sorted(
             range(len(rows)),
@@ -915,10 +786,7 @@ def _row_order(
                 row_colors[row_index],
                 _row_local_key(rows[row_index]),
                 tuple(
-                    sorted(
-                        (coefficient, column_colors[column_index])
-                        for column_index, coefficient in rows[row_index].entries
-                    )
+                    sorted((coefficient, column_colors[column_index]) for column_index, coefficient in rows[row_index].entries)
                 ),
             ),
         )
@@ -939,10 +807,7 @@ def _column_order(
                 column_colors[column_index],
                 _column_local_key(columns[column_index]),
                 tuple(
-                    sorted(
-                        (coefficient, row_colors[row_index])
-                        for row_index, coefficient in column_neighbors[column_index]
-                    )
+                    sorted((coefficient, row_colors[row_index]) for row_index, coefficient in column_neighbors[column_index])
                 ),
             ),
         )

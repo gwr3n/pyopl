@@ -4,6 +4,7 @@ from pyopl.linear_problem import LinearProblem
 from pyopl.milp_equivalence import EquivalenceResult, compare, prove_equivalent
 from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.scipy_codegen import SciPyCodeGenerator
+from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 class CompareTests(unittest.TestCase):
@@ -12,11 +13,12 @@ class CompareTests(unittest.TestCase):
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(model))
         generator = SciPyCodeGenerator(ast)
+        if not isinstance(generator, SciPyCSCCodeGenerator):
+            raise AssertionError(f"Expected SciPyCSCCodeGenerator, got {type(generator).__name__}")
         return generator.build_problem()
 
     def test_compare_accepts_equivalent_opl_models_compiled_by_scipy_codegen(self):
-        first = self.linear_problem_from_opl(
-            """
+        first = self.linear_problem_from_opl("""
             dvar float+ x;
 
             minimize 2 * x;
@@ -24,10 +26,8 @@ class CompareTests(unittest.TestCase):
             subject to {
                 x <= 3;
             }
-            """
-        )
-        second = self.linear_problem_from_opl(
-            """
+            """)
+        second = self.linear_problem_from_opl("""
             dvar float+ y;
 
             minimize 2 * y;
@@ -35,8 +35,7 @@ class CompareTests(unittest.TestCase):
             subject to {
                 2 * y <= 6;
             }
-            """
-        )
+            """)
 
         self.assertNotEqual(first.var_names, second.var_names)
         self.assertNotEqual(first.A_ub, second.A_ub)
