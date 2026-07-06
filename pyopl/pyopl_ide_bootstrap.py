@@ -37,7 +37,8 @@ from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
 from .linear_problem_highs import export_linear_problem
-from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser
+from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, linear_problem_from_opl
 from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 # Settings storage (same strategy as sample.py)
@@ -622,6 +623,8 @@ class OPLIDE(tk.Tk):
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
         filemenu.add_command(label="Export model...", command=self.export_model)
+        filemenu.add_separator()
+        filemenu.add_command(label="Compare models", command=self.compare_models)
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -3015,6 +3018,170 @@ class OPLIDE(tk.Tk):
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(fname)}")
             self.editor_notebook.select(self.data_frame)
             self.on_tab_changed(None)
+
+    def compare_models(self) -> None:
+        """Open a dialog for comparing two model/data file pairs."""
+        if not self._ensure_no_active_operation("Compare models"):
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Compare models")
+        dialog.transient(self)
+        dialog.geometry("760x560")
+        dialog.minsize(680, 460)
+
+        root = ttk.Frame(dialog, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(1, weight=1)
+
+        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
+        path_frame.grid(row=0, column=0, sticky="ew")
+        path_frame.columnconfigure(1, weight=1)
+
+        left_model_var = tk.StringVar(value=self.model_file or "")
+        left_data_var = tk.StringVar(value=self.data_file or "")
+        right_model_var = tk.StringVar()
+        right_data_var = tk.StringVar()
+
+        def browse_model(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select model file",
+                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def browse_data(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select data file",
+                filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def add_path_row(row: int, label: str, var: tk.StringVar, browse_command: Callable[[], None], optional: bool = False) -> None:
+            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            ttk.Entry(path_frame, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+            ttk.Button(path_frame, text="Browse...", command=browse_command).grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+            if optional:
+                ttk.Button(path_frame, text="Clear", command=lambda: var.set("")).grid(
+                    row=row, column=3, sticky="ew", padx=(8, 0), pady=4
+                )
+
+        add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var), optional=True)
+        add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var), optional=True)
+
+        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
+        result_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+
+        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
+        result_text.grid(row=0, column=0, sticky="nsew")
+        result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
+        result_text.config(state="disabled")
+
+        button_frame = ttk.Frame(root)
+        button_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        button_frame.columnconfigure(0, weight=1)
+        compare_button = ttk.Button(button_frame, text="Compare")
+        compare_button.grid(row=0, column=1, padx=(0, 8))
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(row=0, column=2)
+
+        def set_result(text: str) -> None:
+            result_text.config(state="normal")
+            result_text.delete("1.0", tk.END)
+            result_text.insert(tk.END, text)
+            result_text.config(state="disabled")
+
+        def read_optional_file(path: str) -> Optional[str]:
+            if not path:
+                return None
+            with open(path, "r", encoding="utf-8") as file_obj:
+                content = file_obj.read()
+            return content if content.strip() else None
+
+        def compile_path(model_path: str, data_path: str):
+            with open(model_path, "r", encoding="utf-8") as file_obj:
+                model_code = file_obj.read()
+            return linear_problem_from_opl(model_code, read_optional_file(data_path))
+
+        def do_compare() -> None:
+            left_model = left_model_var.get().strip()
+            right_model = right_model_var.get().strip()
+            left_data = left_data_var.get().strip()
+            right_data = right_data_var.get().strip()
+
+            if not left_model or not right_model:
+                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
+                return
+            for label, path in (
+                ("Left model", left_model),
+                ("Right model", right_model),
+                ("Left data", left_data),
+                ("Right data", right_data),
+            ):
+                if path and not os.path.exists(path):
+                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
+                    return
+
+            try:
+                compare_button.config(state="disabled")
+                set_result("Compiling and comparing models...\n")
+                dialog.update_idletasks()
+                left_problem = compile_path(left_model, left_data)
+                right_problem = compile_path(right_model, right_data)
+                result = prove_equivalent(left_problem, right_problem)
+                set_result(self._format_equivalence_result(result, left_model, right_model, left_data, right_data))
+                self.status_var.set(f"Compare models: {result.status}")
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Compare models failed")
+                detail = f"{type(exc).__name__}: {exc}"
+                set_result(f"Comparison failed.\n\n{detail}\n")
+                messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
+            finally:
+                compare_button.config(state="normal")
+
+        compare_button.config(command=do_compare)
+        dialog.bind("<Return>", lambda _event: do_compare())
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.grab_set()
+        dialog.focus_set()
+
+    @staticmethod
+    def _format_equivalence_result(
+        result: EquivalenceResult,
+        left_model: str,
+        right_model: str,
+        left_data: str = "",
+        right_data: str = "",
+    ) -> str:
+        """Format an EquivalenceResult for the compare-models dialog."""
+        lines = [
+            "Compare models",
+            "",
+            f"Status: {result.status}",
+            f"Equivalent: {'Yes' if result.equivalent else 'No'}",
+            f"Level: {result.level}",
+            f"Reason: {result.reason}",
+            "",
+            "Inputs:",
+            f"  Left model: {left_model}",
+            f"  Left data: {left_data or '(none)'}",
+            f"  Right model: {right_model}",
+            f"  Right data: {right_data or '(none)'}",
+        ]
+        if result.proof_steps:
+            lines.extend(["", "Proof steps:"])
+            lines.extend(f"  {index}. {step}" for index, step in enumerate(result.proof_steps, start=1))
+        if result.counterexample:
+            lines.extend(["", "Counterexample:", f"  {result.counterexample}"])
+        return "\n".join(lines) + "\n"
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""

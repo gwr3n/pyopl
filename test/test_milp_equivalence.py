@@ -3,6 +3,7 @@ import unittest
 from pyopl.linear_problem import LinearProblem
 from pyopl.milp_equivalence import EquivalenceResult, compare, prove_equivalent
 from pyopl.pyopl_core import linear_problem_from_opl
+from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class CompareTests(unittest.TestCase):
@@ -62,6 +63,32 @@ class CompareTests(unittest.TestCase):
         self.assertTrue(result.equivalent)
         self.assertIn("normalized both models", result.proof_steps)
         self.assertIsNone(result.counterexample)
+
+    def test_compare_models_formatter_displays_equivalence_result(self):
+        result = EquivalenceResult(
+            status="different",
+            level="solver_implied",
+            reason="normalized graphs are not isomorphic",
+            proof_steps=("normalized both models", "tested labelled graph isomorphism"),
+            counterexample="normalized graphs are not isomorphic",
+        )
+
+        formatted = OPLIDE._format_equivalence_result(
+            result,
+            "/tmp/left.mod",
+            "/tmp/right.mod",
+            "/tmp/left.dat",
+            "",
+        )
+
+        self.assertIn("Status: different", formatted)
+        self.assertIn("Equivalent: No", formatted)
+        self.assertIn("Level: solver_implied", formatted)
+        self.assertIn("Reason: normalized graphs are not isomorphic", formatted)
+        self.assertIn("1. normalized both models", formatted)
+        self.assertIn("2. tested labelled graph isomorphism", formatted)
+        self.assertIn("Right data: (none)", formatted)
+        self.assertIn("Counterexample:", formatted)
 
     def test_prove_equivalent_returns_different_result(self):
         left = LinearProblem(
