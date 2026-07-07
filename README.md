@@ -14,7 +14,7 @@ Core package badges:
 
 Quality and tooling:
 
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000?logo=python)](https://github.com/psf/black) [![Ruff](https://img.shields.io/badge/lint-ruff-1f79ff?logo=python)](https://github.com/astral-sh/ruff) [![mypy](https://img.shields.io/badge/type--checked-mypy-blue?logo=python)](https://github.com/python/mypy)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000?logo=python)](https://github.com/psf/black) [![Ruff](https://img.shields.io/badge/lint-ruff-1f79ff?logo=python)](https://github.com/astral-sh/ruff) [![mypy](https://img.shields.io/badge/type--checked-mypy-blue?logo=python)](https://github.com/python/mypy) [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit) [![security: pip-audit](https://img.shields.io/badge/security-pip--audit-008080.svg)](https://github.com/pypa/pip-audit) [![secrets: Betterleaks](https://img.shields.io/badge/secrets-Betterleaks-24292e.svg?logo=github)](https://github.com/betterleaks/betterleaks)
 
 Project/community:
 
