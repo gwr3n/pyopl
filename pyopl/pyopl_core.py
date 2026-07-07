@@ -5650,7 +5650,7 @@ def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Ca
         }
 
         try:
-            exec(loaded_gurobi_code, exec_globals)
+            exec(loaded_gurobi_code, exec_globals)  # nosec B102
             # Retrieve results from the exec_globals after execution
             if "gurobi_output" in exec_globals["results_container"]:
                 results = exec_globals["results_container"]["gurobi_output"]
@@ -5733,7 +5733,7 @@ def solve_with_scipy(model_file, data_file=None):
                 "linprog": __import__("scipy.optimize", fromlist=["linprog"]).linprog,
                 "results_container": {},
             }
-            exec(loaded_scipy_code, exec_globals)
+            exec(loaded_scipy_code, exec_globals)  # nosec B102
             if "scipy_output" in exec_globals["results_container"]:
                 results = exec_globals["results_container"]["scipy_output"]
                 # Do not override status to COMPLETED; keep solver's status

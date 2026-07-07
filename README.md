@@ -24,6 +24,10 @@ Docs:
 
 [![Docs](https://img.shields.io/badge/docs-user%20guide-blue)](docs/PyOPL%20user%20guide.md)
 
+License: 
+
+[![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE.txt)
+
 `pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
 
 [1] Van Hentenryck, P. (1999). The OPL optimization programming language. London, England: MIT Press.
@@ -249,8 +253,3 @@ python -m pyopl.pyopl_mcp
 ## User Guide
 
 A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `docs` folder of the repository.
-
-## License
-
-MIT License.
-

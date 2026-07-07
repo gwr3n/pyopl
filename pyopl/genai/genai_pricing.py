@@ -1,6 +1,8 @@
 import functools
 import logging
 import re
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import (
     Any,
@@ -140,7 +142,10 @@ def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
     try:
 
         def _read_text(src: str) -> str:
-            if re.match(r"^https?://", src, re.I):
+            parsed_url = urllib.parse.urlparse(src)
+            if parsed_url.scheme and parsed_url.scheme.lower() not in {"http", "https"}:
+                raise ValueError(f"Unsupported pricing URL scheme: {parsed_url.scheme!r}")
+            if parsed_url.scheme.lower() in {"http", "https"}:
                 # Normalize GitHub "blob" URL to raw content
                 m = re.match(
                     r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$",
@@ -149,10 +154,9 @@ def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
                 )
                 if m:
                     src = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}/{m.group(4)}"
-                import urllib.request
 
                 req = urllib.request.Request(src, headers={"User-Agent": "pyopl/1.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
                     return resp.read().decode("utf-8", errors="replace")
             # Fallback to local file if not a URL
             return open(src, "r", encoding="utf8").read()

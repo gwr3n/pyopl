@@ -285,6 +285,13 @@ class TestGenAIPricing(unittest.TestCase):
         self.assertEqual(rates["gpt-test"], {"prompt_per_1M": 10.0, "completion_per_1M": 2.5})
         self.assertEqual(rates["inline-model"], {"prompt_per_1M": 0.2, "completion_per_1M": 0.6})
 
+    def test_parse_pricing_rejects_non_http_remote_scheme(self) -> None:
+        with patch.object(genai_pricing.urllib.request, "urlopen") as urlopen_mock:
+            rates = genai_pricing._parse_pricing("file://tmp/pricing.md")
+
+        self.assertEqual(rates, {})
+        urlopen_mock.assert_not_called()
+
     def test_extract_usage_from_openai_and_gemini_shapes(self) -> None:
         openai_resp = SimpleNamespace(usage=SimpleNamespace(input_tokens=12, output_tokens=5))
         gemini_resp = {"usage_metadata": {"prompt_token_count": 20, "candidates_token_count": 7}}
