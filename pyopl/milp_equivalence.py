@@ -1,3 +1,38 @@
+"""MILP/LP equivalence checks inspired by the OptiBench evaluator.
+
+OptiBench proposes evaluating generated optimization models by converting each
+LP/MILP instance into an attributed bipartite graph and then checking whether
+the generated model graph is equivalent to the reference model graph.  In that
+representation, variable vertices carry variable attributes such as bounds,
+objective coefficients, and type; constraint vertices carry constraint
+attributes such as sense and right-hand side; and weighted edges carry matrix
+coefficients.  Model equivalence is therefore invariant to variable names and to
+row or column ordering, and can be studied as labelled graph isomorphism.
+
+This module implements that core graph-equivalence idea for already parsed
+``LinearProblem`` objects.  It first normalizes matrix data into a stable
+internal representation, converts that representation into a labelled bipartite
+row-column graph, and uses NetworkX labelled graph isomorphism to decide exact
+structural equivalence.  The implementation also includes a Weisfeiler-Lehman-
+style color-refinement pass, but uses it as a canonical ordering aid before the
+exact isomorphism check, not as the final decision rule.
+
+The code intentionally differs from the OptiBench algorithm in two ways.  First,
+it does not implement OptiBench's benchmark-specific sufficient-condition test
+based on WL-determinable and decomposable-symmetric instances; exact labelled
+isomorphism is used instead.  Second, it adds presolve-aware normalization that
+goes beyond plain graph relabelling, including finite-bound row normalization,
+row scaling, duplicate-row removal, fixed-variable substitution,
+slack-variable elimination, affine alias substitution, and solver-proven
+redundant-row removal.
+
+Reference:
+    Zhuohan Wang, Ziwei Zhu, Yizhou Han, Yufeng Lin, Zhihang Lin, Ruoyu Sun,
+    and Tian Ding. "OptiBench: Benchmarking Large Language Models in
+    Optimization Modeling with Equivalence-Detection Evaluation." 2024.
+    https://openreview.net/forum?id=KD9F5Ap878
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
