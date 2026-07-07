@@ -55,37 +55,7 @@ def compare(
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
 ) -> bool:
-    """Return whether two MILP matrix models are structurally equivalent.
-
-    Two models are compared by normalizing their matrix data, converting the
-    normalized representation into a labelled bipartite row-column graph, and
-    testing the two graphs for labelled isomorphism.  Variable names are ignored;
-    column labels contain the objective coefficient and integrality flag, while
-    row labels contain the constraint sense and right-hand side.  Finite variable
-    bounds are normalized into ordinary single-variable inequality rows before
-    graph construction.
-
-    The comparison is invariant to row order, column order, positive scaling of
-    ``<=`` rows, nonzero scaling of equality rows, and the usual conversion from
-    maximization to minimization.  Objective offsets must match after the same
-    objective-sense normalization.
-
-    Numeric values are quantized according to ``tolerance`` before graph
-    construction.  Values whose absolute value is at most ``tolerance`` are
-    treated as zero; all other values are rounded to integer multiples of the
-    tolerance.  ``max_iterations`` limits the color-refinement prepass used to
-    order rows and columns before graph construction.  If omitted, the limit is
-    based on the total number of rows and columns.
-
-    This is a structural matrix comparison, not a general MILP equivalence
-    prover.  It does not account for presolve eliminations, redundant rows,
-    explicit slack-variable reformulations, or other algebraically equivalent but
-    structurally different formulations.
-
-    Raises:
-        ValueError: If either model has inconsistent dimensions, invalid bounds,
-            an unsupported objective sense, or a nonpositive tolerance.
-    """
+    """Convenience wrapper for ``prove_equivalent`` that returns a boolean result."""
 
     return prove_equivalent(
         left,
@@ -105,7 +75,54 @@ def prove_equivalent(
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
 ) -> EquivalenceResult:
-    """Return a status-bearing equivalence result for two MILP matrix models."""
+    """Return a status-bearing equivalence result for two MILP matrix models.
+
+    In ``"solver"`` mode, both models are validated, then canonicalized by
+    eliminating simple affine aliases, explicit nonnegative slack variables, and
+    fixed variables; normalizing objective sense, finite bounds, scaled rows,
+    duplicate rows, and objective offsets; and removing inequality rows proven
+    redundant by the SciPy LP/MILP solver.  The resulting matrix forms are
+    converted into labelled bipartite row-column graphs and tested for labelled
+    isomorphism.
+
+    Variable names are ignored unless ``variable_mapping`` is supplied.  Column
+    labels contain the normalized objective coefficient and integrality flag,
+    while row labels contain the constraint sense and right-hand side.  The
+    comparison is invariant to row order, column order, positive scaling of
+    ``<=`` rows, nonzero scaling of equality rows, explicit finite bounds versus
+    equivalent bound rows, fixed-variable substitution, simple affine-alias
+    substitution, explicit slack-variable reformulations, solver-proven
+    redundant inequalities, and the usual conversion from maximization to
+    minimization.
+
+    Numeric values are quantized according to ``tolerance`` before graph
+    construction.  Values whose absolute value is at most ``tolerance`` are
+    treated as zero; all other values are rounded to integer multiples of the
+    tolerance.  ``max_iterations`` limits the color-refinement prepass used to
+    order rows and columns before graph construction.  If omitted, the limit is
+    based on the total number of rows and columns.
+
+    ``mode="projection"`` first drops unmapped continuous auxiliary variables
+    that have zero objective coefficient and do not appear in any row, then runs
+    the solver-mode comparison under the supplied ``variable_mapping``.  The
+    current implementation accepts ``"structural"`` and ``"normalized"`` modes
+    as aliases of the same canonicalized graph comparison used by ``"solver"``.
+
+    The returned ``EquivalenceResult`` has status ``"equivalent"`` only when
+    the selected proof path establishes equivalence.  It has status
+    ``"different"`` when the implemented normalization, mapping, or graph
+    comparison finds a mismatch under that proof procedure; this should be read
+    as different in the normalized comparison, not necessarily as a complete
+    proof of mathematical non-equivalence for every possible reformulation.  It
+    has status ``"unknown"`` when the requested mode cannot be applied, such as
+    projection mode without a usable variable mapping.  The ``level``,
+    ``reason``, ``proof_steps``, and ``counterexample`` fields describe how that
+    status was reached.
+
+    Raises:
+        ValueError: If either model has inconsistent dimensions, invalid bounds,
+            an unsupported objective sense, or a nonpositive tolerance.
+    """
 
     if mode == "projection":
         if variable_mapping is None:
