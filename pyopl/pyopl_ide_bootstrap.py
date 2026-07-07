@@ -264,6 +264,31 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
         sys.stderr = old_stderr
 
 
+def _compare_models_wrapper(
+    left_model: str, left_data: str, right_model: str, right_data: str, q: multiprocessing.Queue
+) -> None:
+    """Wrapper to compile and compare models in a separate process."""
+
+    def read_optional_file(path: str) -> Optional[str]:
+        if not path:
+            return None
+        with open(path, "r", encoding="utf-8") as file_obj:
+            content = file_obj.read()
+        return content if content.strip() else None
+
+    def compile_path(model_path: str, data_path: str):
+        with open(model_path, "r", encoding="utf-8") as file_obj:
+            model_code = file_obj.read()
+        return linear_problem_from_opl(model_code, read_optional_file(data_path))
+
+    try:
+        left_problem = compile_path(left_model, left_data)
+        right_problem = compile_path(right_model, right_data)
+        q.put(("success", prove_equivalent(left_problem, right_problem)))
+    except Exception as exc:
+        q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
+
+
 class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
@@ -3062,12 +3087,16 @@ class OPLIDE(tk.Tk):
             if fname:
                 target.set(fname)
 
+        browse_buttons: list[ttk.Button] = []
+        compare_process: Optional[multiprocessing.Process] = None
+        compare_queue: Optional[multiprocessing.Queue] = None
+
         def add_path_row(row: int, label: str, var: tk.StringVar, browse_command: Callable[[], None]) -> None:
             ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             ttk.Entry(path_frame, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
-            ttk.Button(path_frame, text="Browse...", command=browse_command).grid(
-                row=row, column=2, sticky="ew", padx=(8, 0), pady=4
-            )
+            browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
+            browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+            browse_buttons.append(browse_button)
 
         add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
         add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
@@ -3089,7 +3118,19 @@ class OPLIDE(tk.Tk):
         button_frame.columnconfigure(0, weight=1)
         compare_button = ttk.Button(button_frame, text="Compare")
         compare_button.grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(row=0, column=2)
+        close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy)
+        close_button.grid(row=0, column=2)
+
+        def set_compare_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            close_button.config(state=state)
+            compare_button.config(
+                text=("Interrupt" if running else "Compare"),
+                command=(interrupt_compare if running else do_compare),
+                state="normal",
+            )
 
         def set_result(text: str) -> None:
             result_text.config(state="normal")
@@ -3097,19 +3138,83 @@ class OPLIDE(tk.Tk):
             result_text.insert(tk.END, text)
             result_text.config(state="disabled")
 
-        def read_optional_file(path: str) -> Optional[str]:
-            if not path:
-                return None
-            with open(path, "r", encoding="utf-8") as file_obj:
-                content = file_obj.read()
-            return content if content.strip() else None
+        def cleanup_compare_process(*, cancel_queue_thread: bool) -> None:
+            nonlocal compare_process, compare_queue
+            q = compare_queue
+            compare_process = None
+            compare_queue = None
+            if q is None:
+                return
+            try:
+                q.close()
+            except Exception:
+                pass
+            try:
+                if cancel_queue_thread:
+                    q.cancel_join_thread()
+                else:
+                    q.join_thread()
+            except Exception:
+                pass
 
-        def compile_path(model_path: str, data_path: str):
-            with open(model_path, "r", encoding="utf-8") as file_obj:
-                model_code = file_obj.read()
-            return linear_problem_from_opl(model_code, read_optional_file(data_path))
+        def interrupt_compare() -> None:
+            p = compare_process
+            if p is not None and p.is_alive():
+                try:
+                    p.terminate()
+                    p.join(timeout=1.0)
+                    if p.is_alive() and hasattr(p, "kill"):
+                        p.kill()
+                        p.join(timeout=1.0)
+                except Exception:
+                    pass
+            cleanup_compare_process(cancel_queue_thread=True)
+            set_compare_running(False)
+            set_result("Comparison interrupted by user.\n")
+            self.status_var.set("Compare models interrupted.")
+
+        def poll_compare(left_model: str, right_model: str, left_data: str, right_data: str) -> None:
+            p = compare_process
+            q = compare_queue
+            if p is None or q is None:
+                return
+
+            try:
+                kind, payload = q.get_nowait()
+            except queue.Empty:
+                if p.is_alive():
+                    dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
+                    return
+                cleanup_compare_process(cancel_queue_thread=True)
+                set_compare_running(False)
+                set_result("Comparison failed.\n\nComparison process terminated unexpectedly.\n")
+                self.status_var.set("Compare models failed: process terminated unexpectedly.")
+                messagebox.showerror(
+                    "Compare models",
+                    "Comparison process terminated unexpectedly.",
+                    parent=dialog,
+                )
+                return
+
+            try:
+                p.join(timeout=0.1)
+            except Exception:
+                pass
+            cleanup_compare_process(cancel_queue_thread=False)
+            set_compare_running(False)
+
+            if kind == "success" and isinstance(payload, EquivalenceResult):
+                set_result(self._format_equivalence_result(payload, left_model, right_model, left_data, right_data))
+                self.status_var.set(f"Compare models: {payload.status}")
+                return
+
+            detail = str(payload)
+            logging.getLogger(__name__).error("Compare models failed: %s", detail)
+            set_result(f"Comparison failed.\n\n{detail}\n")
+            messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
 
         def do_compare() -> None:
+            nonlocal compare_process, compare_queue
             left_model = left_model_var.get().strip()
             right_model = right_model_var.get().strip()
             left_data = left_data_var.get().strip()
@@ -3129,25 +3234,28 @@ class OPLIDE(tk.Tk):
                     return
 
             try:
-                compare_button.config(state="disabled")
+                compare_queue = multiprocessing.Queue()
+                compare_process = multiprocessing.Process(
+                    target=_compare_models_wrapper,
+                    args=(left_model, left_data, right_model, right_data, compare_queue),
+                )
+                compare_process.start()
+                set_compare_running(True)
                 set_result("Compiling and comparing models...\n")
-                dialog.update_idletasks()
-                left_problem = compile_path(left_model, left_data)
-                right_problem = compile_path(right_model, right_data)
-                result = prove_equivalent(left_problem, right_problem)
-                set_result(self._format_equivalence_result(result, left_model, right_model, left_data, right_data))
-                self.status_var.set(f"Compare models: {result.status}")
+                self.status_var.set("Compare models running...")
+                dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
             except Exception as exc:
                 logging.getLogger(__name__).exception("Compare models failed")
+                cleanup_compare_process(cancel_queue_thread=True)
+                set_compare_running(False)
                 detail = f"{type(exc).__name__}: {exc}"
                 set_result(f"Comparison failed.\n\n{detail}\n")
                 messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
-            finally:
-                compare_button.config(state="normal")
 
         compare_button.config(command=do_compare)
-        dialog.bind("<Return>", lambda _event: do_compare())
-        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.bind("<Return>", lambda _event: interrupt_compare() if compare_process is not None else do_compare())
+        dialog.bind("<Escape>", lambda _event: interrupt_compare() if compare_process is not None else dialog.destroy())
+        dialog.protocol("WM_DELETE_WINDOW", lambda: interrupt_compare() if compare_process is not None else dialog.destroy())
         dialog.grab_set()
         dialog.focus_set()
 
