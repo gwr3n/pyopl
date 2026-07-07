@@ -35,6 +35,7 @@ dependencies = [
   "tf-keras>=2.16.0",
   "tiktoken>=0.12.0",
   "mcp>=1.27.0",
+  "networkx>=3.4",
 ]
 
 [project.urls]
