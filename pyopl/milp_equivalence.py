@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 import networkx as nx
+import numpy as np
 from networkx.algorithms import isomorphism
 from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 
@@ -669,6 +670,8 @@ def _is_lp_redundant_row(
     )
     if result.status != 0:
         return False
+    if result.fun is None:
+        return False
     return -float(result.fun) <= _row_rhs(row, tolerance) + tolerance
 
 
@@ -682,15 +685,17 @@ def _is_milp_redundant_row(
     constraints = _linear_constraints(other_rows, variable_count, tolerance)
     objective = [-coefficient for coefficient in _row_coefficients(row, variable_count, tolerance)]
     result = milp(
-        c=objective,
-        integrality=[column.integrality for column in columns],
+        c=np.asarray(objective, dtype=float),
+        integrality=np.asarray([column.integrality for column in columns], dtype=np.int8),
         bounds=Bounds(
-            lb=[-float("inf")] * variable_count,
-            ub=[float("inf")] * variable_count,
+            lb=np.full(variable_count, -float("inf")),
+            ub=np.full(variable_count, float("inf")),
         ),
         constraints=constraints,
     )
     if result.status != 0:
+        return False
+    if result.fun is None:
         return False
     return -float(result.fun) <= _row_rhs(row, tolerance) + tolerance
 
@@ -698,7 +703,7 @@ def _is_milp_redundant_row(
 def _linear_constraints(rows: tuple[_Row, ...], variable_count: int, tolerance: float) -> list[LinearConstraint]:
     constraints: list[LinearConstraint] = []
     for row in rows:
-        coefficients = _row_coefficients(row, variable_count, tolerance)
+        coefficients = np.asarray(_row_coefficients(row, variable_count, tolerance), dtype=float)
         rhs = _row_rhs(row, tolerance)
         if row.sense == "<=":
             constraints.append(LinearConstraint(coefficients, -float("inf"), rhs))
