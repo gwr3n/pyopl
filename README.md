@@ -213,6 +213,39 @@ python -m pyopl solve knapsack.mod knapsack.dat --solver highs --out mps --out-f
 
 
 
+## PyOPL MCP
+
+PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so external clients (IDEs, editors, automation) can call compile, solve, export, and compare operations over stdio-based MCP servers.
+
+- **Purpose**: Provide programmatic access to compilation, solving, Python code export, and model equivalence comparison for OPL models using in-memory model/data strings.
+- **Exposed tools**:
+  - **read_pyopl_grammar_tool**: Return the bundled grammar text.
+  - **solve_strings_tool**: Compile and solve a model from `model_text` and optional `data_text`.
+  - **export_py_strings_tool**: Compile `model_text` and optional `data_text` to generated Python source and return it as a string.
+  - **compare_model_strings_tool**: Compare two OPL models from strings using the same MILP equivalence engine as the IDE's Compare models workflow. Returns `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
+- **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
+- **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
+- **Quick start (VS Code MCP example - .vscode/mcp.json)**:
+```json
+{
+  "servers": {
+    "PyOPL MCP": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/venv/bin/python",
+      "args": ["-m", "pyopl.pyopl_mcp"]
+    }
+  }
+}
+```
+- **Run locally**:
+```bash
+python -m pyopl.pyopl_mcp
+```
+- **Files**: Implementation and tool list in pyopl_mcp.py.
+- **Notes**: Errors from the compiler/solver/comparison engine are propagated to the caller; generated Python code is returned (not written) so the client can persist it as desired.
+
+
+
 ## User Guide
 
 A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `docs` folder of the repository.
