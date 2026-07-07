@@ -30,7 +30,8 @@ from typing import Optional, TypeVar, Union
 from mcp.server.fastmcp import FastMCP
 
 from . import solve
-from .pyopl_core import OPLCompiler
+from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .pyopl_core import OPLCompiler, linear_problem_from_opl
 
 PathLike = Union[str, Path]
 T = TypeVar("T")
@@ -144,6 +145,30 @@ def export_py_from_strings(
     return _compile_to_python(model_text, data_text, solver=solver)
 
 
+def _equivalence_result_to_dict(result: EquivalenceResult) -> dict:
+    """Convert an equivalence result to an MCP-friendly JSON object."""
+    return {
+        "status": result.status,
+        "equivalent": result.equivalent,
+        "level": result.level,
+        "reason": result.reason,
+        "proof_steps": list(result.proof_steps),
+        "counterexample": result.counterexample,
+    }
+
+
+def compare_model_strings(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: Optional[str] = None,
+    right_data_text: Optional[str] = None,
+) -> dict:
+    """Compare two OPL models provided as strings for MILP equivalence."""
+    left_problem = linear_problem_from_opl(left_model_text, left_data_text)
+    right_problem = linear_problem_from_opl(right_model_text, right_data_text)
+    return _equivalence_result_to_dict(prove_equivalent(left_problem, right_problem))
+
+
 def read_pyopl_grammar() -> str:
     """Return the PyOPL grammar file contents as a UTF-8 string."""
     return (files(__package__) / "grammars" / "PyOPL grammar.md").read_text(encoding="utf-8")
@@ -155,7 +180,7 @@ def read_pyopl_grammar_tool() -> str:
     return read_pyopl_grammar()
 
 
-@mcp.tool()
+# @mcp.tool()
 def solve_files_tool(
     model_path: str,
     data_path: Optional[str] = None,
@@ -176,7 +201,7 @@ def solve_files_tool(
     return solve_from_files(model_path, data_path, solver)
 
 
-@mcp.tool()
+# @mcp.tool()
 def export_py_files_tool(
     model_path: str,
     data_path: Optional[str] = None,
@@ -250,6 +275,32 @@ def export_py_strings_tool(
         compiler are propagated to the caller.
     """
     return export_py_from_strings(model_text, data_text, solver)
+
+
+@mcp.tool()
+def compare_model_strings_tool(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: Optional[str] = None,
+    right_data_text: Optional[str] = None,
+) -> dict:
+    """Compare two OPL models provided as strings for MILP equivalence.
+
+    This exposes the same comparison engine used by the GUI's Compare models
+    workflow, but avoids filesystem paths by accepting model/data contents
+    directly.
+
+    Args:
+        left_model_text: OPL source for the left model.
+        right_model_text: OPL source for the right model.
+        left_data_text: Optional OPL data contents for the left model.
+        right_data_text: Optional OPL data contents for the right model.
+
+    Returns:
+        A dictionary containing status, equivalent, level, reason, proof_steps,
+        and counterexample fields.
+    """
+    return compare_model_strings(left_model_text, right_model_text, left_data_text, right_data_text)
 
 
 if __name__ == "__main__":

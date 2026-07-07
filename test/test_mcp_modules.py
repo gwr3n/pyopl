@@ -96,9 +96,41 @@ class TestPyOPLMCP(unittest.TestCase):
             self.assertEqual(_pyopl_mcp.export_py_strings_tool("m", None, "scipy"), "code")
         export_mock.assert_called_once_with("m", None, "scipy")
 
+        with patch.object(_pyopl_mcp, "compare_model_strings", return_value={"equivalent": True}) as compare_mock:
+            self.assertEqual(_pyopl_mcp.compare_model_strings_tool("left", "right", None, None), {"equivalent": True})
+        compare_mock.assert_called_once_with("left", "right", None, None)
+
         with patch.object(pyopl_mcp.mcp, "run") as run_mock:
             pyopl_mcp.main()
         run_mock.assert_called_once_with()
+
+    def test_compare_model_strings_returns_equivalence_result_dict(self):
+        left_model = """
+            dvar float+ x;
+
+            minimize 2 * x;
+
+            subject to {
+                x <= 3;
+            }
+            """
+        right_model = """
+            dvar float+ y;
+
+            minimize 2 * y;
+
+            subject to {
+                2 * y <= 6;
+            }
+            """
+
+        result = _pyopl_mcp.compare_model_strings_tool(left_model, right_model)
+
+        self.assertEqual(result["status"], "equivalent")
+        self.assertTrue(result["equivalent"])
+        self.assertEqual(result["level"], "solver_implied")
+        self.assertIn("normalized both models", result["proof_steps"])
+        self.assertIsNone(result["counterexample"])
 
 
 class TestRhetorMCP(unittest.TestCase):
