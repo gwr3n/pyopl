@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pyopl import solve
+from pyopl.milp_equivalence import compare
+from pyopl.pyopl_core import linear_problem_from_opl
 
 
 # Ensure parent directory exists
@@ -151,6 +153,16 @@ def _get_direction_from_model(model_file: str):
     return None
 
 
+def _expected_model_data(item: Any) -> tuple[str, str] | None:
+    if not isinstance(item, dict):
+        return None
+    model = item.get("model")
+    data = item.get("data")
+    if isinstance(model, str) and isinstance(data, str):
+        return model, data
+    return None
+
+
 # Unify single/batch processing into one function
 def _process_item(
     index: int,
@@ -170,24 +182,11 @@ def _process_item(
     }
 
     prompt = item.get("en_question") if isinstance(item, dict) else None
-    expected_raw = item.get("en_answer") if isinstance(item, dict) else None
+    expected_model_data = _expected_model_data(item)
 
     if not prompt:
         entry.update({"error": "Selected item has no 'en_question'.", "exit_code": 2})
         return entry, False
-
-    expected = _extract_number(expected_raw)
-    if expected is None:
-        entry.update(
-            {
-                "expected_objective": None,
-                "error": f"Could not parse numeric en_answer from: {expected_raw}",
-                "exit_code": 2,
-            }
-        )
-        return entry, False
-
-    entry["expected_objective"] = expected
 
     # Per-index output files
     model_path = os.path.join(models_dir, f"gen_pyopl_model_{index}.mod")
@@ -232,26 +231,61 @@ def _process_item(
         )
         return entry, False
 
-    # Step 3: Solve and compare
-    try:
-        result = solve(model_path, data_path, solver=args.solver)
-        obj = _extract_objective(result)
-        if obj is None:
+    if expected_model_data is not None:
+        expected_model, expected_data = expected_model_data
+        try:
+            generated_model = Path(model_path).read_text(encoding="utf-8")
+            generated_data = Path(data_path).read_text(encoding="utf-8")
+            expected_problem = linear_problem_from_opl(expected_model, expected_data)
+            generated_problem = linear_problem_from_opl(generated_model, generated_data)
+            ok = compare(expected_problem, generated_problem, tolerance=args.tolerance)
+            entry.update({"comparison": "milp_equivalence", "pass": ok})
+        except Exception as e:
             entry.update(
                 {
-                    "observed_objective": None,
-                    "error": f"Could not extract objective_value from result: {result}",
-                    "exit_code": 5,
+                    "comparison": "milp_equivalence",
+                    "error": f"MILP equivalence comparison failed: {e}",
+                    "exit_code": 6,
                 }
             )
             ok = False
-        else:
-            diff = abs(obj - expected)
-            ok = diff <= args.tolerance
-            entry.update({"observed_objective": obj, "abs_diff": diff, "pass": ok})
-    except Exception as e:
-        entry.update({"observed_objective": None, "error": f"solve failed: {e}", "exit_code": 4})
-        ok = False
+    else:
+        expected_raw = item.get("en_answer") if isinstance(item, dict) else None
+        expected = _extract_number(expected_raw)
+        if expected is None:
+            entry.update(
+                {
+                    "expected_objective": None,
+                    "error": f"Could not parse numeric en_answer from: {expected_raw}",
+                    "exit_code": 2,
+                }
+            )
+            return entry, False
+
+        entry["expected_objective"] = expected
+
+        # Step 3: Solve and compare
+        try:
+            result = solve(model_path, data_path, solver=args.solver)
+            obj = _extract_objective(result)
+            if obj is None:
+                entry.update(
+                    {
+                        "observed_objective": None,
+                        "error": f"Could not extract objective_value from result: {result}",
+                        "exit_code": 5,
+                    }
+                )
+                ok = False
+            else:
+                diff = abs(obj - expected)
+                ok = diff <= args.tolerance
+                entry.update({"comparison": "objective", "observed_objective": obj, "abs_diff": diff, "pass": ok})
+        except Exception as e:
+            entry.update(
+                {"comparison": "objective", "observed_objective": None, "error": f"solve failed: {e}", "exit_code": 4}
+            )
+            ok = False
 
     # Infer direction if model exists
     direction = None
@@ -532,6 +566,7 @@ def main() -> int:
                     "expected_objective": last_entry.get("expected_objective"),
                     "observed_objective": last_entry.get("observed_objective"),
                     "abs_diff": last_entry.get("abs_diff"),
+                    "comparison": last_entry.get("comparison"),
                     "tolerance": last_entry["tolerance"],
                     "pass": last_entry.get("pass", False),
                     "direction": last_entry.get("direction"),

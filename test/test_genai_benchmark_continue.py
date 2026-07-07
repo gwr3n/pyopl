@@ -157,6 +157,81 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
         self.assertEqual(mismatch["exit_code"], 1)
         self.assertEqual(mismatch["direction"], "min")
 
+    def test_process_item_uses_milp_equivalence_when_model_and_data_present(self) -> None:
+        import genai_benchmark
+
+        args = SimpleNamespace(
+            solver="gurobi", tolerance=1e-6, logic="standard", provider="openai", gpt="gpt-test", iterations=1
+        )
+
+        def dummy_generate(prompt: str, model_path: str, data_path: str, **kwargs: Any) -> dict[str, Any]:
+            Path(model_path).write_text("minimize cost;", encoding="utf-8")
+            Path(data_path).write_text("// generated data", encoding="utf-8")
+            return {"assessment": "ok", "iterations": 1, "syntax_errors": [], "cost": {}}
+
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.object(
+                    genai_benchmark, "linear_problem_from_opl", side_effect=["expected", "generated"]
+                ) as compile_mock,
+                patch.object(genai_benchmark, "compare", return_value=True) as compare_mock,
+                patch.object(genai_benchmark, "solve") as solve_mock,
+            ):
+                entry, ok = genai_benchmark._process_item(
+                    0,
+                    {"en_question": "q", "model": "expected model", "data": "expected data"},
+                    args,
+                    DummyGrammar.BNF,
+                    dummy_generate,
+                    td,
+                    True,
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(entry["comparison"], "milp_equivalence")
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertTrue(entry["pass"])
+        compile_mock.assert_any_call("expected model", "expected data")
+        compile_mock.assert_any_call("minimize cost;", "// generated data")
+        compare_mock.assert_called_once_with("expected", "generated", tolerance=1e-6)
+        solve_mock.assert_not_called()
+
+    def test_process_item_falls_back_to_objective_when_only_en_answer_present(self) -> None:
+        import genai_benchmark
+
+        args = SimpleNamespace(
+            solver="gurobi", tolerance=0.1, logic="standard", provider="openai", gpt="gpt-test", iterations=1
+        )
+
+        def dummy_generate(prompt: str, model_path: str, data_path: str, **kwargs: Any) -> dict[str, Any]:
+            Path(model_path).write_text("minimize cost;", encoding="utf-8")
+            Path(data_path).write_text("// data", encoding="utf-8")
+            return {"assessment": "ok", "iterations": 1, "syntax_errors": [], "cost": {}}
+
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.object(genai_benchmark, "linear_problem_from_opl") as compile_mock,
+                patch.object(genai_benchmark, "compare") as compare_mock,
+                patch.object(genai_benchmark, "solve", return_value={"objective_value": 10.05}) as solve_mock,
+            ):
+                entry, ok = genai_benchmark._process_item(
+                    0,
+                    {"en_question": "q", "en_answer": 10.0},
+                    args,
+                    DummyGrammar.BNF,
+                    dummy_generate,
+                    td,
+                    True,
+                )
+
+        self.assertTrue(ok)
+        self.assertEqual(entry["comparison"], "objective")
+        self.assertEqual(entry["exit_code"], 0)
+        self.assertAlmostEqual(entry["abs_diff"], 0.05)
+        solve_mock.assert_called_once()
+        compile_mock.assert_not_called()
+        compare_mock.assert_not_called()
+
 
 class TestGenAIBenchmarkContinue(unittest.TestCase):
     def test_main_no_args_prints_help(self) -> None:
