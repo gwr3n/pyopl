@@ -640,7 +640,7 @@ class OPLIDE(tk.Tk):
         # File
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="New Model", command=self.new_model, accelerator=self._accel("N"))
-        filemenu.add_command(label="New Session", command=self.new_session)
+        filemenu.add_command(label="Clear Session", command=self.new_session)
         filemenu.add_separator()
         filemenu.add_command(label="Open Model...", command=self.open_model)
         filemenu.add_command(label="Open Data...", command=self.open_data)
