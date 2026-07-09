@@ -52,6 +52,90 @@ class TestCLI(unittest.TestCase):
         self.assertNotEqual(ret, 0)
         self.assertIn("model file not found", err_buf.getvalue())
 
+    def test_cli_compare_models_json(self):
+        result = {
+            "status": "equivalent",
+            "equivalent": True,
+            "level": "solver_implied",
+            "reason": "same normalized model",
+            "proof_steps": ["normalized both models"],
+            "counterexample": None,
+        }
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            left_data = td_path / "left.dat"
+            right_data = td_path / "right.dat"
+            left_model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            right_model.write_text("dvar float+ y; minimize y; subject to { y >= 1; }", encoding="utf-8")
+            left_data.write_text("", encoding="utf-8")
+            right_data.write_text("", encoding="utf-8")
+
+            with patch("pyopl.pyopl_cli._compare_models", return_value=result) as compare_mock:
+                buf = io.StringIO()
+                argv = [
+                    "compare",
+                    str(left_model),
+                    str(right_model),
+                    "--left-data",
+                    str(left_data),
+                    "--right-data",
+                    str(right_data),
+                ]
+                with redirect_stdout(buf):
+                    ret = pyopl_cli.main(argv)
+
+            self.assertEqual(ret, 0)
+            self.assertEqual(json.loads(buf.getvalue()), result)
+            compare_mock.assert_called_once_with(left_model, right_model, left_data, right_data)
+
+    def test_cli_compare_models_outfile(self):
+        result = {"status": "different", "equivalent": False, "level": "solver_implied"}
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            out_file = td_path / "compare.json"
+            left_model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            right_model.write_text("dvar float+ x; minimize 2 * x; subject to { x >= 1; }", encoding="utf-8")
+
+            with patch("pyopl.pyopl_cli._compare_models", return_value=result):
+                ret = pyopl_cli.main(["compare", str(left_model), str(right_model), "--out-file", str(out_file)])
+
+            self.assertEqual(ret, 0)
+            self.assertEqual(json.loads(out_file.read_text(encoding="utf-8")), result)
+
+    def test_cli_compare_missing_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            right_model = Path(td) / "right.mod"
+            right_model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            err_buf = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                ret = pyopl_cli.main(["compare", "does_not_exist.mod", str(right_model)])
+
+        self.assertEqual(ret, 2)
+        self.assertIn("left model file not found", err_buf.getvalue())
+
+    def test_cli_compare_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            left_model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            right_model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+
+            err_buf = io.StringIO()
+            with (
+                patch("pyopl.pyopl_cli._compare_models", side_effect=ValueError("bad model")),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(["compare", str(left_model), str(right_model)])
+
+        self.assertEqual(ret, 1)
+        self.assertIn("Error during compare: bad model", err_buf.getvalue())
+
     def test_genai_list_models_openai(self):
         argv = ["genai", "list-models", "openai"]
         fake_models = ["gpt-test-1", "gpt-test-2"]

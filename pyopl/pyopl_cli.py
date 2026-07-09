@@ -26,7 +26,8 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
-from .pyopl_core import OPLCompiler, export_model
+from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .pyopl_core import OPLCompiler, export_model, linear_problem_from_opl
 from .pyopl_ide_bootstrap import OPLIDE
 
 
@@ -62,6 +63,39 @@ def _export_lp_mps(model_path: Path, data_path: Optional[Path], out_file: Path) 
     return export_model(model_code, data_code, "scipy", out_file)
 
 
+def _equivalence_result_to_dict(result: EquivalenceResult) -> dict:
+    return {
+        "status": result.status,
+        "equivalent": result.equivalent,
+        "level": result.level,
+        "reason": result.reason,
+        "proof_steps": list(result.proof_steps),
+        "counterexample": result.counterexample,
+    }
+
+
+def _compare_models(
+    left_model_path: Path,
+    right_model_path: Path,
+    left_data_path: Optional[Path],
+    right_data_path: Optional[Path],
+) -> dict:
+    left_model_code = _read_text(left_model_path)
+    right_model_code = _read_text(right_model_path)
+    left_data_code = _read_text(left_data_path) if left_data_path else None
+    right_data_code = _read_text(right_data_path) if right_data_path else None
+    left_problem = linear_problem_from_opl(left_model_code, left_data_code)
+    right_problem = linear_problem_from_opl(right_model_code, right_data_code)
+    return _equivalence_result_to_dict(prove_equivalent(left_problem, right_problem))
+
+
+def _validate_input_file(path: Path, label: str) -> bool:
+    if path.exists():
+        return True
+    print(f"Error: {label} file not found: {path}", file=sys.stderr)
+    return False
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="pyopl", description="PyOPL command-line interface")
 
@@ -78,6 +112,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_solve.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
     p_solve.add_argument("--out", choices=["json", "py", "lp", "mps"], default="json", help="Output format")
     p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
+
+    # compare subcommand
+    p_compare = subparsers.add_parser("compare", help="Compare two models for MILP equivalence")
+    p_compare.add_argument("left_model", help="Path to the left model (.mod)")
+    p_compare.add_argument("right_model", help="Path to the right model (.mod)")
+    p_compare.add_argument("--left-data", help="Optional data (.dat) for the left model")
+    p_compare.add_argument("--right-data", help="Optional data (.dat) for the right model")
+    p_compare.add_argument("--out-file", help="Write comparison JSON to file instead of stdout")
 
     # genai group
     p_genai = subparsers.add_parser("genai", help="Generative AI utilities")
@@ -178,6 +220,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return 0
         except Exception as e:
             print(f"Error during solve/export: {e}", file=sys.stderr)
+            return 1
+
+    if args.command == "compare":
+        left_model_path = Path(args.left_model)
+        right_model_path = Path(args.right_model)
+        left_data_path = Path(args.left_data) if args.left_data else None
+        right_data_path = Path(args.right_data) if args.right_data else None
+
+        if not _validate_input_file(left_model_path, "left model"):
+            return 2
+        if not _validate_input_file(right_model_path, "right model"):
+            return 2
+        if left_data_path and not _validate_input_file(left_data_path, "left data"):
+            return 2
+        if right_data_path and not _validate_input_file(right_data_path, "right data"):
+            return 2
+
+        try:
+            with redirect_stdout(sys.stderr):
+                result = _compare_models(left_model_path, right_model_path, left_data_path, right_data_path)
+            out_text = json.dumps(result, indent=2, sort_keys=True, default=str)
+            if args.out_file:
+                _write_text(Path(args.out_file), out_text)
+            else:
+                print(out_text)
+            return 0
+        except Exception as e:
+            print(f"Error during compare: {e}", file=sys.stderr)
             return 1
 
     if args.command == "genai":
