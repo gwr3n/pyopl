@@ -37,7 +37,16 @@ from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
 from .milp_equivalence import EquivalenceResult, prove_equivalent
-from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, export_model as export_opl_model, linear_problem_from_opl
+from .pyopl_core import (
+    OPLDataLexer,
+    OPLDataParser,
+    OPLLexer,
+    OPLParser,
+    linear_problem_from_opl,
+)
+from .pyopl_core import (
+    export_model as export_opl_model,
+)
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
