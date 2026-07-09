@@ -26,10 +26,8 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
-from .linear_problem_highs import export_linear_problem
-from .pyopl_core import OPLCompiler
+from .pyopl_core import OPLCompiler, export_model
 from .pyopl_ide_bootstrap import OPLIDE
-from .scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 def _read_text(path: Path) -> str:
@@ -61,10 +59,7 @@ def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> 
 def _export_lp_mps(model_path: Path, data_path: Optional[Path], out_file: Path) -> Path:
     model_code = _read_text(model_path)
     data_code = _read_text(data_path) if data_path else None
-    compiler = OPLCompiler()
-    ast, _code_str, data_dict = compiler.compile_model(model_code, data_code, solver="scipy")
-    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
-    return export_linear_problem(problem, out_file)
+    return export_model(model_code, data_code, "scipy", out_file)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

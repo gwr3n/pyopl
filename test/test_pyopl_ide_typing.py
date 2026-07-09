@@ -49,7 +49,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         with (
             mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", side_effect=fake_saveas),
-            mock.patch.object(pyopl_ide_bootstrap, "export_linear_problem") as export_linear_problem,
+            mock.patch.object(pyopl_ide_bootstrap, "export_opl_model") as export_opl_model,
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning"),
         ):
@@ -59,7 +59,12 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn(("LP files", "*.lp"), captured.get("filetypes", []))
         self.assertIn(("MPS files", "*.mps"), captured.get("filetypes", []))
-        export_linear_problem.assert_called_once()
+        export_opl_model.assert_called_once_with(
+            "dvar float+ x; minimize x; subject to { x >= 1; }",
+            "",
+            "gurobi",
+            "/tmp/example.lp",
+        )
         dummy._clear_output.assert_not_called()
         dummy._append_output.assert_not_called()
         self.assertIn("Model exported to LP", stdout.getvalue())

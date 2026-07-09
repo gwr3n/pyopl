@@ -1,5 +1,7 @@
 import unittest
 from collections import defaultdict
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from pyopl.gurobi_codegen import EPS, GurobiCodeGenerator
 from pyopl.pyopl_core import (
@@ -20,6 +22,7 @@ from pyopl.pyopl_core import (
     _prepend_list_item,
     _string_label_value_pair,
     _unquote_string_literal,
+    export_model,
 )
 from pyopl.scipy_codegen import SciPyCodeGenerator
 from pyopl.scipy_codegen_base import SciPyCodeGeneratorBase
@@ -105,6 +108,19 @@ class TestCoreHelperCoverage(unittest.TestCase):
             _coerce_int_set_element(3.5)
         with self.assertRaises(SemanticError):
             _coerce_float_set_element(False)
+
+    def test_export_model_writes_python_file_from_strings(self):
+        model_code = "dvar float+ x; minimize x; subject to { x >= 1; }"
+
+        with TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "model.py"
+            written_path = export_model(model_code, "", "scipy", output_path)
+
+            self.assertEqual(written_path, output_path)
+            exported = output_path.read_text(encoding="utf-8")
+
+        self.assertIn("linprog", exported)
+        self.assertIn("var_names = ['x']", exported)
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):

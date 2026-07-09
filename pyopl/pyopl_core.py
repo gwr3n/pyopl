@@ -18,6 +18,7 @@ import sys
 import time
 import traceback
 from io import StringIO
+from pathlib import Path
 from typing import Any, Callable, Optional, cast  # typing helpers
 
 # === Third-party imports ===
@@ -31,6 +32,7 @@ except Exception:  # pragma: no cover
 # === Local imports ===
 from .gurobi_codegen import GurobiCodeGenerator
 from .linear_problem import LinearProblem
+from .linear_problem_highs import export_linear_problem
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
 from .scipy_codegen_csc import SciPyCSCCodeGenerator
 from .semantic_error import SemanticError
@@ -5491,6 +5493,47 @@ def linear_problem_from_opl(model_code: str, data_code: Optional[str] = None) ->
     if not isinstance(generator, SciPyCSCCodeGenerator):
         raise AssertionError(f"Expected SciPyCSCCodeGenerator, got {type(generator).__name__}")
     return generator.build_problem()
+
+
+def export_model(
+    model_code: str,
+    data_code: Optional[str],
+    solver: str,
+    output_path: str | os.PathLike[str],
+) -> Path:
+    """Export an OPL model string pair to Python, LP, or MPS based on output_path."""
+    path = Path(output_path)
+    export_ext = path.suffix.lower()
+    if export_ext not in {".py", ".lp", ".mps"}:
+        raise ValueError("Choose a supported export extension: .py, .lp, or .mps.")
+
+    compiler = OPLCompiler()
+    effective_data_code = data_code if data_code and data_code.strip() else None
+    if export_ext == ".py":
+        _ast, generated_code, _data_dict = compiler.compile_model(
+            model_code,
+            effective_data_code,
+            solver=solver,
+        )
+        if not generated_code:
+            raise ValueError("Compiler returned no generated code.")
+
+        lines = generated_code.rstrip("\n").split("\n")
+        if lines:
+            generated_code = "\n".join(lines[:-1])
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(generated_code)
+        return path
+
+    ast, _generated_code, data_dict = compiler.compile_model(
+        model_code,
+        effective_data_code,
+        solver="scipy",
+    )
+    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
+    return export_linear_problem(problem, path)
 
 
 # --- Utility function to load OPL model from disk ---

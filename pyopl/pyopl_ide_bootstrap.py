@@ -36,10 +36,8 @@ from .genai.model_discovery import (
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
-from .linear_problem_highs import export_linear_problem
 from .milp_equivalence import EquivalenceResult, prove_equivalent
-from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, linear_problem_from_opl
-from .scipy_codegen_csc import SciPyCSCCodeGenerator
+from .pyopl_core import OPLCompiler, OPLDataLexer, OPLDataParser, OPLLexer, OPLParser, export_model as export_opl_model, linear_problem_from_opl
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -4522,33 +4520,8 @@ class OPLIDE(tk.Tk):
                 )
                 return
 
-            # Compile through OPLCompiler so all AST rewrites/validation are applied.
             try:
-                compiler = OPLCompiler()
-                if export_ext == ".py":
-                    _ast, generated_code, _data_dict = compiler.compile_model(
-                        model_code,
-                        data_code if data_code.strip() else None,
-                        solver=solver_choice,
-                    )
-                    if not generated_code:
-                        raise ValueError("Compiler returned no generated code.")
-
-                    # Preserve existing behavior
-                    lines = generated_code.rstrip("\n").split("\n")
-                    if lines:
-                        generated_code = "\n".join(lines[:-1])
-
-                    with open(dest_path, "w", encoding="utf-8") as f:
-                        f.write(generated_code)
-                else:
-                    ast, _generated_code, data_dict = compiler.compile_model(
-                        model_code,
-                        data_code if data_code.strip() else None,
-                        solver="scipy",
-                    )
-                    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
-                    export_linear_problem(problem, dest_path)
+                export_opl_model(model_code, data_code, solver_choice, dest_path)
             except Exception as e:
                 detail = f"{type(e).__name__}: {e}"
                 logging.getLogger(__name__).exception("Export failed")
