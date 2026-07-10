@@ -46,7 +46,7 @@ def run_main_in_tmp(
 
 class TestGenAIBenchmarkHelpers(unittest.TestCase):
     def test_json_result_helpers_and_latest_run(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -74,7 +74,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
             )
 
     def test_extract_number_objective_and_direction(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             model_path = Path(td) / "model.mod"
@@ -89,7 +89,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
             self.assertIsNone(genai_benchmark._get_direction_from_model(str(Path(td) / "missing.mod")))
 
     def test_process_item_error_paths(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         args = SimpleNamespace(
             solver="gurobi", tolerance=1e-6, logic="standard", provider="openai", gpt="gpt-test", iterations=1
@@ -118,7 +118,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
         self.assertEqual(gen_fail["exit_code"], 3)
 
     def test_process_item_solve_failures_and_mismatch(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         args = SimpleNamespace(
             solver="gurobi",
@@ -158,7 +158,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
         self.assertEqual(mismatch["direction"], "min")
 
     def test_process_item_uses_milp_equivalence_when_model_and_data_present(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         args = SimpleNamespace(
             solver="gurobi", tolerance=1e-6, logic="standard", provider="openai", gpt="gpt-test", iterations=1
@@ -197,7 +197,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
         solve_mock.assert_not_called()
 
     def test_process_item_falls_back_to_objective_when_only_en_answer_present(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         args = SimpleNamespace(
             solver="gurobi", tolerance=0.1, logic="standard", provider="openai", gpt="gpt-test", iterations=1
@@ -235,7 +235,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
 
 class TestGenAIBenchmarkContinue(unittest.TestCase):
     def test_main_no_args_prints_help(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         buf = io.StringIO()
         with patch.object(genai_benchmark.sys, "argv", ["genai_benchmark.py"]), redirect_stdout(buf):
@@ -245,7 +245,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
         self.assertIn("Run problems from a dataset", buf.getvalue())
 
     def test_single_index_success_prints_summary(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -285,7 +285,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
         self.assertIn('"pass": true', out)
 
     def test_main_validation_errors(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -316,7 +316,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
         self.assertIn("out of range", err2)
 
     def test_all_fresh_run_emits_resume_hint_and_writes_results(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -352,7 +352,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
 
     def test_continue_resumes_from_first_missing_index(self) -> None:
         # Import here so patch targets resolve correctly.
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -451,7 +451,7 @@ class TestGenAIBenchmarkContinue(unittest.TestCase):
             self.assertIn("Resuming from existing results", out)
 
     def test_continue_without_value_resumes_latest(self) -> None:
-        import genai_benchmark
+        from tools import genai_benchmark
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)

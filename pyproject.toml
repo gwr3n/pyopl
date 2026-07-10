@@ -77,10 +77,10 @@ extend-ignore = ["E203", "W503", "F811"]
 
 [tool.coverage.run]
 omit = [
-  "test_logger.py",
-  "genai_modelling.py",
-  "examples.py",
-  "_sparse_example.py",
+  "tools/test_logger.py",
+  "tools/genai_modelling.py",
+  "tools/examples.py",
+  "tools/_sparse_example.py",
   "test/*",
   "pyopl/__main__.py",
   "pyopl/pyopl_ide_bootstrap.py",

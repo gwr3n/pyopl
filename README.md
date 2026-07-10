@@ -124,7 +124,7 @@ w = [2, 3, 4, 5];
 v = [3, 4, 5, 6];
 ```
 
-See `examples.py` for a repository of examples. 
+See `tools/examples.py` for a repository of examples. 
 
 
 ### Function Reference

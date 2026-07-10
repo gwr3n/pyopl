@@ -89,9 +89,8 @@ def _find_latest_run_dir(base_root: str, results_filenames: list[str]) -> Option
     return os.path.join(base_root, newest_name), newest_fn
 
 
-# Resolve dataset file path relative to this script
 def _dataset_file(dataset_name: str) -> Path:
-    root = Path(__file__).resolve().parent
+    root = Path(__file__).resolve().parents[1]
     return root / "gen_ai" / "datasets" / dataset_name / f"{dataset_name}.json"
 
 
@@ -588,7 +587,7 @@ if __name__ == "__main__":
 
     Run SyntAGM on the full dataset ReSocratic using openai/gpt-5:
         ```
-        python genai_benchmark.py --provider openai --gpt gpt-5 --dataset StochasticOR --logic SyntAGM --all
+        python -m tools.genai_benchmark --provider openai --gpt gpt-5 --dataset StochasticOR --logic SyntAGM --all
         ```
     """
     raise SystemExit(main())
