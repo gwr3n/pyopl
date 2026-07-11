@@ -10,22 +10,25 @@ Core package badges:
 [![Downloads](https://img.shields.io/pypi/dm/rhetor)](https://pypistats.org/packages/rhetor) 
 [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) 
 [![Wheel](https://img.shields.io/pypi/wheel/rhetor)](https://pypi.org/project/rhetor/)
+[![License](https://img.shields.io/github/license/gwr3n/pyopl?v=2)](LICENSE.txt)
 
 Quality and tooling:
 
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000?logo=python)](https://github.com/psf/black) [![Ruff](https://img.shields.io/badge/lint-ruff-1f79ff?logo=python)](https://github.com/astral-sh/ruff) [![mypy](https://img.shields.io/badge/type--checked-mypy-blue?logo=python)](https://github.com/python/mypy) [![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit) [![security: pip-audit](https://img.shields.io/badge/security-pip--audit-008080.svg)](https://github.com/pypa/pip-audit) [![secrets: Betterleaks](https://img.shields.io/badge/secrets-Betterleaks-24292e.svg?logo=github)](https://github.com/betterleaks/betterleaks)
+[![Code style: black](https://img.shields.io/badge/code%20style-black-000000?logo=python)](https://github.com/psf/black) 
+[![Ruff](https://img.shields.io/badge/lint-ruff-1f79ff?logo=python)](https://github.com/astral-sh/ruff) [![mypy](https://img.shields.io/badge/type--checked-mypy-blue?logo=python)](https://github.com/python/mypy) 
+[![security: bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit) 
+[![security: pip-audit](https://img.shields.io/badge/security-pip--audit-008080.svg)](https://github.com/pypa/pip-audit) 
+[![secrets: Betterleaks](https://img.shields.io/badge/secrets-Betterleaks-24292e.svg?logo=github)](https://github.com/betterleaks/betterleaks)
 
 Project/community:
 
-[![Issues](https://img.shields.io/github/issues/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/issues) [![PRs](https://img.shields.io/github/issues-pr/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/pulls) [![Stars](https://img.shields.io/github/stars/gwr3n/pyopl?style=social)](https://github.com/gwr3n/pyopl/stargazers)
+[![Issues](https://img.shields.io/github/issues/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/issues) 
+[![PRs](https://img.shields.io/github/issues-pr/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/pulls) 
+[![Stars](https://img.shields.io/github/stars/gwr3n/pyopl?style=social)](https://github.com/gwr3n/pyopl/stargazers)
 
 Docs:
 
 [![Docs](https://img.shields.io/badge/docs-user%20guide-blue)](docs/PyOPL%20user%20guide.md)
-
-License: 
-
-![GitHub License](https://img.shields.io/github/license/gwr3n/pyopl)
 
 
 `pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
