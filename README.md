@@ -60,7 +60,7 @@ You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selecta
 
 ### Solving an OPL Model
 
-You can use the `solve` function to load and solve an OPL model (and optional data file). The function parses the model, performs semantic validation, generates backend-specific code (Gurobi Python or SciPy/HiGHS matrices), applies logical encodings (including implication and `!=` big-M or indicator formulations), and executes it. Choose the solver with the `solver` argument:
+You can use the `solve` function to load and solve an OPL model (and optional data file). Choose the solver with the `solver` argument:
 
 ```python
 from pyopl import solve
@@ -125,36 +125,6 @@ v = [3, 4, 5, 6];
 ```
 
 See `tools/examples.py` for a repository of examples. 
-
-
-### Function Reference
-
-#### `solve(model_file, data_file=None, solver='gurobi')`
-
-- `model_file`: Path to your `.mod` or `.opl` OPL model file
-- `data_file`: (Optional) Path to a `.dat` data file
-- `solver`: `'gurobi'` (default) or `'scipy'`
-
-The function returns a dictionary with solver results and prints:
-- Parsed AST (Abstract Syntax Tree)
-- Loaded data dictionary (if any)
-- Generated solver code
-- Output from the selected solver
-
-**Return value:**
-- Dictionary with keys:
-  - `status`: Optimization status (e.g., 'OPTIMAL', 'INFEASIBLE')
-  - `solution`: Variable values (if optimal)
-  - `objective_value`: Objective value (if optimal)
-  - `stats`: Solver statistics (MIPGap, Runtime, etc.)
-  - `message`: Error or status messages
-
-### Notes
-
-- You must have a valid Gurobi license to solve models with Gurobi.
-- SciPy/HiGHS is open-source.
-- The library is designed for educational and prototyping purposes and supports a rich subset of OPL syntax, including advanced tuple, boolean, and logical constructs.
-
 
 
 ## PyOPL IME
