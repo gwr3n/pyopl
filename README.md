@@ -7,7 +7,6 @@ Core package badges:
 [![Lint and type-check](https://img.shields.io/github/actions/workflow/status/gwr3n/pyopl/lint-type.yml?branch=main&label=lint%20%2B%20type-check)](https://github.com/gwr3n/pyopl/actions/workflows/lint-type.yml) 
 [![Rhetor on PyPI](https://img.shields.io/pypi/v/rhetor)](https://pypi.org/project/rhetor/)
 [![Python versions](https://img.shields.io/pypi/pyversions/rhetor)](https://pypi.org/project/rhetor/)
-[![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE.txt)
 [![Downloads](https://img.shields.io/pypi/dm/rhetor)](https://pypistats.org/packages/rhetor) 
 [![Release](https://img.shields.io/github/v/release/gwr3n/pyopl)](https://github.com/gwr3n/pyopl/releases) 
 [![Wheel](https://img.shields.io/pypi/wheel/rhetor)](https://pypi.org/project/rhetor/)
@@ -26,7 +25,8 @@ Docs:
 
 License: 
 
-[![License](https://img.shields.io/github/license/gwr3n/pyopl)](LICENSE.txt)
+![GitHub License](https://img.shields.io/github/license/gwr3n/pyopl)
+
 
 `pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
 

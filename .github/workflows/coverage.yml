@@ -31,10 +31,9 @@ jobs:
         run: |
           python -m coverage run --source=pyopl -m unittest discover -v -s test -p 'test_*.py'
           python -m coverage xml
-      - name: Upload to Codecov (OIDC)
-        uses: codecov/codecov-action@v4
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
         with:
-          use_oidc: true
           files: ./coverage.xml
-          flags: unittests
-          fail_ci_if_error: false
+          fail_ci_if_error: ${{ secrets.CODECOV_TOKEN != '' }}
+          token: ${{ secrets.CODECOV_TOKEN }}
