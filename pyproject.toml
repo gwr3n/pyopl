@@ -5,7 +5,7 @@ description = "A Python library for parsing and solving OPL-like mathematical pr
 authors = [
   { name = "Roberto Rossi", email = "robros@gmail.com" },
 ]
-readme = "README.md"
+readme = "RHETOR.md"
 requires-python = ">=3.10"
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -39,7 +39,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/gwr3n/pyopl"
+Homepage = "https://gwr3n.github.io/rhetor/"
 
 [tool.setuptools]
 include-package-data = true
