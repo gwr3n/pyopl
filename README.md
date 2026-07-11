@@ -131,6 +131,8 @@ See `tools/examples.py` for a repository of examples.
 
 PyOPL includes [Rhetor](https://gwr3n.github.io/rhetor), a GenAI-first integrated modelling environment (IME) for creating, revising, solving, exporting, and versioning OPL models and data files.
 
+![Demo](https://github.com/gwr3n/rhetor/raw/main/sudoku.gif)
+
 The IME features:
 
 - GenAI-first modelling workflows for generating models, revising existing model/data pairs, asking questions about a formulation, and explaining solutions with OpenAI, Google/Gemini, or Ollama models when configured
