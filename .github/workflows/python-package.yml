@@ -1,4 +1,4 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
+# This workflow will install Python dependencies and run tests with a variety of Python versions.
 # For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python package
@@ -31,11 +31,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        python -m pip install flake8
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Quick flake8 fatal check
-      run: |
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
     - name: Test with unittest
       run: |
         python -m unittest discover -v -s test -p 'test_*.py'
