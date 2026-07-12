@@ -35,7 +35,7 @@
   - [4) Implications](#4-implications)
 - [Error Handling](#error-handling)
 - [Solving a Model](#solving-a-model)
-  - [Exporting LP and MPS files](#exporting-lp-and-mps-files)
+  - [Exporting Python, LP, and MPS files](#exporting-python-lp-and-mps-files)
 - [Limitations](#limitations)
 - [GenAI Assistants](#genai-assistants)
 - [PyOPL IDE](#pyopl-ide)
@@ -626,9 +626,9 @@ The `solve` function returns a dictionary with the following keys:
 
 Gurobi or SciPy/HiGHS output will be printed, including variable values and objective value if optimal.
 
-### Exporting LP and MPS files
+### Exporting Python, LP, and MPS files
 
-PyOPL can also lower a model to its linear problem representation and export a solver file through HiGHS. This is useful for inspecting the generated linear/MIP model or passing it to another solver tool.
+PyOPL can export the compiled Python source for a model, or lower a model to its linear problem representation and export a solver file through HiGHS. Python export is useful for inspecting or reusing the generated backend code; LP/MPS export is useful for inspecting the generated linear/MIP model or passing it to another solver tool.
 
 ```python
 from pyopl.pyopl_core import OPLCompiler
@@ -638,14 +638,22 @@ from pyopl.linear_problem_highs import export_linear_problem
 model_text = open("model.mod", encoding="utf-8").read()
 data_text = open("data.dat", encoding="utf-8").read()
 
-ast, _code, data = OPLCompiler().compile_model(model_text, data_text, solver="scipy")
+ast, python_code, data = OPLCompiler().compile_model(model_text, data_text, solver="scipy")
+open("model.py", "w", encoding="utf-8").write(python_code)
+
 problem = SciPyCSCCodeGenerator(ast, data).build_problem()
 
 export_linear_problem(problem, "model.lp")
 export_linear_problem(problem, "model.mps")
 ```
 
-The CLI provides the same export path with `--out lp` or `--out mps`.
+The CLI provides the same export path with `--out py`, `--out lp`, or `--out mps`. Python export can be printed to stdout or written to a file; LP and MPS export require `--out-file`.
+
+```sh
+python -m pyopl solve model.mod data.dat --out py --out-file model.py
+python -m pyopl solve model.mod data.dat --out lp --out-file model.lp
+python -m pyopl solve model.mod data.dat --out mps --out-file model.mps
+```
 
 Solver specifics:
 - Gurobi (default): linear and mixed-integer models; uses indicator constraints for many logical patterns and big-M encodings with automatic tightening.
