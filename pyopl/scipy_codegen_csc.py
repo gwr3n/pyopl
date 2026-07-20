@@ -1484,50 +1484,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             iterators = constr.get("iterators")
             if not iterators:
                 return
-            loop_vars = [it["iterator"] for it in iterators]
-            rng = iterators[0].get("range")
-            # Support both inline and named ranges
-            if rng is None:
-                return
-            if "start" in rng and "end" in rng:
-                start = rng["start"]["value"] if isinstance(rng["start"], dict) and "value" in rng["start"] else rng["start"]
-                end = rng["end"]["value"] if isinstance(rng["end"], dict) and "value" in rng["end"] else rng["end"]
-            elif "name" in rng:
-                # Named range: look up declaration
-                decl = None
-                for d in self.ast.get("declarations", []):
-                    if d.get("type") == "range_declaration_inline" and d.get("name") == rng["name"]:
-                        decl = d
-                        break
-                if decl:
-                    start = (
-                        decl["start"]["value"]
-                        if isinstance(decl["start"], dict) and "value" in decl["start"]
-                        else decl["start"]
-                    )
-                    end = decl["end"]["value"] if isinstance(decl["end"], dict) and "value" in decl["end"] else decl["end"]
-                else:
-                    return
-            else:
-                return
-            # Convert start/end to int if possible
             try:
-                start = int(start)
-                end = int(end)
+                iterator_envs = self._iterate_iterators_dynamic(iterators, env)
             except Exception:
                 return
             index_constraint = constr.get("index_constraint")
             inner_constraints = [constr["constraint"]] if "constraint" in constr else constr.get("constraints", [])
-            for t in range(start, end + 1):
-                env2 = env.copy()
-                # Bind loop variable for binop indices
-                for v in loop_vars:
-                    env2[v] = t
+            for env2, _idx_tuple in iterator_envs:
                 if index_constraint is not None:
                     try:
                         cond_val = self._eval_expr(index_constraint, env2)[1]
                     except Exception:
-                        cond_val = True
+                        cond_val = None
+                    if not isinstance(cond_val, (int, float, bool)):
+                        continue
                     if not cond_val:
                         continue
                 for inner in inner_constraints:

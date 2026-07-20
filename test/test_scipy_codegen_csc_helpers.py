@@ -1,6 +1,7 @@
+import logging
 import unittest
 
-from pyopl.pyopl_core import OPLLexer, OPLParser
+from pyopl.pyopl_core import OPLCompiler, OPLLexer, OPLParser
 from pyopl.scipy_codegen_csc import ExpressionEvaluator, SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
@@ -13,6 +14,47 @@ def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> Sci
 
 
 class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+    def test_bound_tightening_forall_keeps_multi_iterator_domains_separate(self) -> None:
+        model = """
+        range I = 1..3;
+        range S = 1..2;
+        param float demand[I][S];
+        dvar float+ x[I][S];
+        minimize 0;
+        subject to {
+            forall(i in I, s in S)
+                Balance:
+                    x[i][s] >= demand[i][s];
+        }
+        """
+        data = """
+        demand = [
+            [1, 2],
+            [3, 4],
+            [5, 6]
+        ];
+        """
+
+        ast, _code, data_dict = OPLCompiler().compile_model(model, data, solver="scipy")
+        logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        messages: list[str] = []
+
+        class CaptureHandler(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                messages.append(record.getMessage())
+
+        handler = CaptureHandler(level=logging.ERROR)
+        logger.addHandler(handler)
+        try:
+            SciPyCSCCodeGenerator(ast, data_dict).generate_code()
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertFalse(
+            any("Parameter or variable 'demand'" in message for message in messages),
+            messages,
+        )
+
     def test_minl_maxl_tuple_and_conditional_literals(self) -> None:
         evaluator = ExpressionEvaluator(make_generator())
 
