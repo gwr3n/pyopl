@@ -303,23 +303,23 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen._flatten_bool(tree, "and"), [leaf1, leaf2, "raw"])
         self.assertEqual(gen._flatten_bool("raw", "and"), ["raw"])
 
-        tuple_env, include = gen._should_include_sum_term(
-            ["a"],
-            (["A", "B"],),
-            {"a"},
-            {"outer": 1},
-            None,
-            {},
-        )
-        self.assertEqual(tuple_env, {"outer": 1, "a": ("A", "B")})
-        self.assertTrue(include)
+        iterators = [
+            {
+                "iterator": "i",
+                "range": {
+                    "type": "range_specifier",
+                    "start": _num(1),
+                    "end": _num(1),
+                },
+            }
+        ]
+        environments = gen._iter_filtered_environments(iterators, {"outer": 1})
+        self.assertEqual(environments, [({"outer": 1, "i": 1}, (1,))])
 
         gen._eval_expr = lambda node, env: ({}, 0)
-        _env, include = gen._should_include_sum_term(["i"], (1,), set(), {}, _cmp(_name("i"), "==", _num(2)), {})
-        self.assertFalse(include)
+        self.assertEqual(gen._iter_filtered_environments(iterators, {}, _cmp(_name("i"), "==", _num(2))), [])
         gen._eval_expr = lambda node, env: (_ for _ in ()).throw(RuntimeError("ignore"))
-        _env, include = gen._should_include_sum_term(["i"], (1,), set(), {}, _cmp(_name("i"), "==", _num(2)), {})
-        self.assertTrue(include)
+        self.assertEqual(gen._iter_filtered_environments(iterators, {}, _cmp(_name("i"), "==", _num(2))), [])
 
     def test_scipy_csc_big_m_and_bounds_helpers(self):
         ast = {

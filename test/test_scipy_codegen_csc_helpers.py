@@ -14,6 +14,64 @@ def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> Sci
 
 
 class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+    def test_filtered_iterator_environments_require_definitive_truth(self) -> None:
+        generator = make_generator("""
+            range I = 1..2;
+            dvar float x[I];
+            minimize 0;
+            subject to { }
+            """)
+        iterators = [
+            {
+                "iterator": "i",
+                "range": {
+                    "type": "range_specifier",
+                    "start": {"type": "number", "value": 1},
+                    "end": {"type": "number", "value": 2},
+                },
+            },
+            {
+                "iterator": "j",
+                "range": {
+                    "type": "range_specifier",
+                    "start": {"type": "number", "value": 1},
+                    "end": {"type": "name", "value": "i"},
+                },
+            },
+        ]
+        filter_expr = {
+            "type": "binop",
+            "op": "==",
+            "left": {"type": "name", "value": "i"},
+            "right": {"type": "name", "value": "j"},
+            "sem_type": "boolean",
+        }
+
+        environments = generator._iter_filtered_environments(iterators, {}, filter_expr)
+
+        self.assertEqual([indices for _env, indices in environments], [(1, 1), (2, 2)])
+        symbolic_filter = {"type": "string_literal", "value": "unknown", "sem_type": "boolean"}
+        self.assertEqual(generator._iter_filtered_environments(iterators, {}, symbolic_filter), [])
+
+        string_iterators = [
+            {
+                "iterator": "city",
+                "range": {"type": "named_set", "name": "Cities"},
+            }
+        ]
+        generator.data_dict["Cities"] = ["A", "B"]
+        string_filter = {
+            "type": "binop",
+            "op": "==",
+            "left": {"type": "name", "value": "city"},
+            "right": {"type": "string_literal", "value": "B"},
+            "sem_type": "boolean",
+        }
+        self.assertEqual(
+            generator._iter_filtered_environments(string_iterators, {}, string_filter),
+            [({"city": "B"}, ("B",))],
+        )
+
     def test_bound_tightening_forall_keeps_multi_iterator_domains_separate(self) -> None:
         model = """
         range I = 1..3;
@@ -227,11 +285,24 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         }
 
         flat = gen._flatten_bool(tree, "and")
-        env2, include = gen._should_include_sum_term(["i"], (1,), set(), {}, {"type": "boolean_literal", "value": False}, {})
+        iterators = [
+            {
+                "iterator": "i",
+                "range": {
+                    "type": "range_specifier",
+                    "start": {"type": "number", "value": 1},
+                    "end": {"type": "number", "value": 1},
+                },
+            }
+        ]
+        environments = gen._iter_filtered_environments(
+            iterators,
+            {},
+            {"type": "boolean_literal", "value": False},
+        )
 
         self.assertEqual(flat[:2], [comp1, comp2])
-        self.assertEqual(env2, {"i": 1})
-        self.assertFalse(include)
+        self.assertEqual(environments, [])
 
     def test_metadata_refresh_snapshot_and_zero_variable_codegen(self) -> None:
         gen = make_generator("minimize 5; subject to { }")

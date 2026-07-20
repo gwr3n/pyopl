@@ -605,11 +605,16 @@ class ExpressionEvaluator:
             right_key = right.get("value") if isinstance(right, dict) and right.get("type") == "name" else None
             if isinstance(right_key, str) and right_key in env:
                 right_val = env[right_key]
+            if (
+                not left_coef
+                and not right_coef
+                and isinstance(left_val, (str, int, float, bool))
+                and isinstance(right_val, (str, int, float, bool))
+            ):
+                return {}, left_val == right_val
             symbolic = bool(left_coef) or bool(right_coef) or isinstance(left_val, str) or isinstance(right_val, str)
             if symbolic and not getattr(self.parent, "_allow_symbolic_bool", False):
                 raise SemanticError("Non-ground boolean == outside constraint build context")
-            if isinstance(left_val, (str, int, float)) and isinstance(right_val, (str, int, float)):
-                return {}, left_val == right_val
             return {}, str(left_val) == str(right_val)
         if op == "+":
             return self._handle_binop_add(left, right, env)
@@ -800,19 +805,14 @@ class ExpressionEvaluator:
 
     def _eval_sum(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
         iterators = expr["iterators"]
-        loop_vars, loop_ranges = self.parent._unroll_iterators(iterators, env)
         # Narrow types to satisfy mypy
         coef_dict_total: Dict[str, float] = {}
         const_total: Union[float, str] = 0.0
-        # Handle empty iterator: sum is zero
-        if any(len(rng) == 0 for rng in loop_ranges):
-            return coef_dict_total, const_total
-        for idx_tuple in itertools.product(*loop_ranges):
-            env2 = dict(env or {})
-            for v, val in zip(loop_vars, idx_tuple):
-                env2[v] = val
-            if not self._sum_index_constraint_satisfied(expr, env2):
-                continue
+        for env2, _idx_tuple in self.parent._iter_filtered_environments(
+            iterators,
+            env,
+            expr.get("index_constraint"),
+        ):
             try:
                 coef_dict, const = self.eval(expr["expression"], env=env2)
             except SemanticError:
@@ -828,20 +828,6 @@ class ExpressionEvaluator:
                 const_total = float(const_total) + float(const)
             # else: ignore non-numeric, non-string constants
         return coef_dict_total, const_total
-
-    def _sum_index_constraint_satisfied(self, expr: Dict[str, Any], env2: Dict[str, Any]) -> bool:
-        index_constraint = expr.get("index_constraint")
-        if index_constraint is not None:
-            try:
-                cond_val = self.eval(index_constraint, env2)[1]
-                logger.debug(f"[SCIPY_SUM] index_constraint={index_constraint}, env2={env2}, cond_val={cond_val}")
-                # Robust truthiness: numeric 0/1 or bool; ignore symbolic strings
-                if isinstance(cond_val, (int, float, bool)):
-                    return bool(cond_val)
-                return bool(cond_val)  # fallback
-            except Exception:
-                return True
-        return True
 
     def _eval_parenthesized_expression(
         self, expr: Dict[str, Any], env: Dict[str, Any]
@@ -1032,34 +1018,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     and produces executable Python code that builds the LP problem,
     solves it, and reports results.
     """
-
-    def _should_include_sum_term(
-        self,
-        loop_vars: list,
-        idx_tuple: tuple,
-        tuple_set_names: set,
-        env: dict,
-        index_constraint: dict | None,
-        expr: dict,
-        eval_env: dict | None = None,
-    ) -> tuple[dict, bool]:
-        """
-        Helper to build env2 and check index_constraint for sum/binop-sum expansion.
-        Returns (env2, should_include:bool)
-        """
-        env2 = dict(env or {})
-        for v, val in zip(loop_vars, idx_tuple):
-            if v in tuple_set_names and not isinstance(val, tuple):
-                val = tuple(val)
-            env2[v] = val
-        should_include = True
-        if index_constraint is not None:
-            try:
-                _, cond_val = self._eval_expr(index_constraint, env2)
-                should_include = bool(cond_val)
-            except Exception:
-                should_include = True
-        return env2, should_include
 
     # ---------------- Boolean composition helpers (AND/OR of linear comparisons) ----------------
     def _is_linear_comparison(self, node: Dict[str, Any]) -> bool:
@@ -1484,24 +1442,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             iterators = constr.get("iterators")
             if not iterators:
                 return
-            try:
-                iterator_envs = self._iterate_iterators_dynamic(iterators, env)
-            except Exception:
-                return
             index_constraint = constr.get("index_constraint")
             inner_constraints = [constr["constraint"]] if "constraint" in constr else constr.get("constraints", [])
-            for env2, _idx_tuple in iterator_envs:
-                if index_constraint is not None:
-                    try:
-                        cond_val = self._eval_expr(index_constraint, env2)[1]
-                    except Exception:
-                        cond_val = None
-                    if not isinstance(cond_val, (int, float, bool)):
-                        continue
-                    if not cond_val:
-                        continue
-                for inner in inner_constraints:
-                    tighten_constraint(inner, env=env2)
+            try:
+                for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
+                    for inner in inner_constraints:
+                        tighten_constraint(inner, env=env2)
+            except Exception:
+                return
 
         def tighten_constraint(constr, env=None):
             if env is None:
@@ -2288,8 +2236,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return int(left - right)
             if op == "*":
                 return int(left * right)
-            if op == "/":
-                return int(left // right)
             raise self._unsupported_operator_error("index bound binop", op)
         if t == "uminus":
             v = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("value")), env)
@@ -2383,6 +2329,29 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         rec(0, dict(outer_env or {}), [])
         return results
+
+    def _iter_filtered_environments(
+        self,
+        iterators: list[dict],
+        outer_env: dict | None = None,
+        index_constraint: dict | None = None,
+    ) -> list[tuple[dict, tuple]]:
+        """Return iterator environments whose optional filter is definitively true."""
+        environments = self._iterate_iterators_dynamic(iterators, outer_env or {})
+        if index_constraint is None:
+            return environments
+
+        included: list[tuple[dict, tuple]] = []
+        for env, idx_tuple in environments:
+            try:
+                coefficients, value = self._eval_expr(index_constraint, env)
+            except Exception:
+                continue
+            if coefficients or not isinstance(value, (int, float, bool)):
+                continue
+            if bool(value):
+                included.append((env, idx_tuple))
+        return included
 
     def _emit_python_expr(self, expr: dict, env: dict | None = None) -> str:
         """
@@ -3602,17 +3571,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             f"# Symbolic objective: sum({self._emit_python_expr(expr['expression'], {v: v for v in loop_vars})} for {symbolic_ranges})"
         )
 
-        # Dynamic nested iteration with dependent bounds
-        for env2, _idx_tuple in self._iterate_iterators_dynamic(iterators, {}):
-            # Apply optional index constraint if present
-            index_constraint = expr.get("index_constraint")
-            if index_constraint is not None:
-                try:
-                    _, cond_val = self._eval_expr(index_constraint, env2)
-                    if not bool(cond_val):
-                        continue
-                except Exception:
-                    pass
+        for env2, _idx_tuple in self._iter_filtered_environments(iterators, {}, expr.get("index_constraint")):
             coef_dict, const = self._eval_expr(expr["expression"], env=env2)
             if coef_dict:
                 for vname, coef in coef_dict.items():
@@ -4066,17 +4025,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if not _local_is_simple_comparison(inner_cmp):
                 return None
             iterators = sum_node.get("iterators", [])
-            loop_vars, loop_ranges = self._unroll_iterators(iterators)
             z_names = []
-            for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                env2 = dict(env_local)
-                for var_name, value in zip(loop_vars, idx_tuple):
-                    env2[var_name] = value
-                idx_constr = sum_node.get("index_constraint")
-                if idx_constr is not None:
-                    cond_coef, cond_val = self._eval_expr(idx_constr, env2)
-                    if cond_coef or not bool(cond_val):
-                        continue
+            for env2, _idx_tuple in self._iter_filtered_environments(
+                iterators,
+                env_local,
+                sum_node.get("index_constraint"),
+            ):
                 comp_inst = {
                     "type": "binop",
                     "op": inner_cmp.get("op"),
@@ -4770,7 +4724,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             def _detect_sum_of_comparisons(left, right, op_sym_top):
                 """
                 Detects and normalizes sum-of-comparisons and cardinality constraints.
-                Returns (is_sum_of_comparisons, inner_cmp, k_val, loop_vars, loop_ranges) or None.
+                Returns the comparison, threshold, iterators, and optional iterator filter.
                 """
                 LU_left = _unwrap_paren(left)
                 LU_right = _unwrap_paren(right)
@@ -4785,8 +4739,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if _is_simple_comparison(inner_cmp):
                         k_val = LU_right.get("value")
                         iterators = LU_left.get("iterators", [])
-                        loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                        return True, inner_cmp, k_val, loop_vars, loop_ranges
+                        return True, inner_cmp, k_val, iterators, LU_left.get("index_constraint")
                 return False, None, None, None, None
 
             def _normalize_implication_nodes(ant, cons):
@@ -4828,13 +4781,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if _is_simple_comparison(inner_cmp):
                                 k_val = LU_right.get("value")
                                 iterators = LU_left.get("iterators", [])
-                                loop_vars, loop_ranges = self._unroll_iterators(iterators)
                                 # For each index, reify the comparison to a boolean aux
                                 aux_vars = []
-                                for idx_tuple in itertools.product(*loop_ranges):
-                                    env2 = dict(env or {})
-                                    for v, val in zip(loop_vars, idx_tuple):
-                                        env2[v] = val
+                                for env2, _idx_tuple in self._iter_filtered_environments(
+                                    iterators,
+                                    env,
+                                    LU_left.get("index_constraint"),
+                                ):
                                     aux_var = self._bool_expr_var(inner_cmp, env2)
                                     aux_vars.append(aux_var)
                                 # Build sum row: sum(aux_vars) op k_val
@@ -5800,20 +5753,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     elif op_sym_top == "<":
                         rhs_value -= 1e-9
                     iterators = sum_node.get("iterators", [])
-                    loop_vars, loop_ranges = self._unroll_iterators(iterators)
                     row = [0.0] * len(self.var_names)
-                    for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                        env2 = dict(env or {})
-                        for v, val in zip(loop_vars, idx_tuple):
-                            env2[v] = val
-                        idx_constr = sum_node.get("index_constraint")
-                        if idx_constr is not None:
-                            try:
-                                _, cond_val = self._eval_expr(idx_constr, env2)
-                                if not bool(cond_val):
-                                    continue
-                            except Exception:
-                                pass
+                    for env2, _idx_tuple in self._iter_filtered_environments(
+                        iterators,
+                        env,
+                        sum_node.get("index_constraint"),
+                    ):
                         weight_coef, weight_const = self._eval_expr(weight_node, env2)
                         if weight_coef or isinstance(weight_const, (str, tuple)):
                             raise SemanticError("Weighted boolean sums require numeric weights")
@@ -5847,14 +5792,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         eq_row_idx += 1
                     return
 
-                is_sum, inner_cmp, k_val, loop_vars, loop_ranges = _detect_sum_of_comparisons(left, right, op_sym_top)
+                is_sum, inner_cmp, k_val, iterators, index_constraint = _detect_sum_of_comparisons(
+                    left,
+                    right,
+                    op_sym_top,
+                )
                 if is_sum:
                     z_indices = []
 
-                    for idx_tuple in itertools.product(*loop_ranges):
-                        env2 = dict(env or {})
-                        for v, val in zip(loop_vars, idx_tuple):
-                            env2[v] = val
+                    for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
                         comp_inst = {
                             "type": "binop",
                             "op": inner_cmp.get("op"),
@@ -5951,22 +5897,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if _is_simple_comparison(inner_cmp):
                                 k_val = k_node.get("value")
                                 iterators = sum_side.get("iterators", [])
-                                loop_vars, loop_ranges = self._unroll_iterators(iterators)
                                 z_indices = []
-                                for idx_tuple in itertools.product(*loop_ranges):
-                                    env2 = dict(env or {})
-                                    for v, val in zip(loop_vars, idx_tuple):
-                                        env2[v] = val
-                                    idx_constr = sum_side.get("index_constraint")
-                                    should_include = True
-                                    if idx_constr is not None:
-                                        try:
-                                            _, cval = self._eval_expr(idx_constr, env2)
-                                            should_include = bool(cval)
-                                        except Exception:
-                                            should_include = True
-                                    if not should_include:
-                                        continue
+                                for env2, _idx_tuple in self._iter_filtered_environments(
+                                    iterators,
+                                    env,
+                                    sum_side.get("index_constraint"),
+                                ):
                                     comp_inst = {
                                         "type": "binop",
                                         "op": inner_cmp.get("op"),
@@ -6734,25 +6670,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if constr.get("op") == "<":
                         rhs_value -= 1e-9
                     iterators = sum_node.get("iterators", [])
-                    try:
-                        loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                    except SemanticError:
-                        loop_vars, loop_ranges = [], []
                     row = [0.0] * len(self.var_names)
-                    for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                        env2 = dict(env or {})
-                        for v, val in zip(loop_vars, idx_tuple):
-                            env2[v] = val
-                        idx_constr = sum_node.get("index_constraint")
-                        should_include = True
-                        if idx_constr is not None:
-                            try:
-                                _, cval = self._eval_expr(idx_constr, env2)
-                                should_include = bool(cval)
-                            except Exception:
-                                should_include = True
-                        if not should_include:
-                            continue
+                    for env2, _idx_tuple in self._iter_filtered_environments(
+                        iterators,
+                        env,
+                        sum_node.get("index_constraint"),
+                    ):
                         weight_coef, weight_const = self._eval_expr(weight_node, env2)
                         if weight_coef or isinstance(weight_const, (str, tuple)):
                             raise SemanticError("Weighted boolean sums require numeric weights")
@@ -6875,16 +6798,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         if cmp_expr.get("op") == ">":
                             k_val = k_val + 1
                         iterators = sum_node.get("iterators", [])
-                        try:
-                            loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                        except SemanticError:
-                            loop_vars, loop_ranges = [], []
                         comp_proto = _unwrap(sum_node.get("expression"))
                         z_vars = []
-                        for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                            env2 = dict(env or {})
-                            for v, val in zip(loop_vars, idx_tuple):
-                                env2[v] = val
+                        for env2, _idx_tuple in self._iter_filtered_environments(
+                            iterators,
+                            env,
+                            sum_node.get("index_constraint"),
+                        ):
                             z_vars.append(_bool_expr_var(comp_proto, env2))
                         # Cardinality reification b == (sum z_i >= k)
                         # Retrieve/ensure boolean variable index
@@ -7325,18 +7245,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     inner_constraints = constr["constraints"]
                 else:
                     raise self._unsupported_type_error("forall_constraint", "missing constraint(s)")
-                loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                for idx_tuple in itertools.product(*loop_ranges):
-                    env2 = dict(env or {})
-                    for v, val in zip(loop_vars, idx_tuple):
-                        env2[v] = val
-                    if index_constraint is not None:
-                        try:
-                            cond_val = self._eval_expr(index_constraint, env2)[1]
-                        except Exception:
-                            cond_val = True
-                        if not cond_val:
-                            continue
+                for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
                     for inner in inner_constraints:
                         handle_constraint(inner, env=env2)
             elif constr["type"] == "implication_constraint":
@@ -7444,19 +7353,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         Helper for _accumulate_sum_to_dict: handles 'sum' expressions with dependent bounds.
         """
         iterators = expr["iterators"]
-        index_constraint = expr.get("index_constraint")
-
-        # Iterate dynamically honoring dependent bounds
-        for env2, _idx_tuple in self._iterate_iterators_dynamic(iterators, env or {}):
-            should_include = True
-            if index_constraint is not None:
-                try:
-                    _, cond_val = self._eval_expr(index_constraint, env2)
-                    should_include = bool(cond_val)
-                except Exception:
-                    should_include = True
-            if not should_include:
-                continue
+        for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, expr.get("index_constraint")):
             sum_expr = expr["expression"]
             # If the inner expression is a comparison, defer to constraints builder
             if (
