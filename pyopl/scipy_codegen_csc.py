@@ -1137,12 +1137,44 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for comp in comparisons:
             op = comp.get("op")
             if op == "!=":
-                comp_lt = dict(comp)
-                comp_lt["op"] = "<"
-                comp_gt = dict(comp)
-                comp_gt["op"] = ">"
-                self._expand_and([comp_lt], env=env_eval)
-                self._expand_and([comp_gt], env=env_eval)
+                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
+                rhs_dict, rhs_const = self._accumulate_sum_to_dict(comp["right"], env=env_eval, sign=1)
+                diff_coef = dict(lhs_dict)
+                for var_name, coefficient in rhs_dict.items():
+                    diff_coef[var_name] = diff_coef.get(var_name, 0.0) - coefficient
+                diff_const = lhs_const - rhs_const
+                diff_min, diff_max = self._finite_integer_affine_bounds(
+                    diff_coef,
+                    diff_const,
+                    "Integer not-equal conjunction term",
+                )
+                big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
+                if not hasattr(self, "_neq_counter"):
+                    self._neq_counter = 0
+                direction_name = f"neq_direction_c{self._neq_counter}"
+                self._neq_counter += 1
+                self.var_names.append(direction_name)
+                self.var_indices[direction_name] = len(self.var_names) - 1
+                self.bounds.append([0, 1])
+                self.integrality.append(1)
+                self.c.append(0.0)
+                for existing_row in self.A_eq:
+                    existing_row.append(0.0)
+                for existing_row in self.A_ub:
+                    existing_row.append(0.0)
+
+                negative_row = [0.0] * len(self.var_names)
+                positive_row = [0.0] * len(self.var_names)
+                for var_name, coefficient in diff_coef.items():
+                    negative_row[self.var_indices[var_name]] += coefficient
+                    positive_row[self.var_indices[var_name]] -= coefficient
+                negative_row[self.var_indices[direction_name]] = -big_m
+                positive_row[self.var_indices[direction_name]] = big_m
+                self.A_ub.append(negative_row)
+                self.b_ub.append(-1.0 - diff_const)
+                self.A_ub.append(positive_row)
+                self.b_ub.append(big_m - 1.0 + diff_const)
+                continue
             else:
                 lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
                 rhs_dict, rhs_const = (
@@ -1399,6 +1431,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     rhs_val = float(c)
             except Exception:
                 rhs_val = None
+            if rhs_val is not None:
+                try:
+                    left_coef, left_const = self._eval_expr(left, env)
+                except Exception:
+                    left_coef, left_const = {}, None
+                if len(left_coef) == 1 and isinstance(left_const, (int, float)):
+                    var_name, coefficient = next(iter(left_coef.items()))
+                    if var_name in var_indices and abs(float(coefficient)) > 1e-12:
+                        bound_value = (rhs_val - float(left_const)) / float(coefficient)
+                        bound_op = constr["op"]
+                        if coefficient < 0:
+                            bound_op = {">=": "<=", "<=": ">=", "==": "=="}.get(bound_op, bound_op)
+                        update_bounds(var_indices[var_name], bound_op, bound_value)
+                        return
             if left["type"] == "name":
                 idx = var_indices.get(left["value"])
                 update_bounds(idx, constr["op"], rhs_val)
@@ -3868,6 +3914,40 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return lb_b, ub_b
         return (None, None)
 
+    def _finite_affine_bounds(self, coefficients, constant, context):
+        """Return the exact interval of an affine expression with finite variable bounds."""
+        if not isinstance(constant, (int, float)):
+            raise SemanticError(f"{context} requires a numeric affine expression")
+        lower = upper = float(constant)
+        for var_name, coefficient in coefficients.items():
+            if var_name not in self.var_indices:
+                raise SemanticError(f"Variable '{var_name}' not indexed")
+            lb, ub = self._infer_var_bounds(var_name)
+            if lb is None or ub is None:
+                raise SemanticError(f"{context} requires finite variable bounds for a valid big-M formulation")
+            coefficient = float(coefficient)
+            if coefficient >= 0:
+                lower += coefficient * lb
+                upper += coefficient * ub
+            else:
+                lower += coefficient * ub
+                upper += coefficient * lb
+        return lower, upper
+
+    def _finite_integer_affine_bounds(self, coefficients, constant, context):
+        """Validate a unit-integer affine expression and return its exact finite interval."""
+        tolerance = 1e-9
+        if not isinstance(constant, (int, float)) or abs(float(constant) - round(float(constant))) > tolerance:
+            raise SemanticError(f"{context} requires an integer-valued affine expression")
+        for var_name, coefficient in coefficients.items():
+            if var_name not in self.var_indices:
+                raise SemanticError(f"Variable '{var_name}' not indexed")
+            if self.integrality[self.var_indices[var_name]] == 0:
+                raise SemanticError(f"{context} requires integer variables or an explicit tolerance policy")
+            if abs(float(coefficient) - round(float(coefficient))) > tolerance:
+                raise SemanticError(f"{context} requires integer-valued coefficients on the unit lattice")
+        return self._finite_affine_bounds(coefficients, constant, context)
+
     def _append_sparse_row(self, state: _ConstraintBuildState, row: list[float], rhs: float, *, sense: str) -> None:
         if sense == "eq":
             row_idx = state.eq_row_idx
@@ -5402,27 +5482,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             return coef, lc - rc
 
                         ant_coef, ant_const = _diff_eq(ant_c.get("left"), ant_c.get("right"))
-                        # Compute tight |diff| bound if possible: diff = sum a_i x_i + ant_const
-                        diff_min = 0.0
-                        diff_max = 0.0
-                        feasible_bounds = True
-                        for var, coef in ant_coef.items():
-                            lb, ub = self._infer_var_bounds(var)
-                            if lb is None or ub is None:
-                                feasible_bounds = False
-                                break
-                            if coef >= 0:
-                                diff_min += coef * lb
-                                diff_max += coef * ub
-                            else:
-                                diff_min += coef * ub
-                                diff_max += coef * lb
-                        diff_min += ant_const
-                        diff_max += ant_const
-                        if not feasible_bounds:
-                            raise SemanticError("Equality implication antecedent requires finite variable bounds")
-                        if any(self.integrality[self.var_indices[var]] == 0 for var in ant_coef):
-                            raise SemanticError("Equality implication antecedent requires integer variables")
+                        diff_min, diff_max = self._finite_integer_affine_bounds(
+                            ant_coef,
+                            ant_const,
+                            "Equality implication antecedent",
+                        )
                         if not hasattr(self, "_impl_counter"):
                             self._impl_counter = 0
                         flag_name = f"implication_flag_c{self._impl_counter}"
@@ -5480,20 +5544,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             return diff_c_coef, diff_c_const
 
                         diff_c_coef, diff_c_const = _emit_consequent(cons_c, cons_op)
-                        # Bound for consequent bigM (try tighten similarly)
-                        M_c = 0.0
-                        feasible_c = True
-                        for var, coef in diff_c_coef.items():
-                            lb, ub = self._infer_var_bounds(var)
-                            if lb is None or ub is None:
-                                feasible_c = False
-                                break
-                            if coef >= 0:
-                                M_c = max(M_c, abs(coef * lb), abs(coef * ub))
-                            else:
-                                M_c = max(M_c, abs(coef * ub), abs(coef * lb))
-                        if not feasible_c or M_c == 0.0:
-                            M_c = 1_000_000.0
+                        _diff_c_min, diff_c_max = self._finite_affine_bounds(
+                            diff_c_coef,
+                            diff_c_const,
+                            "Equality implication consequent",
+                        )
+                        M_c = max(0.0, diff_c_max)
                         coefc = diff_c_coef.copy()
                         rhs_c = M_c - diff_c_const
                         # diff_c + M_c*flag <= M_c
@@ -6142,8 +6198,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     for name, coef in right_coef.items():
                         diff_coef[name] = diff_coef.get(name, 0.0) - coef
                     diff_const = float(left_const) - float(right_const)
-                    cmp_bin = {"type": "binop", "op": "!=", "left": left, "right": right}
-                    big_m = self._big_m_for_comparison(cmp_bin, env=env)
+                    diff_min, diff_max = self._finite_integer_affine_bounds(
+                        diff_coef,
+                        diff_const,
+                        "Integer not-equal constraint",
+                    )
+                    big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
                     if not hasattr(self, "_neq_counter"):
                         self._neq_counter = 0
                     direction_name = f"neq_direction_c{self._neq_counter}"
@@ -7327,15 +7387,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 const_ref[0] += sign * float(cval)
         elif expr["type"] == "name":
             # Include only if it is a decision variable; numeric parameters contribute to constant
-            try:
-                is_var, val, is_symbolic = self._lookup_var_or_param(expr.get("value"), indices=None, env=env)
-                if is_var:
-                    vname = val if isinstance(val, str) else expr.get("value")
-                    coef_dict[vname] += sign * 1.0
-                elif not is_symbolic and isinstance(val, (int, float)):
-                    const_ref[0] += sign * float(val)
-            except Exception:
-                pass
+            is_var, val, is_symbolic = self._lookup_var_or_param(expr.get("value"), indices=None, env=env)
+            if is_var:
+                vname = val if isinstance(val, str) else expr.get("value")
+                coef_dict[vname] += sign * 1.0
+            elif not is_symbolic and isinstance(val, (int, float)):
+                const_ref[0] += sign * float(val)
         elif expr["type"] == "number":
             const_ref[0] += sign * float(expr.get("value", 0.0))
         elif expr["type"] == "binop" and expr.get("op") in ("+", "-"):
@@ -7354,17 +7411,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 coef_dict[k] += sign * v
             const_ref[0] += sign * inner_const
         else:
-            # Patch: treat missing parameters as zero only in sum expansion context
-            prev_resolve_param_value = self._resolve_param_value
-
-            def resolve_param_value_zero(name, indices=None, env=None, default_zero_if_missing=False):
-                return prev_resolve_param_value(name, indices, env, default_zero_if_missing=True)
-
-            self._resolve_param_value = resolve_param_value_zero
-            try:
-                cdict, cval = self._eval_expr(expr, env)
-            finally:
-                self._resolve_param_value = prev_resolve_param_value
+            cdict, cval = self._eval_expr(expr, env)
             for vname, coef in cdict.items():
                 coef_dict[vname] += sign * coef
             if isinstance(cval, (int, float)):

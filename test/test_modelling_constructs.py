@@ -2013,16 +2013,12 @@ class TestModellingConstructs(unittest.TestCase):
         # Gurobi code generation should succeed
         gcode = GurobiCodeGenerator(ast).generate_code()
         self.assertIn("!=", gcode, "Expected inequality to appear in Gurobi code")
-        # SciPy code generation (must ALSO succeed)
+        # SciPy has no implicit tolerance policy for continuous disequality.
         from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
         sc_gen = SciPyCSCCodeGenerator(ast, {})
-        sc_code = sc_gen.generate_code()
-        self.assertIn(
-            "!=",
-            sc_code,
-            "Expected '!=' to appear (or be explicitly encoded) in SciPy code",
-        )
+        with self.assertRaisesRegex(SemanticError, "integer variables|tolerance policy"):
+            sc_gen.generate_code()
 
     def test_sum_with_string_literal_filter_on_tuple_field(self):
         """Test sum with index constraint comparing tuple field to string literal (both solvers)."""

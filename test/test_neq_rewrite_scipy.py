@@ -2,6 +2,7 @@ import unittest
 
 from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.semantic_error import SemanticError
 
 
 class TestNotEqualRewriteSciPy(unittest.TestCase):
@@ -33,7 +34,9 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
 
     def test_integer_neq_uses_bigM_delta(self):
         opl = """
-        dvar int x; dvar int y; minimize 0; subject to { x != y; }
+        dvar int x; dvar int y; minimize 0; subject to {
+            x >= -10; x <= 10; y >= -10; y <= 10; x != y;
+        }
         """
         gen = self.gen(opl)
         # Identify newly introduced binary variable (not x or y)
@@ -94,13 +97,65 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
             "x == y must be infeasible for x != y",
         )
 
+    def test_float_neq_is_rejected_without_an_explicit_tolerance_policy(self):
+        opl = """
+        dvar float x; dvar float y; minimize 0; subject to {
+            x >= 0; x <= 1; y >= 0; y <= 1; x != y;
+        }
+        """
+
+        with self.assertRaisesRegex(SemanticError, "integer|tolerance|not-equal"):
+            self.gen(opl)
+
+    def test_unbounded_integer_neq_is_rejected_without_finite_big_m_bounds(self):
+        opl = """
+        dvar int x; dvar int y; minimize 0; subject to { x != y; }
+        """
+
+        with self.assertRaisesRegex(SemanticError, "finite.*bounds|big-M"):
+            self.gen(opl)
+
+    def test_expand_and_treats_not_equal_as_a_disjunction(self):
+        opl = """
+        dvar int x; dvar int y; minimize 0; subject to {
+            x >= -10; x <= 10; y >= -10; y <= 10;
+        }
+        """
+        gen = self.gen(opl)
+        comparison = {
+            "type": "constraint",
+            "op": "!=",
+            "left": {"type": "name", "value": "x", "sem_type": "int"},
+            "right": {"type": "name", "value": "y", "sem_type": "int"},
+        }
+
+        gen._expand_and([comparison])
+
+        self.assertTrue(
+            self._rows_allow_assignment(gen, {"x": 1, "y": 2}),
+            "The helper must preserve the x < y branch of x != y",
+        )
+        self.assertTrue(
+            self._rows_allow_assignment(gen, {"x": 2, "y": 1}),
+            "The helper must preserve the x > y branch of x != y",
+        )
+        self.assertFalse(
+            self._rows_allow_assignment(gen, {"x": 1, "y": 1}),
+            "The helper must reject the equality branch of x != y",
+        )
+
     def _rows_allow_assignment(self, gen, values):
-        auxiliary = next(name for name in gen.var_indices if name not in values)
-        for auxiliary_value in (0, 1):
-            assignment = {**values, auxiliary: auxiliary_value}
+        auxiliary_names = [name for name in gen.var_indices if name not in values]
+        for mask in range(1 << len(auxiliary_names)):
+            assignment = dict(values)
+            for bit, name in enumerate(auxiliary_names):
+                assignment[name] = (mask >> bit) & 1
             if all(
                 sum(row[gen.var_indices[name]] * value for name, value in assignment.items()) <= rhs + 1e-9
                 for row, rhs in zip(gen.A_ub, gen.b_ub)
+            ) and all(
+                abs(sum(row[gen.var_indices[name]] * value for name, value in assignment.items()) - rhs) <= 1e-9
+                for row, rhs in zip(gen.A_eq, gen.b_eq)
             ):
                 return True
         return False

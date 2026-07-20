@@ -65,6 +65,26 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "missing"):
             ExpressionEvaluator(generator).eval(expression)
 
+    def test_sum_accumulator_does_not_replace_semantic_errors_with_zero(self) -> None:
+        generator = make_generator("""
+            range I = 1..2;
+            param float missing;
+            dvar float x;
+            minimize x;
+            subject to { }
+            """)
+        generator._build_variables()
+        expression = {
+            "type": "binop",
+            "op": "+",
+            "left": {"type": "name", "value": "missing", "sem_type": "float"},
+            "right": {"type": "name", "value": "x", "sem_type": "float"},
+            "sem_type": "float",
+        }
+
+        with self.assertRaisesRegex(SemanticError, "missing"):
+            generator._accumulate_sum_to_dict(expression, {})
+
     def test_unresolved_indexed_variable_name_does_not_collapse_to_base(self) -> None:
         generator = make_generator("""
             range I = 1..2;
