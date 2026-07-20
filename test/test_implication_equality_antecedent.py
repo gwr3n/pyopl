@@ -1,5 +1,8 @@
 import unittest
 
+import numpy as np
+from scipy.optimize import Bounds, LinearConstraint, milp
+
 from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
@@ -71,6 +74,44 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
             gen._build_variables()
             gen._build_objective()
             gen._build_constraints()
+
+    def test_false_equality_antecedent_does_not_force_consequent(self):
+        ast = {
+            "declarations": [
+                {"type": "dvar", "name": "x", "var_type": "int+"},
+                {"type": "dvar", "name": "y", "var_type": "int+"},
+            ],
+            "objective": {"type": "minimize", "expression": self._name("y")},
+            "constraints": [
+                self._constraint(self._name("x"), ">=", self._num(1)),
+                self._constraint(self._name("x"), "<=", self._num(3)),
+                self._constraint(self._name("y"), "<=", self._num(3)),
+                {
+                    "type": "implication_constraint",
+                    "antecedent": self._constraint(self._name("x"), "==", self._num(2)),
+                    "consequent": self._constraint(self._name("y"), ">=", self._num(2)),
+                },
+            ],
+        }
+        gen = SciPyCSCCodeGenerator(ast)
+        problem = gen.build_problem()
+        constraints = []
+        if problem.A_ub is not None:
+            constraints.append(LinearConstraint(problem.A_ub, -float("inf"), problem.b_ub))
+        if problem.A_eq:
+            constraints.append(LinearConstraint(problem.A_eq, problem.b_eq, problem.b_eq))
+        lower_bounds = [bound[0] if bound[0] is not None else -np.inf for bound in problem.bounds]
+        upper_bounds = [bound[1] if bound[1] is not None else np.inf for bound in problem.bounds]
+        result = milp(
+            problem.c,
+            integrality=problem.integrality,
+            bounds=Bounds(lower_bounds, upper_bounds),
+            constraints=constraints,
+        )
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.fun, 0.0)
+        self.assertNotEqual(result.x[gen.var_indices["x"]], 2.0)
 
 
 if __name__ == "__main__":

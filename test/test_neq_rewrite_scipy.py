@@ -52,10 +52,10 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
         M = max(M_candidates) if M_candidates else 1_000_000.0
         found_forms = 0
         for row, rhs in zip(gen.A_ub, gen.b_ub):
-            # Form 1: -x + y - M*delta <= -1 (or algebraically equivalent scaling)
+            # Form 1: x - y - M*delta <= -1
             if (
-                abs(row[x_idx] + 1.0) < 1e-9
-                and abs(row[y_idx] - 1.0) < 1e-9
+                abs(row[x_idx] - 1.0) < 1e-9
+                and abs(row[y_idx] + 1.0) < 1e-9
                 and abs(row[delta_idx] + M) < 1e-6
                 and abs(rhs + 1.0) < 1e-6
             ):
@@ -81,6 +81,29 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
             2,
             f"Did not detect two distinct big-M inequalities for x != y; rows={gen.A_ub}, b_ub={gen.b_ub}, M={M}, delta={delta}",
         )
+        self.assertTrue(
+            self._rows_allow_assignment(gen, {"x": 1, "y": 2}),
+            "x < y must be feasible for x != y",
+        )
+        self.assertTrue(
+            self._rows_allow_assignment(gen, {"x": 2, "y": 1}),
+            "x > y must be feasible for x != y",
+        )
+        self.assertFalse(
+            self._rows_allow_assignment(gen, {"x": 1, "y": 1}),
+            "x == y must be infeasible for x != y",
+        )
+
+    def _rows_allow_assignment(self, gen, values):
+        auxiliary = next(name for name in gen.var_indices if name not in values)
+        for auxiliary_value in (0, 1):
+            assignment = {**values, auxiliary: auxiliary_value}
+            if all(
+                sum(row[gen.var_indices[name]] * value for name, value in assignment.items()) <= rhs + 1e-9
+                for row, rhs in zip(gen.A_ub, gen.b_ub)
+            ):
+                return True
+        return False
 
     def test_strict_constraints_are_normalized(self):
         opl = """

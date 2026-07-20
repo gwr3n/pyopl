@@ -317,9 +317,25 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(environments, [({"outer": 1, "i": 1}, (1,))])
 
         gen._eval_expr = lambda node, env: ({}, 0)
-        self.assertEqual(gen._iter_filtered_environments(iterators, {}, _cmp(_name("i"), "==", _num(2))), [])
+        self.assertEqual(
+            gen._iter_filtered_environments(
+                iterators,
+                {},
+                _cmp(_name("i"), "==", _num(2)),
+                skip_unresolved=True,
+            ),
+            [],
+        )
         gen._eval_expr = lambda node, env: (_ for _ in ()).throw(RuntimeError("ignore"))
-        self.assertEqual(gen._iter_filtered_environments(iterators, {}, _cmp(_name("i"), "==", _num(2))), [])
+        self.assertEqual(
+            gen._iter_filtered_environments(
+                iterators,
+                {},
+                _cmp(_name("i"), "==", _num(2)),
+                skip_unresolved=True,
+            ),
+            [],
+        )
 
     def test_scipy_csc_big_m_and_bounds_helpers(self):
         ast = {

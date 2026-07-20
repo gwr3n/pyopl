@@ -14,6 +14,75 @@ def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> Sci
 
 
 class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+    def test_model_building_rejects_unresolved_iterator_filter(self) -> None:
+        generator = make_generator("""
+            range I = 1..2;
+            dvar float x[I];
+            minimize 0;
+            subject to { }
+            """)
+        iterators = [
+            {
+                "iterator": "i",
+                "range": {
+                    "type": "range_specifier",
+                    "start": {"type": "number", "value": 1},
+                    "end": {"type": "number", "value": 2},
+                },
+            }
+        ]
+        unresolved_filter = {"type": "string_literal", "value": "unresolved", "sem_type": "boolean"}
+
+        with self.assertRaisesRegex(SemanticError, "iterator filter"):
+            generator._iter_filtered_environments(iterators, {}, unresolved_filter)
+
+    def test_sum_evaluation_does_not_replace_semantic_errors_with_zero(self) -> None:
+        generator = make_generator("""
+            range I = 1..2;
+            param float missing[I];
+            dvar float x;
+            minimize x;
+            subject to { }
+            """)
+        expression = {
+            "type": "sum",
+            "iterators": [
+                {
+                    "iterator": "i",
+                    "range": {"type": "named_range", "name": "I"},
+                }
+            ],
+            "index_constraint": None,
+            "expression": {
+                "type": "indexed_name",
+                "name": "missing",
+                "dimensions": [{"type": "name_reference_index", "name": "i", "sem_type": "int"}],
+                "sem_type": "float",
+            },
+            "sem_type": "float",
+        }
+
+        with self.assertRaisesRegex(SemanticError, "missing"):
+            ExpressionEvaluator(generator).eval(expression)
+
+    def test_unresolved_indexed_variable_name_does_not_collapse_to_base(self) -> None:
+        generator = make_generator("""
+            range I = 1..2;
+            dvar float x[I];
+            minimize 0;
+            subject to { }
+            """)
+        generator._build_variables()
+        unresolved = {
+            "type": "indexed_name",
+            "name": "x",
+            "dimensions": [{"type": "name_reference_index", "name": "i", "sem_type": "int"}],
+            "sem_type": "float",
+        }
+
+        with self.assertRaisesRegex(SemanticError, "Unable to resolve indexed variable"):
+            generator._multi_indexed_var_name(unresolved, {})
+
     def test_filtered_iterator_environments_require_definitive_truth(self) -> None:
         generator = make_generator("""
             range I = 1..2;
@@ -51,7 +120,10 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
 
         self.assertEqual([indices for _env, indices in environments], [(1, 1), (2, 2)])
         symbolic_filter = {"type": "string_literal", "value": "unknown", "sem_type": "boolean"}
-        self.assertEqual(generator._iter_filtered_environments(iterators, {}, symbolic_filter), [])
+        self.assertEqual(
+            generator._iter_filtered_environments(iterators, {}, symbolic_filter, skip_unresolved=True),
+            [],
+        )
 
         string_iterators = [
             {

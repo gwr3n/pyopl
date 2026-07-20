@@ -813,11 +813,7 @@ class ExpressionEvaluator:
             env,
             expr.get("index_constraint"),
         ):
-            try:
-                coef_dict, const = self.eval(expr["expression"], env=env2)
-            except SemanticError:
-                # Treat missing parameter/variable as zero ONLY in sum expansion
-                coef_dict, const = {}, 0.0
+            coef_dict, const = self.eval(expr["expression"], env=env2)
             for vname, coef in coef_dict.items():
                 # coef is numeric; coerce to float for safety
                 coef_dict_total[vname] = coef_dict_total.get(vname, 0.0) + float(cast(Union[int, float], coef))
@@ -1445,7 +1441,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             index_constraint = constr.get("index_constraint")
             inner_constraints = [constr["constraint"]] if "constraint" in constr else constr.get("constraints", [])
             try:
-                for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
+                for env2, _idx_tuple in self._iter_filtered_environments(
+                    iterators,
+                    env,
+                    index_constraint,
+                    skip_unresolved=True,
+                ):
                     for inner in inner_constraints:
                         tighten_constraint(inner, env=env2)
             except Exception:
@@ -2335,6 +2336,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         iterators: list[dict],
         outer_env: dict | None = None,
         index_constraint: dict | None = None,
+        *,
+        skip_unresolved: bool = False,
     ) -> list[tuple[dict, tuple]]:
         """Return iterator environments whose optional filter is definitively true."""
         environments = self._iterate_iterators_dynamic(iterators, outer_env or {})
@@ -2345,10 +2348,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for env, idx_tuple in environments:
             try:
                 coefficients, value = self._eval_expr(index_constraint, env)
-            except Exception:
-                continue
+            except Exception as exc:
+                if skip_unresolved:
+                    continue
+                raise SemanticError(f"Unable to evaluate iterator filter for indices {idx_tuple}: {exc}") from exc
             if coefficients or not isinstance(value, (int, float, bool)):
-                continue
+                if skip_unresolved:
+                    continue
+                raise SemanticError(f"Unable to resolve iterator filter for indices {idx_tuple}")
             if bool(value):
                 included.append((env, idx_tuple))
         return included
@@ -3639,6 +3646,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _multi_indexed_var_name(self, expr, env, eval_index_expr=None):
         if expr["type"] != "indexed_name":
             return expr["name"]
+        if eval_index_expr is None:
+            eval_index_expr = self._eval_index_expr
         base = expr["name"]
         index_values = []
         for dim in expr.get("dimensions", []):
@@ -3680,6 +3689,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             vname_fallback = f"{base_clean}_{'_'.join(str(i) for i in index_values)}"
             if vname_fallback in self.var_indices or vname_fallback in self.data_dict:
                 return vname_fallback
+        declaration = self._find_decl(base)
+        if declaration and declaration.get("type") in ("dvar", "dvar_indexed"):
+            raise SemanticError(f"Unable to resolve indexed variable '{base}' with indices {index_values}")
         return base
 
     def _find_decl(self, name, decl_type=None):
@@ -5407,23 +5419,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 diff_max += coef * lb
                         diff_min += ant_const
                         diff_max += ant_const
-                        if feasible_bounds:
-                            bigM = max(abs(diff_min), abs(diff_max), 1.0)
-                        else:
-                            bigM = 1_000_000.0
+                        if not feasible_bounds:
+                            raise SemanticError("Equality implication antecedent requires finite variable bounds")
+                        if any(self.integrality[self.var_indices[var]] == 0 for var in ant_coef):
+                            raise SemanticError("Equality implication antecedent requires integer variables")
                         if not hasattr(self, "_impl_counter"):
                             self._impl_counter = 0
                         flag_name = f"implication_flag_c{self._impl_counter}"
                         self._impl_counter += 1
-                        self.var_names.append(flag_name)
-                        self.var_indices[flag_name] = len(self.var_names) - 1
-                        self.bounds.append([0, 1])
-                        if hasattr(self, "integrality"):
+                        negative_flag = f"{flag_name}_negative"
+                        positive_flag = f"{flag_name}_positive"
+                        for name in (flag_name, negative_flag, positive_flag):
+                            self.var_names.append(name)
+                            self.var_indices[name] = len(self.var_names) - 1
+                            self.bounds.append([0, 1])
                             self.integrality.append(1)
-                        else:
-                            self.integrality = [1]
-                        if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                            self.c.append(0.0)
+                            if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                                self.c.append(0.0)
 
                         # Helper to add row
                         def _add_row(coef_dict, flag_coef, rhs):
@@ -5435,18 +5447,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             row[self.var_indices[flag_name]] += flag_coef
                             append_ub_row(row, rhs)
 
-                        # Standard equality reification (diff==0 -> flag=1) using four inequalities:
-                        # diff <=  bigM*(1-flag)
-                        # -diff <= bigM*(1-flag)
-                        # diff >= -bigM*flag  -> -diff <= bigM*flag
-                        # -diff >= -bigM*flag ->  diff <= bigM*flag
-                        # First two: diff + bigM*flag <= bigM  and -diff + bigM*flag <= bigM
-                        _add_row(ant_coef, bigM, bigM - ant_const)
-                        neg_coef = {v: -c for v, c in ant_coef.items()}
-                        _add_row(neg_coef, bigM, bigM + ant_const)
-                        # Second pair: diff - bigM*flag <= 0  and -diff - bigM*flag <= 0
-                        _add_row(ant_coef, -bigM, -ant_const)
-                        _add_row(neg_coef, -bigM, ant_const)
+                        partition_row = [0.0] * len(self.var_names)
+                        for name in (flag_name, negative_flag, positive_flag):
+                            partition_row[self.var_indices[name]] = 1.0
+                        append_eq_row(partition_row, 1.0)
+
+                        # Exact integer partition: diff is negative, zero, or positive.
+                        lower_row = [0.0] * len(self.var_names)
+                        upper_row = [0.0] * len(self.var_names)
+                        for var, coef in ant_coef.items():
+                            lower_row[self.var_indices[var]] -= coef
+                            upper_row[self.var_indices[var]] += coef
+                        lower_row[self.var_indices[negative_flag]] += diff_min
+                        lower_row[self.var_indices[positive_flag]] += 1.0
+                        upper_row[self.var_indices[negative_flag]] += 1.0
+                        upper_row[self.var_indices[positive_flag]] -= diff_max
+                        append_ub_row(lower_row, ant_const)
+                        append_ub_row(upper_row, -ant_const)
 
                         # Proceed to consequent gating using flag_name
                         # Build consequent diff normalization below reusing logic after antecedent handling
@@ -6119,26 +6136,32 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         self._add_code_line("# encoded != (boolean var vs literal)")
                         eq_row_idx += 1
                         return
-                    # Fallback: treat as generic comparison truth variable and then enforce b==1
-                    cmp_bin = {
-                        "type": "binop",
-                        "op": "!=",
-                        "left": left,
-                        "right": right,
-                        "sem_type": "boolean",
-                    }
-                    bvar = _comparison_truth_var(cmp_bin, env)
-                    # bvar == 1 (simple equality)
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[bvar]] = 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_eq_rows.append(eq_row_idx)
-                            A_eq_cols.append(i)
-                            A_eq_data.append(coef)
-                    b_eq.append(1.0)
-                    eq_row_idx += 1
-                    self._add_code_line("# encoded != via truth var fallback")
+                    left_coef, left_const = self._eval_expr(left, env)
+                    right_coef, right_const = self._eval_expr(right, env)
+                    diff_coef = dict(left_coef)
+                    for name, coef in right_coef.items():
+                        diff_coef[name] = diff_coef.get(name, 0.0) - coef
+                    diff_const = float(left_const) - float(right_const)
+                    cmp_bin = {"type": "binop", "op": "!=", "left": left, "right": right}
+                    big_m = self._big_m_for_comparison(cmp_bin, env=env)
+                    if not hasattr(self, "_neq_counter"):
+                        self._neq_counter = 0
+                    direction_name = f"neq_direction_c{self._neq_counter}"
+                    self._neq_counter += 1
+                    self.var_names.append(direction_name)
+                    self.var_indices[direction_name] = len(self.var_names) - 1
+                    self.bounds.append([0, 1])
+                    self.integrality.append(1)
+                    self.c.append(0.0)
+
+                    # diff <= -1 + M*d or diff >= 1 - M*(1-d).
+                    negative_row = dict(diff_coef)
+                    negative_row[direction_name] = -big_m
+                    append_ub_coef_row(negative_row, -1.0 - diff_const)
+                    positive_row = {name: -coef for name, coef in diff_coef.items()}
+                    positive_row[direction_name] = big_m
+                    append_ub_coef_row(positive_row, big_m - 1.0 + diff_const)
+                    self._add_code_line("# encoded integer != via direction binary")
                     return
 
                 # --- NOT rewrite normalization ---
