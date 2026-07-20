@@ -97,8 +97,9 @@ class TestImplicationBigMTightness(unittest.TestCase):
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
-        flag_idx = gen.var_indices.get("implication_flag_c0")
-        self.assertIsNotNone(flag_idx, f"Flag var missing; vars={gen.var_names}")
+        flag_names = [name for name in gen.var_names if name.startswith("cmp_flag_")]
+        self.assertEqual(len(flag_names), 1, f"Expected one antecedent truth flag; vars={gen.var_names}")
+        flag_idx = gen.var_indices[flag_names[0]]
         max_coef = 0
         for row in gen.A_ub:
             coef = row[flag_idx]

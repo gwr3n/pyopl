@@ -33,7 +33,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
-        aux_vars = [v for v in gen.var_names if v.startswith("_baux")]
+        aux_vars = [v for v in gen.var_names if v not in ("a", "b", "c")]
         # We expect auxiliaries for (b==0), (b==0 OR c==1), and for the != itself
         # (a==1) is atomic, but (b==0 OR c==1) should introduce an aux, and the != should introduce an aux
         # So expect at least 2 auxiliaries: one for (b==0 OR c==1), one for the !=

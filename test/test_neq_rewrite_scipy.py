@@ -173,7 +173,10 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
 
     def test_strict_implication_consequent_is_normalized(self):
         opl = """
-        dvar boolean b; dvar float x; minimize 0; subject to { b == 1 => x < 5; }
+        dvar boolean b; dvar float x; minimize 0; subject to {
+            x >= -10; x <= 10;
+            b == 1 => x < 5;
+        }
         """
         gen = self.gen(opl)
         x_idx = gen.var_indices["x"]

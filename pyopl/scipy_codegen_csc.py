@@ -14,9 +14,6 @@ from .tuple_set_helper import TupleSetHelper
 # (none)
 
 
-# === Module-level constants (Stage 1 refactor) ===
-# Single source for big-M fallback and boolean epsilon tolerances.
-BIG_M_DEFAULT = 1_000_000.0  # Conservative default; refined per-expression when bounds available.
 BOOL_EPS = 1e-6  # Tolerance used for strict inequality flips / boolean reification.
 
 
@@ -933,47 +930,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return row
 
     def _big_m_for_comparison(self, comp: Dict[str, Any], env: Optional[Dict[str, Any]] = None) -> float:
-        """Compute a tightened big-M for a linear (in)equation comp.
-
-        Strategy:
-        1. Evaluate lhs and rhs into linear forms f_l(x)=a_l^T x + c_l and f_r(x)=a_r^T x + c_r.
-        2. Consider expression f(x) = f_l(x) - f_r(x) with constant part c = c_l - c_r.
-        3. Using collected variable bounds (from preprocessing) compute interval [f_min, f_max].
-           Fallback bounds: (-1e3, 1e3) if unavailable (kept conservative but finite to avoid overflow).
-        4. Return M = max(|f_min|, |f_max|, |f_max - f_min|) + 1.0 (slack) with floor 1.0.
-
-        If any error occurs, fallback to BIG_M_DEFAULT.
-        """
-        try:
-            env_eval = env or {}
-            lhs = comp.get("left")
-            rhs = comp.get("right")
-            coef_lhs, const_lhs = self._eval_expr(lhs, env_eval)
-            if isinstance(rhs, dict):
-                coef_rhs, const_rhs = self._eval_expr(rhs, env_eval)
-            else:
-                coef_rhs, const_rhs = ({}, rhs if isinstance(rhs, (int, float)) else 0.0)
-            expr_coef = dict(coef_lhs)
-            for vn, cf in coef_rhs.items():
-                expr_coef[vn] = expr_coef.get(vn, 0.0) - cf
-            expr_const = const_lhs - const_rhs
-            f_min = expr_const
-            f_max = expr_const
-            lbs = getattr(self, "_collected_lbs", {})
-            ubs = getattr(self, "_collected_ubs", {})
-            for vn, cf in expr_coef.items():
-                lb = lbs.get(vn, -1e3)
-                ub = ubs.get(vn, 1e3)
-                if cf >= 0:
-                    f_min += cf * lb
-                    f_max += cf * ub
-                else:
-                    f_min += cf * ub
-                    f_max += cf * lb
-            width = max(abs(f_min), abs(f_max), abs(f_max - f_min))
-            return max(1.0, width + 1.0)
-        except Exception:
-            return BIG_M_DEFAULT
+        """Return a finite big-M derived from the complete affine interval."""
+        env_eval = env or {}
+        coef_lhs, const_lhs = self._eval_expr(comp.get("left"), env_eval)
+        rhs = comp.get("right")
+        coef_rhs, const_rhs = (
+            self._eval_expr(rhs, env_eval) if isinstance(rhs, dict) else ({}, rhs if isinstance(rhs, (int, float)) else 0.0)
+        )
+        if not isinstance(const_lhs, (int, float)) or not isinstance(const_rhs, (int, float)):
+            raise SemanticError("Comparison big-M requires a numeric affine expression")
+        coefficients = dict(coef_lhs)
+        for var_name, coefficient in coef_rhs.items():
+            coefficients[var_name] = coefficients.get(var_name, 0.0) - coefficient
+        constant = float(const_lhs) - float(const_rhs)
+        lower, upper = self._finite_affine_bounds(coefficients, constant, "Comparison big-M")
+        return max(1.0, abs(lower), abs(upper))
 
     def _get_tuple_set_names(self, iterators):
         """
@@ -4077,7 +4048,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             isinstance(node, dict)
             and node.get("type") == "binop"
             and node.get("sem_type") == "boolean"
-            and node.get("op") in ("<=", ">=", "!=", "==")
+            and node.get("op") in ("<=", "<", ">=", ">", "!=", "==")
         ):
             raise SemanticError("Not a supported comparison binop for truth var")
         comparison_truth_cache = ctx.comparison_truth_cache
@@ -4190,54 +4161,66 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             expr_coef[var_name] = expr_coef.get(var_name, 0.0) - coef
         expr_const = lhs_const - rhs_const
         bname = f"cmp_flag_{len(comparison_truth_cache)}"
-        self.var_names.append(bname)
-        self.var_indices[bname] = len(self.var_names) - 1
-        self.bounds.append([0, 1])
-        if hasattr(self, "integrality"):
+
+        def add_binary(name):
+            self.var_names.append(name)
+            self.var_indices[name] = len(self.var_names) - 1
+            self.bounds.append([0, 1])
             self.integrality.append(1)
-        else:
-            self.integrality = [1]
-        if hasattr(self, "c") and len(self.c) < len(self.var_names):
-            self.c.append(0.0)
-        try:
-            big_m = self._big_m_for_comparison(node, env=env)
-        except Exception:
-            big_m = BIG_M_DEFAULT
-        eps = BOOL_EPS
+            if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                self.c.append(0.0)
+
+        add_binary(bname)
 
         def add_ub(row_coef_dict, rhs):
             self._append_sparse_coef_row(ctx.state, row_coef_dict, rhs, sense="ub")
 
-        if op == "<=":
-            row1 = dict(expr_coef)
-            row1[bname] = row1.get(bname, 0.0) + big_m
-            add_ub(row1, big_m - expr_const)
-            row2 = {var_name: -coef for var_name, coef in expr_coef.items()}
-            row2[bname] = row2.get(bname, 0.0) - big_m
-            add_ub(row2, expr_const - eps)
-        elif op == ">=":
-            neg_coef = {var_name: -coef for var_name, coef in expr_coef.items()}
-            neg_const = -expr_const
-            row1 = dict(neg_coef)
-            row1[bname] = row1.get(bname, 0.0) + big_m
-            add_ub(row1, big_m - neg_const)
-            row2 = dict(expr_coef)
-            row2[bname] = row2.get(bname, 0.0) - big_m
-            add_ub(row2, -expr_const - eps)
-        elif op == "!=":
-            row_a = {var_name: -coef for var_name, coef in expr_coef.items()}
-            row_a[bname] = row_a.get(bname, 0.0) - big_m
-            add_ub(row_a, -1 - expr_const)
-            row_b = {var_name: -coef for var_name, coef in expr_coef.items()}
-            row_b[bname] = row_b.get(bname, 0.0) + big_m
-            add_ub(row_b, big_m - 1 - expr_const)
+        if op in ("<=", "<", ">=", ">"):
+            oriented_coef = dict(expr_coef)
+            oriented_const = expr_const
+            if op in (">=", ">"):
+                oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
+                oriented_const = -oriented_const
+            if op in ("<", ">"):
+                oriented_const += BOOL_EPS
+            lower, upper = self._finite_affine_bounds(
+                oriented_coef,
+                oriented_const,
+                f"Comparison truth variable for '{op}'",
+            )
+            true_row = dict(oriented_coef)
+            true_row[bname] = upper
+            add_ub(true_row, upper - oriented_const)
+            false_row = {var_name: -coef for var_name, coef in oriented_coef.items()}
+            false_row[bname] = lower - BOOL_EPS
+            add_ub(false_row, -BOOL_EPS + oriented_const)
         else:
-            row1 = dict(expr_coef)
-            row1[bname] = row1.get(bname, 0.0) + big_m
-            add_ub(row1, big_m - expr_const)
-            neg_coef = {var_name: -coef for var_name, coef in expr_coef.items()}
-            neg_coef[bname] = neg_coef.get(bname, 0.0) + big_m
-            add_ub(neg_coef, big_m + expr_const)
+            lower, upper = self._finite_integer_affine_bounds(
+                expr_coef,
+                expr_const,
+                f"Comparison truth variable for '{op}'",
+            )
+            negative_name = f"{bname}_negative"
+            positive_name = f"{bname}_positive"
+            add_binary(negative_name)
+            add_binary(positive_name)
+
+            relation = {negative_name: 1.0, positive_name: 1.0}
+            if op == "==":
+                relation[bname] = 1.0
+                self._append_sparse_coef_row(ctx.state, relation, 1.0, sense="eq")
+            else:
+                relation[bname] = -1.0
+                self._append_sparse_coef_row(ctx.state, relation, 0.0, sense="eq")
+
+            lower_row = {var_name: -coef for var_name, coef in expr_coef.items()}
+            lower_row[negative_name] = lower
+            lower_row[positive_name] = 1.0
+            add_ub(lower_row, expr_const)
+            upper_row = dict(expr_coef)
+            upper_row[negative_name] = 1.0
+            upper_row[positive_name] = -upper
+            add_ub(upper_row, -expr_const)
         comparison_truth_cache[key] = bname
         self._add_code_line(f"# comparison truth var for {op}")
         return bname
@@ -4448,6 +4431,26 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if t == "parenthesized_expression":
             inner = node.get("expression")
             return self._bool_expr_var(inner, env, ctx)
+        if t == "constraint" and node.get("op") in ("<=", "<", ">=", ">", "!=", "=="):
+            is_atomic_boolean = False
+            if node.get("op") == "==":
+                try:
+                    self._atomic_bool_var(node, env)
+                    is_atomic_boolean = True
+                except SemanticError:
+                    pass
+            if not is_atomic_boolean:
+                comparison = {
+                    "type": "binop",
+                    "op": node.get("op"),
+                    "left": node.get("left"),
+                    "right": node.get("right"),
+                    "sem_type": "boolean",
+                }
+                result = self._comparison_truth_var(comparison, env, ctx)
+                ctx.subtree_var_cache[sk] = result
+                ctx.expr_memo[env_memo_key] = result
+                return result
         # Boolean variable equality with composite (var == (and/or/...)) should reuse composite aux directly
         # Handle both 'binop' and 'constraint' nodes with op '!=' and both sides boolean
         is_binop_neq = t == "binop" and node.get("sem_type") == "boolean" and node.get("op") == "!="
@@ -5034,13 +5037,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # For boolean aux, skip constraints that are always true: aux == 1, aux >= 1, aux <= 1, aux >= 0, aux <= 1
                     # Only skip for aux == 1 (r==1 or True), aux >= 0, aux <= 1
                     def _is_tautology_bool_aux(op, r):
-                        if op == "==":
-                            if isinstance(r, dict) and (
-                                (r.get("type") == "boolean_literal" and r.get("value") is True)
-                                or (r.get("type") == "number" and r.get("value") == 1)
-                            ):
-                                return True
-                        elif op == ">=":
+                        if op == ">=":
                             if isinstance(r, dict) and r.get("type") == "number" and r.get("value") == 0:
                                 return True
                         elif op == "<=":
@@ -5284,78 +5281,58 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 ant_var_node = _extract_var_eq_val(ant_unwrapped, 1)
 
-                # --- NEW specialized pattern: (bool_var == 0) => (lin_var <= const) ---
-                # Encode: x - M * b <= c   (since b in {0,1})
+                def _gate_affine_consequent(antecedent_node, active_value, consequent_node):
+                    if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
+                        raise SemanticError("Implication consequent must be a constraint")
+                    consequent_op = consequent_node.get("op")
+                    if consequent_op not in ("<=", "<", ">=", ">", "=="):
+                        raise SemanticError("Unsupported implication consequent operator")
+                    antecedent_name = (
+                        self._multi_indexed_var_name(antecedent_node, env)
+                        if antecedent_node.get("type") == "indexed_name"
+                        else antecedent_node["value"]
+                    )
+                    left_coef, left_const = self._eval_expr(consequent_node.get("left"), dict(env or {}))
+                    right_coef, right_const = self._eval_expr(consequent_node.get("right"), dict(env or {}))
+                    if not isinstance(left_const, (int, float)) or not isinstance(right_const, (int, float)):
+                        raise SemanticError("Implication consequent requires a numeric affine expression")
+
+                    def emit_side(coef, constant):
+                        _lower, upper = self._finite_affine_bounds(
+                            coef,
+                            constant,
+                            "Boolean implication consequent",
+                        )
+                        relaxation = max(0.0, upper)
+                        row = [0.0] * len(self.var_names)
+                        for var_name, value in coef.items():
+                            row[self.var_indices[var_name]] += value
+                        if active_value == 1:
+                            row[self.var_indices[antecedent_name]] += relaxation
+                            rhs = relaxation - constant
+                        else:
+                            row[self.var_indices[antecedent_name]] -= relaxation
+                            rhs = -constant
+                        append_ub_row(row, rhs)
+
+                    diff_coef = dict(left_coef)
+                    for var_name, value in right_coef.items():
+                        diff_coef[var_name] = diff_coef.get(var_name, 0.0) - value
+                    diff_const = float(left_const) - float(right_const)
+                    if consequent_op in (">=", ">"):
+                        diff_coef = {var_name: -value for var_name, value in diff_coef.items()}
+                        diff_const = -diff_const
+                    if consequent_op in ("<", ">"):
+                        diff_const += BOOL_EPS
+                    emit_side(diff_coef, diff_const)
+                    if consequent_op == "==":
+                        emit_side({var_name: -value for var_name, value in diff_coef.items()}, -diff_const)
+                    return
+
                 ant_eq_zero = _extract_var_eq_val(ant_unwrapped, 0)
-                if ant_eq_zero is not None and isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") == "constraint":
-                    op_c = cons_unwrapped.get("op")
-                    lc = cons_unwrapped.get("left")
-                    rc = cons_unwrapped.get("right")
-
-                    def _is_var(n):
-                        return isinstance(n, dict) and n.get("type") in ("name", "indexed_name")
-
-                    def _is_num(n):
-                        return isinstance(n, dict) and n.get("type") == "number"
-
-                    # Support canonical form: var <= const
-                    if op_c == "<=" and _is_var(lc) and _is_num(rc):
-                        ant_vname = (
-                            self._multi_indexed_var_name(ant_eq_zero, env)
-                            if ant_eq_zero.get("type") == "indexed_name"
-                            else ant_eq_zero["value"]
-                        )
-                        cons_vname = self._multi_indexed_var_name(lc, env) if lc.get("type") == "indexed_name" else lc["value"]
-                        rhs_val = float(rc.get("value", 0.0))
-
-                        # Pick big-M from inferred upper bound of cons_var when available
-                        M = None
-                        try:
-                            lb, ub = self._infer_var_bounds(cons_vname)
-                            if ub is not None:
-                                M = max(1.0, float(ub))
-                        except Exception:
-                            M = None
-                        if M is None:
-                            M = BIG_M_DEFAULT
-
-                        # Add inequality: cons_v - M * ant_b <= rhs_val
-                        row = [0.0] * len(self.var_names)
-                        if cons_vname in self.var_indices:
-                            row[self.var_indices[cons_vname]] += 1.0
-                        if ant_vname in self.var_indices:
-                            row[self.var_indices[ant_vname]] -= M
-
-                        append_ub_row(row, rhs_val)
-                        return
-
-                    # Also accept equality to zero when x >= 0 (common with float+)
-                    if op_c == "==" and _is_var(lc) and _is_num(rc) and abs(float(rc.get("value", 0.0))) < 1e-12:
-                        ant_vname = (
-                            self._multi_indexed_var_name(ant_eq_zero, env)
-                            if ant_eq_zero.get("type") == "indexed_name"
-                            else ant_eq_zero["value"]
-                        )
-                        cons_vname = self._multi_indexed_var_name(lc, env) if lc.get("type") == "indexed_name" else lc["value"]
-                        # Use same gating as <= 0: x - M*b <= 0 (nonnegativity enforces x==0 when b==0)
-                        M = None
-                        try:
-                            lb, ub = self._infer_var_bounds(cons_vname)
-                            if ub is not None:
-                                M = max(1.0, float(ub))
-                        except Exception:
-                            M = None
-                        if M is None:
-                            M = BIG_M_DEFAULT
-
-                        row = [0.0] * len(self.var_names)
-                        if cons_vname in self.var_indices:
-                            row[self.var_indices[cons_vname]] += 1.0
-                        if ant_vname in self.var_indices:
-                            row[self.var_indices[ant_vname]] -= M
-
-                        append_ub_row(row, 0.0)
-                        return
+                if ant_eq_zero is not None:
+                    _gate_affine_consequent(ant_eq_zero, 0, cons_unwrapped)
+                    return
 
                 # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
                 # Recognize antecedent: constraint with op in ('>','>=') comparing single var to 0; consequent: var == 1 on boolean var
@@ -5395,50 +5372,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         return right
                     return None
 
-                ant_var_pos = _is_single_var_gt_zero(ant_unwrapped)
-                cons_var_one = _is_var_eq_one(cons_unwrapped)
-                if ant_var_pos is not None and cons_var_one is not None:
-                    # Implement big-M gating: x <= M * y  (with y binary). This enforces x>0 -> y=1
-                    x_name = (
-                        self._multi_indexed_var_name(ant_var_pos, env)
-                        if ant_var_pos.get("type") == "indexed_name"
-                        else ant_var_pos["value"]
-                    )
-                    y_name = (
-                        self._multi_indexed_var_name(cons_var_one, env)
-                        if cons_var_one.get("type") == "indexed_name"
-                        else cons_var_one["value"]
-                    )
-                    # Ensure both variables are registered; y must be binary (assumed from declaration)
-                    if x_name not in self.var_indices or y_name not in self.var_indices:
-                        raise SemanticError("Implication variables not indexed properly")
-                    # Heuristic M: use previously collected upper bound for x if available, else fallback to sum of any demand-like parameter or default
-                    bigM = self._collected_ubs.get(x_name)
-                    if bigM is None:
-                        # Try aggregated symbol bound
-                        base_sym = ant_var_pos.get("name") if ant_var_pos.get("type") == "indexed_name" else x_name
-                        bigM = self._collected_ubs.get(base_sym)
-                    if bigM is None:
-                        # Robust AST-based extraction for Wagner-Whitin: sum demand[t..T]
-                        try:
-                            if "demand" in self.data_dict and isinstance(self.data_dict["demand"], list):
-                                dem_list = self.data_dict["demand"]
-                                # Use AST to extract index t (OPL 1-based)
-                                if ant_var_pos.get("type") == "indexed_name" and ant_var_pos.get("dimensions"):
-                                    idx_expr = ant_var_pos["dimensions"][-1]
-                                    _, t_idx = self._eval_index_expr(idx_expr, env)
-                                    if isinstance(t_idx, int) and 1 <= t_idx <= len(dem_list):
-                                        bigM = sum(dem_list[t_idx - 1 :])
-                        except Exception:
-                            pass
-                    if bigM is None:
-                        bigM = 1_000_000.0
-                    # Add row: x - M*y <= 0
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[x_name]] += 1.0
-                    row[self.var_indices[y_name]] -= bigM
-                    append_ub_row(row, 0.0)
-                    return
                 # --- General linear antecedent -> linear consequent (Option A canonical big-M) ---
                 if not ant_var_node:
                     # Expect both antecedent and consequent to be simple constraints
@@ -5560,131 +5493,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         append_ub_row(row, rhs_c)
                         return
 
-                    # Helper: linearize expression (restricted to +,- of names and numbers)
-                    def _lin_imp(expr):
-                        if not isinstance(expr, dict):
-                            raise SemanticError("Unsupported expression in implication linearization")
-                        try:
-                            coef, const = self._eval_expr(expr, dict(env or {}))
-                        except Exception as exc:
-                            raise SemanticError("Unsupported linear expression form in implication") from exc
-                        if not isinstance(const, (int, float)):
-                            raise SemanticError("Unsupported linear expression form in implication")
-                        return dict(coef), float(const)
-
-                    def _diff_imp(left, right):
-                        ld, lc = _lin_imp(left)
-                        rd, rc = _lin_imp(right)
-                        coef = ld.copy()
-                        for k, v in rd.items():
-                            coef[k] = coef.get(k, 0.0) - v
-                        return coef, lc - rc
-
-                    # Normalize antecedent to diff_a >= 0 form
-                    if ant_op in (">=", ">"):
-                        diff_a_coef, diff_a_const = _diff_imp(ant_c.get("left"), ant_c.get("right"))
-                    elif ant_op in ("<=", "<"):
-                        diff_a_coef, diff_a_const = _diff_imp(ant_c.get("right"), ant_c.get("left"))
-                    else:
-                        raise SemanticError("Unsupported antecedent operator")
-
-                    # Bounds for antecedent diff
-                    def _bounds_expr(expr):
-                        try:
-                            return self._linear_bounds_safe(expr)
-                        except Exception:
-                            return (None, None)
-
-                    # Compose diff bounds from left/right
-                    lL, lU = _bounds_expr(ant_c.get("left"))
-                    rL, rU = _bounds_expr(ant_c.get("right"))
-                    diff_min = None
-                    diff_max = None
-                    if None not in (lL, lU, rL, rU):
-                        if ant_op in (">=", ">"):
-                            diff_min = lL - rU
-                            diff_max = lU - rL
-                        else:  # flipped
-                            diff_min = rL - lU
-                            diff_max = rU - lL
-                    # Introduce flag variable z
-                    if not hasattr(self, "_impl_counter"):
-                        self._impl_counter = 0
-                    flag_name = f"implication_flag_c{self._impl_counter}"
-                    self._impl_counter += 1
-                    self.var_names.append(flag_name)
-                    self.var_indices[flag_name] = len(self.var_names) - 1
-                    self.bounds.append([0, 1])
-                    if hasattr(self, "integrality"):
-                        self.integrality.append(1)
-                    else:
-                        self.integrality = [1]
-                    if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                        self.c.append(0.0)
-
-                    # Helper to add a <= row
-                    def _add_le(coef_dict, flag_coef, rhs):
-                        row = [0.0] * len(self.var_names)
-                        for var, coef in coef_dict.items():
-                            if var not in self.var_indices:
-                                raise SemanticError(f"Variable '{var}' not indexed")
-                            row[self.var_indices[var]] += coef
-                        row[self.var_indices[flag_name]] += flag_coef
-                        append_ub_row(row, rhs)
-
-                    # Big-M values
-                    # M1 for antecedent activation (diff_a >= 0 when flag=1): use max(0, -diff_min)
-                    M1 = max(0.0, -(diff_min if diff_min is not None else -1_000_000.0))
-                    # U_a for forcing flag when diff_a positive
-                    U_a = diff_max if diff_max is not None else 1_000_000.0
-                    # 1) -diff_a + M1*flag <= M1  (enforces diff_a >=0 if flag=1)
-                    coef1 = {v: -c for v, c in diff_a_coef.items()}
-                    # constant shift: diff_a = sum(c_i x_i) + diff_a_const
-                    # So -diff_a = -sum(c_i x_i) - diff_a_const
-                    coef1_const = -diff_a_const
-                    if abs(coef1_const) > 1e-12:
-                        # Move constant to RHS: -sum(c_i)x_i - diff_a_const + M1*flag <= M1  => -sum(c_i)x_i + M1*flag <= M1 + diff_a_const
-                        rhs1 = M1 + diff_a_const
-                    else:
-                        rhs1 = M1
-                    _add_le(coef1, M1, rhs1)
-                    # 2) diff_a - U_a*flag <= 0 (forces flag=1 if diff_a>0)
-                    coef2 = diff_a_coef.copy()
-                    # diff_a = sum(c_i)x_i + diff_a_const -> sum(c_i)x_i - U_a*flag <= -diff_a_const
-                    rhs2 = -diff_a_const
-                    _add_le(coef2, -U_a, rhs2)
-
-                    # Consequent normalization: enforce diff_c <= 0 (or both for equality)
-                    def _emit_consequent(cons_node, op):
-                        if op == "==":
-                            raise SemanticError("Equality consequent not yet supported")
-                        if op in ("<=", "<"):
-                            diff_c_coef, diff_c_const = _diff_imp(cons_node.get("left"), cons_node.get("right"))
-                        elif op in (">=", ">"):
-                            diff_c_coef, diff_c_const = _diff_imp(cons_node.get("right"), cons_node.get("left"))
-                        else:
-                            raise SemanticError("Unsupported consequent operator")
-                        if op in ("<", ">"):
-                            diff_c_const += BOOL_EPS
-                        return diff_c_coef, diff_c_const
-
-                    diff_c_coef, diff_c_const = _emit_consequent(cons_c, cons_op)
-                    # Bound for consequent to build M_c
-                    lL2, lU2 = _bounds_expr(cons_c.get("left"))
-                    rL2, rU2 = _bounds_expr(cons_c.get("right"))
-                    diff_c_max = None
-                    if None not in (lL2, lU2, rL2, rU2):
-                        if cons_op in ("<=", "<"):
-                            diff_c_max = lU2 - rL2
-                        elif cons_op in (">=", ">"):
-                            diff_c_max = rU2 - lL2
-                    M_c = diff_c_max if diff_c_max is not None else 1_000_000.0
-                    # diff_c + M_c*flag <= M_c  (when flag=1 diff_c<=0)
-                    coefc = diff_c_coef.copy()
-                    # diff_c = sum(c_i)x_i + diff_c_const
-                    # sum(c_i)x_i + diff_c_const + M_c*flag <= M_c  -> sum(c_i)x_i + M_c*flag <= M_c - diff_c_const
-                    rhs_c = M_c - diff_c_const
-                    _add_le(coefc, M_c, rhs_c)
+                    antecedent_comparison = {
+                        "type": "binop",
+                        "op": ant_op,
+                        "left": ant_c.get("left"),
+                        "right": ant_c.get("right"),
+                        "sem_type": "boolean",
+                    }
+                    flag_name = _comparison_truth_var(antecedent_comparison, env)
+                    _gate_affine_consequent({"type": "name", "value": flag_name}, 1, cons_c)
                     return
                 ant_name = (
                     self._multi_indexed_var_name(ant_var_node, env)
@@ -5705,10 +5522,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 def _var_name(node):
                     return self._multi_indexed_var_name(node, env) if node.get("type") == "indexed_name" else node["value"]
 
-                if cons_var_one or (
+                def _is_boolean_decision_var(node):
+                    if not isinstance(node, dict) or node.get("type") not in ("name", "indexed_name"):
+                        return False
+                    base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+                    declaration = self._find_decl(base_name)
+                    return bool(
+                        declaration
+                        and declaration.get("type") in ("dvar", "dvar_indexed")
+                        and declaration.get("var_type") == "boolean"
+                    )
+
+                if (cons_var_one and _is_boolean_decision_var(cons_var_one)) or (
                     op_c in (">=", "==")
                     and isinstance(lc, dict)
                     and lc.get("type") in ("name", "indexed_name")
+                    and _is_boolean_decision_var(lc)
                     and isinstance(rc, dict)
                     and rc.get("type") == "number"
                     and rc.get("value") == 1
@@ -5727,10 +5556,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     b_ub.append(0.0)
                     ub_row_idx += 1
                     return
-                if cons_var_zero or (
+                if (cons_var_zero and _is_boolean_decision_var(cons_var_zero)) or (
                     op_c in ("<=", "==")
                     and isinstance(lc, dict)
                     and lc.get("type") in ("name", "indexed_name")
+                    and _is_boolean_decision_var(lc)
                     and isinstance(rc, dict)
                     and rc.get("type") == "number"
                     and rc.get("value") == 0
@@ -5749,31 +5579,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     b_ub.append(1.0)
                     ub_row_idx += 1
                     return
-                if op_c in ("<=", "<", ">=", ">"):
-                    lhs_dict, lhs_const = self._accumulate_sum_to_dict(lc, env, sign=1)
-                    rhs_dict, rhs_const = self._accumulate_sum_to_dict(rc, env, sign=1)
-                    row_coef = dict(lhs_dict)
-                    for vname, coef in rhs_dict.items():
-                        row_coef[vname] = row_coef.get(vname, 0.0) - coef
-                    rhs_value = rhs_const - lhs_const
-                    adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(op_c, rhs_value)
-                    if adjusted_op == ">=":
-                        row_coef = {vname: -coef for vname, coef in row_coef.items()}
-                        adjusted_rhs = -adjusted_rhs
-                    big_m = BIG_M_DEFAULT
-                    row = [0.0] * len(self.var_names)
-                    for vname, coef in row_coef.items():
-                        idx = self.var_indices.get(vname)
-                        if idx is not None:
-                            row[idx] += coef
-                    row[self.var_indices[ant_name]] += big_m
-                    for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(adjusted_rhs + big_m)
-                    ub_row_idx += 1
+                if op_c in ("<=", "<", ">=", ">", "=="):
+                    _gate_affine_consequent(ant_var_node, 1, cons_simple)
                     return
                 raise SemanticError("Unsupported implication consequent form")
             if constr["type"] == "constraint":
@@ -5871,6 +5678,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     op_sym_top,
                 )
                 if is_sum:
+                    if op_sym_top == ">=" and k_val <= 0:
+                        return
                     z_indices = []
 
                     for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
@@ -5881,56 +5690,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             "right": inner_cmp.get("right"),
                             "sem_type": "boolean",
                         }
-                        z_name = self._ensure_aux_binary("cmp_sum")
-                        if hasattr(self, "integrality"):
-                            if len(self.integrality) < len(self.var_names):
-                                self.integrality.append(1)
-                        else:
-                            self.integrality = [1] * len(self.var_names)
-                        if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                            self.c.extend([0.0] * (len(self.var_names) - len(self.c)))
+                        z_name = _comparison_truth_var(comp_inst, env2)
                         z_indices.append(self.var_indices[z_name])
-                        M = self._big_m_for_comparison(comp_inst, env=env2)
-                        coef_lhs, const_lhs = self._eval_expr(comp_inst["left"], env2)
-                        rnode = comp_inst["right"]
-                        if isinstance(rnode, dict):
-                            coef_rhs, const_rhs = self._eval_expr(rnode, env2)
-                        else:
-                            coef_rhs, const_rhs = (
-                                {},
-                                rnode if isinstance(rnode, (int, float)) else 0.0,
-                            )
-                        diff_coef = dict(coef_lhs)
-                        for vn, cf in coef_rhs.items():
-                            diff_coef[vn] = diff_coef.get(vn, 0.0) - cf
-                        diff_const = const_lhs - const_rhs
-                        # Conditional diff >=0 when z=1:
-                        # 1) -diff + M*z <= M   (if z=1 -> -diff <= 0 => diff >=0; if z=0 -> -diff <= M relaxes)
-                        row1 = [0.0] * len(self.var_names)
-                        for vn, cf in diff_coef.items():
-                            if vn in self.var_indices:
-                                row1[self.var_indices[vn]] -= cf
-                        row1[self.var_indices[z_name]] += M
-                        for i, coef in enumerate(row1):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(M - diff_const)
-                        ub_row_idx += 1
-                        # 2) diff - M*z <= 0
-                        row2 = [0.0] * len(self.var_names)
-                        for vn, cf in diff_coef.items():
-                            if vn in self.var_indices:
-                                row2[self.var_indices[vn]] += cf
-                        row2[self.var_indices[z_name]] -= M
-                        for i, coef in enumerate(row2):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(-diff_const)
-                        ub_row_idx += 1
                     if op_sym_top == ">=":
                         # -sum z <= -k
                         row = [0.0] * len(self.var_names)
@@ -5954,6 +5715,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 A_eq_data.append(coef)
                         b_eq.append(k_val)
                         eq_row_idx += 1
+                    return
                 # Pattern B: b == (sum(i)(comparison) >= k)
                 if op_sym_top == "==" and isinstance(left, dict) and left.get("type") == "name":
                     r_un = _unwrap_paren(right)
@@ -5983,54 +5745,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                         "right": inner_cmp.get("right"),
                                         "sem_type": "boolean",
                                     }
-                                    z_name = self._ensure_aux_binary("cmp_sum")
-                                    if hasattr(self, "integrality"):
-                                        if len(self.integrality) < len(self.var_names):
-                                            self.integrality.append(1)
-                                    else:
-                                        self.integrality = [1] * len(self.var_names)
-                                    if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                                        self.c.extend([0.0] * (len(self.var_names) - len(self.c)))
+                                    z_name = _comparison_truth_var(comp_inst, env2)
                                     z_indices.append(self.var_indices[z_name])
-                                    M = self._big_m_for_comparison(comp_inst, env=env2)
-                                    coef_lhs, const_lhs = self._eval_expr(comp_inst["left"], env2)
-                                    rnode = comp_inst["right"]
-                                    if isinstance(rnode, dict):
-                                        coef_rhs, const_rhs = self._eval_expr(rnode, env2)
-                                    else:
-                                        coef_rhs, const_rhs = (
-                                            {},
-                                            (rnode if isinstance(rnode, (int, float)) else 0.0),
-                                        )
-                                    diff_coef = dict(coef_lhs)
-                                    for vn, cf in coef_rhs.items():
-                                        diff_coef[vn] = diff_coef.get(vn, 0.0) - cf
-                                    diff_const = const_lhs - const_rhs
-                                    # Conditional diff >=0 when z=1
-                                    row1 = [0.0] * len(self.var_names)
-                                    for vn, cf in diff_coef.items():
-                                        if vn in self.var_indices:
-                                            row1[self.var_indices[vn]] -= cf
-                                    row1[self.var_indices[z_name]] += M
-                                    for i, coef in enumerate(row1):
-                                        if abs(coef) > 1e-12:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(M - diff_const)
-                                    ub_row_idx += 1
-                                    row2 = [0.0] * len(self.var_names)
-                                    for vn, cf in diff_coef.items():
-                                        if vn in self.var_indices:
-                                            row2[self.var_indices[vn]] += cf
-                                    row2[self.var_indices[z_name]] -= M
-                                    for i, coef in enumerate(row2):
-                                        if abs(coef) > 1e-12:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(-diff_const)
-                                    ub_row_idx += 1
                                 b_var = left.get("value")
                                 if b_var not in self.var_indices:
                                     self._ensure_aux_binary(b_var)
@@ -6338,30 +6054,72 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     def _is_decl_bool_var(node):
                         if not (isinstance(node, dict) and node.get("type") in ("name", "indexed_name")):
                             return False
-                        vname = (
-                            self._multi_indexed_var_name(node, env)
-                            if node.get("type") == "indexed_name"
-                            else node.get("value")
+                        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+                        declaration = self._find_decl(base_name)
+                        return bool(
+                            declaration
+                            and declaration.get("type") in ("dvar", "dvar_indexed")
+                            and declaration.get("var_type") == "boolean"
                         )
-                        if vname not in self.var_indices:
-                            return False
-                        vidx = self.var_indices[vname]
-                        try:
-                            return (
-                                self.integrality[vidx] == 1
-                                and self.bounds[vidx][0] == 0
-                                and (self.bounds[vidx][1] in (1, None))
-                            )
-                        except Exception:
-                            return False
 
                     def _try_expr(node):
-                        try:
-                            return _bool_expr_var(node, env)
-                        except Exception:
+                        unwrapped = node
+                        while isinstance(unwrapped, dict) and unwrapped.get("type") == "parenthesized_expression":
+                            unwrapped = unwrapped.get("expression")
+                        if isinstance(unwrapped, dict) and unwrapped.get("type") == "boolean_literal":
                             return None
+                        if isinstance(unwrapped, dict) and unwrapped.get("type") == "sum":
+                            return None
+                        if (
+                            isinstance(unwrapped, dict)
+                            and unwrapped.get("type") == "constraint"
+                            and unwrapped.get("op") in (">=", ">")
+                            and isinstance(unwrapped.get("left"), dict)
+                            and unwrapped["left"].get("type") == "binop"
+                        ):
 
-                    if _is_decl_bool_var(left):
+                            def is_boolean_sum_term(term):
+                                if not isinstance(term, dict):
+                                    return False
+                                if term.get("type") == "binop" and term.get("op") == "+":
+                                    return is_boolean_sum_term(term.get("left")) and is_boolean_sum_term(term.get("right"))
+                                if term.get("type") == "number":
+                                    return True
+                                if term.get("type") not in ("name", "indexed_name"):
+                                    return False
+                                base_name = term.get("value") if term.get("type") == "name" else term.get("name")
+                                declaration = self._find_decl(base_name)
+                                return bool(declaration and declaration.get("var_type") == "boolean")
+
+                            if is_boolean_sum_term(unwrapped["left"]):
+                                return None
+                        if (
+                            isinstance(unwrapped, dict)
+                            and unwrapped.get("type") == "binop"
+                            and unwrapped.get("op") in (">=", ">")
+                            and isinstance(unwrapped.get("left"), dict)
+                            and unwrapped["left"].get("type") == "sum"
+                        ):
+                            return None
+                        return _bool_expr_var(node, env)
+
+                    def _is_boolean_expression(node):
+                        unwrapped = node
+                        while isinstance(unwrapped, dict) and unwrapped.get("type") == "parenthesized_expression":
+                            unwrapped = unwrapped.get("expression")
+                        return bool(
+                            isinstance(unwrapped, dict)
+                            and (
+                                unwrapped.get("sem_type") == "boolean"
+                                or unwrapped.get("type") in ("and", "or", "not", "implies", "boolean_literal")
+                                or (
+                                    unwrapped.get("type") == "constraint"
+                                    and unwrapped.get("op") in ("==", "!=", "<=", ">=", "<", ">")
+                                )
+                            )
+                        )
+
+                    if _is_decl_bool_var(left) and _is_boolean_expression(right):
                         expr_var = _try_expr(right)
                         if expr_var is not None:
                             v_left = (
@@ -6383,7 +6141,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 b_eq.append(0.0)
                                 eq_row_idx += 1
                             return
-                    if _is_decl_bool_var(right):
+                    if _is_decl_bool_var(right) and _is_boolean_expression(left):
                         expr_var = _try_expr(left)
                         if expr_var is not None:
                             v_right = (

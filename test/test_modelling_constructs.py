@@ -1916,6 +1916,8 @@ class TestModellingConstructs(unittest.TestCase):
         dvar float x; dvar float y; dvar boolean b;
         minimize x + y;
         subject to {
+            x >= -20; x <= 20;
+            y >= -20; y <= 20;
             (x + y <= 10) && (x - y >= 2);
             (x <= 5) || (y >= 1);
             ((x + y <= 10) && (x - y >= 2)) || (x + 2*y <= 15);

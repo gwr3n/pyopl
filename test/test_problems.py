@@ -536,8 +536,10 @@ class TestPyOPLProblems(unittest.TestCase):
                 // -------------------------------
                 subject to {
                 // Nonnegativity of starts (redundant due to int+, restated for clarity)
-                forall(j in Jobs, o in Ops)
+                forall(j in Jobs, o in Ops) {
                     StartNonneg: start[j][o] >= 0;
+                    StartUpper: start[j][o] <= M;
+                }
 
                 // Within-job precedence (for all scenarios; starts are here-and-now)
                 // op o+1 cannot start before op o completes under scenario s
@@ -5069,6 +5071,7 @@ class TestPyOPLProblems(unittest.TestCase):
             minimize sum(t in T) (K*order[t] + h*I[t]);
             subject to {
                 forall(t in T){
+                    Q[t] <= 410;
                     if (t == 1) {
                         I[1] == Q[1] - demand[1];
                     } else {
@@ -5129,6 +5132,7 @@ class TestPyOPLProblems(unittest.TestCase):
             minimize sum(t in T) (K*order[t] + h*I[t]);
             subject to {
                 forall(t in T){
+                    Q[t] <= 410;
                     if (t == 1) {
                         I[1] == Q[1] - demand[1];
                     } else {
@@ -5407,7 +5411,7 @@ class TestPyOPLProblems(unittest.TestCase):
         code = GurobiCodeGenerator(ast).generate_code()
         # We no longer rely on specific 'impl_bin' name; ensure auxiliary binary variables were introduced
         self.assertRegex(code, r"_b\d+_c0")
-        # SciPy solve should raise (unsupported) for now
+        # SciPy should preserve the same composite implication semantics.
         import os
         import tempfile
 
@@ -5419,10 +5423,8 @@ class TestPyOPLProblems(unittest.TestCase):
             path = tmp.name
         try:
             res = solve_with_scipy(path)
-            # SciPy currently unsupported for implication => expect FAILED status, message may be generic
-            self.assertEqual(res["status"], "FAILED")
-            msg = res.get("message", "")
-            self.assertTrue("Implication constraints are not supported" in msg or "Failed to load or parse OPL model" in msg)
+            self.assertEqual(res["status"], "OPTIMAL")
+            self.assertIn("solution", res)
         finally:
             os.remove(path)
 
@@ -5555,6 +5557,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 x[t] <= y[t] * sum(tt in t..T) demand[tt] ;
             forall(t in 1..T) {
                 x[t] >= 0;
+                x[t] <= 150;
                 s[t] >= 0;
             }
             y[1] == 1;
@@ -5646,6 +5649,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 x[t] <= (sum(tt in t..T) demand[t]) * y[t];
             forall(t in 1..T) {
                 x[t] >= 0;
+                x[t] <= 150;
                 s[t] >= 0;
             }
         }
@@ -5748,6 +5752,7 @@ class TestPyOPLProblems(unittest.TestCase):
             //    x[t] <= (sum(tt in t..T) demand[t]) * y[t];
             forall(t in 1..T) {
                 x[t] >= 0;
+                x[t] <= 150;
                 s[t] >= 0;
             }
             // Implication: if x[t] > 0 then y[t] == 1

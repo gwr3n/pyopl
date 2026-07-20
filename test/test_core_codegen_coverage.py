@@ -367,9 +367,10 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         )
 
         comp = _cmp({"type": "binop", "op": "-", "left": _name("x"), "right": _name("y")}, "<=", _num(1))
-        self.assertEqual(gen._big_m_for_comparison(comp), 11.0)
+        self.assertEqual(gen._big_m_for_comparison(comp), 7.0)
         gen._eval_expr = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("fallback"))
-        self.assertGreaterEqual(gen._big_m_for_comparison(comp), 1_000_000.0)
+        with self.assertRaises(RuntimeError):
+            gen._big_m_for_comparison(comp)
 
     def test_scipy_csc_linearize_or_and_expand_and_helpers(self):
         gen = SciPyCSCCodeGenerator({"declarations": []})
@@ -432,6 +433,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         dvar float+ y[I];
         minimize sum(i in I) x[i];
         subject to {
+            forall(i in I) x[i] <= 5;
+            forall(i in I) y[i] <= 5;
             sum(i in I) w[i] * ((x[i] >= 1) && (y[i] <= 2)) >= 1;
         }
         """
@@ -453,6 +456,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         dvar float+ x[I];
         minimize b;
         subject to {
+            forall(i in I) x[i] <= 5;
             b == (sum(i in I) (x[i] >= i) >= 2);
         }
         """
@@ -465,7 +469,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("_cmp_sum_list", gurobi_code)
         self.assertIn("model.addConstr(b == _cmp_expr", gurobi_code)
         self.assertTrue(any(name.startswith("cmp_") for name in scipy_gen.var_names))
-        self.assertEqual(gurobi_ast["constraints"][0]["op"], "==")
+        self.assertTrue(any(constraint.get("op") == "==" for constraint in gurobi_ast["constraints"]))
 
     def test_model_codegen_tuple_range_parameter_flattening(self):
         model = """

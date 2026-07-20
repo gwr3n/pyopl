@@ -20,6 +20,8 @@ class TestBoolEqualityAuxReuse(unittest.TestCase):
         dvar boolean b1; dvar boolean b2; dvar int x; dvar int y;
         minimize 0;
         subject to {
+            x >= -10; x <= 10;
+            y >= -10; y <= 10;
             b1 == (x != y);
             b2 == (x != y);
         }
