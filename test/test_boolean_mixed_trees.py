@@ -166,6 +166,60 @@ class TestBooleanMixedTrees(unittest.TestCase):
             f"Expected >=3 equality rows with RHS=1 enforcing expression true, got {len(ones)}; b_eq={gen.b_eq}",
         )
 
+    def test_right_hand_boolean_tree_literal_comparisons(self):
+        not_tree = {
+            "type": "not",
+            "value": self._atom("a", 1),
+        }
+        constraints = [
+            {
+                "type": "constraint",
+                "left": {"type": "boolean_literal", "value": False},
+                "op": "==",
+                "right": not_tree,
+            },
+            {
+                "type": "constraint",
+                "left": not_tree,
+                "op": ">=",
+                "right": {"type": "number", "value": 1},
+            },
+            {
+                "type": "constraint",
+                "left": {"type": "boolean_literal", "value": False},
+                "op": "<=",
+                "right": not_tree,
+            },
+            {
+                "type": "constraint",
+                "left": {"type": "number", "value": 0},
+                "op": ">=",
+                "right": not_tree,
+            },
+            {
+                "type": "constraint",
+                "left": {"type": "number", "value": 1},
+                "op": "<=",
+                "right": not_tree,
+            },
+        ]
+        ast = {
+            "declarations": [self._decl_bool("a")],
+            "constraints": constraints,
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+        }
+
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+        gen._build_constraints()
+
+        aux_vars = [v for v in gen.var_names if v.startswith("_baux")]
+        self.assertEqual(len(aux_vars), 1, f"Expected one shared NOT auxiliary; var_names={gen.var_names}")
+        self.assertEqual(gen.b_eq.count(1.0), 2, f"Expected NOT definition plus one enforced true row; b_eq={gen.b_eq}")
+        self.assertEqual(gen.b_eq.count(0.0), 2, f"Expected NOT definition plus one enforced false row; b_eq={gen.b_eq}")
+        self.assertEqual(gen.A_ub, [], f"Expected tautologies to add no inequality rows; A_ub={gen.A_ub}")
+
     def test_or_with_nested_and_linear_comparisons(self):
         def comparison(var, op, value):
             return {
