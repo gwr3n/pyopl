@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.semantic_error import SemanticError
 
 
 class TestBooleanMixedTrees(unittest.TestCase):
@@ -163,6 +165,54 @@ class TestBooleanMixedTrees(unittest.TestCase):
             3,
             f"Expected >=3 equality rows with RHS=1 enforcing expression true, got {len(ones)}; b_eq={gen.b_eq}",
         )
+
+    def test_or_with_nested_and_linear_comparisons(self):
+        def comparison(var, op, value):
+            return {
+                "type": "binop",
+                "left": {"type": "name", "value": var},
+                "op": op,
+                "right": {"type": "number", "value": value},
+                "sem_type": "boolean",
+            }
+
+        expression = {
+            "type": "or",
+            "left": {
+                "type": "and",
+                "left": comparison("a", "<=", 0),
+                "right": comparison("b", ">=", 1),
+                "sem_type": "boolean",
+            },
+            "right": comparison("c", ">=", 1),
+            "sem_type": "boolean",
+        }
+        ast = {
+            "declarations": [self._decl_bool(name) for name in ("a", "b", "c")],
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "left": expression,
+                    "op": "==",
+                    "right": {"type": "boolean_literal", "value": True},
+                }
+            ],
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+        }
+
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+        with patch.object(gen, "_bool_expr_var", side_effect=SemanticError("use specialized OR fallback")):
+            gen._build_constraints()
+
+        self.assertIn("or_flag_0", gen.var_indices)
+        self.assertIn("or_flag_1", gen.var_indices)
+        self.assertEqual(len(gen.A_ub), 4)
+        selector_row = gen.A_ub[-1]
+        self.assertEqual(selector_row[gen.var_indices["or_flag_0"]], -1.0)
+        self.assertEqual(selector_row[gen.var_indices["or_flag_1"]], -1.0)
+        self.assertEqual(gen.b_ub[-1], -1.0)
 
     # def test_boolean_tautologies_eliminated(self):
     #   """Tautological comparisons (expr >= 0, expr <= 1) should not add constraint rows (built manually)."""
