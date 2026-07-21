@@ -352,7 +352,9 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         self.assertEqual(second, "flag_1")
         self.assertEqual(gen._convert_flat_kv_to_dict(["a", 1, "b", 2.5]), {"a": 1, "b": 2.5})
         self.assertIsNone(gen._convert_flat_kv_to_dict(["a", "not-number"]))
-        self.assertEqual(gen._make_constraint_row({"flag": 2.0, "missing": 9.0}), [2.0, 0.0])
+        with self.assertRaisesRegex(SemanticError, "missing"):
+            gen._make_constraint_row({"flag": 2.0, "missing": 9.0})
+        self.assertEqual(gen._make_constraint_row({"flag": 2.0}), [2.0, 0.0])
 
     def test_bool_flatten_and_sum_inclusion_helpers(self) -> None:
         gen = make_generator()

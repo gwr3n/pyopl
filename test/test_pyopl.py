@@ -492,7 +492,8 @@ class TestPyOPLParser(TestPyOPL):
             codegen_ast,
             {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 1.0}, "ub": {1: 3.0, 2: 4.0}},
         ).generate_code()
-        self.assertIn("options={'disp': True}", scipy_code)
+        self.assertIn("'primal_feasibility_tolerance': 1e-06", scipy_code)
+        self.assertIn("'dual_feasibility_tolerance': 1e-06", scipy_code)
         self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
 
     def test_typed_scalar_set_comprehension_split_variables_parse(self):

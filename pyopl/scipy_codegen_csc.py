@@ -14,7 +14,8 @@ from .tuple_set_helper import TupleSetHelper
 # (none)
 
 
-BOOL_EPS = 1e-6  # Tolerance used for strict inequality flips / boolean reification.
+SCIPY_FEASIBILITY_TOLERANCE = 1e-6
+BOOL_EPS = SCIPY_FEASIBILITY_TOLERANCE
 
 
 @dataclass
@@ -925,8 +926,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         row = [0.0] * len(self.var_names)
         for v, c in coef_dict.items():
-            if v in self.var_indices:
-                row[self.var_indices[v]] += c
+            row[self._resolve_coefficient_index(v)] += c
         return row
 
     def _big_m_for_comparison(self, comp: Dict[str, Any], env: Optional[Dict[str, Any]] = None) -> float:
@@ -1314,19 +1314,30 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return (c * vU, c * vL)
         return (None, None)
 
-    def _update_vector_from_coef_dict(self, coef_dict: Dict[str, Any], vector: List[float], op: Optional[str] = None) -> None:
+    def _resolve_coefficient_index(self, variable: Any) -> int:
+        if isinstance(variable, int):
+            if 0 <= variable < len(self.var_names):
+                return variable
+            raise SemanticError(f"Coefficient variable index {variable} is out of range")
+        if not isinstance(variable, str):
+            raise SemanticError(f"Unsupported coefficient variable key {variable!r}")
+        idx = self.var_indices.get(variable)
+        if idx is not None:
+            return idx
+        return self._resolve_tuple_index_varname(variable)
+
+    def _update_vector_from_coef_dict(self, coef_dict: Dict[Any, Any], vector: List[float], op: Optional[str] = None) -> None:
         """
         Helper to update a vector from a coef_dict. If op is None, set; if '+', add; if '-', subtract.
         """
         for vname, coef in coef_dict.items():
-            idx = self.var_indices.get(vname)
-            if idx is not None:
-                if op == "+":
-                    vector[idx] += coef
-                elif op == "-":
-                    vector[idx] -= coef
-                else:
-                    vector[idx] = coef
+            idx = self._resolve_coefficient_index(vname)
+            if op == "+":
+                vector[idx] += coef
+            elif op == "-":
+                vector[idx] -= coef
+            else:
+                vector[idx] = coef
 
     @staticmethod
     def _strict_adjusted_rhs(op: str, rhs_value: float) -> tuple[str, float]:
@@ -1336,10 +1347,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return "<=", rhs_value - BOOL_EPS
         return op, rhs_value
 
-    def _resolve_tuple_index_varname(self, vname: str) -> Optional[int]:
+    def _resolve_tuple_index_varname(self, vname: str) -> int:
         """
         Helper to resolve a variable name with a tuple index to its index in var_indices.
-        Returns the index if found, else None.
+        Returns the index if found; otherwise raises SemanticError.
 
         Note:
             This method is not covered by tests because, in all real OPL models and test cases (including vehicle routing),
@@ -1363,7 +1374,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     try:
                         key_tuple = ast.literal_eval(key)
                     except Exception:
-                        return None
+                        key_tuple = None
+                    if key_tuple is None:
+                        raise SemanticError(f"Variable '{vname}' has an invalid tuple index")
                     vname_norm = f"{base}[{repr(key_tuple)}]"
                     idx = self.var_indices.get(vname_norm)
                     if idx is not None:
@@ -1568,10 +1581,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if set_name in self.data_dict:
                     elements = self.data_dict[set_name]
                 elif set_decl:
-                    # typed_set stores list in 'value'
-                    elements = set_decl.get("value") or []
+                    elements = set_decl.get("value")
+                    if set_decl.get("type") == "typed_set_external" and elements is None:
+                        raise SemanticError(f"External set '{set_name}' has no data provided")
+                    elements = elements or []
                 else:
-                    elements = []
+                    raise SemanticError(f"Named set '{set_name}' is not declared")
             logger.debug(f"[SciPyCSCCodeGenerator] Elements for {name} over {set_name}: {elements}")
             for k in elements:
                 # For scalar string indices use underscore style (name_value) to avoid quote issues elsewhere.
@@ -1630,7 +1645,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 ):
                     set_vals = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
                 else:
-                    set_vals = self.data_dict.get(set_name, [])
+                    if set_name in self.data_dict:
+                        set_vals = self.data_dict[set_name]
+                    elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+                        set_vals = set_decl.get("value")
+                        if set_decl.get("type") == "typed_set_external" and set_vals is None:
+                            raise SemanticError(f"External set '{set_name}' has no data provided")
+                        set_vals = set_vals or []
+                    else:
+                        raise SemanticError(f"Named set '{set_name}' is not declared")
                 logger.debug(f"[SciPyCSCCodeGenerator] Named set for {name}: {set_vals}")
                 dim_ranges.append(set_vals)
                 symbolic_dim_ranges.append(set_name)
@@ -2149,8 +2172,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if rng["name"] in self.data_dict:
                                 set_val = self.data_dict[rng["name"]]
                             else:
-                                # Declaration stores elements under 'value'
-                                set_val = set_decl.get("value") or []
+                                set_val = set_decl.get("value")
+                                if set_decl.get("type") == "typed_set_external" and set_val is None:
+                                    raise SemanticError(f"External set '{rng['name']}' has no data provided")
+                                set_val = set_val or []
                         else:
                             set_val = []
                         loop_ranges.append(set_val)
@@ -2191,7 +2216,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if t == "number":
                 return expr["value"]
             elif t == "name":
-                return self.data_dict.get(expr["value"], 1)
+                name = expr["value"]
+                if name not in self.data_dict:
+                    raise SemanticError(f"Range bound parameter '{name}' has no data provided")
+                value = self.data_dict[name]
+                if not isinstance(value, (int, float, bool)):
+                    raise SemanticError(f"Range bound parameter '{name}' must be numeric")
+                return value
             elif t == "binop":
                 left = self._eval_bound(expr["left"])
                 right = self._eval_bound(expr["right"])
@@ -2292,7 +2323,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # Use declaration
                 decl = self._find_decl(cast(str, rng.get("name")), "range_declaration_inline")
                 if decl is None:
-                    return []
+                    raise SemanticError(f"Named range '{rng.get('name')}' is not declared")
                 # _eval_bound returns float | int; coerce to int for range
                 start = int(self._eval_bound(decl["start"]))
                 end = int(self._eval_bound(decl["end"]))
@@ -2307,11 +2338,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     # fallback to AST typed set or set-of-tuples
                     set_decl = self._find_decl(set_name)
                     if set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
-                        set_vals = set_decl.get("value") or []
+                        set_vals = set_decl.get("value")
+                        if set_decl.get("type") == "typed_set_external" and set_vals is None:
+                            raise SemanticError(f"External set '{set_name}' has no data provided")
+                        set_vals = set_vals or []
                     elif set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
                         set_vals = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
                     else:
-                        set_vals = []
+                        raise SemanticError(f"Named set '{set_name}' is not declared")
                 return list(set_vals)
             if rt == "indexed_set":
                 set_name = cast(str, rng.get("name"))
@@ -2788,13 +2822,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._add_code_line(
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs', integrality=integrality, options={'disp': True})"
+                "bounds=bounds, method='highs', integrality=integrality, "
+                f"options={{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
+                f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}})"
             )
         else:
             self._add_code_line(
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs', options={'disp': True})"
+                "bounds=bounds, method='highs', "
+                f"options={{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
+                f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}})"
             )
         self._add_code_line("end_time = time.time()")
         self._add_code_line(
@@ -3256,8 +3294,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if set_name in data_dict:
                     val = data_dict[set_name]
                 else:
-                    # decl['value'] already a list of scalar elements or None
-                    val = decl.get("value") or []
+                    val = decl.get("value")
+                    if decl.get("type") == "typed_set_external" and val is None:
+                        continue
+                    val = val or []
                 self._add_code_line(f"{set_name} = {repr(val)}")
                 # Also update internal data_dict so index remapping can consult set order
                 try:
@@ -3599,14 +3639,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             coef_dict, const = self._eval_expr(expr["expression"], env=env2)
             if coef_dict:
                 for vname, coef in coef_dict.items():
-                    idx = self.var_indices.get(vname)
-                    if idx is None:
-                        try:
-                            idx = self._resolve_tuple_index_varname(vname)
-                        except Exception:
-                            idx = None
-                    if idx is not None:
-                        c[idx] += sign * coef
+                    c[self._resolve_coefficient_index(vname)] += sign * coef
             if isinstance(const, (int, float)):
                 self.obj_const_offset += sign * float(const)
 
@@ -3957,9 +3990,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     ) -> None:
         row = [0.0] * len(self.var_names)
         for var_name, coef in coef_by_var.items():
-            idx = var_name if isinstance(var_name, int) else self.var_indices.get(var_name)
-            if idx is not None:
-                row[idx] += coef
+            row[self._resolve_coefficient_index(var_name)] += coef
         self._append_sparse_row(state, row, rhs, sense=sense)
 
     def _finalize_constraint_state(self, state: _ConstraintBuildState) -> None:
@@ -4431,7 +4462,28 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if t == "parenthesized_expression":
             inner = node.get("expression")
             return self._bool_expr_var(inner, env, ctx)
-        if t == "constraint" and node.get("op") in ("<=", "<", ">=", ">", "!=", "=="):
+
+        def _is_boolean_expression(expr):
+            return isinstance(expr, dict) and (
+                expr.get("sem_type") == "boolean"
+                or expr.get("type") in ("boolean_literal", "and", "or", "not")
+                or (
+                    expr.get("type") == "constraint"
+                    and expr.get("op") == "=="
+                    and (
+                        (isinstance(expr.get("left"), dict) and expr["left"].get("type") in ("name", "indexed_name"))
+                        or (isinstance(expr.get("right"), dict) and expr["right"].get("type") in ("name", "indexed_name"))
+                    )
+                )
+            )
+
+        is_boolean_neq = (
+            t == "constraint"
+            and node.get("op") == "!="
+            and _is_boolean_expression(node.get("left"))
+            and _is_boolean_expression(node.get("right"))
+        )
+        if t == "constraint" and node.get("op") in ("<=", "<", ">=", ">", "!=", "==") and not is_boolean_neq:
             is_atomic_boolean = False
             if node.get("op") == "==":
                 try:
@@ -4459,42 +4511,27 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             left = node["left"]
             right = node["right"]
 
-            def _is_bool_expr(x):
-                return isinstance(x, dict) and (
-                    x.get("sem_type") == "boolean"
-                    or x.get("type") == "boolean_literal"
-                    or (
-                        x.get("type") == "constraint"
-                        and x.get("op") == "=="
-                        and (
-                            (isinstance(x.get("left"), dict) and x["left"].get("type") in ("name", "indexed_name"))
-                            or (isinstance(x.get("right"), dict) and x["right"].get("type") in ("name", "indexed_name"))
-                        )
-                    )
-                    or (x.get("type") in ("and", "or", "not"))
-                )
-
-            if _is_bool_expr(left) and _is_bool_expr(right):
+            if _is_boolean_expression(left) and _is_boolean_expression(right):
                 x = self._bool_expr_var(left, env, ctx)
                 y = self._bool_expr_var(right, env, ctx)
                 z = self._new_bool_aux_var()
                 # z >= x - y
                 row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[x]] = -1.0
-                row[self.var_indices[y]] = 1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                # z >= y - x
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[z]] = -1.0
                 row[self.var_indices[x]] = 1.0
                 row[self.var_indices[y]] = -1.0
                 self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                # z <= x + y
+                # z >= y - x
                 row = [0.0] * len(self.var_names)
                 row[self.var_indices[z]] = -1.0
-                row[self.var_indices[x]] = 1.0
+                row[self.var_indices[x]] = -1.0
                 row[self.var_indices[y]] = 1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+                # z <= x + y
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[z]] = 1.0
+                row[self.var_indices[x]] = -1.0
+                row[self.var_indices[y]] = -1.0
                 self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
                 # z <= 2 - (x + y)
                 row = [0.0] * len(self.var_names)
@@ -4910,11 +4947,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if (
                         not expr_side
                         or not isinstance(expr_side, dict)
-                        or expr_side.get("type") not in ("parenthesized_expression", "binop")
+                        or expr_side.get("type") not in ("parenthesized_expression", "binop", "and", "or", "not")
                     ):
                         return node
                     inner = expr_side.get("expression") if expr_side.get("type") == "parenthesized_expression" else expr_side
-                    if not (isinstance(inner, dict) and inner.get("type") == "binop"):
+                    if not isinstance(inner, dict):
+                        return node
+                    if inner.get("type") in ("and", "or", "not"):
+                        return inner
+                    if inner.get("type") != "binop":
                         return node
                     return {
                         "type": "constraint",
@@ -4930,45 +4971,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 ant_unwrapped = _unwrap_bool_eq_true(ant)
                 cons_unwrapped = _unwrap_bool_eq_true(cons)
-                # If antecedent is equality-to-true of AND composite (possibly parenthesized), decompose and rewrite.
-                if isinstance(ant, dict) and ant.get("type") == "constraint" and ant.get("op") == "==":
-                    left = _unwrap_paren(ant.get("left"))
-                    right = _unwrap_paren(ant.get("right"))
-                    if (
-                        isinstance(right, dict)
-                        and right.get("type") == "and"
-                        and isinstance(left, dict)
-                        and left.get("type") == "boolean_literal"
-                        and left.get("value") is True
-                    ):
-                        left, right = right, left
-                    if (
-                        isinstance(left, dict)
-                        and left.get("type") == "and"
-                        and isinstance(right, dict)
-                        and right.get("type") == "boolean_literal"
-                        and right.get("value") is True
-                    ):
-                        leaves = self._flatten_bool(left, "and")
-                        last_leaf = None
-                        for leaf in leaves:
-                            expr_node = leaf.get("expression") if leaf.get("type") == "parenthesized_expression" else leaf
-                            if expr_node.get("type") == "parenthesized_expression":
-                                expr_node = expr_node.get("expression")
-                            if self._is_linear_comparison(expr_node):
-                                pseudo = {
-                                    "type": "constraint",
-                                    "op": expr_node["op"],
-                                    "left": expr_node["left"],
-                                    "right": expr_node["right"],
-                                }
-                                handle_constraint(pseudo, env=env)
-                                last_leaf = pseudo
-                            else:
-                                last_leaf = None
-                                break
-                        if last_leaf is not None:
-                            ant_unwrapped = last_leaf
                 return ant_unwrapped, cons_unwrapped
 
             def _tighten_lower_bound(symbol, val):
@@ -5253,6 +5255,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 # Unwrap antecedent & consequent if they are equality-to-true wrappers
                 ant_unwrapped, cons_unwrapped = _normalize_implication_nodes(ant, cons)
+                if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not"):
+                    antecedent_name = _bool_expr_var(ant_unwrapped, env)
+                    ant_unwrapped = {
+                        "type": "constraint",
+                        "op": "==",
+                        "left": {"type": "name", "value": antecedent_name, "sem_type": "boolean"},
+                        "right": {"type": "number", "value": 1},
+                    }
+                if isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") in ("and", "or", "not"):
+                    consequent_name = _bool_expr_var(cons_unwrapped, env)
+                    cons_unwrapped = {
+                        "type": "constraint",
+                        "op": "==",
+                        "left": {"type": "name", "value": consequent_name, "sem_type": "boolean"},
+                        "right": {"type": "number", "value": 1},
+                    }
 
                 # (Optional) OR antecedent handling could introduce additional auxiliary; not yet supported
                 # (Optional) OR antecedent handling could introduce additional auxiliary; not yet supported
@@ -6219,15 +6237,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     if not isinstance(node, dict):
                         return None
                     if node.get("type") == "name" and _is_boolean_var(node):
-                        return ({node["value"]}, 0)
+                        return ({node["value"]: 1.0}, 0)
                     if node.get("type") == "binop" and node.get("op") == "+":
                         left = _collect_sum(node["left"])
                         right = _collect_sum(node["right"])
                         if left and right:
-                            return (left[0].union(right[0]), left[1] + right[1])
+                            weights = dict(left[0])
+                            for variable_name, weight in right[0].items():
+                                weights[variable_name] = weights.get(variable_name, 0.0) + weight
+                            return (weights, left[1] + right[1])
                         return None
                     if node.get("type") == "number":
-                        return (set(), node.get("value", 0))
+                        return ({}, node.get("value", 0))
                     return None
 
                 if op_sym == "==" and (
@@ -6252,8 +6273,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         k = ineq_r.get("value")
                         collected = _collect_sum(ineq_l)
                         if collected:
-                            vars_set, c_off = collected
+                            variable_weights, c_off = collected
                             k_adj = k - c_off
+                            max_sum = sum(variable_weights.values())
                             vname = (
                                 bool_side["value"]
                                 if bool_side.get("type") == "name"
@@ -6271,8 +6293,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 b_eq.append(1.0)
                                 eq_row_idx += 1
                                 return
-                            # If k_adj > |S| then condition impossible -> b == 0
-                            if k_adj > len(vars_set):
+                            # If k_adj exceeds the maximum weighted sum, the condition is impossible.
+                            if k_adj > max_sum:
                                 row = [0.0] * len(self.var_names)
                                 row[self.var_indices[vname]] = 1.0
                                 for i, coef in enumerate(row):
@@ -6286,8 +6308,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             # Inequality: k_adj * b - sum(vars) <= 0
                             row = [0.0] * len(self.var_names)
                             row[self.var_indices[vname]] += k_adj
-                            for vn in vars_set:
-                                row[self.var_indices[vn]] -= 1.0
+                            for vn, weight in variable_weights.items():
+                                row[self.var_indices[vn]] -= weight
                             for i, coef in enumerate(row):
                                 if abs(coef) > 1e-12:
                                     A_ub_rows.append(ub_row_idx)
@@ -6296,11 +6318,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             b_ub.append(0.0)
                             ub_row_idx += 1
                             if k_adj >= 1:
-                                # sum(vars) - (k_adj -1) - (|S|-k_adj+1)*b <=0
+                                # sum(weights*vars) - (max_sum-k_adj+1)*b <= k_adj-1
                                 row = [0.0] * len(self.var_names)
-                                for vn in vars_set:
-                                    row[self.var_indices[vn]] += 1.0
-                                row[self.var_indices[vname]] -= len(vars_set) - k_adj + 1
+                                for vn, weight in variable_weights.items():
+                                    row[self.var_indices[vn]] += weight
+                                row[self.var_indices[vname]] -= max_sum - k_adj + 1
                                 for i, coef in enumerate(row):
                                     if abs(coef) > 1e-12:
                                         A_ub_rows.append(ub_row_idx)
@@ -6564,10 +6586,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         k_val = k_val - 1  # sum < k  => sum <= k-1
                     # Expand sum, create auxiliary binaries for each comparison instance
                     iterators = sum_node.get("iterators", [])
-                    try:
-                        loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                    except SemanticError:
-                        loop_vars, loop_ranges = [], []
+                    loop_vars, loop_ranges = self._unroll_iterators(iterators)
                     comp_proto = _unwrap(sum_node.get("expression"))
                     z_vars = []
 
@@ -7044,21 +7063,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 logger.debug(f"[SciPyCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
                 row = [0.0] * len(self.var_names)
                 for vname, coef in lhs_dict.items():
-                    if isinstance(vname, int):
-                        idx = vname
-                    else:
-                        idx = self.var_indices.get(vname)
+                    idx = self._resolve_coefficient_index(vname)
                     logger.debug(f"[SciPyCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
-                    if idx is not None:
-                        row[idx] += coef
+                    row[idx] += coef
                 for vname, coef in rhs_dict.items():
-                    if isinstance(vname, int):
-                        idx = vname
-                    else:
-                        idx = self.var_indices.get(vname)
+                    idx = self._resolve_coefficient_index(vname)
                     logger.debug(f"[SciPyCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
-                    if idx is not None:
-                        row[idx] -= coef
+                    row[idx] -= coef
                 rhs_value = rhs_const - lhs_const
                 logger.debug(f"[SciPyCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
                 if constr["op"] == "==":
@@ -7192,14 +7203,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 continue
             cdict, cval = self._eval_expr(sum_expr, env=env2)
             for vname, vcoef in cdict.items():
-                idx = self.var_indices.get(vname)
-                if idx is None:
-                    try:
-                        idx = self._resolve_tuple_index_varname(vname)
-                    except Exception:
-                        idx = None
-                if idx is not None:
-                    coef_dict[vname] += sign * vcoef
+                self._resolve_coefficient_index(vname)
+                coef_dict[vname] += sign * vcoef
             if isinstance(cval, (int, float)):
                 const_ref[0] += sign * cval
 
@@ -7255,17 +7260,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 merge(left_coefs, 1.0)
                 add_const(left_const_box[0], 1.0)
                 for vn, cf in right_coefs.items():
-                    idx = self.var_indices.get(vn)
-                    if idx is not None:
-                        coef_dict[idx] += sign * cf
+                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
                 add_const(right_const, 1.0)
             elif op == "-":
                 merge(left_coefs, 1.0)
                 add_const(left_const_box[0], 1.0)
                 for vn, cf in right_coefs.items():
-                    idx = self.var_indices.get(vn)
-                    if idx is not None:
-                        coef_dict[idx] += sign * (-cf)
+                    coef_dict[self._resolve_coefficient_index(vn)] += sign * (-cf)
                 add_const(right_const, -1.0)
             else:
                 raise self._unsupported_operator_error("binop-with-sum", op)
@@ -7277,17 +7278,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             left_coefs, left_const = self._eval_expr(left, env)
             if op == "+":
                 for vn, cf in left_coefs.items():
-                    idx = self.var_indices.get(vn)
-                    if idx is not None:
-                        coef_dict[idx] += sign * cf
+                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
                 add_const(left_const, 1.0)
                 merge(right_coefs, 1.0)
                 add_const(right_const_box[0], 1.0)
             elif op == "-":
                 for vn, cf in left_coefs.items():
-                    idx = self.var_indices.get(vn)
-                    if idx is not None:
-                        coef_dict[idx] += sign * cf
+                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
                 add_const(left_const, 1.0)
                 merge(right_coefs, -1.0)
                 add_const(right_const_box[0], -1.0)
@@ -7297,7 +7294,5 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         # Fallback: neither side sum (should not reach here based on guard)
         base_coefs, base_const = self._eval_expr(expr, env)
         for vn, cf in base_coefs.items():
-            idx = self.var_indices.get(vn)
-            if idx is not None:
-                coef_dict[idx] += sign * cf
+            coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
         add_const(base_const, 1.0)

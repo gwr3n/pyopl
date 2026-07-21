@@ -196,8 +196,10 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen.var_indices = {"x": 0, "y": 1}
         vector = [0.0, 0.0]
 
-        gen._update_vector_from_coef_dict({"x": 2.0, "missing": 9.0}, vector)
-        self.assertEqual(vector, [2.0, 0.0])
+        with self.assertRaisesRegex(SemanticError, "missing"):
+            gen._update_vector_from_coef_dict({"missing": 9.0}, vector)
+        self.assertEqual(vector, [0.0, 0.0])
+        gen._update_vector_from_coef_dict({"x": 2.0}, vector)
         gen._update_vector_from_coef_dict({"x": 3.0, "y": 4.0}, vector, op="+")
         self.assertEqual(vector, [5.0, 4.0])
         gen._update_vector_from_coef_dict({"x": 1.5, "y": 2.0}, vector, op="-")
@@ -280,7 +282,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
         gen.var_names = ["x", "y"]
         gen.var_indices = {"x": 0, "y": 1}
-        self.assertEqual(gen._make_constraint_row({"x": 2.0, "missing": 9.0, "y": -1.0}), [2.0, -1.0])
+        with self.assertRaisesRegex(SemanticError, "missing"):
+            gen._make_constraint_row({"x": 2.0, "missing": 9.0, "y": -1.0})
+        self.assertEqual(gen._make_constraint_row({"x": 2.0, "y": -1.0}), [2.0, -1.0])
         self.assertEqual(gen._get_tuple_set_names([{"iterator": "a", "range": {"type": "named_set", "name": "Arcs"}}]), {"a"})
         self.assertEqual(gen._get_tuple_set_names([{"iterator": "i", "range": {"type": "range_specifier"}}]), set())
 
