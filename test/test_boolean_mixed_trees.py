@@ -235,14 +235,19 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "left": {
                 "type": "and",
                 "left": comparison("a", "<=", 0),
-                "right": comparison("b", ">=", 1),
+                "right": {
+                    "type": "and",
+                    "left": comparison("b", ">=", 1),
+                    "right": comparison("d", "==", 1),
+                    "sem_type": "boolean",
+                },
                 "sem_type": "boolean",
             },
             "right": comparison("c", ">=", 1),
             "sem_type": "boolean",
         }
         ast = {
-            "declarations": [self._decl_bool(name) for name in ("a", "b", "c")],
+            "declarations": [self._decl_bool(name) for name in ("a", "b", "c", "d")],
             "constraints": [
                 {
                     "type": "constraint",
@@ -262,11 +267,137 @@ class TestBooleanMixedTrees(unittest.TestCase):
 
         self.assertIn("or_flag_0", gen.var_indices)
         self.assertIn("or_flag_1", gen.var_indices)
-        self.assertEqual(len(gen.A_ub), 4)
+        self.assertEqual(len(gen.A_ub), 6)
         selector_row = gen.A_ub[-1]
         self.assertEqual(selector_row[gen.var_indices["or_flag_0"]], -1.0)
         self.assertEqual(selector_row[gen.var_indices["or_flag_1"]], -1.0)
         self.assertEqual(gen.b_ub[-1], -1.0)
+
+        equality_rows = [row for row in gen.A_ub if row[gen.var_indices["d"]] != 0]
+        self.assertEqual(len(equality_rows), 2)
+        self.assertEqual({row[gen.var_indices["d"]] for row in equality_rows}, {-1.0, 1.0})
+
+    def test_and_or_literal_fast_path_resolves_variable_polarity(self):
+        and_tree = {
+            "type": "and",
+            "left": self._atom("a", 1),
+            "right": {
+                "type": "constraint",
+                "left": {"type": "number", "value": 0},
+                "op": "==",
+                "right": {"type": "name", "value": "b"},
+            },
+        }
+        or_tree = {
+            "type": "or",
+            "left": self._atom("a", 1),
+            "right": self._atom("b", 0),
+        }
+        ast = {
+            "declarations": [self._decl_bool("a"), self._decl_bool("b")],
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "left": {"type": "boolean_literal", "value": True},
+                    "op": "==",
+                    "right": and_tree,
+                },
+                {
+                    "type": "constraint",
+                    "left": {"type": "boolean_literal", "value": False},
+                    "op": "==",
+                    "right": and_tree,
+                },
+                {
+                    "type": "constraint",
+                    "left": {"type": "boolean_literal", "value": True},
+                    "op": "==",
+                    "right": or_tree,
+                },
+                {
+                    "type": "constraint",
+                    "left": {"type": "boolean_literal", "value": False},
+                    "op": "==",
+                    "right": or_tree,
+                },
+            ],
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+        }
+
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+        gen._build_constraints()
+
+        a_idx = gen.var_indices["a"]
+        b_idx = gen.var_indices["b"]
+        self.assertIn([1.0, 0.0], [[row[a_idx], row[b_idx]] for row in gen.A_eq])
+        self.assertIn([0.0, 1.0], [[row[a_idx], row[b_idx]] for row in gen.A_eq])
+        self.assertIn([1.0, -1.0], [[row[a_idx], row[b_idx]] for row in gen.A_ub])
+        self.assertIn([-1.0, 1.0], [[row[a_idx], row[b_idx]] for row in gen.A_ub])
+        self.assertIn([1.0, -1.0], [[row[a_idx], row[b_idx]] for row in gen.A_eq])
+        self.assertIn(([1.0, -1.0], 0.0), [([row[a_idx], row[b_idx]], rhs) for row, rhs in zip(gen.A_ub, gen.b_ub)])
+        self.assertIn(([-1.0, 1.0], 0.0), [([row[a_idx], row[b_idx]], rhs) for row, rhs in zip(gen.A_ub, gen.b_ub)])
+        self.assertIn(([1.0, -1.0], -1.0), [([row[a_idx], row[b_idx]], rhs) for row, rhs in zip(gen.A_eq, gen.b_eq)])
+
+    def test_weighted_boolean_sum_composite_comparison_rows(self):
+        def comparison(var, op, value):
+            return {
+                "type": "binop",
+                "left": {"type": "name", "value": var},
+                "op": op,
+                "right": {"type": "number", "value": value},
+                "sem_type": "boolean",
+            }
+
+        weighted_sum = {
+            "type": "sum",
+            "iterators": [],
+            "expression": {
+                "type": "binop",
+                "left": {"type": "number", "value": 2},
+                "op": "*",
+                "right": comparison("a", ">=", 1),
+            },
+        }
+
+        cases = [
+            (">=", "ub", -2.0, -2.0),
+            (">", "ub", -2.0, -(2.0 + 1e-9)),
+            ("<=", "ub", 2.0, 2.0),
+            ("<", "ub", 2.0, 2.0 - 1e-9),
+            ("==", "eq", 2.0, 2.0),
+        ]
+
+        for op, row_kind, expected_coef, expected_rhs in cases:
+            with self.subTest(op=op):
+                ast = {
+                    "declarations": [self._decl_bool("a")],
+                    "constraints": [
+                        {
+                            "type": "constraint",
+                            "left": weighted_sum,
+                            "op": op,
+                            "right": {"type": "number", "value": 2},
+                        }
+                    ],
+                    "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+                }
+
+                gen = SciPyCSCCodeGenerator(ast)
+                gen._build_variables()
+                gen._build_objective()
+                gen._build_constraints()
+
+                cmp_flags = [name for name in gen.var_names if name.startswith("cmp_flag_")]
+                self.assertEqual(len(cmp_flags), 1, f"Expected one comparison flag; var_names={gen.var_names}")
+                flag_idx = gen.var_indices[cmp_flags[0]]
+                rows = gen.A_eq if row_kind == "eq" else gen.A_ub
+                rhs_values = gen.b_eq if row_kind == "eq" else gen.b_ub
+
+                self.assertTrue(rows, f"Expected {row_kind} rows for weighted boolean sum")
+                self.assertAlmostEqual(rows[-1][flag_idx], expected_coef)
+                self.assertAlmostEqual(rhs_values[-1], expected_rhs)
 
     # def test_boolean_tautologies_eliminated(self):
     #   """Tautological comparisons (expr >= 0, expr <= 1) should not add constraint rows (built manually)."""

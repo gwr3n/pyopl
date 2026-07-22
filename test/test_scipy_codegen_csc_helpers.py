@@ -14,6 +14,43 @@ def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> Sci
 
 
 class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+    def test_index_extraction_helpers(self) -> None:
+        generator = make_generator()
+        generator.tuple_types = {"Arc": [{"name": "from"}, {"name": "to"}]}
+        generator.data_dict["named_index"] = 7
+
+        self.assertEqual(
+            generator._extract_field_access_index(
+                {
+                    "type": "field_access_index",
+                    "base": {"type": "name", "value": "arc", "sem_type": "Arc"},
+                    "field": "to",
+                },
+                {"arc": (3, 5)},
+            ),
+            5,
+        )
+        self.assertEqual(
+            generator._extract_tuple_index(
+                {
+                    "type": "tuple_literal",
+                    "elements": [
+                        {"type": "name_reference_index", "name": "i"},
+                        {"type": "number_literal_index", "value": 4},
+                    ],
+                },
+                {"i": 2},
+            ),
+            (2, 4),
+        )
+        self.assertEqual(
+            generator._extract_normal_index(
+                {"type": "string_literal", "value": "named_index"},
+                {},
+            ),
+            7,
+        )
+
     def test_model_building_rejects_unresolved_iterator_filter(self) -> None:
         generator = make_generator("""
             range I = 1..2;

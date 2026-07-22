@@ -1,5 +1,7 @@
+# === Standard library imports ===
 import itertools
 import logging
+import re
 from collections import defaultdict  # Needed for coefficient accumulation helpers
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union, cast
@@ -3907,7 +3909,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if lb is not None or ub is not None:
             return lb, ub
         # Try base symbol (strip trailing indices pattern _\d+)
-        import re
 
         m = re.match(r"^([A-Za-z][A-Za-z0-9]*)(?:_.*)?$", vname)
         if m:
