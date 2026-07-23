@@ -228,3 +228,25 @@ python -m pyopl.pyopl_mcp
 ## User Guide
 
 A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `docs` folder of the repository.
+
+
+
+## Citation
+
+**Rossi, R. & Prestwich, S. D. (2026).**  
+*Grammar-Aware Literate Generative Mathematical Programming with Compiler-in-the-Loop*.  
+[arXiv:2601.17670 [cs.PL]](https://arxiv.org/abs/2601.17670)
+
+```bibtex
+@misc{rossi2026grammarawareliterategenerativemathematical,
+  title={Grammar-Aware Literate Generative Mathematical Programming with Compiler-in-the-Loop},
+  author={Roberto Rossi and Steven D. Prestwich},
+  year={2026},
+  eprint={2601.17670},
+  archivePrefix={arXiv},
+  primaryClass={cs.PL},
+  url={https://arxiv.org/abs/2601.17670},
+}
+```
+
+
