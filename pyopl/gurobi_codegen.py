@@ -935,22 +935,6 @@ class GurobiCodeGenerator:
             )
         }
 
-        def _all_named_scalar_set_dims(pdecl):
-            dims = pdecl.get("dimensions", [])
-            if not dims:
-                return False
-            for dim in dims:
-                if dim.get("type") != "named_set_dimension":
-                    return False
-                set_decl = self._find_declaration_by_name(dim.get("name"))
-                if not set_decl or set_decl.get("type") not in (
-                    "typed_set",
-                    "typed_set_external",
-                    "set_declaration",
-                ):
-                    return False
-            return True
-
         for name, value in working_data_pref.items():
             if name in already_emitted:
                 continue

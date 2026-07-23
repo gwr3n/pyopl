@@ -581,6 +581,251 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaises(SemanticError):
             bad._generate_data_declarations(bad.data_dict)
 
+    def test_gurobi_tuple_set_range_dict_rows_resolve_expression_bounds(self):
+        ast = {
+            "declarations": [
+                {"type": "parameter_inline", "name": "offset", "value": 1},
+                {"type": "parameter_inline", "name": "span", "value": 2},
+                {"type": "tuple_type", "name": "Store", "fields": [{"name": "id"}]},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Stores",
+                    "tuple_type": "Store",
+                    "value": [("A",), ("B",)],
+                },
+                {
+                    "type": "range_declaration_inline",
+                    "name": "T",
+                    "start": {"type": "binop", "op": "+", "left": _num(1), "right": _name("offset")},
+                    "end": {"type": "binop", "op": "*", "left": _num(2), "right": _name("span")},
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "demand",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": {"type": "binop", "op": "+", "left": _num(1), "right": _name("offset")},
+                            "end": {"type": "binop", "op": "*", "left": _num(2), "right": _name("span")},
+                        },
+                    ],
+                },
+            ]
+        }
+        data = {"demand": {("A",): [10, 20, 30], ("B",): [40, 50, 60]}}
+
+        gen = GurobiCodeGenerator(ast, data)
+        gen._generate_data_declarations(gen.data_dict)
+        code = "\n".join(gen.gurobi_code_lines)
+
+        self.assertIn("demand = {(('A',), 2): 10", code)
+        self.assertIn("(('B',), 4): 60", code)
+        self.assertIn("demand", gen.dict_params)
+
+    def test_gurobi_tuple_set_range_dict_rows_specific_branch_and_length_error(self):
+        class GenericFlatteningTripKey:
+            armed = False
+            tripped = False
+
+            def __init__(self, value):
+                self.value = value
+
+            def __hash__(self):
+                if self.__class__.armed and not self.__class__.tripped:
+                    self.__class__.tripped = True
+                    raise TypeError("force generic flattening fallback")
+                return hash(self.value)
+
+            def __eq__(self, other):
+                return isinstance(other, GenericFlatteningTripKey) and self.value == other.value
+
+            def __repr__(self):
+                return repr(self.value)
+
+        ast = {
+            "declarations": [
+                {"type": "tuple_type", "name": "Store", "fields": [{"name": "id"}]},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Stores",
+                    "tuple_type": "Store",
+                    "value": [("A",), ("B",)],
+                },
+                {"type": "range_declaration_inline", "name": "T", "start": _num(2), "end": _num(4)},
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "demand",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {"type": "named_range_dimension", "name": "T", "start": _num(2), "end": _num(4)},
+                    ],
+                },
+            ]
+        }
+        data = {"demand": {GenericFlatteningTripKey("A"): [1, 2, 3], GenericFlatteningTripKey("B"): [4, 5, 6]}}
+        gen = GurobiCodeGenerator(ast, data)
+        GenericFlatteningTripKey.armed = True
+        GenericFlatteningTripKey.tripped = False
+
+        gen._generate_data_declarations(gen.data_dict)
+        code = "\n".join(gen.gurobi_code_lines)
+
+        self.assertIn("demand = {('A', 2): 1", code)
+        self.assertIn("('B', 4): 6", code)
+        self.assertIn("demand", gen.dict_params)
+
+        bad_data = {"demand": {GenericFlatteningTripKey("A"): [1, 2], GenericFlatteningTripKey("B"): [4, 5, 6]}}
+        bad = GurobiCodeGenerator(ast, bad_data)
+        GenericFlatteningTripKey.armed = True
+        GenericFlatteningTripKey.tripped = False
+        with self.assertRaisesRegex(SemanticError, "row for key 'A' has length 2; expected 3"):
+            bad._generate_data_declarations(bad.data_dict)
+
+    def test_gurobi_tuple_set_range_list_rows_resolve_expression_bounds(self):
+        ast = {
+            "declarations": [
+                {"type": "parameter_inline", "name": "lo", "value": 1},
+                {"type": "parameter_inline", "name": "hi", "value": 2},
+                {"type": "tuple_type", "name": "Store", "fields": [{"name": "id"}]},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Stores",
+                    "tuple_type": "Store",
+                    "value": [("A",), ("B",)],
+                },
+                {
+                    "type": "range_declaration_inline",
+                    "name": "T",
+                    "start": {"type": "binop", "op": "+", "left": _name("lo"), "right": _num(1)},
+                    "end": {"type": "binop", "op": "*", "left": _name("hi"), "right": _num(2)},
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "pair_rows",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": {"type": "binop", "op": "+", "left": _name("lo"), "right": _num(1)},
+                            "end": {"type": "binop", "op": "*", "left": _name("hi"), "right": _num(2)},
+                        },
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "row_major",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": {"type": "binop", "op": "+", "left": _name("lo"), "right": _num(1)},
+                            "end": {"type": "binop", "op": "*", "left": _name("hi"), "right": _num(2)},
+                        },
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "by_period",
+                    "dimensions": [
+                        {
+                            "type": "named_range_dimension",
+                            "name": "T",
+                            "start": {"type": "binop", "op": "+", "left": _name("lo"), "right": _num(1)},
+                            "end": {"type": "binop", "op": "*", "left": _name("hi"), "right": _num(2)},
+                        }
+                    ],
+                },
+            ]
+        }
+        data = {
+            "pair_rows": [[("A",), [1, 2, 3]], [("B",), [4, 5, 6]]],
+            "row_major": [[7, 8, 9], [10, 11, 12]],
+            "by_period": [13, 14, 15],
+        }
+
+        gen = GurobiCodeGenerator(ast, data)
+        gen._generate_data_declarations(gen.data_dict)
+        code = "\n".join(gen.gurobi_code_lines)
+
+        self.assertIn("pair_rows = {(('A',), 2): 1", code)
+        self.assertIn("(('B',), 4): 6", code)
+        self.assertIn("row_major = {(('A',), 2): 7", code)
+        self.assertIn("(('B',), 4): 12", code)
+        self.assertIn("by_period = {2: 13, 3: 14, 4: 15}", code)
+        self.assertTrue({"pair_rows", "row_major", "by_period"}.issubset(gen.dict_params))
+
+    def test_gurobi_tuple_set_range_helper_edge_paths(self):
+        ast = {
+            "declarations": [
+                {"type": "parameter_inline", "name": "lo", "value": 5},
+                {"type": "parameter_inline", "name": "scale", "value": 2},
+                {"type": "typed_set", "base_type": "string", "name": "Labels", "value": ["L1", "L2"]},
+                {"type": "tuple_type", "name": "Store", "fields": [{"name": "id"}]},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Stores",
+                    "tuple_type": "Store",
+                    "value": [("A",), ("B",)],
+                },
+                {
+                    "type": "range_declaration_inline",
+                    "name": "ExprT",
+                    "start": {"type": "binop", "op": "-", "left": _name("lo"), "right": _num(3)},
+                    "end": {"type": "binop", "op": "/", "left": _num(8), "right": _name("scale")},
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "decl_bounds_rows",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {"type": "named_range_dimension", "name": "ExprT"},
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "data_bounds_rows",
+                    "dimensions": [
+                        {"type": "named_set_dimension", "name": "Stores"},
+                        {"type": "named_range_dimension", "name": "DataT"},
+                    ],
+                },
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "label_values",
+                    "dimensions": [{"type": "named_range_dimension", "name": "Labels"}],
+                },
+            ]
+        }
+        data = {
+            "decl_bounds_rows": [[("A",), [1, 2, 3]], [("B",), [4, 5, 6]]],
+            "data_bounds_rows": [[("A",), [7, 8]], [("B",), [9, 10]]],
+            "DataT": {"type": "range_data", "start": 3, "end": 4},
+            "Labels": ["L1", "L2"],
+            "label_values": [11, 12],
+        }
+
+        gen = GurobiCodeGenerator(ast, data)
+        gen._generate_data_declarations(gen.data_dict)
+        code = "\n".join(gen.gurobi_code_lines)
+
+        self.assertIn("decl_bounds_rows = {(('A',), 2): 1", code)
+        self.assertIn("(('B',), 4): 6", code)
+        self.assertIn("data_bounds_rows = {(('A',), 3): 7", code)
+        self.assertIn("(('B',), 4): 10", code)
+        self.assertIn('label_values = {"L1": 11, "L2": 12}', code)
+
+        no_bounds = GurobiCodeGenerator(ast, {**data, "DataT": [], "data_bounds_rows": [[("A",), [1]], [("B",), [2]]]})
+        with self.assertRaisesRegex(SemanticError, "Named range 'DataT' has no bounds"):
+            no_bounds._generate_data_declarations(no_bounds.data_dict)
+
+        bad_label_values = GurobiCodeGenerator(ast, {**data, "label_values": [11]})
+        with self.assertRaisesRegex(SemanticError, "declared set 'Labels' has 2 elements"):
+            bad_label_values._generate_data_declarations(bad_label_values.data_dict)
+
     def test_scipy_data_declarations_cover_nested_and_structured_forms(self):
         ast = {
             "declarations": [
