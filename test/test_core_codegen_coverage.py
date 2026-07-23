@@ -475,6 +475,165 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertTrue(any(name.startswith("cmp_") for name in scipy_gen.var_names))
         self.assertTrue(any(constraint.get("op") == "==" for constraint in gurobi_ast["constraints"]))
 
+    def test_gurobi_reified_cardinality_specialized_constraint_node_path(self):
+        sum_node = {
+            "type": "sum",
+            "iterators": [{"iterator": "i", "range": {"type": "named_range", "name": "I"}}],
+            "expression": _cmp(
+                {"type": "indexed_name", "name": "x", "dimensions": [{"type": "name_reference_index", "name": "i"}]},
+                ">=",
+                _name("i", sem_type="int"),
+            ),
+        }
+        ast = {
+            "declarations": [
+                {"type": "range_declaration_inline", "name": "I", "start": _num(1), "end": _num(3)},
+                {"type": "dvar", "name": "b", "var_type": "int"},
+                {
+                    "type": "dvar_indexed",
+                    "name": "x",
+                    "var_type": "float+",
+                    "dimensions": [{"type": "named_range_dimension", "name": "I"}],
+                },
+            ],
+            "objective": {"type": "minimize", "expression": _name("b")},
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "op": "==",
+                    "left": _name("b", sem_type="int"),
+                    "right": {"type": "constraint", "op": ">=", "left": sum_node, "right": _num(2)},
+                }
+            ],
+        }
+
+        code = GurobiCodeGenerator(ast).generate_code()
+
+        self.assertIn("# Reified cardinality: b == (sum(comparisons) >= 2)", code)
+        self.assertIn("model.addConstr(2 * b - gp.quicksum(_cmp_sum_list_1) <= 0", code)
+        self.assertIn("model.addConstr(gp.quicksum(_cmp_sum_list_1) - (2-1) -", code)
+
+    def test_gurobi_reified_cardinality_specialized_binop_strict_path(self):
+        sum_node = {
+            "type": "sum",
+            "iterators": [{"iterator": "i", "range": {"type": "range_specifier", "start": _num(1), "end": _num(3)}}],
+            "expression": _cmp(
+                {"type": "indexed_name", "name": "x", "dimensions": [{"type": "name_reference_index", "name": "i"}]},
+                "<=",
+                _num(5),
+            ),
+        }
+        ast = {
+            "declarations": [
+                {"type": "dvar", "name": "b", "var_type": "int"},
+                {
+                    "type": "dvar_indexed",
+                    "name": "x",
+                    "var_type": "float+",
+                    "dimensions": [{"type": "range_index", "start": _num(1), "end": _num(3)}],
+                },
+            ],
+            "objective": {"type": "minimize", "expression": _name("b")},
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "op": "==",
+                    "left": _name("b", sem_type="int"),
+                    "right": {"type": "binop", "op": ">", "left": sum_node, "right": _num(1)},
+                }
+            ],
+        }
+
+        code = GurobiCodeGenerator(ast).generate_code()
+
+        self.assertIn("# Reified cardinality (binop): b == (sum(comparisons) >= 2)", code)
+        self.assertIn("model.addConstr(2 * b - gp.quicksum(_cmp_sum_list_1) <= 0", code)
+        self.assertIn("model.addConstr(gp.quicksum(_cmp_sum_list_1) - (2-1) -", code)
+
+    def test_gurobi_reified_cardinality_parenthesized_and_strict_constraint_path(self):
+        sum_node = {
+            "type": "sum",
+            "iterators": [{"iterator": "i", "range": {"type": "range_specifier", "start": _num(1), "end": _num(3)}}],
+            "expression": _cmp(
+                {"type": "indexed_name", "name": "x", "dimensions": [{"type": "name_reference_index", "name": "i"}]},
+                ">=",
+                _num(1),
+            ),
+        }
+        ast = {
+            "declarations": [
+                {"type": "dvar", "name": "b", "var_type": "int"},
+                {
+                    "type": "dvar_indexed",
+                    "name": "x",
+                    "var_type": "float+",
+                    "dimensions": [{"type": "range_index", "start": _num(1), "end": _num(3)}],
+                },
+            ],
+            "objective": {"type": "minimize", "expression": _name("b")},
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "op": "==",
+                    "left": _name("b", sem_type="int"),
+                    "right": {
+                        "type": "constraint",
+                        "op": ">",
+                        "left": {"type": "parenthesized_expression", "expression": sum_node},
+                        "right": _num(1),
+                    },
+                },
+                {
+                    "type": "constraint",
+                    "op": "==",
+                    "left": _name("b", sem_type="int"),
+                    "right": {
+                        "type": "binop",
+                        "op": ">=",
+                        "left": {"type": "parenthesized_expression", "expression": sum_node},
+                        "right": _num(1),
+                    },
+                },
+            ],
+        }
+
+        code = GurobiCodeGenerator(ast).generate_code()
+
+        self.assertIn("# Reified cardinality: b == (sum(comparisons) >= 2)", code)
+        self.assertIn("# Reified cardinality (binop): b == (sum(comparisons) >= 1)", code)
+
+    def test_gurobi_reified_cardinality_metadata_traversal_exceptions_are_tolerated(self):
+        ast = {
+            "declarations": [{"type": "dvar", "name": "b", "var_type": "int"}],
+            "objective": {"type": "minimize", "expression": _name("b")},
+            "constraints": [],
+        }
+        bad_sum_node = {
+            "type": "sum",
+            "iterators": [{"iterator": "i", "range": {"type": "range_specifier", "start": _num(1), "end": _num(1)}}],
+            "expression": {"type": "unsupported_for_coverage"},
+        }
+
+        constraint_probe = {
+            "type": "constraint",
+            "op": "==",
+            "left": _name("b", sem_type="int"),
+            "right": {"type": "constraint", "op": ">=", "left": bad_sum_node, "right": _num(1)},
+        }
+        binop_probe = {
+            "type": "constraint",
+            "op": "==",
+            "left": _name("b", sem_type="int"),
+            "right": {"type": "binop", "op": ">=", "left": bad_sum_node, "right": _num(1)},
+        }
+        gen = GurobiCodeGenerator(ast)
+        gen.gurobi_var_map["b"] = "b"
+
+        with self.assertRaises(NotImplementedError):
+            gen._constraint_constraint(constraint_probe, "c_constraint", {})
+        with self.assertRaises(NotImplementedError):
+            gen._constraint_constraint(binop_probe, "c_binop", {})
+
     def test_model_codegen_tuple_range_parameter_flattening(self):
         model = """
         tuple Store { string id; }
