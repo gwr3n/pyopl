@@ -760,6 +760,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
 - Subcommands:
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it).
+  - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Use `--left-data <left.dat>` and `--right-data <right.dat>` when either model needs data, and `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/google/ollama).
     - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
@@ -776,12 +777,16 @@ python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out lp --out-file tmp/lot_sizing.lp
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out mps --out-file tmp/lot_sizing.mps
 
+# Compare two models for MILP equivalence
+python -m pyopl compare left.mod right.mod --left-data left.dat --right-data right.dat --out-file tmp/comparison.json
+
 # Generate insight (GenAI) and save to Markdown
 python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
 ```
 
 Notes:
 - LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
+- `compare` returns JSON with `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`, using the same MILP equivalence engine exposed by the IDE and MCP tools.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
