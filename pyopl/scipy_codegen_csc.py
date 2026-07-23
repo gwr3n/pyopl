@@ -18,6 +18,7 @@ from .tuple_set_helper import TupleSetHelper
 
 SCIPY_FEASIBILITY_TOLERANCE = 1e-6
 BOOL_EPS = SCIPY_FEASIBILITY_TOLERANCE
+LINEAR_ZERO_TOLERANCE = 1e-12
 
 
 @dataclass
@@ -724,7 +725,7 @@ class ExpressionEvaluator:
             rc = float(cast(Union[int, float], rconst))
         except Exception:
             raise self.parent._unsupported_type_error("division", "non-numeric divisor")
-        if abs(rc) < 1e-12:
+        if abs(rc) < LINEAR_ZERO_TOLERANCE:
             raise SemanticError("Division by zero")
 
         inv = 1.0 / rc
@@ -1424,7 +1425,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     left_coef, left_const = {}, None
                 if len(left_coef) == 1 and isinstance(left_const, (int, float)):
                     var_name, coefficient = next(iter(left_coef.items()))
-                    if var_name in var_indices and abs(float(coefficient)) > 1e-12:
+                    if var_name in var_indices and abs(float(coefficient)) > LINEAR_ZERO_TOLERANCE:
                         bound_value = (rhs_val - float(left_const)) / float(coefficient)
                         bound_op = constr["op"]
                         if coefficient < 0:
@@ -3970,7 +3971,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise ValueError(f"Unsupported sparse row sense: {sense}")
 
         for idx, coef in enumerate(row):
-            if abs(coef) > 1e-12:
+            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                 rows.append(row_idx)
                 cols.append(idx)
                 data.append(coef)
@@ -4143,7 +4144,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 z_names = left_truths if left_truths is not None else right_truths
                 other_side = node.get("right") if left_truths is not None else node.get("left")
                 k_value = _ground_numeric_value(other_side, env)
-                if k_value is not None and abs(k_value - len(z_names)) < 1e-12:
+                if k_value is not None and abs(k_value - len(z_names)) < LINEAR_ZERO_TOLERANCE:
                     bname = f"cmp_flag_{len(comparison_truth_cache)}"
                     self.var_names.append(bname)
                     self.var_indices[bname] = len(self.var_names) - 1
@@ -5333,7 +5334,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
                 # Recognize antecedent: constraint with op in ('>','>=') comparing single var to 0; consequent: var == 1 on boolean var
                 def _is_zero_number(n):
-                    return isinstance(n, dict) and n.get("type") == "number" and abs(n.get("value")) < 1e-12
+                    return isinstance(n, dict) and n.get("type") == "number" and abs(n.get("value")) < LINEAR_ZERO_TOLERANCE
 
                 # --- General linear antecedent -> linear consequent (Option A canonical big-M) ---
                 if not ant_var_node:
@@ -5512,7 +5513,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     row[self.var_indices[ant_name]] += 1.0
                     row[self.var_indices[bname]] -= 1.0
                     for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
+                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                             A_ub_rows.append(ub_row_idx)
                             A_ub_cols.append(i)
                             A_ub_data.append(coef)
@@ -5535,7 +5536,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     row[self.var_indices[ant_name]] += 1.0
                     row[self.var_indices[bname]] += 1.0
                     for i, coef in enumerate(row):
-                        if abs(coef) > 1e-12:
+                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                             A_ub_rows.append(ub_row_idx)
                             A_ub_cols.append(i)
                             A_ub_data.append(coef)
@@ -5592,9 +5593,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     sum_node, weight_node, bool_node = weighted_bool
                     rhs_value = float(rhs_const_wb)
                     if op_sym_top == ">":
-                        rhs_value += 1e-9
+                        rhs_value += BOOL_EPS
                     elif op_sym_top == "<":
-                        rhs_value -= 1e-9
+                        rhs_value -= BOOL_EPS
                     iterators = sum_node.get("iterators", [])
                     row = [0.0] * len(self.var_names)
                     for env2, _idx_tuple in self._iter_filtered_environments(
@@ -5611,7 +5612,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         row[self.var_indices[zvar]] += float(weight_const)
                     if op_sym_top in (">=", ">"):
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(-coef)
@@ -5619,7 +5620,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         ub_row_idx += 1
                     elif op_sym_top in ("<=", "<"):
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -5627,7 +5628,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         ub_row_idx += 1
                     else:
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_eq_rows.append(eq_row_idx)
                                 A_eq_cols.append(i)
                                 A_eq_data.append(coef)
@@ -5661,7 +5662,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for zi in z_indices:
                             row[zi] -= 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -5672,7 +5673,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for zi in z_indices:
                             row[zi] += 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_eq_rows.append(eq_row_idx)
                                 A_eq_cols.append(i)
                                 A_eq_data.append(coef)
@@ -5720,7 +5721,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 for zi in z_indices:
                                     rowA[zi] -= 1.0
                                 for i, coef in enumerate(rowA):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_ub_rows.append(ub_row_idx)
                                         A_ub_cols.append(i)
                                         A_ub_data.append(coef)
@@ -5732,7 +5733,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     rowB[zi] += 1.0
                                 rowB[self.var_indices[b_var]] -= N - k_val + 1
                                 for i, coef in enumerate(rowB):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_ub_rows.append(ub_row_idx)
                                         A_ub_cols.append(i)
                                         A_ub_data.append(coef)
@@ -5843,7 +5844,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             row[self.var_indices[v_left]] = 1.0
                             row[self.var_indices[v_right]] = 1.0
                             for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
+                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                     A_eq_rows.append(eq_row_idx)
                                     A_eq_cols.append(i)
                                     A_eq_data.append(coef)
@@ -5863,7 +5864,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         row = [0.0] * len(self.var_names)
                         row[self.var_indices[vname]] = 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_eq_rows.append(eq_row_idx)
                                 A_eq_cols.append(i)
                                 A_eq_data.append(coef)
@@ -6097,7 +6098,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row[self.var_indices[v_left]] = 1.0
                                 row[self.var_indices[expr_var]] = -1.0
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef)
@@ -6119,7 +6120,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row[self.var_indices[v_right]] = 1.0
                                 row[self.var_indices[expr_var]] = -1.0
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef)
@@ -6231,7 +6232,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row = [0.0] * len(self.var_names)
                                 row[self.var_indices[vname]] = 1.0
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef)
@@ -6243,7 +6244,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row = [0.0] * len(self.var_names)
                                 row[self.var_indices[vname]] = 1.0
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef)
@@ -6256,7 +6257,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             for vn, weight in variable_weights.items():
                                 row[self.var_indices[vn]] -= weight
                             for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
+                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                     A_ub_rows.append(ub_row_idx)
                                     A_ub_cols.append(i)
                                     A_ub_data.append(coef)
@@ -6269,7 +6270,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     row[self.var_indices[vn]] += weight
                                 row[self.var_indices[vname]] -= max_sum - k_adj + 1
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_ub_rows.append(ub_row_idx)
                                         A_ub_cols.append(i)
                                         A_ub_data.append(coef)
@@ -6315,7 +6316,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                 row = [0.0] * len(self.var_names)
                                 row[self.var_indices[zvar]] = 1.0
                                 for i, coef in enumerate(row):
-                                    if abs(coef) > 1e-12:
+                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef)
@@ -6356,7 +6357,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             row[self.var_indices[lhs_var]] = 1.0
                             row[self.var_indices[rhs_var]] -= 1.0
                             for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
+                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                     A_eq_rows.append(eq_row_idx)
                                     A_eq_cols.append(i)
                                     A_eq_data.append(coef)
@@ -6369,7 +6370,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             row[self.var_indices[lhs_var]] = -1.0
                             row[self.var_indices[rhs_var]] += 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -6443,79 +6444,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     inner = _unwrap(inner)
                     return _is_comparison(inner)
 
-                def _weighted_bool_sum(node):
-                    if not (isinstance(node, dict) and node.get("type") == "sum"):
-                        return None
-                    inner = _unwrap(node.get("expression"))
-                    if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
-                        return None
-
-                    def _is_composite_boolean(expr_node):
-                        return isinstance(expr_node, dict) and expr_node.get("type") not in ("name", "indexed_name")
-
-                    candidates = ((inner.get("left"), inner.get("right")), (inner.get("right"), inner.get("left")))
-                    for weight_node, bool_node in candidates:
-                        bool_unwrapped = _unwrap(bool_node)
-                        if (
-                            isinstance(bool_unwrapped, dict)
-                            and bool_unwrapped.get("sem_type") == "boolean"
-                            and _is_composite_boolean(bool_unwrapped)
-                        ):
-                            return node, weight_node, bool_unwrapped
-                    return None
-
-                weighted_bool = _weighted_bool_sum(left)
-                if (
-                    constr.get("op") in (">=", "==", "<=", ">", "<")
-                    and weighted_bool is not None
-                    and isinstance(right, dict)
-                    and right.get("type") == "number"
-                ):
-                    sum_node, weight_node, bool_node = weighted_bool
-                    rhs_value = float(right.get("value"))
-                    if constr.get("op") == ">":
-                        rhs_value += 1e-9
-                    if constr.get("op") == "<":
-                        rhs_value -= 1e-9
-                    iterators = sum_node.get("iterators", [])
-                    row = [0.0] * len(self.var_names)
-                    for env2, _idx_tuple in self._iter_filtered_environments(
-                        iterators,
-                        env,
-                        sum_node.get("index_constraint"),
-                    ):
-                        weight_coef, weight_const = self._eval_expr(weight_node, env2)
-                        if weight_coef or isinstance(weight_const, (str, tuple)):
-                            raise SemanticError("Weighted boolean sums require numeric weights")
-                        coeff = float(weight_const)
-                        zvar = _bool_expr_var(bool_node, env2)
-                        row[self.var_indices[zvar]] += coeff
-                    if constr.get("op") in (">=", ">"):
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(-coef)
-                        b_ub.append(-rhs_value)
-                        ub_row_idx += 1
-                    elif constr.get("op") in ("<=", "<"):
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(rhs_value)
-                        ub_row_idx += 1
-                    else:
-                        for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(rhs_value)
-                        eq_row_idx += 1
-                    return
-
                 # Case 1: Direct cardinality constraint: sum(...) op k
                 if (
                     constr.get("op") in (">=", "==", ">", "<=", "<")
@@ -6547,7 +6475,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for z in z_vars:
                             row[self.var_indices[z]] -= 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -6558,7 +6486,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for z in z_vars:
                             row[self.var_indices[z]] += 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_eq_rows.append(eq_row_idx)
                                 A_eq_cols.append(i)
                                 A_eq_data.append(coef)
@@ -6570,7 +6498,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for z in z_vars:
                             row[self.var_indices[z]] += 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -6632,7 +6560,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         for z in z_vars:
                             rowA[self.var_indices[z]] -= 1.0
                         for i, coef in enumerate(rowA):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -6644,7 +6572,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             rowB[self.var_indices[z]] += 1.0
                         rowB[self.var_indices[b_vname]] += n - k_val
                         for i, coef in enumerate(rowB):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_ub_rows.append(ub_row_idx)
                                 A_ub_cols.append(i)
                                 A_ub_data.append(coef)
@@ -6721,7 +6649,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                     row[idx_var] = 1.0
                                     rhs_val = 1.0 if polarity == 1 else 0.0
                                     for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
+                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                             A_eq_rows.append(eq_row_idx)
                                             A_eq_cols.append(i)
                                             A_eq_data.append(coef)
@@ -6740,7 +6668,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                         const_shift += 1.0
                                 rhs_limit = (k - 1) - const_shift
                                 for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > 1e-12:
+                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
                                         A_ub_rows.append(ub_row_idx)
                                         A_ub_cols.append(i)
                                         A_ub_data.append(coef_i)
@@ -6759,7 +6687,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             if target_val:
                                 # sum(lits) >= 1  => -sum(lits) <= -1
                                 for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > 1e-12:
+                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
                                         A_ub_rows.append(ub_row_idx)
                                         A_ub_cols.append(i)
                                         A_ub_data.append(-coef_i)
@@ -6768,7 +6696,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             else:
                                 # sum(lits) == 0 => equality rows
                                 for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > 1e-12:
+                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
                                         A_eq_rows.append(eq_row_idx)
                                         A_eq_cols.append(i)
                                         A_eq_data.append(coef_i)
@@ -6782,7 +6710,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         row = [0.0] * len(self.var_names)
                         row[self.var_indices[expr_var]] = 1.0
                         for i, coef in enumerate(row):
-                            if abs(coef) > 1e-12:
+                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                 A_eq_rows.append(eq_row_idx)
                                 A_eq_cols.append(i)
                                 A_eq_data.append(coef)
@@ -6945,7 +6873,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                             row[self.var_indices[vn]] += cf
                                     row[self.var_indices[z_name]] += M
                                     for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
+                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                             A_ub_rows.append(ub_row_idx)
                                             A_ub_cols.append(i)
                                             A_ub_data.append(coef)
@@ -6958,7 +6886,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                             row[self.var_indices[vn]] -= cf
                                     row[self.var_indices[z_name]] += M
                                     for i, coef in enumerate(row):
-                                        if abs(coef) > 1e-12:
+                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                             A_ub_rows.append(ub_row_idx)
                                             A_ub_cols.append(i)
                                             A_ub_data.append(coef)
@@ -6972,7 +6900,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                             row1[self.var_indices[vn]] += cf
                                     row1[self.var_indices[z_name]] += M
                                     for i, coef in enumerate(row1):
-                                        if abs(coef) > 1e-12:
+                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                             A_ub_rows.append(ub_row_idx)
                                             A_ub_cols.append(i)
                                             A_ub_data.append(coef)
@@ -6984,7 +6912,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                                             row2[self.var_indices[vn]] -= cf
                                     row2[self.var_indices[z_name]] += M
                                     for i, coef in enumerate(row2):
-                                        if abs(coef) > 1e-12:
+                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                             A_ub_rows.append(ub_row_idx)
                                             A_ub_cols.append(i)
                                             A_ub_data.append(coef)
@@ -6995,7 +6923,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             for z in z_vars:
                                 row[self.var_indices[z]] -= 1.0
                             for i, coef in enumerate(row):
-                                if abs(coef) > 1e-12:
+                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
                                     A_ub_rows.append(ub_row_idx)
                                     A_ub_cols.append(i)
                                     A_ub_data.append(coef)

@@ -201,6 +201,7 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
         )
         tolerance = scipy_codegen_csc.SCIPY_FEASIBILITY_TOLERANCE
         self.assertEqual(scipy_codegen_csc.BOOL_EPS, tolerance)
+        self.assertEqual(scipy_codegen_csc.LINEAR_ZERO_TOLERANCE, 1e-12)
 
         ast = self._ast([self._decl("x", "float")], [self._constraint(self._name("x"), "<", self._number(1))])
         code = SciPyCSCCodeGenerator(ast).generate_code()

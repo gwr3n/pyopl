@@ -1,7 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.pyopl_core import OPLLexer, OPLParser
+from pyopl.scipy_codegen_csc import BOOL_EPS, SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
@@ -103,6 +104,16 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "op": "==",
             "right": {"type": "number", "value": val},
         }
+
+    def _gen_from_opl(self, src):
+        lexer = OPLLexer()
+        parser = OPLParser()
+        ast = parser.parse(lexer.tokenize(src))
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+        gen._build_constraints()
+        return gen
 
     def test_mixed_and_or_equivalent_comparisons(self):
         """Mixed AND/OR tree enforced via ==1, >=1, !=0 should each fix expression to 1 (three equality rows).
@@ -363,9 +374,9 @@ class TestBooleanMixedTrees(unittest.TestCase):
 
         cases = [
             (">=", "ub", -2.0, -2.0),
-            (">", "ub", -2.0, -(2.0 + 1e-9)),
+            (">", "ub", -2.0, -(2.0 + BOOL_EPS)),
             ("<=", "ub", 2.0, 2.0),
-            ("<", "ub", 2.0, 2.0 - 1e-9),
+            ("<", "ub", 2.0, 2.0 - BOOL_EPS),
             ("==", "eq", 2.0, 2.0),
         ]
 
@@ -398,6 +409,62 @@ class TestBooleanMixedTrees(unittest.TestCase):
                 self.assertTrue(rows, f"Expected {row_kind} rows for weighted boolean sum")
                 self.assertAlmostEqual(rows[-1][flag_idx], expected_coef)
                 self.assertAlmostEqual(rhs_values[-1], expected_rhs)
+
+    def test_weighted_boolean_sum_composite_filtered_iterator_rows(self):
+        gen = self._gen_from_opl("""
+            range I = 1..3;
+            dvar boolean x[I];
+            dvar boolean y[I];
+            minimize 0;
+            subject to {
+                sum(i in I : i != 2) 2 * ((x[i] == 1) && (y[i] == 1)) >= 4;
+            }
+        """)
+
+        baux_vars = [name for name in gen.var_names if name.startswith("_baux")]
+        weighted_rows = [
+            (row, rhs)
+            for row, rhs in zip(gen.A_ub, gen.b_ub)
+            if rhs == -4.0 and sum(1 for coef in row if coef == -2.0) == 2
+        ]
+
+        self.assertGreaterEqual(len(baux_vars), 2, f"Expected iterator-expanded AND auxiliaries; var_names={gen.var_names}")
+        self.assertEqual(len(weighted_rows), 1, f"Expected one weighted >= row; A_ub={gen.A_ub}, b_ub={gen.b_ub}")
+
+    def test_weighted_boolean_sum_rejects_symbolic_weight(self):
+        ast = {
+            "declarations": [self._decl_bool("a")],
+            "constraints": [
+                {
+                    "type": "constraint",
+                    "left": {
+                        "type": "sum",
+                        "iterators": [],
+                        "expression": {
+                            "type": "binop",
+                            "left": {"type": "string_literal", "value": "bad"},
+                            "op": "*",
+                            "right": {
+                                "type": "and",
+                                "left": self._atom("a", 1),
+                                "right": self._atom("a", 1),
+                                "sem_type": "boolean",
+                            },
+                        },
+                    },
+                    "op": ">=",
+                    "right": {"type": "number", "value": 1},
+                }
+            ],
+            "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
+        }
+
+        gen = SciPyCSCCodeGenerator(ast)
+        gen._build_variables()
+        gen._build_objective()
+
+        with self.assertRaisesRegex(SemanticError, "numeric weights"):
+            gen._build_constraints()
 
     # def test_boolean_tautologies_eliminated(self):
     #   """Tautological comparisons (expr >= 0, expr <= 1) should not add constraint rows (built manually)."""
