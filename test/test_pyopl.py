@@ -604,7 +604,11 @@ class TestPyOPLParser(TestPyOPL):
 
         _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
         self.assertIn("matrix = [[(1, 1.0), (2, 2.0)]]", scipy_code)
-        self.assertIn("A_eq_data = [-1.0, -2.0]", scipy_code)
+        self.assertTrue(
+            ("A_eq_data = [-1.0, -2.0]" in scipy_code and "b_eq = [-5.0]" in scipy_code)
+            or ("A_eq_data = [1.0, 2.0]" in scipy_code and "b_eq = [5.0]" in scipy_code),
+            scipy_code,
+        )
 
     def test_indexed_tuple_set_array_allows_empty_rows(self):
         model_code = """

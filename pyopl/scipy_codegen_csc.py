@@ -4736,6 +4736,274 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         # If we reach here, node cannot be resolved to a variable name
         raise SemanticError(f"Unsupported or non-resolvable boolean expression node type: {t} ({repr(node)})")
 
+    @staticmethod
+    def _unwrap_parenthesized_node(node):
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        return node
+
+    @staticmethod
+    def _is_var_reference_node(node):
+        return isinstance(node, dict) and node.get("type") in ("name", "indexed_name")
+
+    @staticmethod
+    def _is_number_node(node):
+        return isinstance(node, dict) and node.get("type") == "number"
+
+    @staticmethod
+    def _is_number_01_node(node):
+        return isinstance(node, dict) and node.get("type") == "number" and node.get("value") in (0, 1)
+
+    def _is_simple_boolean_comparison(self, node):
+        node = self._unwrap_parenthesized_node(node)
+        return (
+            isinstance(node, dict)
+            and node.get("type") == "binop"
+            and node.get("op") in (">=", "<=", "==", ">", "<")
+            and node.get("sem_type") == "boolean"
+        )
+
+    def _detect_sum_of_comparisons(self, left, right, op_sym_top):
+        """Return comparison cardinality parts, or a false sentinel if the pattern does not match."""
+        left_unwrapped = self._unwrap_parenthesized_node(left)
+        right_unwrapped = self._unwrap_parenthesized_node(right)
+        if (
+            isinstance(left_unwrapped, dict)
+            and left_unwrapped.get("type") == "sum"
+            and isinstance(right_unwrapped, dict)
+            and right_unwrapped.get("type") == "number"
+            and op_sym_top in (">=", "==")
+        ):
+            inner_cmp = self._unwrap_parenthesized_node(left_unwrapped.get("expression"))
+            if self._is_simple_boolean_comparison(inner_cmp):
+                return (
+                    True,
+                    inner_cmp,
+                    right_unwrapped.get("value"),
+                    left_unwrapped.get("iterators", []),
+                    left_unwrapped.get("index_constraint"),
+                )
+        return False, None, None, None, None
+
+    def _is_declared_boolean_var_node(self, node):
+        if not self._is_var_reference_node(node):
+            return False
+        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+        declaration = self._find_decl(base_name)
+        return bool(
+            declaration and declaration.get("type") in ("dvar", "dvar_indexed") and declaration.get("var_type") == "boolean"
+        )
+
+    def _is_constraint_boolean_expression(self, node):
+        return isinstance(node, dict) and (
+            node.get("type") == "boolean_literal"
+            or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
+            or (
+                node.get("type") == "constraint"
+                and node.get("op") == "=="
+                and (self._is_var_reference_node(node.get("left")) or self._is_var_reference_node(node.get("right")))
+            )
+            or node.get("type") in ("and", "or", "not")
+        )
+
+    def _is_atomic_bool_tree_node(self, node):
+        if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
+            return False
+        left = node.get("left")
+        right = node.get("right")
+        return (self._is_var_reference_node(left) and self._is_number_01_node(right)) or (
+            self._is_var_reference_node(right) and self._is_number_01_node(left)
+        )
+
+    def _is_bool_tree_node(self, node):
+        if not isinstance(node, dict):
+            return False
+        node_type = node.get("type")
+        if node_type in ("and", "or"):
+            return self._is_bool_tree_node(node.get("left")) and self._is_bool_tree_node(node.get("right"))
+        if node_type == "not":
+            return self._is_bool_tree_node(node.get("value"))
+        return self._is_atomic_bool_tree_node(node)
+
+    def _is_unbound_constraint_parameter_node(self, node):
+        if not self._is_var_reference_node(node):
+            return False
+        base = node.get("value") if node.get("type") == "name" else node.get("name")
+        if base is None:
+            return False
+        decl = self._find_decl(base)
+        if decl is None:
+            return False
+        if decl.get("type") not in (
+            "parameter_inline",
+            "parameter_inline_indexed",
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+        ):
+            return False
+        if decl.get("type") in ("parameter_inline", "parameter_inline_indexed") and decl.get("value") is not None:
+            return False
+        return self.data_dict.get(base) is None
+
+    def _ensure_constraint_parameters_bound(self, constr):
+        if constr.get("type") == "constraint" and (
+            self._is_unbound_constraint_parameter_node(constr.get("left"))
+            or self._is_unbound_constraint_parameter_node(constr.get("right"))
+        ):
+            raise SemanticError("Constraint references parameter with no data provided")
+
+    def _collect_passive_constraint_bounds(self, constr, env, bool_expr_var) -> None:
+        """Collect simple variable bounds for later big-M tightening without changing core constraint handling."""
+
+        def tighten_lower_bound(symbol, val):
+            self._collected_lbs[symbol] = max(self._collected_lbs.get(symbol, -float("inf")), val)
+
+        def tighten_upper_bound(symbol, val):
+            self._collected_ubs[symbol] = min(self._collected_ubs.get(symbol, float("inf")), val)
+
+        def tighten_bounds(symbol, val):
+            tighten_lower_bound(symbol, val)
+            tighten_upper_bound(symbol, val)
+
+        try:
+            if constr.get("type") == "constraint" and constr.get("op") == "!=":
+                left = constr.get("left")
+                right = constr.get("right")
+                if self._is_constraint_boolean_expression(left) and self._is_constraint_boolean_expression(right):
+                    bool_expr_var(constr, env)
+
+            if constr.get("type") != "constraint" or constr.get("op") not in (">=", "<=", "=="):
+                return
+
+            op_sym = constr.get("op")
+            left = constr.get("left")
+            right = constr.get("right")
+            if self._is_var_reference_node(left) and self._is_number_node(right):
+                vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
+                val = float(right.get("value"))
+                if op_sym == ">=":
+                    tighten_lower_bound(vname, val)
+                elif op_sym == "<=":
+                    tighten_upper_bound(vname, val)
+                elif op_sym == "==":
+                    tighten_bounds(vname, val)
+                if left.get("type") == "indexed_name":
+                    base_sym = left.get("name")
+                    if op_sym in (">=", "=="):
+                        cur_lb = self._collected_lbs.get(base_sym)
+                        if cur_lb is None or val < cur_lb:
+                            tighten_lower_bound(base_sym, val)
+                    if op_sym in ("<=", "=="):
+                        cur_ub = self._collected_ubs.get(base_sym)
+                        if cur_ub is None or val > cur_ub:
+                            tighten_upper_bound(base_sym, val)
+            elif self._is_var_reference_node(right) and self._is_number_node(left):
+                vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
+                val = float(left.get("value"))
+                if op_sym == ">=":
+                    tighten_upper_bound(vname, val)
+                elif op_sym == "<=":
+                    tighten_lower_bound(vname, val)
+                elif op_sym == "==":
+                    tighten_bounds(vname, val)
+                if right.get("type") == "indexed_name":
+                    base_sym = right.get("name")
+                    if op_sym == ">=":
+                        cur_ub = self._collected_ubs.get(base_sym)
+                        if cur_ub is None or val > cur_ub:
+                            tighten_upper_bound(base_sym, val)
+                    elif op_sym == "<=":
+                        cur_lb = self._collected_lbs.get(base_sym)
+                        if cur_lb is None or val < cur_lb:
+                            tighten_lower_bound(base_sym, val)
+                    elif op_sym == "==":
+                        cur_lb = self._collected_lbs.get(base_sym)
+                        if cur_lb is None or val < cur_lb:
+                            tighten_lower_bound(base_sym, val)
+                        cur_ub = self._collected_ubs.get(base_sym)
+                        if cur_ub is None or val > cur_ub:
+                            tighten_upper_bound(base_sym, val)
+        except Exception:
+            pass
+
+    def _try_enforce_bool_tree_literal_constraint(self, constr, env, bool_expr_var, append_eq_row) -> bool:
+        """Handle constraints that directly force a composed boolean tree to a literal truth value."""
+        if constr.get("type") != "constraint" or constr.get("op") not in ("==", ">=", "<=", "!="):
+            return False
+        left = constr.get("left")
+        right = constr.get("right")
+        if not self._is_bool_tree_node(left) or self._is_bool_tree_node(
+            {
+                "type": "constraint",
+                "left": left,
+                "op": "==",
+                "right": {"type": "number", "value": 1},
+            }
+        ):
+            return False
+
+        aux = bool_expr_var(left, env)
+        logger.debug(f"[DEBUG] Created auxiliary {aux} for boolean expr: {left}")
+
+        if constr.get("op") == ">=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
+            logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {constr.get('op')} {right}")
+            return True
+        if constr.get("op") == "<=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
+            logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {constr.get('op')} {right}")
+            return True
+
+        if constr.get("op") == "==":
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[aux]] = 1.0
+            append_eq_row(row, float(right.get("value", 0)))
+            return True
+        if constr.get("op") == ">=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[aux]] = 1.0
+            append_eq_row(row, 1.0)
+            return True
+        if constr.get("op") == "!=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[aux]] = 1.0
+            append_eq_row(row, 1.0)
+            return True
+        return False
+
+    def _emit_plain_linear_constraint(self, constr, env, append_eq_row, append_ub_row) -> None:
+        left = constr["left"]
+        right = constr["right"]
+        lhs_dict, lhs_const = self._accumulate_sum_to_dict(left, env, sign=1)
+        rhs_dict, rhs_const = self._accumulate_sum_to_dict(right, env, sign=1)
+        logger.debug(f"[SciPyCSCCodeGenerator] lhs_dict: {lhs_dict}, lhs_const: {lhs_const}")
+        logger.debug(f"[SciPyCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
+        row = [0.0] * len(self.var_names)
+        for vname, coef in lhs_dict.items():
+            idx = self._resolve_coefficient_index(vname)
+            logger.debug(f"[SciPyCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
+            row[idx] += coef
+        for vname, coef in rhs_dict.items():
+            idx = self._resolve_coefficient_index(vname)
+            logger.debug(f"[SciPyCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
+            row[idx] -= coef
+        rhs_value = rhs_const - lhs_const
+        logger.debug(f"[SciPyCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
+        if constr["op"] == "==":
+            append_eq_row(row, rhs_value)
+        elif constr["op"] == "<=":
+            append_ub_row(row, rhs_value)
+        elif constr["op"] == ">=":
+            append_ub_row([-v for v in row], -rhs_value)
+        elif constr["op"] in (">", "<"):
+            adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(constr["op"], rhs_value)
+            if adjusted_op == "<=":
+                append_ub_row(row, adjusted_rhs)
+            else:
+                append_ub_row([-v for v in row], -adjusted_rhs)
+        else:
+            logger.debug(f"Unsupported op: {constr['op']}")
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -4806,74 +5074,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         def handle_constraint(constr, env, constr_name_prefix=None):
             nonlocal eq_row_idx, ub_row_idx
 
-            # Early guard: if a constraint references a parameter without provided data, error out
-            def _is_unbound_param_node(node):
-                if not isinstance(node, dict):
-                    return False
-                t = node.get("type")
-                if t not in ("name", "indexed_name"):
-                    return False
-                base = node.get("value") if t == "name" else node.get("name")
-                if base is None:
-                    return False
-                decl = self._find_decl(base)
-                if decl is None:
-                    return False
-                if decl.get("type") not in (
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                ):
-                    return False
-                # Inline parameters with explicit value are bound
-                if decl.get("type") in ("parameter_inline", "parameter_inline_indexed") and decl.get("value") is not None:
-                    return False
-                # External-like parameters require data in data_dict
-                return self.data_dict.get(base) is None
-
-            if constr.get("type") == "constraint" and (
-                _is_unbound_param_node(constr.get("left")) or _is_unbound_param_node(constr.get("right"))
-            ):
-                raise SemanticError("Constraint references parameter with no data provided")
+            self._ensure_constraint_parameters_bound(constr)
 
             # Helper functions must be defined before use
             def _unwrap_paren(n):
-                while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                    n = n.get("expression")
-                return n
+                return self._unwrap_parenthesized_node(n)
 
             def _is_simple_comparison(n):
-                n = _unwrap_paren(n)
-                return (
-                    isinstance(n, dict)
-                    and n.get("type") == "binop"
-                    and n.get("op") in (">=", "<=", "==", ">", "<")
-                    and n.get("sem_type") == "boolean"
-                )
+                return self._is_simple_boolean_comparison(n)
 
             def _detect_sum_of_comparisons(left, right, op_sym_top):
-                """
-                Detects and normalizes sum-of-comparisons and cardinality constraints.
-                Returns the comparison, threshold, iterators, and optional iterator filter.
-                """
-                LU_left = _unwrap_paren(left)
-                LU_right = _unwrap_paren(right)
-                if (
-                    isinstance(LU_left, dict)
-                    and LU_left.get("type") == "sum"
-                    and isinstance(LU_right, dict)
-                    and LU_right.get("type") == "number"
-                    and op_sym_top in (">=", "==")
-                ):
-                    inner_cmp = _unwrap_paren(LU_left.get("expression"))
-                    if _is_simple_comparison(inner_cmp):
-                        k_val = LU_right.get("value")
-                        iterators = LU_left.get("iterators", [])
-                        return True, inner_cmp, k_val, iterators, LU_left.get("index_constraint")
-                return False, None, None, None, None
+                return self._detect_sum_of_comparisons(left, right, op_sym_top)
 
             def _normalize_implication_nodes(ant, cons):
                 """
@@ -4974,216 +5185,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 cons_unwrapped = _unwrap_bool_eq_true(cons)
                 return ant_unwrapped, cons_unwrapped
 
-            def _tighten_lower_bound(symbol, val):
-                self._collected_lbs[symbol] = max(self._collected_lbs.get(symbol, -float("inf")), val)
-
-            def _tighten_upper_bound(symbol, val):
-                self._collected_ubs[symbol] = min(self._collected_ubs.get(symbol, float("inf")), val)
-
-            def _tighten_bounds(symbol, val):
-                _tighten_lower_bound(symbol, val)
-                _tighten_upper_bound(symbol, val)
-
             # Local helper: check if a node is a boolean tree
             def _is_bool_tree(node):
-                if not isinstance(node, dict):
-                    return False
-                tnode = node.get("type")
-                if tnode in ("and", "or"):
-                    return _is_bool_tree(node.get("left")) and _is_bool_tree(node.get("right"))
-                if tnode == "not":
-                    return _is_bool_tree(node.get("value"))
-                # atomic: constraint (var == 0/1) or (0/1 == var)
-                if tnode == "constraint" and node.get("op") == "==":
-                    left = node.get("left")
-                    right = node.get("right")
-
-                    def is_var(x):
-                        return isinstance(x, dict) and x.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    def is_num01(x):
-                        return isinstance(x, dict) and x.get("type") == "number" and x.get("value") in (0, 1)
-
-                    return (is_var(left) and is_num01(right)) or (is_var(right) and is_num01(left))
-                return False
+                return self._is_bool_tree_node(node)
 
             # --- Patch: Always create auxiliary for non-trivial boolean expressions ---
             # Only for constraints of the form (bool_expr) == True/1 or >=1 or <=1
 
-            if constr.get("type") == "constraint" and constr.get("op") in (
-                "==",
-                ">=",
-                "<=",
-                "!=",
-            ):
-                left = constr.get("left")
-                right = constr.get("right")
-
-                # Only create aux if left is a non-trivial bool tree (not just a variable == 0/1)
-                if _is_bool_tree(left) and not (
-                    _is_bool_tree(
-                        {
-                            "type": "constraint",
-                            "left": left,
-                            "op": "==",
-                            "right": {"type": "number", "value": 1},
-                        }
-                    )
-                ):
-                    aux = _bool_expr_var(left, env)
-                    logger.debug(f"[DEBUG] Created auxiliary {aux} for boolean expr: {left}")
-
-                    # --- Tautology skip logic ---
-                    # For boolean aux, skip constraints that are always true: aux == 1, aux >= 1, aux <= 1, aux >= 0, aux <= 1
-                    # Only skip for aux == 1 (r==1 or True), aux >= 0, aux <= 1
-                    def _is_tautology_bool_aux(op, r):
-                        if op == ">=":
-                            if isinstance(r, dict) and r.get("type") == "number" and r.get("value") == 0:
-                                return True
-                        elif op == "<=":
-                            if isinstance(r, dict) and r.get("type") == "number" and r.get("value") == 1:
-                                return True
-                        return False
-
-                    if _is_tautology_bool_aux(constr.get("op"), right):
-                        logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {constr.get('op')} {right}")
-                        return
-                    # For AND/OR trees, always enforce via equality for ==1, >=1, !=0
-                    if constr.get("op") == "==":
-                        # Add equality constraint row: aux == r
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[aux]] = 1.0
-                        append_eq_row(row, float(right.get("value", 0)))
-                        return
-                    elif constr.get("op") == ">=":
-                        if isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
-                            # Enforce aux >= 1 <=> aux == 1 for boolean
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[aux]] = 1.0
-                            append_eq_row(row, 1.0)
-                            return
-                    elif constr.get("op") == "!=":
-                        if isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
-                            # Enforce aux != 0 <=> aux == 1 for boolean
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[aux]] = 1.0
-                            append_eq_row(row, 1.0)
-                            return
-                    # For <= 0, >= 0, etc., fall through to generic logic
+            if self._try_enforce_bool_tree_literal_constraint(constr, env, _bool_expr_var, append_eq_row):
+                return
 
             # nonlocal already declared at top of handle_constraint
             logger.debug(f"[SciPyCSCCodeGenerator] handle_constraint: {constr}")
-            # Passive bound collection for later big-M tightening
-            try:
-                # Ensure boolean XOR/NEQ at constraint level triggers aux var creation
-                if constr.get("type") == "constraint" and constr.get("op") == "!=":
-                    left = constr.get("left")
-                    right = constr.get("right")
-
-                    def is_bool_expr(e):
-                        return isinstance(e, dict) and (
-                            e.get("type") == "boolean_literal"
-                            or (e.get("type") == "binop" and e.get("sem_type") == "boolean")
-                            or (
-                                e.get("type") == "constraint"
-                                and e.get("op") == "=="
-                                and (
-                                    (isinstance(e.get("left"), dict) and e["left"].get("type") in ("name", "indexed_name"))
-                                    or (
-                                        isinstance(e.get("right"), dict) and e["right"].get("type") in ("name", "indexed_name")
-                                    )
-                                )
-                            )
-                            or (e.get("type") in ("and", "or", "not"))
-                        )
-
-                    if is_bool_expr(left) and is_bool_expr(right):
-                        # This will create/register aux vars for both sides and the XOR
-                        _ = _bool_expr_var(constr, env)
-                if constr.get("type") == "constraint" and constr.get("op") in (
-                    ">=",
-                    "<=",
-                    "==",
-                ):
-                    op_sym = constr.get("op")
-                    left = constr.get("left")
-                    right = constr.get("right")
-
-                    def _is_var(n):
-                        return isinstance(n, dict) and n.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    def _is_num(n):
-                        return isinstance(n, dict) and n.get("type") == "number"
-
-                    if _is_var(left) and _is_num(right):
-                        vname = (
-                            self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                        )
-                        val = float(right.get("value"))
-                        # Per-instance bound tightening (monotone narrowing)
-                        if op_sym == ">=":
-                            _tighten_lower_bound(vname, val)
-                        elif op_sym == "<=":
-                            _tighten_upper_bound(vname, val)
-                        elif op_sym == "==":
-                            _tighten_bounds(vname, val)
-                        # Aggregated base-symbol bounds (widening across indices): we want a safe envelope
-                        if left.get("type") == "indexed_name":
-                            base_sym = left.get("name")
-                            # For lower bounds we take the minimum across instances (so use min semantics)
-                            if op_sym in (">=", "=="):
-                                cur_lb = self._collected_lbs.get(base_sym)
-                                if cur_lb is None or val < cur_lb:
-                                    _tighten_lower_bound(base_sym, val)
-                            if op_sym in ("<=", "=="):
-                                cur_ub = self._collected_ubs.get(base_sym)
-                                if cur_ub is None or val > cur_ub:
-                                    _tighten_upper_bound(base_sym, val)
-                    elif _is_var(right) and _is_num(left):
-                        vname = (
-                            self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                        )
-                        val = float(left.get("value"))
-                        # Flip perspective
-                        if op_sym == ">=":
-                            _tighten_upper_bound(vname, val)
-                        elif op_sym == "<=":
-                            _tighten_lower_bound(vname, val)
-                        elif op_sym == "==":
-                            _tighten_bounds(vname, val)
-                        if right.get("type") == "indexed_name":
-                            base_sym = right.get("name")
-                            if op_sym in (
-                                "<=",
-                                "==",
-                            ):  # var <= number (from number >= var) contributes upper envelope
-                                # For upper envelope collect maximum
-                                if op_sym == "<=":  # derived var >= number so lower bound
-                                    pass  # handled separately below
-                            # Reverse logic for flipped inequalities:
-                            if op_sym == ">=":
-                                cur_ub = self._collected_ubs.get(base_sym)
-                                if cur_ub is None or val > cur_ub:
-                                    _tighten_upper_bound(base_sym, val)
-                            elif op_sym == "<=":
-                                cur_lb = self._collected_lbs.get(base_sym)
-                                if cur_lb is None or val < cur_lb:
-                                    _tighten_lower_bound(base_sym, val)
-                            elif op_sym == "==":
-                                cur_lb = self._collected_lbs.get(base_sym)
-                                if cur_lb is None or val < cur_lb:
-                                    _tighten_lower_bound(base_sym, val)
-                                cur_ub = self._collected_ubs.get(base_sym)
-                                if cur_ub is None or val > cur_ub:
-                                    _tighten_upper_bound(base_sym, val)
-            except Exception:
-                pass  # Never let bound collection break core logic
+            self._collect_passive_constraint_bounds(constr, env, _bool_expr_var)
             # Implication constraints: antecedent => consequent
             # --- Patch: ensure auxiliary variables for nested implications ---
             if (
@@ -5216,43 +5230,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if constr.get("type") == "implication_constraint":
                 ant = constr["antecedent"]
                 cons = constr["consequent"]
-
-                # Accept antecedent of form (var == 1) for boolean var
-                def _unwrap_bool_eq_true(node):
-                    """If node is constraint ((parenthesized_expression binop ...) == true) unwrap to inner binop as a constraint-like dict.
-                    This covers parser output that normalizes boolean expressions via == true.
-                    """
-                    if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
-                        return node
-                    left = node.get("left")
-                    right = node.get("right")
-
-                    # Identify side that is boolean true literal
-                    def _is_true(x):
-                        return isinstance(x, dict) and x.get("type") == "boolean_literal" and x.get("value") is True
-
-                    # Other side may be parenthesized_expression wrapping a binop
-                    expr_side = None
-                    if _is_true(left):
-                        expr_side = right
-                    elif _is_true(right):
-                        expr_side = left
-                    if (
-                        not expr_side
-                        or not isinstance(expr_side, dict)
-                        or expr_side.get("type") not in ("parenthesized_expression", "binop")
-                    ):
-                        return node
-                    inner = expr_side.get("expression") if expr_side.get("type") == "parenthesized_expression" else expr_side
-                    if not (isinstance(inner, dict) and inner.get("type") == "binop"):
-                        return node
-                    # Repackage as a pseudo-constraint so downstream logic can treat uniformly
-                    return {
-                        "type": "constraint",
-                        "op": inner.get("op"),
-                        "left": inner.get("left"),
-                        "right": inner.get("right"),
-                    }
 
                 # Unwrap antecedent & consequent if they are equality-to-true wrappers
                 ant_unwrapped, cons_unwrapped = _normalize_implication_nodes(ant, cons)
@@ -5357,39 +5334,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # Recognize antecedent: constraint with op in ('>','>=') comparing single var to 0; consequent: var == 1 on boolean var
                 def _is_zero_number(n):
                     return isinstance(n, dict) and n.get("type") == "number" and abs(n.get("value")) < 1e-12
-
-                def _is_single_var_gt_zero(cnode):
-                    if not (isinstance(cnode, dict) and cnode.get("type") == "constraint" and cnode.get("op") in (">", ">=")):
-                        return None
-                    left = cnode.get("left")
-                    right = cnode.get("right")
-                    # Accept var > 0 or 0 < var (swap)
-                    if isinstance(left, dict) and left.get("type") in ("name", "indexed_name") and _is_zero_number(right):
-                        return left
-                    if isinstance(right, dict) and right.get("type") in ("name", "indexed_name") and _is_zero_number(left):
-                        return right
-                    return None
-
-                def _is_var_eq_one(cnode):
-                    if not (isinstance(cnode, dict) and cnode.get("type") == "constraint" and cnode.get("op") == "=="):
-                        return None
-                    left = cnode.get("left")
-                    right = cnode.get("right")
-
-                    def is_one(n):
-                        return isinstance(n, dict) and n.get("type") == "number" and n.get("value") == 1
-
-                    def is_var(n):
-                        return isinstance(n, dict) and n.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    if is_var(left) and is_one(right):
-                        return left
-                    if is_var(right) and is_one(left):
-                        return right
-                    return None
 
                 # --- General linear antecedent -> linear consequent (Option A canonical big-M) ---
                 if not ant_var_node:
@@ -7058,35 +7002,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                             b_ub.append(-1.0)
                             ub_row_idx += 1
                         return
-                lhs_dict, lhs_const = self._accumulate_sum_to_dict(left, env, sign=1)
-                rhs_dict, rhs_const = self._accumulate_sum_to_dict(right, env, sign=1)
-                logger.debug(f"[SciPyCSCCodeGenerator] lhs_dict: {lhs_dict}, lhs_const: {lhs_const}")
-                logger.debug(f"[SciPyCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
-                row = [0.0] * len(self.var_names)
-                for vname, coef in lhs_dict.items():
-                    idx = self._resolve_coefficient_index(vname)
-                    logger.debug(f"[SciPyCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
-                    row[idx] += coef
-                for vname, coef in rhs_dict.items():
-                    idx = self._resolve_coefficient_index(vname)
-                    logger.debug(f"[SciPyCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
-                    row[idx] -= coef
-                rhs_value = rhs_const - lhs_const
-                logger.debug(f"[SciPyCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
-                if constr["op"] == "==":
-                    append_eq_row(row, rhs_value)
-                elif constr["op"] == "<=":
-                    append_ub_row(row, rhs_value)
-                elif constr["op"] == ">=":
-                    append_ub_row([-v for v in row], -rhs_value)
-                elif constr["op"] in (">", "<"):
-                    adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(constr["op"], rhs_value)
-                    if adjusted_op == "<=":
-                        append_ub_row(row, adjusted_rhs)
-                    else:
-                        append_ub_row([-v for v in row], -adjusted_rhs)
-                else:
-                    logger.debug(f"Unsupported op: {constr['op']}")
+                self._emit_plain_linear_constraint(constr, env, append_eq_row, append_ub_row)
             elif constr["type"] == "forall_constraint":
                 iterators = constr.get("iterators")
                 index_constraint = constr.get("index_constraint")
