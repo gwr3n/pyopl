@@ -423,9 +423,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
 
         baux_vars = [name for name in gen.var_names if name.startswith("_baux")]
         weighted_rows = [
-            (row, rhs)
-            for row, rhs in zip(gen.A_ub, gen.b_ub)
-            if rhs == -4.0 and sum(1 for coef in row if coef == -2.0) == 2
+            (row, rhs) for row, rhs in zip(gen.A_ub, gen.b_ub) if rhs == -4.0 and sum(1 for coef in row if coef == -2.0) == 2
         ]
 
         self.assertGreaterEqual(len(baux_vars), 2, f"Expected iterator-expanded AND auxiliaries; var_names={gen.var_names}")
