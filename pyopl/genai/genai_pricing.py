@@ -1,4 +1,5 @@
 import functools
+import json
 import logging
 import re
 import urllib.parse
@@ -14,19 +15,19 @@ from typing import (
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
 
-PRICING_URL = "https://github.com/AgentOps-AI/tokencost/blob/main/pricing_table.md"
-LOCAL_PRICING_FILENAME = "pricing_table.md"
+PRICING_URL = "https://raw.githubusercontent.com/BerriAI/litellm/refs/heads/litellm_internal_staging/litellm/model_prices_and_context_window_backup.json"
+LOCAL_PRICING_FILENAME = "model_prices_and_context_window_backup.json"
 
 
 def _resolve_pricing_source() -> str:
-    """Return a local pricing_table.md path if available; else fall back to PRICING_URL."""
+    """Return a local LiteLLM pricing JSON path if available; else fall back to PRICING_URL."""
     candidates = []
 
     # 1) Current working directory (common when running from repo root)
     candidates.append(Path.cwd() / LOCAL_PRICING_FILENAME)
 
     # 2) Repository root relative to this module
-    # pyopl/genai/genai_pricing.py -> repo_root/pricing_table.md
+    # pyopl/genai/genai_pricing.py -> repo_root/model_prices_and_context_window_backup.json
     try:
         repo_root = Path(__file__).resolve().parents[2]
         candidates.append(repo_root / LOCAL_PRICING_FILENAME)
@@ -134,59 +135,78 @@ def _extract_gemini_usage(resp: Any, input_text: str, output_text: str) -> Dict[
     return _usage_dict(prompt_tokens, completion_tokens)
 
 
-# Estimate costs using pricing_table.md (best-effort parser)
-@functools.lru_cache(maxsize=8)
-def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
-    # Explicit type for mypy
+def _pricing_source_suffix(path: str) -> str:
+    return Path(urllib.parse.urlparse(path).path).suffix.lower()
+
+
+def _read_pricing_text(src: str) -> str:
+    parsed_url = urllib.parse.urlparse(src)
+    if parsed_url.scheme and parsed_url.scheme.lower() not in {"http", "https"}:
+        raise ValueError(f"Unsupported pricing URL scheme: {parsed_url.scheme!r}")
+    if parsed_url.scheme.lower() in {"http", "https"}:
+        m = re.match(
+            r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$",
+            src,
+            re.I,
+        )
+        if m:
+            src = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}/{m.group(4)}"
+
+        req = urllib.request.Request(src, headers={"User-Agent": "pyopl/1.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
+            return resp.read().decode("utf-8", errors="replace")
+    return open(src, "r", encoding="utf8").read()
+
+
+def _numeric_to_per_1m(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value * 1_000_000.0
+    return None
+
+
+def _parse_litellm_json_pricing(txt: str, path: str) -> Dict[str, Dict[str, Optional[float]]]:
     rates: Dict[str, Dict[str, Optional[float]]] = {}
     try:
-
-        def _read_text(src: str) -> str:
-            parsed_url = urllib.parse.urlparse(src)
-            if parsed_url.scheme and parsed_url.scheme.lower() not in {"http", "https"}:
-                raise ValueError(f"Unsupported pricing URL scheme: {parsed_url.scheme!r}")
-            if parsed_url.scheme.lower() in {"http", "https"}:
-                # Normalize GitHub "blob" URL to raw content
-                m = re.match(
-                    r"^https?://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.*)$",
-                    src,
-                    re.I,
-                )
-                if m:
-                    src = f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}/{m.group(4)}"
-
-                req = urllib.request.Request(src, headers={"User-Agent": "pyopl/1.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:  # nosec B310
-                    return resp.read().decode("utf-8", errors="replace")
-            # Fallback to local file if not a URL
-            return open(src, "r", encoding="utf8").read()
-
-        txt = _read_text(path)
-    except Exception as exc:
-        # make failure visible rather than silently returning empty rates
-        import logging
-
-        logging.getLogger(__name__).warning("Failed to load pricing from %s: %s", path, exc)
+        data = json.loads(txt)
+    except json.JSONDecodeError as exc:
+        logger.warning("Failed to parse pricing JSON from %s: %s", path, exc)
         return rates
 
-    # helpers to parse amounts and units, normalizing to "per 1M"
-    def _cell_to_per_1m(cell: str, default_unit: Optional[str] = None) -> Optional[float]:
-        if not cell:
-            return None
-        # find numeric value (allow commas)
-        m = re.search(r"\$?([\d,]*\.?\d+)", cell)
-        if not m:
-            return None
-        val = float(m.group(1).replace(",", ""))
-        # detect explicit unit in the same cell
-        if re.search(r"/\s*1\s*[kK]\b|per\s+1\s*[kK]\b", cell):
-            return val * 1000.0
-        if re.search(r"/\s*1\s*[mM]\b|per\s+1\s*[mM]\b", cell):
-            return val
-        # fallback to default unit from header if provided
-        if default_unit == "1k":
-            return val * 1000.0
+    if not isinstance(data, dict):
+        logger.warning("Expected pricing JSON object from %s, got %s", path, type(data).__name__)
+        return rates
+
+    for model, spec in data.items():
+        if model == "sample_spec" or not isinstance(spec, dict):
+            continue
+        p_val = _numeric_to_per_1m(spec.get("input_cost_per_token"))
+        c_val = _numeric_to_per_1m(spec.get("output_cost_per_token"))
+        if p_val is not None or c_val is not None:
+            rates[str(model).lower()] = {
+                "prompt_per_1M": p_val,
+                "completion_per_1M": c_val,
+            }
+    return rates
+
+
+def _cell_to_per_1m(cell: str, default_unit: Optional[str] = None) -> Optional[float]:
+    if not cell:
+        return None
+    m = re.search(r"\$?([\d,]*\.?\d+)", cell)
+    if not m:
+        return None
+    val = float(m.group(1).replace(",", ""))
+    if re.search(r"/\s*1\s*[kK]\b|per\s+1\s*[kK]\b", cell):
+        return val * 1000.0
+    if re.search(r"/\s*1\s*[mM]\b|per\s+1\s*[mM]\b", cell):
         return val
+    if default_unit == "1k":
+        return val * 1000.0
+    return val
+
+
+def _parse_markdown_pricing(txt: str) -> Dict[str, Dict[str, Optional[float]]]:
+    rates: Dict[str, Dict[str, Optional[float]]] = {}
 
     # Explicit type so assigning "1k"/"1m" is valid
     header_units: Dict[str, Optional[str]] = {"prompt": None, "completion": None}
@@ -246,6 +266,25 @@ def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
             if p_val is not None or c_val is not None:
                 rates[model] = {"prompt_per_1M": p_val, "completion_per_1M": c_val}
     return rates
+
+
+# Estimate costs using LiteLLM pricing JSON (best-effort parser)
+@functools.lru_cache(maxsize=8)
+def _parse_pricing(path: str) -> Dict[str, Dict[str, Optional[float]]]:
+    try:
+        txt = _read_pricing_text(path)
+    except Exception as exc:
+        logger.warning("Failed to load pricing from %s: %s", path, exc)
+        return {}
+
+    source_suffix = _pricing_source_suffix(path)
+    if source_suffix == ".json":
+        return _parse_litellm_json_pricing(txt, path)
+    if source_suffix in {".md", ".markdown"}:
+        return _parse_markdown_pricing(txt)
+
+    logger.warning("Unsupported pricing file extension for %s", path)
+    return {}
 
 
 def clear_pricing_cache():

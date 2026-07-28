@@ -285,6 +285,36 @@ class TestGenAIPricing(unittest.TestCase):
         self.assertEqual(rates["gpt-test"], {"prompt_per_1M": 10.0, "completion_per_1M": 2.5})
         self.assertEqual(rates["inline-model"], {"prompt_per_1M": 0.2, "completion_per_1M": 0.6})
 
+    def test_parse_pricing_reads_litellm_json_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pricing_path = Path(td) / "model_prices_and_context_window_backup.json"
+            pricing_path.write_text(
+                '{"gpt-json": {"input_cost_per_token": 0.000002, "output_cost_per_token": 0.000008}}',
+                encoding="utf-8",
+            )
+
+            rates = genai_pricing._parse_pricing(str(pricing_path))
+
+        self.assertEqual(rates["gpt-json"], {"prompt_per_1M": 2.0, "completion_per_1M": 8.0})
+
+    def test_parse_pricing_uses_extension_instead_of_json_markdown_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pricing_path = Path(td) / "model_prices_and_context_window_backup.json"
+            pricing_path.write_text("| gpt-test | $0.01 | $2.50 |", encoding="utf-8")
+
+            rates = genai_pricing._parse_pricing(str(pricing_path))
+
+        self.assertEqual(rates, {})
+
+    def test_estimate_costs_reads_current_litellm_backup_models(self) -> None:
+        usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+
+        codex = genai_pricing.estimate_costs(SimpleNamespace(model="gpt-5.3-codex"), usage)
+        gpt55 = genai_pricing.estimate_costs(SimpleNamespace(model="gpt-5.5"), usage)
+
+        self.assertEqual(codex, {"prompt_cost": 1.75, "completion_cost": 14.0, "total_cost": 15.75})
+        self.assertEqual(gpt55, {"prompt_cost": 5.0, "completion_cost": 30.0, "total_cost": 35.0})
+
     def test_parse_pricing_rejects_non_http_remote_scheme(self) -> None:
         with patch.object(genai_pricing.urllib.request, "urlopen") as urlopen_mock:
             rates = genai_pricing._parse_pricing("file://tmp/pricing.md")
