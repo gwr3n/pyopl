@@ -77,11 +77,7 @@ test to run.
 
 ### `genai_benchmark.py`
 
-Runs benchmark problems from JSON datasets in `gen_ai/datasets/<dataset>/` through
-one of the GenAI modelling strategies, then validates the generated result. If the
-dataset item includes reference model/data text, validation uses MILP equivalence;
-otherwise it solves the generated model and compares the objective value with the
-dataset answer.
+Runs benchmark problems from JSON datasets in `gen_ai/datasets/<dataset>/` (decompress the zip file `gen_ai.zip` if necessary) through one of the GenAI modelling strategies, then validates the generated result. If the dataset item includes reference model/data text, validation uses MILP equivalence; otherwise it solves the generated model and compares the objective value with the dataset answer.
 
 Common single-problem run:
 
