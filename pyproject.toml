@@ -1,6 +1,6 @@
 [project]
 name = "rhetor"
-version = "1.9.5"
+version = "1.9.6"
 description = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
 authors = [
   { name = "Roberto Rossi", email = "robros@gmail.com" },
@@ -24,7 +24,7 @@ dependencies = [
   "highspy>=1.11",
   "Pillow>=10",
   "PyMuPDF>=1.24",
-  "ttkbootstrap>=1.14",
+  "ttkbootstrap>=1.14,<2",
   "platformdirs>=4.1",
   "openai>=1.99",
   "google-generativeai>=0.8.5",
