@@ -26,7 +26,7 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
-from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
 from .pyopl_core import OPLCompiler, export_model, linear_problem_from_opl
 from .pyopl_ide_bootstrap import OPLIDE
 

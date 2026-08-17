@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pyopl import solve
-from pyopl.milp_equivalence import compare
+from pyopl.milp_concrete_equivalence import compare
 from pyopl.pyopl_core import linear_problem_from_opl
 
 
@@ -238,11 +238,11 @@ def _process_item(
             expected_problem = linear_problem_from_opl(expected_model, expected_data)
             generated_problem = linear_problem_from_opl(generated_model, generated_data)
             ok = compare(expected_problem, generated_problem, tolerance=args.tolerance)
-            entry.update({"comparison": "milp_equivalence", "pass": ok})
+            entry.update({"comparison": "milp_concrete_equivalence", "pass": ok})
         except Exception as e:
             entry.update(
                 {
-                    "comparison": "milp_equivalence",
+                    "comparison": "milp_concrete_equivalence",
                     "error": f"MILP equivalence comparison failed: {e}",
                     "exit_code": 6,
                 }

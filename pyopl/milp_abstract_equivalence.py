@@ -1,6 +1,6 @@
 """Structural equivalence checks for abstract PyOPL MILP model schemas.
 
-Unlike :mod:`pyopl.milp_equivalence`, this module compares models before data
+Unlike :mod:`pyopl.milp_concrete_equivalence`, this module compares models before data
 values expand indexed declarations and constraints into a concrete matrix.  It
 uses the PyOPL parser AST as its source IR and converts that AST into a
 symbol-linked graph.  Exact labelled graph isomorphism then recognizes
@@ -114,7 +114,7 @@ def prove_abstract_equivalent(
     Algebraic mode returns ``unknown`` for unsupported indexed, nonlinear,
     parameterized-implication, or unbounded-integer fragments.  Parameter
     values are deliberately not accepted here: concrete instances remain the
-    responsibility of :func:`pyopl.milp_equivalence.prove_equivalent`.
+    responsibility of :func:`pyopl.milp_concrete_equivalence.prove_equivalent`.
     """
 
     left_ast = _coerce_ast(left)

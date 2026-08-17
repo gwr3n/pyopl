@@ -157,7 +157,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
         self.assertEqual(mismatch["exit_code"], 1)
         self.assertEqual(mismatch["direction"], "min")
 
-    def test_process_item_uses_milp_equivalence_when_model_and_data_present(self) -> None:
+    def test_process_item_uses_milp_concrete_equivalence_when_model_and_data_present(self) -> None:
         from tools import genai_benchmark
 
         args = SimpleNamespace(
@@ -188,7 +188,7 @@ class TestGenAIBenchmarkHelpers(unittest.TestCase):
                 )
 
         self.assertTrue(ok)
-        self.assertEqual(entry["comparison"], "milp_equivalence")
+        self.assertEqual(entry["comparison"], "milp_concrete_equivalence")
         self.assertEqual(entry["exit_code"], 0)
         self.assertTrue(entry["pass"])
         compile_mock.assert_any_call("expected model", "expected data")

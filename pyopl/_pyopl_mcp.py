@@ -30,7 +30,7 @@ from typing import Optional, TypeVar, Union
 from mcp.server.fastmcp import FastMCP
 
 from . import solve
-from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
 from .pyopl_core import OPLCompiler, linear_problem_from_opl
 
 PathLike = Union[str, Path]

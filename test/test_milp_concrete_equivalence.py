@@ -1,7 +1,7 @@
 import unittest
 
 from pyopl.linear_problem import LinearProblem
-from pyopl.milp_equivalence import EquivalenceResult, compare, prove_equivalent
+from pyopl.milp_concrete_equivalence import EquivalenceResult, compare, prove_equivalent
 from pyopl.pyopl_core import linear_problem_from_opl
 from pyopl.pyopl_ide_bootstrap import OPLIDE
 

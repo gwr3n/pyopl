@@ -36,7 +36,7 @@ from .genai.model_discovery import (
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
-from .milp_equivalence import EquivalenceResult, prove_equivalent
+from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
 from .pyopl_core import (
     OPLDataLexer,
     OPLDataParser,
