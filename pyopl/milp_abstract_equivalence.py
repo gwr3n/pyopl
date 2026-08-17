@@ -160,9 +160,7 @@ def prove_abstract_equivalent(
         if grounded_indexed_schema and effective_variable_mapping is None:
             left_types = {variable.name: variable.value_type for variable in left_model.variables}
             right_types = {variable.name: variable.value_type for variable in right_model.variables}
-            shared_names = {
-                name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]
-            }
+            shared_names = {name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]}
             effective_variable_mapping = {name: name for name in shared_names}
             effective_left_auxiliaries.update(left_types.keys() - shared_names)
             effective_right_auxiliaries.update(right_types.keys() - shared_names)

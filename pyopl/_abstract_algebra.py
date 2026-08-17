@@ -192,12 +192,10 @@ def lower_linear_problem(problem: LinearProblem) -> SymbolicModel:
         )
 
     constraints.extend(
-        AffineConstraint(row_expression(row, rhs), "=")
-        for row, rhs in zip(problem.A_eq, problem.b_eq, strict=True)
+        AffineConstraint(row_expression(row, rhs), "=") for row, rhs in zip(problem.A_eq, problem.b_eq, strict=True)
     )
     constraints.extend(
-        AffineConstraint(row_expression(row, rhs), "<=")
-        for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
+        AffineConstraint(row_expression(row, rhs), "<=") for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
     )
     for name, bounds in zip(problem.var_names, problem.bounds, strict=True):
         lower, upper = bounds
@@ -207,8 +205,7 @@ def lower_linear_problem(problem: LinearProblem) -> SymbolicModel:
             constraints.append(AffineConstraint(symbols[name] - _rational(upper), "<="))
 
     objective = sum(
-        _rational(coefficient) * symbols[name]
-        for name, coefficient in zip(problem.var_names, problem.c, strict=True)
+        _rational(coefficient) * symbols[name] for name, coefficient in zip(problem.var_names, problem.c, strict=True)
     ) + _rational(problem.objective_offset)
     return SymbolicModel(
         parameters=(),

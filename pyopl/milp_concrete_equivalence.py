@@ -222,9 +222,7 @@ def prove_equivalent(
     )
     if left_normalized.objective_offset != right_normalized.objective_offset:
         if mode == "auto":
-            return _prove_projected_milp_equivalent(
-                left, right, variable_mapping, tolerance, max_projected_assignments
-            )
+            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -234,9 +232,7 @@ def prove_equivalent(
         )
     if len(left_normalized.columns) != len(right_normalized.columns):
         if mode == "auto":
-            return _prove_projected_milp_equivalent(
-                left, right, variable_mapping, tolerance, max_projected_assignments
-            )
+            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -246,9 +242,7 @@ def prove_equivalent(
         )
     if len(left_normalized.rows) != len(right_normalized.rows):
         if mode == "auto":
-            return _prove_projected_milp_equivalent(
-                left, right, variable_mapping, tolerance, max_projected_assignments
-            )
+            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -284,9 +278,7 @@ def prove_equivalent(
             proof_steps=proof_steps,
         )
     if mode == "auto":
-        return _prove_projected_milp_equivalent(
-            left, right, variable_mapping, tolerance, max_projected_assignments
-        )
+        return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
     return EquivalenceResult(
         status="different",
         level="solver_implied",
@@ -486,10 +478,7 @@ def _find_projected_counterexample(
             return "complete", checked, None
         if result.status != 0 or result.x is None:
             return "solver", checked, None
-        assignment = {
-            name: int(round(float(result.x[index])))
-            for name, index in source_indices.items()
-        }
+        assignment = {name: int(round(float(result.x[index]))) for name, index in source_indices.items()}
         checked += 1
         target_assignment = {mapping[name]: value for name, value in assignment.items()}
         feasibility = _fixed_assignment_feasibility(target, target_assignment)
