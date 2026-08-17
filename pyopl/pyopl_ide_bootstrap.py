@@ -3116,7 +3116,7 @@ class OPLIDE(tk.Tk):
                 target.set(fname)
 
         browse_buttons: list[ttk.Button] = []
-        data_controls: list[tk.Widget] = []
+        data_controls: list[ttk.Entry | ttk.Button] = []
         compare_process: Optional[multiprocessing.Process] = None
         compare_queue: Optional[multiprocessing.Queue] = None
 

@@ -107,9 +107,7 @@ class TestCLI(unittest.TestCase):
             with patch("pyopl.pyopl_cli._compare_models", return_value=result) as compare_mock:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    ret = pyopl_cli.main(
-                        ["compare", str(left_model), str(right_model), "--strategy", "abstract"]
-                    )
+                    ret = pyopl_cli.main(["compare", str(left_model), str(right_model), "--strategy", "abstract"])
 
             self.assertEqual(ret, 0)
             self.assertEqual(json.loads(buf.getvalue()), result)

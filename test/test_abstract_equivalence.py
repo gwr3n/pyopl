@@ -7,7 +7,6 @@ from pyopl.milp_abstract_equivalence import (
     prove_abstract_equivalent,
 )
 
-
 LEFT_MODEL = """
     int N = ...;
     range Items = 1..N;

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import product
-from typing import Any, Collection, Iterable, Literal, Mapping, Sequence
+from typing import Any, Collection, Literal, Mapping, Sequence
 
 import numpy as np
 import sympy as sp
@@ -185,11 +185,7 @@ def prove_algebraic_equivalence(
     for parameter_map, variable_map in mappings:
         renamed_right = _rename_model(right, parameter_map, variable_map)
         left_kept = {variable.name for variable in left.variables if variable.name not in left_auxiliaries}
-        right_kept = {
-            left_name
-            for left_name, right_name in variable_map.items()
-            if right_name not in right_auxiliaries
-        }
+        right_kept = {left_name for left_name, right_name in variable_map.items() if right_name not in right_auxiliaries}
         if left_kept != right_kept:
             continue
         try:
@@ -476,7 +472,6 @@ def _normalize_model(model: SymbolicModel) -> SymbolicModel:
 
 def _normalize_constraint(constraint: AffineConstraint) -> AffineConstraint:
     expression = sp.expand(constraint.expression)
-    numeric_coefficients = [coefficient for coefficient in expression.as_coeff_add()[1] if coefficient.is_number]
     coefficient, _ = expression.as_coeff_Mul()
     if coefficient.is_Rational and coefficient != 0:
         if constraint.sense == "=" or coefficient > 0:
@@ -511,7 +506,11 @@ def _eliminate_affine_alias(
 ) -> tuple[SymbolicModel, str] | None:
     for auxiliary in sorted(auxiliaries):
         symbol = sp.Symbol(auxiliary, real=True)
-        defining = [constraint for constraint in model.constraints if constraint.sense == "=" and symbol in constraint.expression.free_symbols]
+        defining = [
+            constraint
+            for constraint in model.constraints
+            if constraint.sense == "=" and symbol in constraint.expression.free_symbols
+        ]
         if len(defining) != 1:
             continue
         coefficient = sp.expand(defining[0].expression).coeff(symbol)
@@ -577,7 +576,11 @@ def _project_continuous(model: SymbolicModel, auxiliaries: set[str]) -> Symbolic
                 zero.append(constraint)
         combined = [AffineConstraint(sp.expand(upper + lower), "<=") for upper in positive for lower in negative]
         constraints = zero + combined
-    return _normalize_model(replace(model, constraints=tuple(constraints), variables=tuple(v for v in model.variables if v.name not in auxiliaries)))
+    return _normalize_model(
+        replace(
+            model, constraints=tuple(constraints), variables=tuple(v for v in model.variables if v.name not in auxiliaries)
+        )
+    )
 
 
 def _polyhedra_equal(left: SymbolicModel, right: SymbolicModel, variables: list[str]) -> tuple[bool, int]:
@@ -607,7 +610,11 @@ def _farkas_certificate(
     conclusion_coefficients, conclusion_constant = _numeric_row(conclusion.expression, variables)
     variable_count = len(inequalities) + 2 * len(equalities)
     if variable_count == 0:
-        return FarkasCertificate((), ()) if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients) else None
+        return (
+            FarkasCertificate((), ())
+            if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients)
+            else None
+        )
     equality_matrix: list[list[float]] = []
     equality_rhs: list[float] = []
     for index in range(len(variables)):
@@ -617,7 +624,11 @@ def _farkas_certificate(
             + [-float(row[0][index]) for row in equality_vectors]
         )
         equality_rhs.append(float(conclusion_coefficients[index]))
-    upper_matrix = [[-float(row[1]) for row in premise_vectors] + [-float(row[1]) for row in equality_vectors] + [float(row[1]) for row in equality_vectors]]
+    upper_matrix = [
+        [-float(row[1]) for row in premise_vectors]
+        + [-float(row[1]) for row in equality_vectors]
+        + [float(row[1]) for row in equality_vectors]
+    ]
     upper_rhs = [-float(conclusion_constant)]
     result = linprog(
         c=np.zeros(variable_count),
@@ -663,7 +674,13 @@ def _numeric_row(expression: sp.Expr, variables: list[str]) -> tuple[list[Fracti
     symbols = [sp.Symbol(name, real=True) for name in variables]
     expanded = sp.expand(expression)
     coefficients = [_as_fraction(expanded.coeff(symbol)) for symbol in symbols]
-    constant = _as_fraction(expanded - sum(sp.Rational(value.numerator, value.denominator) * symbol for value, symbol in zip(coefficients, symbols, strict=True)))
+    constant = _as_fraction(
+        expanded
+        - sum(
+            sp.Rational(value.numerator, value.denominator) * symbol
+            for value, symbol in zip(coefficients, symbols, strict=True)
+        )
+    )
     return coefficients, constant
 
 

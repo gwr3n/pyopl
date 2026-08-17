@@ -107,5 +107,5 @@ module = "pyopl.pyopl_ide_bootstrap"
 disable_error_code = ["import-untyped"]
 
 [[tool.mypy.overrides]]
-module = ["networkx", "networkx.*", "scipy.optimize"]
+module = ["networkx", "networkx.*", "scipy.optimize", "sympy", "sympy.*"]
 ignore_missing_imports = true

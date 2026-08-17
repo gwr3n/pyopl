@@ -336,9 +336,7 @@ class _AbstractGraphBuilder:
         value_operator = value.get("op") if node_type == "binop" else node_type
         if value_operator != operator:
             return [value]
-        return self._flatten_operator(value.get("left"), operator) + self._flatten_operator(
-            value.get("right"), operator
-        )
+        return self._flatten_operator(value.get("left"), operator) + self._flatten_operator(value.get("right"), operator)
 
     def _populate_mapping(
         self,
