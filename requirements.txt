@@ -2,6 +2,7 @@
 sly>=0.5
 numpy>=1.26
 scipy>=1.14
+sympy>=1.14
 
 # Mathematical Programming bakcends
 gurobipy>=11.0
