@@ -26,8 +26,8 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
-from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
-from .pyopl_core import OPLCompiler, export_model, linear_problem_from_opl
+from .model_equivalence import compare_models, comparison_result_to_dict
+from .pyopl_core import OPLCompiler, export_model
 from .pyopl_ide_bootstrap import OPLIDE
 
 
@@ -63,30 +63,25 @@ def _export_lp_mps(model_path: Path, data_path: Optional[Path], out_file: Path) 
     return export_model(model_code, data_code, "scipy", out_file)
 
 
-def _equivalence_result_to_dict(result: EquivalenceResult) -> dict:
-    return {
-        "status": result.status,
-        "equivalent": result.equivalent,
-        "level": result.level,
-        "reason": result.reason,
-        "proof_steps": list(result.proof_steps),
-        "counterexample": result.counterexample,
-    }
-
-
 def _compare_models(
     left_model_path: Path,
     right_model_path: Path,
     left_data_path: Optional[Path],
     right_data_path: Optional[Path],
+    strategy: str = "abstract",
 ) -> dict:
     left_model_code = _read_text(left_model_path)
     right_model_code = _read_text(right_model_path)
     left_data_code = _read_text(left_data_path) if left_data_path else None
     right_data_code = _read_text(right_data_path) if right_data_path else None
-    left_problem = linear_problem_from_opl(left_model_code, left_data_code)
-    right_problem = linear_problem_from_opl(right_model_code, right_data_code)
-    return _equivalence_result_to_dict(prove_equivalent(left_problem, right_problem))
+    result = compare_models(
+        left_model_code,
+        right_model_code,
+        strategy=strategy,
+        left_data_text=left_data_code,
+        right_data_text=right_data_code,
+    )
+    return comparison_result_to_dict(result, strategy=strategy)
 
 
 def _validate_input_file(path: Path, label: str) -> bool:
@@ -119,6 +114,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_compare.add_argument("right_model", help="Path to the right model (.mod)")
     p_compare.add_argument("--left-data", help="Optional data (.dat) for the left model")
     p_compare.add_argument("--right-data", help="Optional data (.dat) for the right model")
+    p_compare.add_argument(
+        "--strategy",
+        choices=["concrete", "abstract"],
+        default="abstract",
+        help="Comparison strategy (default abstract)",
+    )
     p_compare.add_argument("--out-file", help="Write comparison JSON to file instead of stdout")
 
     # genai group
@@ -239,7 +240,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             with redirect_stdout(sys.stderr):
-                result = _compare_models(left_model_path, right_model_path, left_data_path, right_data_path)
+                result = _compare_models(
+                    left_model_path,
+                    right_model_path,
+                    left_data_path,
+                    right_data_path,
+                    args.strategy,
+                )
             out_text = json.dumps(result, indent=2, sort_keys=True, default=str)
             if args.out_file:
                 _write_text(Path(args.out_file), out_text)

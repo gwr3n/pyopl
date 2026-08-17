@@ -760,7 +760,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
 - Subcommands:
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it).
-  - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Use `--left-data <left.dat>` and `--right-data <right.dat>` when either model needs data, and `--out-file <path>` to write the comparison JSON to a file.
+  - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison compares model schemas before data materialization; concrete comparison uses optional `--left-data` and `--right-data`. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/google/ollama).
     - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
@@ -777,8 +777,11 @@ python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out lp --out-file tmp/lot_sizing.lp
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out mps --out-file tmp/lot_sizing.mps
 
-# Compare two models for MILP equivalence
-python -m pyopl compare left.mod right.mod --left-data left.dat --right-data right.dat --out-file tmp/comparison.json
+# Compare two concrete model instances
+python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --out-file tmp/comparison.json
+
+# Compare parameterized model schemas without instantiating data
+python -m pyopl compare left.mod right.mod --strategy abstract
 
 # Generate insight (GenAI) and save to Markdown
 python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
@@ -786,7 +789,7 @@ python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --pr
 
 Notes:
 - LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
-- `compare` returns JSON with `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`, using the same MILP equivalence engine exposed by the IDE and MCP tools.
+- `compare` returns JSON with `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`. The IDE's Compare models dialog exposes the same concrete/abstract strategy selector.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
@@ -801,7 +804,7 @@ PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so exter
   - **read_pyopl_grammar_tool**: Return the bundled grammar text.
   - **solve_strings_tool**: Compile and solve a model from `model_text` and optional `data_text`.
   - **export_py_strings_tool**: Compile `model_text` and optional `data_text` to generated Python source and return it as a string.
-  - **compare_model_strings_tool**: Compare two OPL models from strings using the same MILP equivalence engine as the IDE's Compare models workflow. Returns `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
+  - **compare_model_strings_tool**: Compare two OPL models from strings using `strategy="concrete"` or `strategy="abstract"`, matching the IDE's Compare models workflow. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
 - **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
 - **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:

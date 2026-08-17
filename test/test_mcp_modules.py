@@ -98,7 +98,7 @@ class TestPyOPLMCP(unittest.TestCase):
 
         with patch.object(_pyopl_mcp, "compare_model_strings", return_value={"equivalent": True}) as compare_mock:
             self.assertEqual(_pyopl_mcp.compare_model_strings_tool("left", "right", None, None), {"equivalent": True})
-        compare_mock.assert_called_once_with("left", "right", None, None)
+        compare_mock.assert_called_once_with("left", "right", None, None, "abstract")
 
         with patch.object(pyopl_mcp.mcp, "run") as run_mock:
             pyopl_mcp.main()
@@ -124,13 +124,28 @@ class TestPyOPLMCP(unittest.TestCase):
             }
             """
 
-        result = _pyopl_mcp.compare_model_strings_tool(left_model, right_model)
+        result = _pyopl_mcp.compare_model_strings_tool(left_model, right_model, strategy="concrete")
 
         self.assertEqual(result["status"], "equivalent")
+        self.assertEqual(result["strategy"], "concrete")
         self.assertTrue(result["equivalent"])
         self.assertEqual(result["level"], "solver_implied")
         self.assertIn("normalized both models", result["proof_steps"])
         self.assertIsNone(result["counterexample"])
+
+    def test_compare_model_strings_selects_abstract_strategy(self):
+        left_model = "dvar float x; minimize x; subject to { x >= 0; }"
+        right_model = "dvar float y; minimize y; subject to { y >= 0; }"
+
+        result = _pyopl_mcp.compare_model_strings_tool(
+            left_model,
+            right_model,
+            strategy="abstract",
+        )
+
+        self.assertEqual(result["strategy"], "abstract")
+        self.assertEqual(result["status"], "equivalent")
+        self.assertEqual(result["level"], "schema_isomorphic")
 
 
 class TestRhetorMCP(unittest.TestCase):

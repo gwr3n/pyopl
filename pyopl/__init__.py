@@ -5,6 +5,7 @@ import os
 import sys
 
 from .genai.pyopl_generative import generative_feedback, generative_solve
+from .model_equivalence import compare_models
 from .pyopl_core import solve
 
 __version__ = "1.9.6"
@@ -18,4 +19,4 @@ __url__ = "https://github.com/gwr3n/pyopl"
 icon_dir = os.path.join(os.path.dirname(__file__), "icon")
 if os.path.isdir(icon_dir) and icon_dir not in sys.path:
     sys.path.append(icon_dir)
-__all__ = ["solve", "generative_solve", "generative_feedback"]
+__all__ = ["solve", "compare_models", "generative_solve", "generative_feedback"]

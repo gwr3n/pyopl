@@ -79,9 +79,11 @@ class CompareTests(unittest.TestCase):
             "/tmp/right.mod",
             "/tmp/left.dat",
             "",
+            "concrete",
         )
 
         self.assertIn("Status: different", formatted)
+        self.assertIn("Strategy: concrete", formatted)
         self.assertIn("Equivalent: No", formatted)
         self.assertIn("Level: solver_implied", formatted)
         self.assertIn("Reason: normalized graphs are not isomorphic", formatted)

@@ -202,7 +202,7 @@ PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so exter
   - **read_pyopl_grammar_tool**: Return the bundled grammar text.
   - **solve_strings_tool**: Compile and solve a model from `model_text` and optional `data_text`.
   - **export_py_strings_tool**: Compile `model_text` and optional `data_text` to generated Python source and return it as a string.
-  - **compare_model_strings_tool**: Compare two OPL models from strings using the same MILP equivalence engine as the IDE's Compare models workflow. Returns `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
+  - **compare_model_strings_tool**: Compare two OPL models from strings using the selectable `concrete` or `abstract` strategy, matching the IDE's Compare models workflow. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
 - **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
 - **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:

@@ -36,13 +36,12 @@ from .genai.model_discovery import (
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
-from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
+from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
     OPLDataParser,
     OPLLexer,
     OPLParser,
-    linear_problem_from_opl,
 )
 from .pyopl_core import (
     export_model as export_opl_model,
@@ -272,9 +271,14 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
 
 
 def _compare_models_wrapper(
-    left_model: str, left_data: str, right_model: str, right_data: str, q: multiprocessing.Queue
+    left_model: str,
+    left_data: str,
+    right_model: str,
+    right_data: str,
+    strategy: str,
+    q: multiprocessing.Queue,
 ) -> None:
-    """Wrapper to compile and compare models in a separate process."""
+    """Wrapper to compare models in a separate process."""
 
     def read_optional_file(path: str) -> Optional[str]:
         if not path:
@@ -283,15 +287,19 @@ def _compare_models_wrapper(
             content = file_obj.read()
         return content if content.strip() else None
 
-    def compile_path(model_path: str, data_path: str):
+    def read_model(model_path: str) -> str:
         with open(model_path, "r", encoding="utf-8") as file_obj:
-            model_code = file_obj.read()
-        return linear_problem_from_opl(model_code, read_optional_file(data_path))
+            return file_obj.read()
 
     try:
-        left_problem = compile_path(left_model, left_data)
-        right_problem = compile_path(right_model, right_data)
-        q.put(("success", prove_equivalent(left_problem, right_problem)))
+        result = compare_models(
+            read_model(left_model),
+            read_model(right_model),
+            strategy=strategy,
+            left_data_text=read_optional_file(left_data),
+            right_data_text=read_optional_file(right_data),
+        )
+        q.put(("success", result))
     except Exception as exc:
         q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
 
@@ -3065,10 +3073,23 @@ class OPLIDE(tk.Tk):
         root = ttk.Frame(dialog, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(1, weight=1)
+        root.rowconfigure(2, weight=1)
+
+        strategy_frame = ttk.Frame(root)
+        strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(strategy_frame, text="Comparison strategy").pack(side=tk.LEFT, padx=(0, 8))
+        strategy_var = tk.StringVar(value="abstract")
+        strategy_combo = ttk.Combobox(
+            strategy_frame,
+            textvariable=strategy_var,
+            values=("concrete", "abstract"),
+            state="readonly",
+            width=16,
+        )
+        strategy_combo.pack(side=tk.LEFT)
 
         path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
-        path_frame.grid(row=0, column=0, sticky="ew")
+        path_frame.grid(row=1, column=0, sticky="ew")
         path_frame.columnconfigure(1, weight=1)
 
         left_model_var = tk.StringVar(value=self.model_file or "")
@@ -3095,23 +3116,41 @@ class OPLIDE(tk.Tk):
                 target.set(fname)
 
         browse_buttons: list[ttk.Button] = []
+        data_controls: list[tk.Widget] = []
         compare_process: Optional[multiprocessing.Process] = None
         compare_queue: Optional[multiprocessing.Queue] = None
 
-        def add_path_row(row: int, label: str, var: tk.StringVar, browse_command: Callable[[], None]) -> None:
+        def add_path_row(
+            row: int,
+            label: str,
+            var: tk.StringVar,
+            browse_command: Callable[[], None],
+            *,
+            is_data: bool = False,
+        ) -> None:
             ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-            ttk.Entry(path_frame, textvariable=var).grid(row=row, column=1, sticky="ew", pady=4)
+            entry = ttk.Entry(path_frame, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
             browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
             browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
             browse_buttons.append(browse_button)
+            if is_data:
+                data_controls.extend((entry, browse_button))
 
         add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
-        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var), is_data=True)
         add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
-        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var), is_data=True)
+
+        def update_strategy_controls(*_args: object) -> None:
+            state = "disabled" if strategy_var.get() == "abstract" else "normal"
+            for control in data_controls:
+                control.config(state=state)
+
+        strategy_var.trace_add("write", update_strategy_controls)
 
         result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
-        result_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         result_frame.rowconfigure(0, weight=1)
         result_frame.columnconfigure(0, weight=1)
 
@@ -3121,7 +3160,7 @@ class OPLIDE(tk.Tk):
         result_text.config(state="disabled")
 
         button_frame = ttk.Frame(root)
-        button_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         button_frame.columnconfigure(0, weight=1)
         compare_button = ttk.Button(button_frame, text="Compare")
         compare_button.grid(row=0, column=1, padx=(0, 8))
@@ -3132,6 +3171,9 @@ class OPLIDE(tk.Tk):
             state = "disabled" if running else "normal"
             for control in browse_buttons:
                 control.config(state=state)
+            strategy_combo.config(state="disabled" if running else "readonly")
+            if not running:
+                update_strategy_controls()
             close_button.config(state=state)
             compare_button.config(
                 text=("Interrupt" if running else "Compare"),
@@ -3210,8 +3252,17 @@ class OPLIDE(tk.Tk):
             cleanup_compare_process(cancel_queue_thread=False)
             set_compare_running(False)
 
-            if kind == "success" and isinstance(payload, EquivalenceResult):
-                set_result(self._format_equivalence_result(payload, left_model, right_model, left_data, right_data))
+            if kind == "success" and hasattr(payload, "status") and hasattr(payload, "proof_steps"):
+                set_result(
+                    self._format_equivalence_result(
+                        payload,
+                        left_model,
+                        right_model,
+                        left_data,
+                        right_data,
+                        strategy_var.get(),
+                    )
+                )
                 self.status_var.set(f"Compare models: {payload.status}")
                 return
 
@@ -3226,16 +3277,18 @@ class OPLIDE(tk.Tk):
             right_model = right_model_var.get().strip()
             left_data = left_data_var.get().strip()
             right_data = right_data_var.get().strip()
+            strategy = strategy_var.get()
 
             if not left_model or not right_model:
                 messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
                 return
-            for label, path in (
+            paths = [
                 ("Left model", left_model),
                 ("Right model", right_model),
-                ("Left data", left_data),
-                ("Right data", right_data),
-            ):
+            ]
+            if strategy == "concrete":
+                paths.extend((("Left data", left_data), ("Right data", right_data)))
+            for label, path in paths:
                 if path and not os.path.exists(path):
                     messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
                     return
@@ -3244,11 +3297,11 @@ class OPLIDE(tk.Tk):
                 compare_queue = multiprocessing.Queue()
                 compare_process = multiprocessing.Process(
                     target=_compare_models_wrapper,
-                    args=(left_model, left_data, right_model, right_data, compare_queue),
+                    args=(left_model, left_data, right_model, right_data, strategy, compare_queue),
                 )
                 compare_process.start()
                 set_compare_running(True)
-                set_result("Compiling and comparing models...\n")
+                set_result(f"Comparing models with the {strategy} strategy...\n")
                 self.status_var.set("Compare models running...")
                 dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
             except Exception as exc:
@@ -3268,16 +3321,18 @@ class OPLIDE(tk.Tk):
 
     @staticmethod
     def _format_equivalence_result(
-        result: EquivalenceResult,
+        result: ModelComparisonResult,
         left_model: str,
         right_model: str,
         left_data: str = "",
         right_data: str = "",
+        strategy: str = "abstract",
     ) -> str:
         """Format an EquivalenceResult for the compare-models dialog."""
         lines = [
             "Compare models",
             "",
+            f"Strategy: {strategy}",
             f"Status: {result.status}",
             f"Equivalent: {'Yes' if result.equivalent else 'No'}",
             f"Level: {result.level}",

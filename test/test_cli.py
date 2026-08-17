@@ -88,7 +88,32 @@ class TestCLI(unittest.TestCase):
 
             self.assertEqual(ret, 0)
             self.assertEqual(json.loads(buf.getvalue()), result)
-            compare_mock.assert_called_once_with(left_model, right_model, left_data, right_data)
+            compare_mock.assert_called_once_with(left_model, right_model, left_data, right_data, "abstract")
+
+    def test_cli_compare_selects_abstract_strategy(self):
+        result = {
+            "strategy": "abstract",
+            "status": "equivalent",
+            "equivalent": True,
+            "level": "schema_isomorphic",
+        }
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            left_model.write_text("dvar float x; minimize x; subject to { x >= 0; }", encoding="utf-8")
+            right_model.write_text("dvar float y; minimize y; subject to { y >= 0; }", encoding="utf-8")
+
+            with patch("pyopl.pyopl_cli._compare_models", return_value=result) as compare_mock:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    ret = pyopl_cli.main(
+                        ["compare", str(left_model), str(right_model), "--strategy", "abstract"]
+                    )
+
+            self.assertEqual(ret, 0)
+            self.assertEqual(json.loads(buf.getvalue()), result)
+            compare_mock.assert_called_once_with(left_model, right_model, None, None, "abstract")
 
     def test_cli_compare_models_outfile(self):
         result = {"status": "different", "equivalent": False, "level": "solver_implied"}

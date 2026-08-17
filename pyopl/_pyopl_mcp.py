@@ -30,8 +30,8 @@ from typing import Optional, TypeVar, Union
 from mcp.server.fastmcp import FastMCP
 
 from . import solve
-from .milp_concrete_equivalence import EquivalenceResult, prove_equivalent
-from .pyopl_core import OPLCompiler, linear_problem_from_opl
+from .model_equivalence import compare_models, comparison_result_to_dict
+from .pyopl_core import OPLCompiler
 
 PathLike = Union[str, Path]
 T = TypeVar("T")
@@ -145,28 +145,22 @@ def export_py_from_strings(
     return _compile_to_python(model_text, data_text, solver=solver)
 
 
-def _equivalence_result_to_dict(result: EquivalenceResult) -> dict:
-    """Convert an equivalence result to an MCP-friendly JSON object."""
-    return {
-        "status": result.status,
-        "equivalent": result.equivalent,
-        "level": result.level,
-        "reason": result.reason,
-        "proof_steps": list(result.proof_steps),
-        "counterexample": result.counterexample,
-    }
-
-
 def compare_model_strings(
     left_model_text: str,
     right_model_text: str,
     left_data_text: Optional[str] = None,
     right_data_text: Optional[str] = None,
+    strategy: str = "abstract",
 ) -> dict:
     """Compare two OPL models provided as strings for MILP equivalence."""
-    left_problem = linear_problem_from_opl(left_model_text, left_data_text)
-    right_problem = linear_problem_from_opl(right_model_text, right_data_text)
-    return _equivalence_result_to_dict(prove_equivalent(left_problem, right_problem))
+    result = compare_models(
+        left_model_text,
+        right_model_text,
+        strategy=strategy,
+        left_data_text=left_data_text,
+        right_data_text=right_data_text,
+    )
+    return comparison_result_to_dict(result, strategy=strategy)
 
 
 def read_pyopl_grammar() -> str:
@@ -283,6 +277,7 @@ def compare_model_strings_tool(
     right_model_text: str,
     left_data_text: Optional[str] = None,
     right_data_text: Optional[str] = None,
+    strategy: str = "abstract",
 ) -> dict:
     """Compare two OPL models provided as strings for MILP equivalence.
 
@@ -295,12 +290,13 @@ def compare_model_strings_tool(
         right_model_text: OPL source for the right model.
         left_data_text: Optional OPL data contents for the left model.
         right_data_text: Optional OPL data contents for the right model.
+        strategy: Comparison strategy: ``concrete`` or ``abstract``.
 
     Returns:
         A dictionary containing status, equivalent, level, reason, proof_steps,
         and counterexample fields.
     """
-    return compare_model_strings(left_model_text, right_model_text, left_data_text, right_data_text)
+    return compare_model_strings(left_model_text, right_model_text, left_data_text, right_data_text, strategy)
 
 
 if __name__ == "__main__":
