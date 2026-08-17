@@ -292,6 +292,63 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertIn("scalar declarations", result.reason)
 
+    def test_algebraic_mode_grounds_indexed_schema_with_data(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            float c[I] = ...;
+            dvar float+ x[I];
+            minimize sum(i in I) c[i] * x[i];
+            subject to { forall(i in I) x[i] <= 2; }
+        """
+        right = """
+            int N = ...;
+            range I = 1..N;
+            float c[I] = ...;
+            dvar float+ x[I];
+            minimize sum(i in I) x[i] * c[i];
+            subject to { forall(i in I) 2 >= x[i]; }
+        """
+        data = "N = 3; c = [1, 2, 3];"
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            left_data_text=data,
+            right_data_text=data,
+        )
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "symbolically_normalized")
+        self.assertIn("grounded finite indexed schemas", " ".join(result.proof_steps))
+
+    def test_grounded_indexed_formulations_infer_unmatched_auxiliaries(self):
+        left = """
+            int N = ...; range I = 1..N;
+            dvar boolean x[I]; dvar float+ load[I];
+            minimize sum(i in I) x[i];
+            subject to { forall(i in I) load[i] >= x[i]; }
+        """
+        right = """
+            int N = ...; range I = 1..N;
+            dvar boolean x[I]; dvar float+ flow[I][I];
+            minimize sum(i in I) x[i];
+            subject to { forall(i in I) sum(j in I) flow[i][j] >= x[i]; }
+        """
+        data = "N = 2;"
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            left_data_text=data,
+            right_data_text=data,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("mixed integer/continuous projection", result.reason)
+
 
 if __name__ == "__main__":
     unittest.main()

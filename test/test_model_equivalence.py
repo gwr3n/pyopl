@@ -59,6 +59,29 @@ class ModelEquivalenceApiTests(unittest.TestCase):
         self.assertEqual(payload["strategy"], "abstract")
         self.assertTrue(payload["equivalent"])
 
+    def test_abstract_strategy_passes_data_for_indexed_algebra(self):
+        left = """
+            int N = ...; range I = 1..N; float c[I] = ...; dvar float+ x[I];
+            minimize sum(i in I) c[i] * x[i];
+            subject to { forall(i in I) x[i] <= 2; }
+        """
+        right = """
+            int N = ...; range I = 1..N; float c[I] = ...; dvar float+ x[I];
+            minimize sum(i in I) x[i] * c[i];
+            subject to { forall(i in I) 2 >= x[i]; }
+        """
+        data = "N = 2; c = [4, 5];"
+
+        result = compare_models(
+            left,
+            right,
+            strategy="abstract",
+            left_data_text=data,
+            right_data_text=data,
+        )
+
+        self.assertTrue(result.equivalent)
+
     def test_compare_models_rejects_unknown_strategy(self):
         with self.assertRaisesRegex(ValueError, "unsupported model comparison strategy"):
             compare_models("left", "right", strategy="unsupported")

@@ -3116,7 +3116,6 @@ class OPLIDE(tk.Tk):
                 target.set(fname)
 
         browse_buttons: list[ttk.Button] = []
-        data_controls: list[ttk.Entry | ttk.Button] = []
         compare_process: Optional[multiprocessing.Process] = None
         compare_queue: Optional[multiprocessing.Queue] = None
 
@@ -3125,8 +3124,6 @@ class OPLIDE(tk.Tk):
             label: str,
             var: tk.StringVar,
             browse_command: Callable[[], None],
-            *,
-            is_data: bool = False,
         ) -> None:
             ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
             entry = ttk.Entry(path_frame, textvariable=var)
@@ -3134,20 +3131,11 @@ class OPLIDE(tk.Tk):
             browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
             browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
             browse_buttons.append(browse_button)
-            if is_data:
-                data_controls.extend((entry, browse_button))
 
         add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
-        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var), is_data=True)
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
         add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
-        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var), is_data=True)
-
-        def update_strategy_controls(*_args: object) -> None:
-            state = "disabled" if strategy_var.get() == "abstract" else "normal"
-            for control in data_controls:
-                control.config(state=state)
-
-        strategy_var.trace_add("write", update_strategy_controls)
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
 
         result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
         result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
@@ -3172,8 +3160,6 @@ class OPLIDE(tk.Tk):
             for control in browse_buttons:
                 control.config(state=state)
             strategy_combo.config(state="disabled" if running else "readonly")
-            if not running:
-                update_strategy_controls()
             close_button.config(state=state)
             compare_button.config(
                 text=("Interrupt" if running else "Compare"),
@@ -3285,9 +3271,9 @@ class OPLIDE(tk.Tk):
             paths = [
                 ("Left model", left_model),
                 ("Right model", right_model),
+                ("Left data", left_data),
+                ("Right data", right_data),
             ]
-            if strategy == "concrete":
-                paths.extend((("Left data", left_data), ("Right data", right_data)))
             for label, path in paths:
                 if path and not os.path.exists(path):
                     messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)

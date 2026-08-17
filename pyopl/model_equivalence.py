@@ -25,8 +25,8 @@ def compare_models(
     ``strategy="concrete"`` instantiates each model with its optional data and
     compares the resulting matrix models. ``strategy="abstract"`` compares the
     model families before data materialization, using structural comparison
-    followed by the supported algebraic proof backend. Data inputs are ignored
-    for abstract comparison.
+    followed by the supported algebraic proof backend. When data is supplied,
+    it may also ground finite indexed schemas for instance-level algebraic proof.
     """
 
     if strategy == "concrete":
@@ -34,7 +34,13 @@ def compare_models(
         right_problem = linear_problem_from_opl(right_model_text, right_data_text)
         return prove_equivalent(left_problem, right_problem)
     if strategy == "abstract":
-        return prove_abstract_equivalent(left_model_text, right_model_text, mode="auto")
+        return prove_abstract_equivalent(
+            left_model_text,
+            right_model_text,
+            mode="auto",
+            left_data_text=left_data_text,
+            right_data_text=right_data_text,
+        )
     raise ValueError(f"unsupported model comparison strategy: {strategy}")
 
 

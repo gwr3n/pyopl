@@ -17,6 +17,8 @@ import numpy as np
 import sympy as sp
 from scipy.optimize import linprog
 
+from pyopl.linear_problem import LinearProblem
+
 
 class UnsupportedAlgebra(ValueError):
     pass
@@ -165,6 +167,62 @@ def lower_symbolic_model(
     return model
 
 
+def lower_linear_problem(problem: LinearProblem) -> SymbolicModel:
+    """Lower a finite grounded PyOPL matrix model to the symbolic proof IR.
+
+    This adapter lets indexed declarations, sums, and ``forall`` constraints
+    use PyOPL's established finite-domain expansion before certified algebraic
+    comparison. Numeric values are converted through their decimal string so
+    the resulting SymPy expressions use exact rationals rather than binary
+    floating-point approximations.
+    """
+
+    variables: list[Symbol] = []
+    symbols: dict[str, sp.Symbol] = {}
+    constraints: list[AffineConstraint] = []
+    for name, integrality in zip(problem.var_names, problem.integrality, strict=True):
+        value_type = "int" if integrality else "float"
+        variables.append(Symbol(name, "variable", value_type))
+        symbols[name] = sp.Symbol(name, real=True)
+
+    def row_expression(row: Sequence[float], rhs: float) -> sp.Expr:
+        return sp.expand(
+            sum(_rational(coefficient) * symbols[name] for name, coefficient in zip(problem.var_names, row, strict=True))
+            - _rational(rhs)
+        )
+
+    constraints.extend(
+        AffineConstraint(row_expression(row, rhs), "=")
+        for row, rhs in zip(problem.A_eq, problem.b_eq, strict=True)
+    )
+    constraints.extend(
+        AffineConstraint(row_expression(row, rhs), "<=")
+        for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
+    )
+    for name, bounds in zip(problem.var_names, problem.bounds, strict=True):
+        lower, upper = bounds
+        if lower is not None:
+            constraints.append(AffineConstraint(_rational(lower) - symbols[name], "<="))
+        if upper is not None:
+            constraints.append(AffineConstraint(symbols[name] - _rational(upper), "<="))
+
+    objective = sum(
+        _rational(coefficient) * symbols[name]
+        for name, coefficient in zip(problem.var_names, problem.c, strict=True)
+    ) + _rational(problem.objective_offset)
+    return SymbolicModel(
+        parameters=(),
+        variables=tuple(variables),
+        constraints=tuple(constraints),
+        objective=sp.expand(objective),
+        objective_sense=problem.sense,
+    )
+
+
+def _rational(value: object) -> sp.Rational:
+    return sp.Rational(str(value))
+
+
 def prove_algebraic_equivalence(
     left: SymbolicModel,
     right: SymbolicModel,
@@ -254,6 +312,16 @@ def _prove_mapped_models(
         if variable.value_type in {"int", "int+", "boolean"}
     }
     if integer_variables:
+        if any(
+            variable.value_type not in {"int", "int+", "boolean"}
+            for variable in left_normalized.variables + right_normalized.variables
+        ):
+            return AlgebraicProof(
+                "unknown",
+                "presburger_proven",
+                "mixed integer/continuous projection requires a quantified MILP backend",
+                tuple(dict.fromkeys(steps)),
+            )
         return _prove_finite_integer_models(left_normalized, right_normalized, kept_variables, steps)
 
     left_projected = _project_continuous(left_normalized, left_auxiliaries)
@@ -805,6 +873,7 @@ __all__ = [
     "Symbol",
     "SymbolicModel",
     "UnsupportedAlgebra",
+    "lower_linear_problem",
     "lower_symbolic_model",
     "prove_algebraic_equivalence",
 ]

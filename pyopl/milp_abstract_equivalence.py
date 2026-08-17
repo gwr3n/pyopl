@@ -21,8 +21,8 @@ from typing import Any, Collection, Literal, Mapping
 import networkx as nx
 from networkx.algorithms import isomorphism
 
-from pyopl._abstract_algebra import UnsupportedAlgebra, lower_symbolic_model, prove_algebraic_equivalence
-from pyopl.pyopl_core import OPLLexer, OPLParser
+from pyopl._abstract_algebra import UnsupportedAlgebra, lower_linear_problem, lower_symbolic_model, prove_algebraic_equivalence
+from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 
 AbstractEquivalenceStatus = Literal["equivalent", "different", "unknown"]
 AbstractEquivalenceLevel = Literal[
@@ -94,6 +94,8 @@ def prove_abstract_equivalent(
     right_auxiliaries: Collection[str] = (),
     assumptions: Mapping[str, str] | None = None,
     max_rewrite_iterations: int = 12,
+    left_data_text: str | None = None,
+    right_data_text: str | None = None,
 ) -> AbstractEquivalenceResult:
     """Compare two abstract PyOPL models using exact labelled graph isomorphism.
 
@@ -111,10 +113,12 @@ def prove_abstract_equivalent(
     and exhaustive bounded-integer elimination.  ``mode="auto"`` accepts a
     schema isomorphism immediately and otherwise tries the algebraic backend.
 
-    Algebraic mode returns ``unknown`` for unsupported indexed, nonlinear,
-    parameterized-implication, or unbounded-integer fragments.  Parameter
-    values are deliberately not accepted here: concrete instances remain the
-    responsibility of :func:`pyopl.milp_concrete_equivalence.prove_equivalent`.
+    When both data texts are supplied, indexed declarations and quantified
+    constraints may be finitely grounded by PyOPL's matrix lowering before the
+    algebraic proof stages. Such a result proves equivalence for those supplied
+    data instances, not universally for every parameter assignment. Algebraic
+    mode otherwise returns ``unknown`` for unsupported indexed, nonlinear,
+    parameterized-implication, or unbounded-integer fragments.
     """
 
     left_ast = _coerce_ast(left)
@@ -139,16 +143,36 @@ def prove_abstract_equivalent(
             reason=f"unsupported abstract equivalence mode: {mode}",
         )
 
+    grounded_indexed_schema = False
     try:
-        left_model = lower_symbolic_model(left_ast, assumptions)
-        right_model = lower_symbolic_model(right_ast, assumptions)
+        try:
+            left_model = lower_symbolic_model(left_ast, assumptions)
+            right_model = lower_symbolic_model(right_ast, assumptions)
+        except UnsupportedAlgebra:
+            if not isinstance(left, str) or not isinstance(right, str) or left_data_text is None or right_data_text is None:
+                raise
+            left_model = lower_linear_problem(linear_problem_from_opl(left, left_data_text))
+            right_model = lower_linear_problem(linear_problem_from_opl(right, right_data_text))
+            grounded_indexed_schema = True
+        effective_variable_mapping = variable_mapping
+        effective_left_auxiliaries = set(left_auxiliaries)
+        effective_right_auxiliaries = set(right_auxiliaries)
+        if grounded_indexed_schema and effective_variable_mapping is None:
+            left_types = {variable.name: variable.value_type for variable in left_model.variables}
+            right_types = {variable.name: variable.value_type for variable in right_model.variables}
+            shared_names = {
+                name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]
+            }
+            effective_variable_mapping = {name: name for name in shared_names}
+            effective_left_auxiliaries.update(left_types.keys() - shared_names)
+            effective_right_auxiliaries.update(right_types.keys() - shared_names)
         proof = prove_algebraic_equivalence(
             left_model,
             right_model,
             parameter_mapping=parameter_mapping,
-            variable_mapping=variable_mapping,
-            left_auxiliaries=left_auxiliaries,
-            right_auxiliaries=right_auxiliaries,
+            variable_mapping=effective_variable_mapping,
+            left_auxiliaries=effective_left_auxiliaries,
+            right_auxiliaries=effective_right_auxiliaries,
             max_rewrite_iterations=max_rewrite_iterations,
         )
     except UnsupportedAlgebra as exc:
@@ -159,6 +183,8 @@ def prove_abstract_equivalent(
             proof_steps=structural_result.proof_steps if mode == "auto" else (),
         )
     proof_steps = proof.steps
+    if grounded_indexed_schema:
+        proof_steps = ("grounded finite indexed schemas with supplied data",) + proof_steps
     if mode == "auto":
         proof_steps = structural_result.proof_steps + proof_steps
     return AbstractEquivalenceResult(
