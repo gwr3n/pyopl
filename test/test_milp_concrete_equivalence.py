@@ -209,6 +209,95 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(result.status, "equivalent")
         self.assertIn("projected unmapped auxiliary variables", result.proof_steps)
 
+    def test_projected_milp_mode_compares_linked_continuous_auxiliaries(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x", "load"],
+            bounds=[[0, 1], [0, None]],
+            integrality=[1, 0],
+            c=[1.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[[-1.0, 1.0], [0.0, 1.0]],
+            b_ub=[0.0, 1.0],
+        )
+        right = LinearProblem(
+            sense="minimize",
+            var_names=["x", "flow_a", "flow_b"],
+            bounds=[[0, 1], [0, None], [0, None]],
+            integrality=[1, 0, 0],
+            c=[1.0, 0.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[[-1.0, 1.0, 1.0], [0.0, 1.0, 1.0]],
+            b_ub=[0.0, 1.0],
+        )
+
+        result = prove_equivalent(left, right, mode="projected_milp")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "projected_milp_proven")
+        self.assertIn("enumerated", " ".join(result.proof_steps))
+
+    def test_projected_milp_mode_returns_shared_assignment_counterexample(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x", "aux"],
+            bounds=[[0, 1], [0, None]],
+            integrality=[1, 0],
+            c=[1.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[],
+            b_ub=[],
+        )
+        right = LinearProblem(
+            sense="minimize",
+            var_names=["x", "other_aux"],
+            bounds=[[0, 1], [0, None]],
+            integrality=[1, 0],
+            c=[1.0, 0.0],
+            A_eq=[[1.0, 0.0]],
+            b_eq=[0.0],
+            A_ub=[],
+            b_ub=[],
+        )
+
+        result = prove_equivalent(left, right, mode="projected_milp")
+
+        self.assertEqual(result.status, "different")
+        self.assertEqual(result.level, "projected_milp_proven")
+        self.assertIn("x=1", result.counterexample or "")
+
+    def test_auto_mode_falls_back_to_projected_milp(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x", "load"],
+            bounds=[[0, 1], [0, 1]],
+            integrality=[1, 0],
+            c=[1.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[[-1.0, 1.0]],
+            b_ub=[0.0],
+        )
+        right = LinearProblem(
+            sense="minimize",
+            var_names=["x", "flow_a", "flow_b"],
+            bounds=[[0, 1], [0, 1], [0, 1]],
+            integrality=[1, 0, 0],
+            c=[1.0, 0.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[[-1.0, 1.0, 1.0]],
+            b_ub=[0.0],
+        )
+
+        result = prove_equivalent(left, right, mode="auto")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "projected_milp_proven")
+
     def test_compare_accepts_permuted_names_rows_columns_and_row_scaling(self):
         left = LinearProblem(
             sense="minimize",

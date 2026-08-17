@@ -32,7 +32,7 @@ def compare_models(
     if strategy == "concrete":
         left_problem = linear_problem_from_opl(left_model_text, left_data_text)
         right_problem = linear_problem_from_opl(right_model_text, right_data_text)
-        return prove_equivalent(left_problem, right_problem)
+        return prove_equivalent(left_problem, right_problem, mode="auto")
     if strategy == "abstract":
         return prove_abstract_equivalent(
             left_model_text,

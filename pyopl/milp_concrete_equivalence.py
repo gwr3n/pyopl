@@ -46,7 +46,7 @@ from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 from pyopl.linear_problem import BoundValue, LinearProblem, Number, ObjectiveSense
 
 EquivalenceStatus = Literal["equivalent", "different", "unknown"]
-EquivalenceLevel = Literal["structural", "normalized", "solver_implied", "projection"]
+EquivalenceLevel = Literal["structural", "normalized", "solver_implied", "projection", "projected_milp_proven"]
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ def compare(
     return prove_equivalent(
         left,
         right,
-        mode="solver",
+        mode="auto",
         tolerance=tolerance,
         max_iterations=max_iterations,
     ).equivalent
@@ -105,10 +105,11 @@ def prove_equivalent(
     left: LinearProblem,
     right: LinearProblem,
     *,
-    mode: Literal["structural", "normalized", "solver", "projection"] = "solver",
+    mode: Literal["structural", "normalized", "solver", "projection", "projected_milp", "auto"] = "solver",
     variable_mapping: dict[str, str] | None = None,
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
+    max_projected_assignments: int = 100_000,
 ) -> EquivalenceResult:
     """Return a status-bearing equivalence result for two MILP matrix models.
 
@@ -159,6 +160,14 @@ def prove_equivalent(
             an unsupported objective sense, or a nonpositive tolerance.
     """
 
+    if mode == "projected_milp":
+        return _prove_projected_milp_equivalent(
+            left,
+            right,
+            variable_mapping,
+            tolerance,
+            max_projected_assignments,
+        )
     if mode == "projection":
         if variable_mapping is None:
             return EquivalenceResult(
@@ -189,7 +198,7 @@ def prove_equivalent(
             proof_steps=projection_steps + result.proof_steps,
             counterexample=result.counterexample,
         )
-    if mode not in {"structural", "normalized", "solver"}:
+    if mode not in {"structural", "normalized", "solver", "auto"}:
         return EquivalenceResult(
             status="unknown",
             level="projection",
@@ -212,6 +221,10 @@ def prove_equivalent(
         "removed duplicate and solver-proven redundant rows",
     )
     if left_normalized.objective_offset != right_normalized.objective_offset:
+        if mode == "auto":
+            return _prove_projected_milp_equivalent(
+                left, right, variable_mapping, tolerance, max_projected_assignments
+            )
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -220,6 +233,10 @@ def prove_equivalent(
             counterexample="normalized objective offsets differ",
         )
     if len(left_normalized.columns) != len(right_normalized.columns):
+        if mode == "auto":
+            return _prove_projected_milp_equivalent(
+                left, right, variable_mapping, tolerance, max_projected_assignments
+            )
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -228,6 +245,10 @@ def prove_equivalent(
             counterexample="normalized column counts differ",
         )
     if len(left_normalized.rows) != len(right_normalized.rows):
+        if mode == "auto":
+            return _prove_projected_milp_equivalent(
+                left, right, variable_mapping, tolerance, max_projected_assignments
+            )
         return EquivalenceResult(
             status="different",
             level="solver_implied",
@@ -262,6 +283,10 @@ def prove_equivalent(
             reason="normalized graphs are isomorphic",
             proof_steps=proof_steps,
         )
+    if mode == "auto":
+        return _prove_projected_milp_equivalent(
+            left, right, variable_mapping, tolerance, max_projected_assignments
+        )
     return EquivalenceResult(
         status="different",
         level="solver_implied",
@@ -269,6 +294,274 @@ def prove_equivalent(
         proof_steps=proof_steps,
         counterexample="normalized graphs are not isomorphic",
     )
+
+
+def _prove_projected_milp_equivalent(
+    left: LinearProblem,
+    right: LinearProblem,
+    variable_mapping: dict[str, str] | None,
+    tolerance: float,
+    max_assignments: int,
+) -> EquivalenceResult:
+    _validate(left, tolerance)
+    _validate(right, tolerance)
+    if max_assignments <= 0:
+        return EquivalenceResult(
+            status="unknown",
+            level="projected_milp_proven",
+            reason="max_projected_assignments must be positive",
+        )
+
+    mapping = variable_mapping or _infer_shared_binary_mapping(left, right, tolerance)
+    issue = _projected_mapping_issue(left, right, mapping, tolerance)
+    if issue is not None:
+        return EquivalenceResult(
+            status="unknown",
+            level="projected_milp_proven",
+            reason=issue,
+        )
+    objective_issue = _projected_objective_issue(left, right, mapping, tolerance)
+    if objective_issue is not None:
+        return EquivalenceResult(
+            status="different",
+            level="projected_milp_proven",
+            reason=objective_issue,
+            counterexample=objective_issue,
+        )
+
+    checked = 0
+    for source, target, source_to_target in (
+        (left, right, mapping),
+        (right, left, {right_name: left_name for left_name, right_name in mapping.items()}),
+    ):
+        direction = _find_projected_counterexample(
+            source,
+            target,
+            source_to_target,
+            tolerance,
+            max_assignments - checked,
+        )
+        checked += direction[1]
+        if direction[0] == "limit":
+            return EquivalenceResult(
+                status="unknown",
+                level="projected_milp_proven",
+                reason=f"projected MILP enumeration exceeded {max_assignments} shared assignments",
+                proof_steps=("enumerated feasible shared binary assignments with no-good cuts",),
+            )
+        if direction[0] == "solver":
+            return EquivalenceResult(
+                status="unknown",
+                level="projected_milp_proven",
+                reason="projected MILP solver did not return an optimal or infeasible status",
+                proof_steps=("enumerated feasible shared binary assignments with no-good cuts",),
+            )
+        if direction[0] == "counterexample":
+            assignment = direction[2] or {}
+            rendered = ", ".join(f"{name}={value}" for name, value in sorted(assignment.items()))
+            return EquivalenceResult(
+                status="different",
+                level="projected_milp_proven",
+                reason="a shared binary assignment is feasible in only one formulation",
+                proof_steps=(
+                    "enumerated feasible shared binary assignments with no-good cuts",
+                    "checked continuous auxiliary feasibility in the other formulation",
+                ),
+                counterexample=rendered,
+            )
+
+    return EquivalenceResult(
+        status="equivalent",
+        level="projected_milp_proven",
+        reason=f"all {checked} directed feasible shared assignments agree after auxiliary projection",
+        proof_steps=(
+            "validated shared binary variables and objective coefficients",
+            "enumerated feasible shared binary assignments with no-good cuts in both directions",
+            "checked continuous auxiliary feasibility in the other formulation",
+        ),
+    )
+
+
+def _infer_shared_binary_mapping(
+    left: LinearProblem,
+    right: LinearProblem,
+    tolerance: float,
+) -> dict[str, str]:
+    right_index = {name: index for index, name in enumerate(right.var_names)}
+    mapping: dict[str, str] = {}
+    for left_index, name in enumerate(left.var_names):
+        candidate = right_index.get(name)
+        if candidate is None:
+            continue
+        if _is_binary_column(left, left_index, tolerance) and _is_binary_column(right, candidate, tolerance):
+            mapping[name] = name
+    return mapping
+
+
+def _is_binary_column(problem: LinearProblem, index: int, tolerance: float) -> bool:
+    lower, upper = problem.bounds[index]
+    return (
+        problem.integrality[index] != 0
+        and lower is not None
+        and upper is not None
+        and float(lower) >= -tolerance
+        and float(upper) <= 1.0 + tolerance
+        and abs(float(lower) - round(float(lower))) <= tolerance
+        and abs(float(upper) - round(float(upper))) <= tolerance
+    )
+
+
+def _projected_mapping_issue(
+    left: LinearProblem,
+    right: LinearProblem,
+    mapping: dict[str, str],
+    tolerance: float,
+) -> str | None:
+    if not mapping:
+        return "projected MILP comparison requires at least one shared binary variable"
+    left_index = {name: index for index, name in enumerate(left.var_names)}
+    right_index = {name: index for index, name in enumerate(right.var_names)}
+    if len(set(mapping.values())) != len(mapping):
+        return "projected MILP variable mapping must be injective"
+    for left_name, right_name in mapping.items():
+        if left_name not in left_index or right_name not in right_index:
+            return "projected MILP variable mapping references an unknown variable"
+        if not _is_binary_column(left, left_index[left_name], tolerance) or not _is_binary_column(
+            right, right_index[right_name], tolerance
+        ):
+            return "projected MILP comparison currently supports shared binary variables only"
+    mapped_left = set(mapping)
+    mapped_right = set(mapping.values())
+    for problem, mapped in ((left, mapped_left), (right, mapped_right)):
+        for index, name in enumerate(problem.var_names):
+            if name in mapped:
+                continue
+            if problem.integrality[index] != 0:
+                return "projected MILP comparison requires all unmapped auxiliaries to be continuous"
+            if abs(float(problem.c[index])) > tolerance:
+                return "projected MILP comparison requires zero-objective auxiliary variables"
+    return None
+
+
+def _projected_objective_issue(
+    left: LinearProblem,
+    right: LinearProblem,
+    mapping: dict[str, str],
+    tolerance: float,
+) -> str | None:
+    left_sign = -1.0 if left.sense == "maximize" else 1.0
+    right_sign = -1.0 if right.sense == "maximize" else 1.0
+    if abs(left_sign * float(left.objective_offset) - right_sign * float(right.objective_offset)) > tolerance:
+        return "projected objective offsets differ"
+    left_index = {name: index for index, name in enumerate(left.var_names)}
+    right_index = {name: index for index, name in enumerate(right.var_names)}
+    for left_name, right_name in mapping.items():
+        left_coefficient = left_sign * float(left.c[left_index[left_name]])
+        right_coefficient = right_sign * float(right.c[right_index[right_name]])
+        if abs(left_coefficient - right_coefficient) > tolerance:
+            return f"projected objective coefficients differ for {left_name} and {right_name}"
+    return None
+
+
+def _find_projected_counterexample(
+    source: LinearProblem,
+    target: LinearProblem,
+    mapping: dict[str, str],
+    tolerance: float,
+    remaining: int,
+) -> tuple[Literal["complete", "counterexample", "limit", "solver"], int, dict[str, int] | None]:
+    source_indices = {name: source.var_names.index(name) for name in mapping}
+    cuts: list[LinearConstraint] = []
+    checked = 0
+    while True:
+        if checked >= remaining:
+            return "limit", checked, None
+        result = milp(
+            c=np.zeros(len(source.var_names)),
+            integrality=np.asarray(source.integrality, dtype=np.int8),
+            bounds=_problem_bounds(source),
+            constraints=[*_problem_constraints(source), *cuts],
+        )
+        if result.status == 2:
+            return "complete", checked, None
+        if result.status != 0 or result.x is None:
+            return "solver", checked, None
+        assignment = {
+            name: int(round(float(result.x[index])))
+            for name, index in source_indices.items()
+        }
+        checked += 1
+        target_assignment = {mapping[name]: value for name, value in assignment.items()}
+        feasibility = _fixed_assignment_feasibility(target, target_assignment)
+        if feasibility == "infeasible":
+            return "counterexample", checked, assignment
+        if feasibility != "feasible":
+            return "solver", checked, None
+        cuts.append(_no_good_cut(source, assignment, source_indices))
+
+
+def _problem_bounds(problem: LinearProblem) -> Bounds:
+    return Bounds(
+        lb=np.asarray([-float("inf") if bounds[0] is None else float(bounds[0]) for bounds in problem.bounds]),
+        ub=np.asarray([float("inf") if bounds[1] is None else float(bounds[1]) for bounds in problem.bounds]),
+    )
+
+
+def _problem_constraints(problem: LinearProblem) -> list[LinearConstraint]:
+    constraints: list[LinearConstraint] = []
+    if problem.A_eq:
+        rhs = np.asarray(problem.b_eq, dtype=float)
+        constraints.append(LinearConstraint(np.asarray(problem.A_eq, dtype=float), rhs, rhs))
+    if problem.A_ub:
+        constraints.append(
+            LinearConstraint(
+                np.asarray(problem.A_ub, dtype=float),
+                np.full(len(problem.A_ub), -float("inf")),
+                np.asarray(problem.b_ub, dtype=float),
+            )
+        )
+    return constraints
+
+
+def _fixed_assignment_feasibility(
+    problem: LinearProblem,
+    assignment: dict[str, int],
+) -> Literal["feasible", "infeasible", "unknown"]:
+    bounds = _problem_bounds(problem)
+    lower = np.array(bounds.lb, copy=True)
+    upper = np.array(bounds.ub, copy=True)
+    index_by_name = {name: index for index, name in enumerate(problem.var_names)}
+    for name, value in assignment.items():
+        index = index_by_name[name]
+        lower[index] = value
+        upper[index] = value
+    result = milp(
+        c=np.zeros(len(problem.var_names)),
+        integrality=np.asarray(problem.integrality, dtype=np.int8),
+        bounds=Bounds(lower, upper),
+        constraints=_problem_constraints(problem),
+    )
+    if result.status == 0:
+        return "feasible"
+    if result.status == 2:
+        return "infeasible"
+    return "unknown"
+
+
+def _no_good_cut(
+    problem: LinearProblem,
+    assignment: dict[str, int],
+    indices: dict[str, int],
+) -> LinearConstraint:
+    coefficients = np.zeros(len(problem.var_names))
+    one_count = 0
+    for name, value in assignment.items():
+        if value == 1:
+            coefficients[indices[name]] = 1.0
+            one_count += 1
+        else:
+            coefficients[indices[name]] = -1.0
+    return LinearConstraint(coefficients, -float("inf"), float(one_count - 1))
 
 
 def _to_graph(problem: _NormalizedProblem) -> nx.Graph:

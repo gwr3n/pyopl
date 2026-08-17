@@ -25,6 +25,21 @@ class ModelEquivalenceApiTests(unittest.TestCase):
         self.assertIsInstance(result, EquivalenceResult)
         self.assertTrue(result.equivalent)
 
+    def test_concrete_strategy_uses_projected_milp_fallback(self):
+        left = """
+            dvar boolean x; dvar float+ load;
+            minimize x; subject to { load <= x; }
+        """
+        right = """
+            dvar boolean x; dvar float+ flowA; dvar float+ flowB;
+            minimize x; subject to { flowA + flowB <= x; }
+        """
+
+        result = compare_models(left, right, strategy="concrete")
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.level, "projected_milp_proven")
+
     def test_compare_models_selects_abstract_strategy_without_data(self):
         left = """
             int N = ...;

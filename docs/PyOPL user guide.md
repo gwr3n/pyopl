@@ -789,7 +789,7 @@ python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --pr
 
 Notes:
 - LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
-- `compare` returns JSON with `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`. The IDE's Compare models dialog exposes the same concrete/abstract strategy selector.
+- `compare` returns JSON with `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`. The IDE's Compare models dialog exposes the same concrete/abstract strategy selector. Concrete comparison first tries normalized graph isomorphism, then falls back to projected MILP comparison when models share binary decision variables but use different continuous auxiliary formulations. A successful fallback reports level `projected_milp_proven`.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
