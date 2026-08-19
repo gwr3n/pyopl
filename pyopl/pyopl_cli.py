@@ -91,7 +91,7 @@ def _validate_input_file(path: Path, label: str) -> bool:
     return False
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pyopl", description="PyOPL command-line interface")
 
     subparsers = parser.add_subparsers(dest="command")
@@ -162,8 +162,89 @@ def main(argv: Optional[list[str]] = None) -> int:
     p_genai_ask.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use")
     p_genai_ask.add_argument("--out-file", help="Write feedback JSON to file")
 
-    args = parser.parse_args(argv)
+    return parser
 
+
+def _handle_solve(args: argparse.Namespace) -> int:
+    model_path = Path(args.model)
+    data_path = Path(args.data) if args.data else None
+    if not _validate_input_file(model_path, "model"):
+        return 2
+    if data_path and not _validate_input_file(data_path, "data"):
+        return 2
+
+    solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
+    try:
+        if args.out == "json":
+            with redirect_stdout(sys.stderr):
+                results = _run_solve(model_path, data_path, solver_key)
+            out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
+            if args.out_file:
+                _write_text(Path(args.out_file), out_text)
+            else:
+                print(out_text)
+            return 0
+
+        if args.out == "py":
+            code = _export_py(model_path, data_path, solver_key)
+            if args.out_file:
+                _write_text(Path(args.out_file), code)
+            else:
+                print(code)
+            return 0
+
+        if not args.out_file:
+            print(f"Error: --out {args.out} requires --out-file", file=sys.stderr)
+            return 2
+        out_path = Path(args.out_file)
+        if out_path.suffix.lower() != f".{args.out}":
+            print(f"Error: --out {args.out} requires an output file ending in .{args.out}", file=sys.stderr)
+            return 2
+        with redirect_stdout(sys.stderr):
+            _export_lp_mps(model_path, data_path, out_path)
+        return 0
+    except Exception as exc:
+        print(f"Error during solve/export: {exc}", file=sys.stderr)
+        return 1
+
+
+def _handle_compare(args: argparse.Namespace) -> int:
+    left_model_path = Path(args.left_model)
+    right_model_path = Path(args.right_model)
+    left_data_path = Path(args.left_data) if args.left_data else None
+    right_data_path = Path(args.right_data) if args.right_data else None
+
+    input_files = (
+        (left_model_path, "left model"),
+        (right_model_path, "right model"),
+        (left_data_path, "left data"),
+        (right_data_path, "right data"),
+    )
+    for path, label in input_files:
+        if path and not _validate_input_file(path, label):
+            return 2
+
+    try:
+        with redirect_stdout(sys.stderr):
+            result = _compare_models(
+                left_model_path,
+                right_model_path,
+                left_data_path,
+                right_data_path,
+                args.strategy,
+            )
+        out_text = json.dumps(result, indent=2, sort_keys=True, default=str)
+        if args.out_file:
+            _write_text(Path(args.out_file), out_text)
+        else:
+            print(out_text)
+        return 0
+    except Exception as exc:
+        print(f"Error during compare: {exc}", file=sys.stderr)
+        return 1
+
+
+def _dispatch_command(args: argparse.Namespace) -> int:
     # Default/no-command => launch IDE (preserve existing behaviour)
     if not args.command:
         ide = OPLIDE(debug=False)
@@ -178,84 +259,10 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # HANDLE OTHER SUBCOMMANDS
     if args.command == "solve":
-        model_path = Path(args.model)
-        data_path = Path(args.data) if args.data else None
-        if not model_path.exists():
-            print(f"Error: model file not found: {model_path}", file=sys.stderr)
-            return 2
-        if data_path and not data_path.exists():
-            print(f"Error: data file not found: {data_path}", file=sys.stderr)
-            return 2
-
-        solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
-
-        try:
-            if args.out == "json":
-                with redirect_stdout(sys.stderr):
-                    results = _run_solve(model_path, data_path, solver_key)
-                out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-                if args.out_file:
-                    _write_text(Path(args.out_file), out_text)
-                else:
-                    print(out_text)
-                return 0
-
-            if args.out == "py":
-                code = _export_py(model_path, data_path, solver_key)
-                if args.out_file:
-                    _write_text(Path(args.out_file), code)
-                else:
-                    print(code)
-                return 0
-
-            if args.out in ("lp", "mps"):
-                if not args.out_file:
-                    print(f"Error: --out {args.out} requires --out-file", file=sys.stderr)
-                    return 2
-                out_path = Path(args.out_file)
-                if out_path.suffix.lower() != f".{args.out}":
-                    print(f"Error: --out {args.out} requires an output file ending in .{args.out}", file=sys.stderr)
-                    return 2
-                with redirect_stdout(sys.stderr):
-                    _export_lp_mps(model_path, data_path, out_path)
-                return 0
-        except Exception as e:
-            print(f"Error during solve/export: {e}", file=sys.stderr)
-            return 1
+        return _handle_solve(args)
 
     if args.command == "compare":
-        left_model_path = Path(args.left_model)
-        right_model_path = Path(args.right_model)
-        left_data_path = Path(args.left_data) if args.left_data else None
-        right_data_path = Path(args.right_data) if args.right_data else None
-
-        if not _validate_input_file(left_model_path, "left model"):
-            return 2
-        if not _validate_input_file(right_model_path, "right model"):
-            return 2
-        if left_data_path and not _validate_input_file(left_data_path, "left data"):
-            return 2
-        if right_data_path and not _validate_input_file(right_data_path, "right data"):
-            return 2
-
-        try:
-            with redirect_stdout(sys.stderr):
-                result = _compare_models(
-                    left_model_path,
-                    right_model_path,
-                    left_data_path,
-                    right_data_path,
-                    args.strategy,
-                )
-            out_text = json.dumps(result, indent=2, sort_keys=True, default=str)
-            if args.out_file:
-                _write_text(Path(args.out_file), out_text)
-            else:
-                print(out_text)
-            return 0
-        except Exception as e:
-            print(f"Error during compare: {e}", file=sys.stderr)
-            return 1
+        return _handle_compare(args)
 
     if args.command == "genai":
         cmd = getattr(args, "genai_cmd", None)
@@ -447,9 +454,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     print("Unknown command", file=sys.stderr)
     return 2
 
-    # Unknown command
-    print("Unknown command", file=sys.stderr)
-    return 2
+
+def main(argv: Optional[list[str]] = None) -> int:
+    return _dispatch_command(_build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":
