@@ -5074,6 +5074,152 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         else:
             logger.debug(f"Unsupported op: {constr['op']}")
 
+    def _gate_affine_implication_consequent(
+        self,
+        antecedent_node,
+        active_value,
+        consequent_node,
+        env,
+        append_ub_row,
+    ):
+        if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
+            raise SemanticError("Implication consequent must be a constraint")
+        consequent_op = consequent_node.get("op")
+        if consequent_op not in ("<=", "<", ">=", ">", "=="):
+            raise SemanticError("Unsupported implication consequent operator")
+        antecedent_name = (
+            self._multi_indexed_var_name(antecedent_node, env)
+            if antecedent_node.get("type") == "indexed_name"
+            else antecedent_node["value"]
+        )
+        left_coef, left_const = self._eval_expr(consequent_node.get("left"), dict(env or {}))
+        right_coef, right_const = self._eval_expr(consequent_node.get("right"), dict(env or {}))
+        if not isinstance(left_const, (int, float)) or not isinstance(right_const, (int, float)):
+            raise SemanticError("Implication consequent requires a numeric affine expression")
+
+        diff_coef = dict(left_coef)
+        for var_name, value in right_coef.items():
+            diff_coef[var_name] = diff_coef.get(var_name, 0.0) - value
+        diff_const = float(left_const) - float(right_const)
+        if consequent_op in (">=", ">"):
+            diff_coef = {var_name: -value for var_name, value in diff_coef.items()}
+            diff_const = -diff_const
+        if consequent_op in ("<", ">"):
+            diff_const += BOOL_EPS
+
+        def emit_side(coef, constant):
+            _lower, upper = self._finite_affine_bounds(
+                coef,
+                constant,
+                "Boolean implication consequent",
+            )
+            relaxation = max(0.0, upper)
+            row = [0.0] * len(self.var_names)
+            for var_name, value in coef.items():
+                row[self.var_indices[var_name]] += value
+            if active_value == 1:
+                row[self.var_indices[antecedent_name]] += relaxation
+                rhs = relaxation - constant
+            else:
+                row[self.var_indices[antecedent_name]] -= relaxation
+                rhs = -constant
+            append_ub_row(row, rhs)
+
+        emit_side(diff_coef, diff_const)
+        if consequent_op == "==":
+            emit_side({var_name: -value for var_name, value in diff_coef.items()}, -diff_const)
+
+    def _handle_boolean_antecedent_implication(
+        self,
+        antecedent_node,
+        consequent_node,
+        env,
+        append_ub_row,
+    ):
+        antecedent_name = (
+            self._multi_indexed_var_name(antecedent_node, env)
+            if antecedent_node.get("type") == "indexed_name"
+            else antecedent_node["value"]
+        )
+        if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
+            raise SemanticError("Implication consequent must be a constraint")
+        consequent_op = consequent_node.get("op")
+        left = consequent_node.get("left")
+        right = consequent_node.get("right")
+
+        def is_var_node(node):
+            return isinstance(node, dict) and node.get("type") in ("name", "indexed_name")
+
+        def is_number_value(node, value):
+            return isinstance(node, dict) and node.get("type") == "number" and node.get("value") == value
+
+        def extract_var_eq_value(value):
+            if consequent_node.get("op") != "==":
+                return None
+            if is_var_node(left) and is_number_value(right, value):
+                return left
+            if is_var_node(right) and is_number_value(left, value):
+                return right
+            return None
+
+        def is_boolean_decision_var(node):
+            if not is_var_node(node):
+                return False
+            base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+            declaration = self._find_decl(base_name)
+            return bool(
+                declaration
+                and declaration.get("type") in ("dvar", "dvar_indexed")
+                and declaration.get("var_type") == "boolean"
+            )
+
+        consequent_var_one = extract_var_eq_value(1)
+        if (consequent_var_one and is_boolean_decision_var(consequent_var_one)) or (
+            consequent_op in (">=", "==")
+            and is_boolean_decision_var(left)
+            and is_number_value(right, 1)
+        ):
+            variable_node = consequent_var_one if consequent_var_one else left
+            variable_name = (
+                self._multi_indexed_var_name(variable_node, env)
+                if variable_node.get("type") == "indexed_name"
+                else variable_node["value"]
+            )
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[antecedent_name]] = 1.0
+            row[self.var_indices[variable_name]] = -1.0
+            append_ub_row(row, 0.0)
+            return
+
+        consequent_var_zero = extract_var_eq_value(0)
+        if (consequent_var_zero and is_boolean_decision_var(consequent_var_zero)) or (
+            consequent_op in ("<=", "==")
+            and is_boolean_decision_var(left)
+            and is_number_value(right, 0)
+        ):
+            variable_node = consequent_var_zero if consequent_var_zero else left
+            variable_name = (
+                self._multi_indexed_var_name(variable_node, env)
+                if variable_node.get("type") == "indexed_name"
+                else variable_node["value"]
+            )
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[antecedent_name]] = 1.0
+            row[self.var_indices[variable_name]] = 1.0
+            append_ub_row(row, 1.0)
+            return
+
+        if consequent_op in ("<=", "<", ">=", ">", "=="):
+            self._gate_affine_implication_consequent(
+                antecedent_node,
+                1,
+                consequent_node,
+                env,
+                append_ub_row,
+            )
+            return
+        raise SemanticError("Unsupported implication consequent form")
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -5223,57 +5369,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 ant_var_node = _extract_var_eq_val(ant_unwrapped, 1)
 
-                def _gate_affine_consequent(antecedent_node, active_value, consequent_node):
-                    if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
-                        raise SemanticError("Implication consequent must be a constraint")
-                    consequent_op = consequent_node.get("op")
-                    if consequent_op not in ("<=", "<", ">=", ">", "=="):
-                        raise SemanticError("Unsupported implication consequent operator")
-                    antecedent_name = (
-                        self._multi_indexed_var_name(antecedent_node, env)
-                        if antecedent_node.get("type") == "indexed_name"
-                        else antecedent_node["value"]
-                    )
-                    left_coef, left_const = self._eval_expr(consequent_node.get("left"), dict(env or {}))
-                    right_coef, right_const = self._eval_expr(consequent_node.get("right"), dict(env or {}))
-                    if not isinstance(left_const, (int, float)) or not isinstance(right_const, (int, float)):
-                        raise SemanticError("Implication consequent requires a numeric affine expression")
-
-                    def emit_side(coef, constant):
-                        _lower, upper = self._finite_affine_bounds(
-                            coef,
-                            constant,
-                            "Boolean implication consequent",
-                        )
-                        relaxation = max(0.0, upper)
-                        row = [0.0] * len(self.var_names)
-                        for var_name, value in coef.items():
-                            row[self.var_indices[var_name]] += value
-                        if active_value == 1:
-                            row[self.var_indices[antecedent_name]] += relaxation
-                            rhs = relaxation - constant
-                        else:
-                            row[self.var_indices[antecedent_name]] -= relaxation
-                            rhs = -constant
-                        append_ub_row(row, rhs)
-
-                    diff_coef = dict(left_coef)
-                    for var_name, value in right_coef.items():
-                        diff_coef[var_name] = diff_coef.get(var_name, 0.0) - value
-                    diff_const = float(left_const) - float(right_const)
-                    if consequent_op in (">=", ">"):
-                        diff_coef = {var_name: -value for var_name, value in diff_coef.items()}
-                        diff_const = -diff_const
-                    if consequent_op in ("<", ">"):
-                        diff_const += BOOL_EPS
-                    emit_side(diff_coef, diff_const)
-                    if consequent_op == "==":
-                        emit_side({var_name: -value for var_name, value in diff_coef.items()}, -diff_const)
-                    return
-
                 ant_eq_zero = _extract_var_eq_val(ant_unwrapped, 0)
                 if ant_eq_zero is not None:
-                    _gate_affine_consequent(ant_eq_zero, 0, cons_unwrapped)
+                    self._gate_affine_implication_consequent(
+                        ant_eq_zero,
+                        0,
+                        cons_unwrapped,
+                        env,
+                        append_ub_row,
+                    )
                     return
 
                 # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
@@ -5410,88 +5514,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         "sem_type": "boolean",
                     }
                     flag_name = _comparison_truth_var(antecedent_comparison, env)
-                    _gate_affine_consequent({"type": "name", "value": flag_name}, 1, cons_c)
-                    return
-                ant_name = (
-                    self._multi_indexed_var_name(ant_var_node, env)
-                    if ant_var_node.get("type") == "indexed_name"
-                    else ant_var_node["value"]
-                )
-                # Use unwrapped consequent for boolean handling
-                cons_simple = cons_unwrapped
-                if not (isinstance(cons_simple, dict) and cons_simple.get("type") == "constraint"):
-                    raise SemanticError("Implication consequent must be a constraint")
-                op_c = cons_simple.get("op")
-                lc = cons_simple.get("left")
-                rc = cons_simple.get("right")
-                # Patterns supported: var == 1 / 0 ; var >= 1 ; var <= 0
-                cons_var_one = _extract_var_eq_val(cons_simple, 1)
-                cons_var_zero = _extract_var_eq_val(cons_simple, 0)
-
-                def _var_name(node):
-                    return self._multi_indexed_var_name(node, env) if node.get("type") == "indexed_name" else node["value"]
-
-                def _is_boolean_decision_var(node):
-                    if not isinstance(node, dict) or node.get("type") not in ("name", "indexed_name"):
-                        return False
-                    base_name = node.get("value") if node.get("type") == "name" else node.get("name")
-                    declaration = self._find_decl(base_name)
-                    return bool(
-                        declaration
-                        and declaration.get("type") in ("dvar", "dvar_indexed")
-                        and declaration.get("var_type") == "boolean"
+                    self._gate_affine_implication_consequent(
+                        {"type": "name", "value": flag_name},
+                        1,
+                        cons_c,
+                        env,
+                        append_ub_row,
                     )
-
-                if (cons_var_one and _is_boolean_decision_var(cons_var_one)) or (
-                    op_c in (">=", "==")
-                    and isinstance(lc, dict)
-                    and lc.get("type") in ("name", "indexed_name")
-                    and _is_boolean_decision_var(lc)
-                    and isinstance(rc, dict)
-                    and rc.get("type") == "number"
-                    and rc.get("value") == 1
-                ):
-                    vnode = cons_var_one if cons_var_one else lc
-                    bname = _var_name(vnode)
-                    # Enforce: when ant==1 then b==1  -> b - ant >= 0  => -b + ant <= 0
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[ant_name]] += 1.0
-                    row[self.var_indices[bname]] -= 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(0.0)
-                    ub_row_idx += 1
                     return
-                if (cons_var_zero and _is_boolean_decision_var(cons_var_zero)) or (
-                    op_c in ("<=", "==")
-                    and isinstance(lc, dict)
-                    and lc.get("type") in ("name", "indexed_name")
-                    and _is_boolean_decision_var(lc)
-                    and isinstance(rc, dict)
-                    and rc.get("type") == "number"
-                    and rc.get("value") == 0
-                ):
-                    vnode = cons_var_zero if cons_var_zero else lc
-                    bname = _var_name(vnode)
-                    # Enforce: when ant==1 then b==0 -> ant + b <= 1
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[ant_name]] += 1.0
-                    row[self.var_indices[bname]] += 1.0
-                    for i, coef in enumerate(row):
-                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                            A_ub_rows.append(ub_row_idx)
-                            A_ub_cols.append(i)
-                            A_ub_data.append(coef)
-                    b_ub.append(1.0)
-                    ub_row_idx += 1
-                    return
-                if op_c in ("<=", "<", ">=", ">", "=="):
-                    _gate_affine_consequent(ant_var_node, 1, cons_simple)
-                    return
-                raise SemanticError("Unsupported implication consequent form")
+                self._handle_boolean_antecedent_implication(
+                    ant_var_node,
+                    cons_unwrapped,
+                    env,
+                    append_ub_row,
+                )
+                return
             if constr["type"] == "constraint":
                 left = constr["left"]
                 right = constr["right"]
