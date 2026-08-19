@@ -5754,6 +5754,42 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return True
         return False
 
+    @staticmethod
+    def _is_boolean_literal_node(node):
+        return isinstance(node, dict) and node.get("type") == "boolean_literal"
+
+    def _try_handle_bool_tree_literal_comparison(self, left, right, op_sym, env, bool_expr_var, state):
+        if op_sym not in ("==", "!=", "<=", ">="):
+            return None
+        left_is_tree = self._is_bool_tree_node(left)
+        right_is_tree = self._is_bool_tree_node(right)
+        left_is_literal = self._is_boolean_literal_node(left) or self._is_number_01_node(left)
+        right_is_literal = self._is_boolean_literal_node(right) or self._is_number_01_node(right)
+        if not ((left_is_tree and right_is_literal) or (right_is_tree and left_is_literal)):
+            return None
+        if right_is_tree:
+            left, right = right, left
+
+        target_value = int(bool(right.get("value"))) if self._is_boolean_literal_node(right) else int(right.get("value"))
+        enforce = None
+        if op_sym == "==" and left.get("type") not in ("and", "or"):
+            enforce = target_value
+        elif op_sym == "!=":
+            enforce = 1 - target_value
+        elif op_sym == ">=" and target_value == 1:
+            enforce = 1
+        elif op_sym == "<=" and target_value == 0:
+            enforce = 0
+
+        if enforce is not None:
+            expression_var = bool_expr_var(left, env)
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[expression_var]] = 1.0
+            self._append_sparse_row(state, row, float(enforce), sense="eq")
+            return True, left, right
+        handled = op_sym != "==" or left.get("type") not in ("and", "or")
+        return handled, left, right
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6055,37 +6091,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # --- Generic boolean comparison handling (>=, <=, !=, plus fallback ==) ---
                 # Supports: (bool_expr) OP literal where OP in {>=, <=, !=, ==} and literal in {0,1, True, False}
                 # bool_expr may be composed of and/or/not trees over atomic constraints var==0/1.
-                def _is_bool_literal(node):
-                    return isinstance(node, dict) and node.get("type") == "boolean_literal"
-
-                def _is_number_01(node):
-                    return isinstance(node, dict) and node.get("type") == "number" and node.get("value") in (0, 1)
-
-                def _is_atomic_bool(node):
-                    # pattern: constraint (var == 0/1) or (0/1 == var)
-                    if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
-                        return False
-                    left = node.get("left")
-                    right = node.get("right")
-
-                    def is_var(x):
-                        return isinstance(x, dict) and x.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    return (is_var(left) and _is_number_01(right)) or (is_var(right) and _is_number_01(left))
-
-                def _is_bool_tree(node):
-                    if not isinstance(node, dict):
-                        return False
-                    tnode = node.get("type")
-                    if tnode in ("and", "or"):
-                        return _is_bool_tree(node.get("left")) and _is_bool_tree(node.get("right"))
-                    if tnode == "not":
-                        return _is_bool_tree(node.get("value"))
-                    return _is_atomic_bool(node)
-
                 # Normalize so left is boolean expression, right is literal if pattern matches
                 op_sym = constr.get("op")
 
@@ -6096,58 +6101,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     eq_row_idx = state.eq_row_idx
                     ub_row_idx = state.ub_row_idx
                     return
-                if op_sym in ("==", "!=", "<=", ">="):
-                    if (_is_bool_tree(left) and (_is_bool_literal(right) or _is_number_01(right))) or (
-                        _is_bool_tree(right) and (_is_bool_literal(left) or _is_number_01(left))
-                    ):
-                        if _is_bool_tree(right):  # swap
-                            left, right = right, left
-                        # Extract literal value as 0/1
-                        if _is_bool_literal(right):
-                            target_val = 1 if right.get("value") else 0
-                        else:  # number 0/1
-                            target_val = int(right.get("value"))
-                        if target_val not in (0, 1):
-                            raise SemanticError("Boolean comparison literal must be 0/1 or True/False")
-                        # Reduce operators to equality or tautology/contradiction
-                        enforce = None  # None means no constraint needed
-                        if op_sym == "==":
-                            # Defer to existing fast path only if tree is and/or (handled below). For other trees enforce directly.
-                            if left.get("type") not in ("and", "or"):
-                                enforce = target_val
-                        elif op_sym == "!=":
-                            enforce = 1 - target_val
-                        elif op_sym == ">=":
-                            # B >= 1 -> B ==1 ; B >=0 -> tautology
-                            if target_val == 1:
-                                enforce = 1
-                            else:
-                                enforce = None
-                        elif op_sym == "<=":
-                            # B <=0 -> B==0 ; B <=1 -> tautology
-                            if target_val == 0:
-                                enforce = 0
-                            else:
-                                enforce = None
-                        if enforce is not None:
-                            try:
-                                zvar = _bool_expr_var(left, env)
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[zvar]] = 1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(float(enforce))
-                                eq_row_idx += 1
-                                return
-                            except SemanticError:
-                                # If fallback failed, raise for unsupported mixed form
-                                raise
-                        # If we did not enforce directly and op was not '==' OR tree not and/or, we are done (tautology) or fall through for fast path == handling
-                        if op_sym != "==" or left.get("type") not in ("and", "or"):
-                            return  # tautology or handled
+                literal_result = self._try_handle_bool_tree_literal_comparison(
+                    left,
+                    right,
+                    op_sym,
+                    env,
+                    _bool_expr_var,
+                    state,
+                )
+                if literal_result is not None:
+                    handled, left, right = literal_result
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    if handled:
+                        return
 
                 # --- Reified equality of a declared boolean variable and a general boolean expression ---
                 # Pattern: b == (bool_expr) where bool_expr may include comparisons (<=,>=,==,!=) and/or logical operators.
