@@ -5690,6 +5690,70 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return True
         return False
 
+    def _collect_boolean_sum(self, node):
+        if not isinstance(node, dict):
+            return None
+        if node.get("type") == "name" and self._is_declared_boolean_var_node(node):
+            return {node["value"]: 1.0}, 0
+        if node.get("type") == "number":
+            return {}, node.get("value", 0)
+        if node.get("type") != "binop" or node.get("op") != "+":
+            return None
+        left_sum = self._collect_boolean_sum(node.get("left"))
+        right_sum = self._collect_boolean_sum(node.get("right"))
+        if left_sum is None or right_sum is None:
+            return None
+        weights = dict(left_sum[0])
+        for variable_name, weight in right_sum[0].items():
+            weights[variable_name] = weights.get(variable_name, 0.0) + weight
+        return weights, left_sum[1] + right_sum[1]
+
+    def _try_handle_reified_boolean_sum(self, left, right, op_sym_top, env, state):
+        if op_sym_top != "==":
+            return False
+        orientations = ((left, right), (right, left))
+        for boolean_node, inequality in orientations:
+            if not self._is_declared_boolean_var_node(boolean_node):
+                continue
+            if not (
+                isinstance(inequality, dict)
+                and inequality.get("type") == "constraint"
+                and inequality.get("op") == ">="
+                and isinstance(inequality.get("right"), dict)
+                and inequality["right"].get("type") == "number"
+            ):
+                continue
+            collected = self._collect_boolean_sum(inequality.get("left"))
+            if collected is None:
+                continue
+            variable_weights, constant_offset = collected
+            threshold = inequality["right"].get("value") - constant_offset
+            maximum_sum = sum(variable_weights.values())
+            boolean_name = (
+                boolean_node["value"]
+                if boolean_node.get("type") == "name"
+                else self._multi_indexed_var_name(boolean_node, env)
+            )
+            if threshold <= 0 or threshold > maximum_sum:
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[boolean_name]] = 1.0
+                self._append_sparse_row(state, row, 1.0 if threshold <= 0 else 0.0, sense="eq")
+                return True
+
+            lower_row = [0.0] * len(self.var_names)
+            lower_row[self.var_indices[boolean_name]] = threshold
+            for variable_name, weight in variable_weights.items():
+                lower_row[self.var_indices[variable_name]] -= weight
+            self._append_sparse_row(state, lower_row, 0.0, sense="ub")
+
+            upper_row = [0.0] * len(self.var_names)
+            for variable_name, weight in variable_weights.items():
+                upper_row[self.var_indices[variable_name]] += weight
+            upper_row[self.var_indices[boolean_name]] = -(maximum_sum - threshold + 1)
+            self._append_sparse_row(state, upper_row, threshold - 1, sense="ub")
+            return True
+        return False
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6026,117 +6090,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 op_sym = constr.get("op")
 
                 # Reified pattern: b == (sum(bool vars) >= k)
-                def _is_boolean_var(node):
-                    if not (isinstance(node, dict) and node.get("type") in ("name", "indexed_name")):
-                        return False
-                    nm = node.get("value") if node.get("type") == "name" else node.get("name")
-                    for d in self.ast.get("declarations", []):
-                        if (
-                            d.get("name") == nm
-                            and d.get("type") in ("dvar", "dvar_indexed")
-                            and d.get("var_type") == "boolean"
-                        ):
-                            return True
-                    return False
-
-                def _collect_sum(node):
-                    if not isinstance(node, dict):
-                        return None
-                    if node.get("type") == "name" and _is_boolean_var(node):
-                        return ({node["value"]: 1.0}, 0)
-                    if node.get("type") == "binop" and node.get("op") == "+":
-                        left = _collect_sum(node["left"])
-                        right = _collect_sum(node["right"])
-                        if left and right:
-                            weights = dict(left[0])
-                            for variable_name, weight in right[0].items():
-                                weights[variable_name] = weights.get(variable_name, 0.0) + weight
-                            return (weights, left[1] + right[1])
-                        return None
-                    if node.get("type") == "number":
-                        return ({}, node.get("value", 0))
-                    return None
-
-                if op_sym == "==" and (
-                    (
-                        _is_boolean_var(left)
-                        and isinstance(right, dict)
-                        and right.get("type") == "constraint"
-                        and right.get("op") == ">="
-                    )
-                    or (
-                        _is_boolean_var(right)
-                        and isinstance(left, dict)
-                        and left.get("type") == "constraint"
-                        and left.get("op") == ">="
-                    )
-                ):
-                    bool_side = left if _is_boolean_var(left) else right
-                    ineq = right if bool_side is left else left
-                    ineq_l = ineq.get("left")
-                    ineq_r = ineq.get("right")
-                    if isinstance(ineq_r, dict) and ineq_r.get("type") == "number":
-                        k = ineq_r.get("value")
-                        collected = _collect_sum(ineq_l)
-                        if collected:
-                            variable_weights, c_off = collected
-                            k_adj = k - c_off
-                            max_sum = sum(variable_weights.values())
-                            vname = (
-                                bool_side["value"]
-                                if bool_side.get("type") == "name"
-                                else self._multi_indexed_var_name(bool_side, env)
-                            )
-                            # Trivial cases: if k_adj <= 0 then sum(vars)>=k always true -> b == 1
-                            if k_adj <= 0:
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[vname]] = 1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(1.0)
-                                eq_row_idx += 1
-                                return
-                            # If k_adj exceeds the maximum weighted sum, the condition is impossible.
-                            if k_adj > max_sum:
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[vname]] = 1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
-                                return
-                            # Inequality: k_adj * b - sum(vars) <= 0
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[vname]] += k_adj
-                            for vn, weight in variable_weights.items():
-                                row[self.var_indices[vn]] -= weight
-                            for i, coef in enumerate(row):
-                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(coef)
-                            b_ub.append(0.0)
-                            ub_row_idx += 1
-                            if k_adj >= 1:
-                                # sum(weights*vars) - (max_sum-k_adj+1)*b <= k_adj-1
-                                row = [0.0] * len(self.var_names)
-                                for vn, weight in variable_weights.items():
-                                    row[self.var_indices[vn]] += weight
-                                row[self.var_indices[vname]] -= max_sum - k_adj + 1
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_ub_rows.append(ub_row_idx)
-                                        A_ub_cols.append(i)
-                                        A_ub_data.append(coef)
-                                b_ub.append(k_adj - 1)
-                                ub_row_idx += 1
-                            return
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_handle_reified_boolean_sum(left, right, op_sym, env, state):
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    return
                 if op_sym in ("==", "!=", "<=", ">="):
                     if (_is_bool_tree(left) and (_is_bool_literal(right) or _is_number_01(right))) or (
                         _is_bool_tree(right) and (_is_bool_literal(left) or _is_number_01(left))
