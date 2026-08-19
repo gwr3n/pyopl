@@ -723,6 +723,259 @@ class GurobiCodeGenerator:
         self.dict_params.add(name)
         return True
 
+    def _normalize_data_key(self, value):
+        if isinstance(value, (list, tuple)):
+            return tuple(self._normalize_data_key(element) for element in value)
+        return value
+
+    def _normalize_set_elements(self, value):
+        elements = value.get("elements") if isinstance(value, dict) and "elements" in value else value
+        if elements is None:
+            return []
+        return [self._normalize_data_key(element) for element in elements]
+
+    def _dimension_keys(self, dimensions, working_data):
+        keys_by_dimension = []
+        try:
+            for dimension in dimensions:
+                dimension_type = dimension.get("type")
+                if dimension_type in ("named_range_dimension", "range_index"):
+                    start = self._eval_data_bound(dimension["start"], working_data)
+                    end = self._eval_data_bound(dimension["end"], working_data)
+                    keys_by_dimension.append(list(range(start, end + 1)))
+                elif dimension_type == "named_set_dimension":
+                    set_value = working_data.get(dimension["name"], [])
+                    keys_by_dimension.append(self._normalize_set_elements(set_value))
+                else:
+                    return None
+        except Exception:
+            return None
+        return keys_by_dimension
+
+    def _flatten_data_positions(self, value, position=()):
+        if isinstance(value, (list, tuple)) and value and any(
+            isinstance(element, (list, tuple)) for element in value
+        ):
+            for index, element in enumerate(value):
+                yield from self._flatten_data_positions(element, position + (index,))
+            return
+        if isinstance(value, (list, tuple)):
+            for index, element in enumerate(value):
+                yield position + (index,), element
+            return
+        yield position, value
+
+    def _flatten_positional_parameter(self, name, value, keys_by_dimension):
+        flattened = {}
+        try:
+            for positions, item in self._flatten_data_positions(value):
+                if len(positions) != len(keys_by_dimension):
+                    raise SemanticError(
+                        f"Parameter '{name}' dimensionality mismatch: data depth {len(positions)} vs declared {len(keys_by_dimension)}."
+                    )
+                if any(
+                    position < 0 or position >= len(keys_by_dimension[index])
+                    for index, position in enumerate(positions)
+                ):
+                    raise SemanticError(f"Parameter '{name}' positional index is out of bounds.")
+                key = tuple(
+                    keys_by_dimension[index][position]
+                    for index, position in enumerate(positions)
+                )
+                flattened[key] = item
+        except SemanticError:
+            return None
+        return flattened
+
+    def _emit_positional_nd_parameters(self, working_data, parameter_declarations):
+        emitted = set()
+        for name, value in working_data.items():
+            declaration = parameter_declarations.get(name)
+            if declaration is None or not isinstance(value, (list, tuple)):
+                continue
+            dimensions = declaration.get("dimensions", []) or []
+            if len(dimensions) < 2:
+                continue
+            keys_by_dimension = self._dimension_keys(dimensions, working_data)
+            if not keys_by_dimension:
+                continue
+            flattened = self._flatten_positional_parameter(name, value, keys_by_dimension)
+            if flattened is None:
+                continue
+            self._add_code_line(f"{name} = {repr(flattened)}")
+            logger.info("Emitting flattened dict for '%s' with %d entries", name, len(flattened))
+            self.dict_params.add(name)
+            emitted.add(name)
+        return emitted
+
+    def _key_matches_dimensions(self, key, dimensions):
+        if not isinstance(key, (list, tuple)) or len(key) != len(dimensions):
+            return False
+        for index, dimension in enumerate(dimensions):
+            if dimension.get("type") == "named_set_dimension":
+                set_declaration = self._find_declaration_by_name(dimension.get("name"))
+                expects_tuple = set_declaration and set_declaration.get("type") in (
+                    "set_of_tuples",
+                    "set_of_tuples_external",
+                )
+                if expects_tuple != isinstance(key[index], (list, tuple)):
+                    return False
+            elif isinstance(key[index], (list, tuple)):
+                return False
+        return True
+
+    def _expand_two_set_rows(self, value, dimensions, working_data):
+        if len(dimensions) != 2 or any(
+            dimension.get("type") != "named_set_dimension" for dimension in dimensions
+        ):
+            return None
+        second_set = dimensions[1]["name"]
+        try:
+            labels = TupleSetHelper.get_tuple_set(second_set, self.ast, working_data)
+        except Exception:
+            return None
+        if not labels:
+            return None
+        normalized_labels = [
+            tuple(label) if isinstance(label, (list, tuple)) else label for label in labels
+        ]
+        flattened = {}
+        for key, row in value.items():
+            if not isinstance(row, (list, tuple)) or len(row) != len(normalized_labels):
+                return None
+            key_object = tuple(key) if isinstance(key, (list, tuple)) else (key,)
+            for label, item in zip(normalized_labels, row):
+                flattened[(key_object, label)] = item
+        return flattened or None
+
+    def _has_full_length_keys(self, value, dimension_count):
+        if not isinstance(value, dict) or not any(
+            isinstance(key, (list, tuple)) for key in value
+        ):
+            return False
+        key_lengths = {
+            len(key) if isinstance(key, (list, tuple)) else 1 for key in value
+        }
+        return len(key_lengths) == 1 and next(iter(key_lengths)) == dimension_count
+
+    def _normalize_full_key_mapping(self, value, dimensions, working_data):
+        if not self._has_full_length_keys(value, len(dimensions)):
+            return None
+        has_sequence_values = any(
+            isinstance(item, (list, tuple)) for item in value.values()
+        )
+        all_keys_match = all(
+            self._key_matches_dimensions(key, dimensions) for key in value
+        )
+        if has_sequence_values and not all_keys_match:
+            expanded = self._expand_two_set_rows(value, dimensions, working_data)
+            if expanded is not None:
+                return expanded
+        return {
+            tuple(key) if isinstance(key, (list, tuple)) else (key,): item
+            for key, item in value.items()
+        }
+
+    def _resolve_set_elements(self, set_name, working_data):
+        set_value = working_data.get(set_name)
+        if set_value is None:
+            declaration = self._find_declaration_by_name(
+                set_name,
+                types=[
+                    "typed_set",
+                    "typed_set_external",
+                    "set_declaration",
+                    "set_of_tuples",
+                    "set_of_tuples_external",
+                ],
+            )
+            if declaration is not None:
+                set_value = declaration.get("value")
+        if set_value is None:
+            return None
+        return self._normalize_set_elements(set_value)
+
+    def _dimension_labels_and_start(self, dimension, working_data):
+        dimension_type = dimension.get("type")
+        if dimension_type == "named_set_dimension":
+            labels = self._resolve_set_elements(dimension["name"], working_data)
+            return (list(labels) if labels is not None else None), None
+        if dimension_type in ("named_range_dimension", "range_index"):
+            start = self._eval_data_bound(dimension["start"], working_data)
+            end = self._eval_data_bound(dimension["end"], working_data)
+            return list(range(start, end + 1)), start
+        return None, None
+
+    def _position_label(self, labels, start, position, provided_length):
+        if labels is not None and len(labels) == provided_length:
+            return labels[position] if position < len(labels) else position + 1
+        return start + position if isinstance(start, int) else position + 1
+
+    def _flatten_labeled_data(self, node, dimension_index, prefix, labels, starts, output):
+        if dimension_index == len(labels) - 1:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    output[prefix + (self._normalize_data_key(key),)] = value
+                return
+            values = node if isinstance(node, (list, tuple)) else [node]
+            for position, value in enumerate(values):
+                label = self._position_label(
+                    labels[dimension_index], starts[dimension_index], position, len(values)
+                )
+                output[prefix + (label,)] = value
+            return
+        children = node.items() if isinstance(node, dict) else enumerate(
+            node if isinstance(node, (list, tuple)) else [node]
+        )
+        child_count = len(node) if isinstance(node, (dict, list, tuple)) else 1
+        for position, child in children:
+            if isinstance(node, dict):
+                label = self._normalize_data_key(position)
+            else:
+                label = self._position_label(
+                    labels[dimension_index], starts[dimension_index], position, child_count
+                )
+            self._flatten_labeled_data(
+                child, dimension_index + 1, prefix + (label,), labels, starts, output
+            )
+
+    def _flatten_nested_parameter(self, value, dimensions, working_data):
+        labels = []
+        starts = []
+        try:
+            for dimension in dimensions:
+                dimension_labels, start = self._dimension_labels_and_start(
+                    dimension, working_data
+                )
+                labels.append(dimension_labels)
+                starts.append(start)
+            flattened = {}
+            self._flatten_labeled_data(value, 0, (), labels, starts, flattened)
+            return flattened or None
+        except Exception:
+            return None
+
+    def _emit_mapping_nd_parameters(
+        self, working_data, parameter_declarations, already_emitted
+    ):
+        emitted = set()
+        for name, value in working_data.items():
+            if name in already_emitted:
+                continue
+            declaration = parameter_declarations.get(name)
+            dimensions = declaration.get("dimensions", []) if declaration else []
+            mapping = self._normalize_full_key_mapping(value, dimensions, working_data)
+            if mapping is None and isinstance(value, dict) and len(dimensions) >= 2:
+                mapping = self._flatten_nested_parameter(value, dimensions, working_data)
+            if mapping is not None:
+                self._add_code_line(f"{name} = {repr(mapping)}")
+                self.dict_params.add(name)
+                emitted.add(name)
+                continue
+            if isinstance(value, (list, tuple)) and declaration is not None:
+                self._check_parameter_shape(value, dimensions, working_data, name)
+        return emitted
+
     def _generate_data_declarations(self, data_dict):
         """Generate Python code for data declarations and AST tuple/set declarations."""
         logger.debug("Entering _generate_data_declarations")
@@ -760,315 +1013,15 @@ class GurobiCodeGenerator:
                         return left // right
             raise Exception(f"Unsupported range bound expr: {expr}")
 
-        def _normalize_set_elems(obj):
-            elems = obj.get("elements") if isinstance(obj, dict) and "elements" in obj else obj
+        already_emitted = self._emit_positional_nd_parameters(
+            working_data_pref, param_decl_map
+        )
 
-            def to_key(x):
-                if isinstance(x, (list, tuple)):
-                    return tuple(to_key(e) for e in x)
-                return x
-
-            return [to_key(e) for e in elems] if elems is not None else []
-
-        # --- Generic N-D flatten to dict with tuple keys using declared dimension semantics ---
-        already_emitted = set()
-        for name, value in working_data_pref.items():
-            pdecl = param_decl_map.get(name)
-            if not (pdecl and isinstance(value, (list, tuple))):
-                continue
-            dims = pdecl.get("dimensions", []) or []
-            if len(dims) < 2:
-                continue  # 1D handled by dedicated logic below
-            keys_per_dim = []
-            try:
-                for d in dims:
-                    dt = d.get("type")
-                    if dt == "named_range_dimension":
-                        s = _eval_expr_bound(d["start"])
-                        e = _eval_expr_bound(d["end"])
-                        keys_per_dim.append(list(range(s, e + 1)))
-                    elif dt == "range_index":
-                        s = _eval_expr_bound(d["start"])
-                        e = _eval_expr_bound(d["end"])
-                        keys_per_dim.append(list(range(s, e + 1)))
-                    elif dt == "named_set_dimension":
-                        set_name = d["name"]
-                        set_obj = working_data.get(set_name, [])
-                        keys_per_dim.append(_normalize_set_elems(set_obj))
-                    else:
-                        keys_per_dim = None
-                        break
-            except Exception:
-                keys_per_dim = None
-            if not keys_per_dim:
-                continue
-
-            def _flatten_positions(arr, pos=()):
-                if isinstance(arr, (list, tuple)) and arr and any(isinstance(x, (list, tuple)) for x in arr):
-                    for i, sub in enumerate(arr):
-                        yield from _flatten_positions(sub, pos + (i,))
-                elif isinstance(arr, (list, tuple)):
-                    for i, v in enumerate(arr):
-                        yield pos + (i,), v
-                else:
-                    yield pos, arr
-
-            flat_dict = {}
-            try:
-                for idx_pos, v in _flatten_positions(value, ()):
-                    if len(idx_pos) != len(keys_per_dim):
-                        raise SemanticError(
-                            f"Parameter '{name}' dimensionality mismatch: data depth {len(idx_pos)} vs declared {len(keys_per_dim)}."
-                        )
-                    for dim_i, pi in enumerate(idx_pos):
-                        if pi < 0 or pi >= len(keys_per_dim[dim_i]):
-                            raise SemanticError(f"Parameter '{name}' index {pi} out of bounds for dimension {dim_i+1}.")
-                    key = tuple(keys_per_dim[dim_i][pi] for dim_i, pi in enumerate(idx_pos))
-                    flat_dict[key] = v
-            except SemanticError:
-                flat_dict = None
-
-            if flat_dict is not None:
-                self._add_code_line(f"{name} = {repr(flat_dict)}")
-                # Runtime debug: show that a flattened dict was emitted
-                logger.info("Emitting flattened dict for '%s' with %d entries", name, len(flat_dict))
-                self.dict_params.add(name)
-                already_emitted.add(name)
-
-        # Prevent duplicate fallback emissions for already-emitted names
-        for name, value in working_data_pref.items():
-            if name in already_emitted:
-                continue
-            pdecl = param_decl_map.get(name)
-
-            # If .dat provided a dict with tuple-like keys, detect whether it
-            # already encodes full keys for all declared dimensions (e.g.,
-            # cost[<k,i,a>] or P[<k,i,a,j>]) and emit a normalized tuple-key
-            # mapping in that case. Otherwise, fall through to the general
-            # N-D flattening logic which can handle dict-of-lists or nested
-            # mappings keyed by partial dimensions.
-            if pdecl is not None and isinstance(value, dict) and any(isinstance(k, (list, tuple)) for k in value.keys()):
-                dims = pdecl.get("dimensions", []) or []
-                # compute key lengths (treat scalar keys as length 1)
-                key_lengths = {(len(k) if isinstance(k, (list, tuple)) else 1) for k in value.keys()}
-                # If every dict key length matches the declared number of dimensions,
-                # treat this as a fully-keyed sparse map and normalize keys to tuples.
-                if len(key_lengths) == 1 and next(iter(key_lengths)) == len(dims):
-                    try:
-                        # Determine whether dict values are scalars or list/tuples
-                        has_list_vals = any(isinstance(v, (list, tuple)) for v in value.values())
-
-                        # Heuristic: detect "full-key" mappings where each key element corresponds
-                        # to a declared dimension. For tuple-set dimensions those key elements
-                        # should themselves be tuples. This disambiguates cases like Arc=(1,2)
-                        # vs. a full key ((1,2), 'Asset').
-                        def _is_full_key(k):
-                            if not isinstance(k, (list, tuple)):
-                                return False
-                            if len(k) != len(dims):
-                                return False
-                            for i, dim in enumerate(dims):
-                                if dim.get("type") == "named_set_dimension":
-                                    set_decl = self._find_declaration_by_name(dim.get("name"))
-                                    if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                                        # element for this dim should be a tuple
-                                        if not isinstance(k[i], (list, tuple)):
-                                            return False
-                                    else:
-                                        # element should be scalar (not tuple)
-                                        if isinstance(k[i], (list, tuple)):
-                                            return False
-                                else:
-                                    # range-indexed dims expect scalar keys
-                                    if isinstance(k[i], (list, tuple)):
-                                        return False
-                            return True
-
-                        all_full = all(_is_full_key(k) for k in value.keys())
-
-                        if not has_list_vals and all_full:
-                            # Simple case: already fully keyed scalars
-                            norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
-                            self._add_code_line(f"{name} = {repr(norm)}")
-                            # Runtime debug: show normalized mapping emitted
-                            logger.info("Emitting normalized scalar mapping for '%s' with %d entries", name, len(norm))
-                            self.dict_params.add(name)
-                            already_emitted.add(name)
-                            continue
-
-                        # Case: keys are full-length but values are lists. This commonly
-                        # arises when the top-level dict keys represent one tuple-set
-                        # element (e.g., an Arc tuple) and the values are ordered lists
-                        # corresponding to another named set (e.g., Assets). Detect and
-                        # expand to scalar (tuple_key, elem) -> value mapping when possible.
-                        if has_list_vals and not all_full and len(dims) == 2:
-                            # Attempt expansion for 2D params e.g., param[Arc][Assets] provided as
-                            # { <arc> : [v1, v2, ...], ... }
-                            d0, d1 = dims[0], dims[1]
-                            if d0.get("type") == "named_set_dimension" and d1.get("type") == "named_set_dimension":
-                                # set0_name = d0.get("name")
-                                set1_name = d1.get("name")
-                                # Resolve set elements for second dimension
-                                set1_elems = None
-                                try:
-                                    set1_elems = TupleSetHelper.get_tuple_set(set1_name, self.ast, working_data)
-                                except Exception:
-                                    set1_elems = None
-                                if set1_elems:
-                                    # Normalize elements (tuples remain tuples, scalars stay scalars)
-                                    set1_norm = [tuple(e) if isinstance(e, (list, tuple)) else e for e in set1_elems]
-                                    flat = {}
-                                    ok = True
-                                    for k, row in value.items():
-                                        key_obj = tuple(k) if isinstance(k, (list, tuple)) else (k,)
-                                        if not isinstance(row, (list, tuple)):
-                                            # Unexpected scalar at this shape; abort expansion
-                                            ok = False
-                                            break
-                                        if len(row) != len(set1_norm):
-                                            ok = False
-                                            break
-                                        for idx, lab in enumerate(set1_norm):
-                                            flat[(key_obj, lab)] = row[idx]
-                                    if ok and flat:
-                                        self._add_code_line(f"{name} = {repr(flat)}")
-                                        # Runtime debug: show expanded flat mapping emitted
-                                        logger.info("Emitting expanded flat mapping for '%s' with %d entries", name, len(flat))
-                                        self.dict_params.add(name)
-                                        already_emitted.add(name)
-                                        continue
-
-                        # Fallback: emit normalized keys (do not attempt to expand list-values)
-                        norm = {tuple(k) if isinstance(k, (list, tuple)) else (k,): v for k, v in value.items()}
-                        self._add_code_line(f"{name} = {repr(norm)}")
-                        # Runtime debug: show fallback normalized mapping emitted
-                        logger.info("Emitting fallback normalized mapping for '%s' with %d entries", name, len(norm))
-                        self.dict_params.add(name)
-                        already_emitted.add(name)
-                        continue
-                    except Exception:
-                        # Fall through to general handling on failure
-                        pass
-
-            # --- NEW: N-D param from nested dict/list keyed along declared dimensions (generalization) ---
-            # Accept nested dictionaries keyed by set/range labels and/or lists (row-major) for any dimensionality >= 2.
-            if pdecl is not None and isinstance(value, dict) and len(pdecl.get("dimensions", [])) >= 2:
-                dims = pdecl.get("dimensions", [])
-
-                # Resolve expected labels per dimension when possible (set elements or explicit range)
-                def _resolve_set_elems(set_name):
-                    # Prefer working_data (.dat), then AST-declared values
-                    set_obj = working_data.get(set_name)
-                    if set_obj is None:
-                        set_decl = self._find_declaration_by_name(
-                            set_name,
-                            types=[
-                                "typed_set",
-                                "typed_set_external",
-                                "set_declaration",
-                                "set_of_tuples",
-                                "set_of_tuples_external",
-                            ],
-                        )
-                        if set_decl is not None:
-                            set_obj = set_decl.get("value")
-                    return _normalize_set_elems(set_obj) if set_obj is not None else None
-
-                def _dim_labels(dim_spec):
-                    dt = dim_spec.get("type")
-                    if dt == "named_set_dimension":
-                        lbls = _resolve_set_elems(dim_spec["name"])
-                        return list(lbls) if lbls is not None else None
-                    if dt == "named_range_dimension":
-                        s = _eval_expr_bound(dim_spec["start"])
-                        e = _eval_expr_bound(dim_spec["end"])
-                        return list(range(s, e + 1))
-                    if dt == "range_index":
-                        s = _eval_expr_bound(dim_spec["start"])
-                        e = _eval_expr_bound(dim_spec["end"])
-                        return list(range(s, e + 1))
-                    return None
-
-                # Precompute labels per dimension when available; None means "unknown, use positional fallback"
-                labels_per_dim = [_dim_labels(d) for d in dims]
-
-                # For range dims, also cache their numeric starts for positional fallback
-                def _dim_start(dim_spec):
-                    dt = dim_spec.get("type")
-                    if dt in ("named_range_dimension", "range_index"):
-                        return _eval_expr_bound(dim_spec["start"])
-                    return None
-
-                starts_per_dim = [_dim_start(d) for d in dims]
-
-                # Normalize keys (lists -> tuples recursively, keep scalars)
-                def _to_key(x):
-                    if isinstance(x, (list, tuple)):
-                        return tuple(_to_key(e) for e in x)
-                    return x
-
-                dict_val = {}
-
-                # Helper: map position index j (0-based) to label for a dimension
-                def _pos_to_label(dim_idx, j, provided_len=None):
-                    lbls = labels_per_dim[dim_idx]
-                    if lbls is not None:
-                        # Only use labels when lengths appear consistent or we intentionally map up to min length
-                        if provided_len is None or len(lbls) == provided_len:
-                            return lbls[j] if j < len(lbls) else j + 1
-                        # length mismatch: be conservative and fallback to positional
-                    # For ranges, use start + j; otherwise 1-based index
-                    start = starts_per_dim[dim_idx]
-                    return (start + j) if isinstance(start, int) else (j + 1)
-
-                # Recursive flatten
-                def _flatten(node, dim_idx, prefix):
-                    # If we reached the last dimension, emit values
-                    if dim_idx == len(dims) - 1:
-                        # node can be dict mapping label -> val, or list/tuple of vals
-                        if isinstance(node, dict):
-                            for k, v in node.items():
-                                key = _to_key(k)
-                                dict_val[prefix + (key,)] = v
-                        elif isinstance(node, (list, tuple)):
-                            L = len(node)
-                            for j, v in enumerate(node):
-                                lab = _pos_to_label(dim_idx, j, provided_len=L)
-                                dict_val[prefix + (lab,)] = v
-                        else:
-                            # Scalar provided at last dim (degenerate): use positional fallback label
-                            lab = _pos_to_label(dim_idx, 0, provided_len=1)
-                            dict_val[prefix + (lab,)] = node
-                        return
-
-                    # Intermediate dimension: node may be dict (labeled children) or list/tuple (positional)
-                    if isinstance(node, dict):
-                        for k, child in node.items():
-                            key = _to_key(k)
-                            _flatten(child, dim_idx + 1, prefix + (key,))
-                    elif isinstance(node, (list, tuple)):
-                        L = len(node)
-                        for j, child in enumerate(node):
-                            lab = _pos_to_label(dim_idx, j, provided_len=L)
-                            _flatten(child, dim_idx + 1, prefix + (lab,))
-                    else:
-                        # Degenerate: non-iterable at intermediate level, treat as single-child sequence
-                        lab = _pos_to_label(dim_idx, 0, provided_len=1)
-                        _flatten(node, dim_idx + 1, prefix + (lab,))
-
-                try:
-                    _flatten(value, 0, tuple())
-                    if dict_val:
-                        self._add_code_line(f"{name} = {repr(dict_val)}")
-                        self.dict_params.add(name)
-                        already_emitted.add(name)
-                        continue
-                except Exception:
-                    # Fall through to other handlers or shape checks
-                    pass
-
-            if value is not None and isinstance(value, (list, tuple)) and pdecl is not None:
-                self._check_parameter_shape(value, pdecl.get("dimensions", []), working_data, name)
+        already_emitted.update(
+            self._emit_mapping_nd_parameters(
+                working_data_pref, param_decl_map, already_emitted
+            )
+        )
 
         self.dict_params = set(self.dict_params)
         self._emit_structured_data_declarations(data_dict)
