@@ -386,158 +386,145 @@ class GurobiCodeGenerator:
                     param_data, declaration["dimensions"], data_dict, param_name
                 )
 
+    def _tuple_array_records(self, data_value, field_names, index_values=None):
+        if isinstance(data_value, dict):
+            items = sorted(data_value.items(), key=lambda item: item[0])
+        elif isinstance(index_values, list) and len(index_values) == len(data_value):
+            items = zip(index_values, data_value)
+        else:
+            items = enumerate(data_value, start=1)
+        records = {}
+        for key, record in items:
+            if isinstance(record, dict):
+                records[key] = {field: record.get(field) for field in field_names if field in record}
+                continue
+            records[key] = {
+                field: record[index]
+                for index, field in enumerate(field_names)
+                if index < len(record)
+            }
+        return records
+
+    def _tuple_set_array_records(self, data_value, index_values=None):
+        if isinstance(data_value, dict):
+            items = sorted(data_value.items(), key=lambda item: item[0])
+        elif isinstance(index_values, list) and len(index_values) == len(data_value):
+            items = zip(index_values, data_value)
+        else:
+            items = enumerate(data_value, start=1)
+        return {key: list(records or []) for key, records in items}
+
+    def _emit_structured_data_declarations(self, data_dict):
+        for declaration in self.ast.get("declarations", []):
+            declaration_type = declaration.get("type")
+            if declaration_type == "tuple_type":
+                self.tuple_types = getattr(self, "tuple_types", {})
+                self.tuple_types[declaration["name"]] = declaration["fields"]
+            elif declaration_type in ("set_of_tuples", "set_of_tuples_external"):
+                set_name = declaration["name"]
+                tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
+                if tuple_list:
+                    self._add_code_line(f"{set_name} = {repr(tuple_list)}")
+            elif declaration_type == "set_of_tuples_array_external":
+                set_name = declaration["name"]
+                dimensions = declaration.get("dimensions") or []
+                index_values = None
+                if len(dimensions) == 1 and dimensions[0].get("type") in (
+                    "named_range_dimension",
+                    "named_set_dimension",
+                ):
+                    index_values = data_dict.get(dimensions[0].get("name"))
+                data_value = data_dict.get(set_name)
+                if data_value is not None:
+                    records = self._tuple_set_array_records(data_value, index_values)
+                    self._add_code_line(f"{set_name} = {repr(records)}")
+            elif declaration_type in ("typed_set", "typed_set_external"):
+                set_name = declaration["name"]
+                elements = declaration.get("value")
+                if not elements and set_name in data_dict:
+                    elements = data_dict[set_name]
+                elements = [] if elements is None else elements
+                elems_str = ", ".join(repr(element) for element in elements)
+                self._add_code_line(f"{set_name} = [{elems_str}]")
+                self._add_code_line(f"{set_name}_index = {{v:i for i,v in enumerate({set_name})}}")
+            elif declaration_type in ("tuple_array", "tuple_array_external"):
+                array_name = declaration["name"]
+                tuple_type = declaration["tuple_type"]
+                data_value = data_dict.get(array_name)
+                if data_value is not None and tuple_type in getattr(self, "tuple_types", {}):
+                    field_names = [field["name"] for field in self.tuple_types[tuple_type]]
+                    index_values = data_dict.get(declaration["index_set"])
+                    records = self._tuple_array_records(data_value, field_names, index_values)
+                    self._add_code_line(f"{array_name} = {repr(records)}")
+
+    def _build_working_data(self, data_dict):
+        working_data = dict(data_dict or {})
+        for declaration in self.ast.get("declarations", []):
+            declaration_type = declaration.get("type")
+            if declaration_type in ("typed_set", "typed_set_external"):
+                name = declaration["name"]
+                if name not in working_data and declaration.get("value") is not None:
+                    working_data[name] = declaration["value"]
+            if declaration_type in ("parameter_inline", "parameter_inline_indexed"):
+                name = declaration["name"]
+                if name not in working_data and declaration.get("value") is not None:
+                    working_data[name] = declaration["value"]
+        preferred_data = dict(working_data)
+        for name, value in working_data.items():
+            if name.endswith("__map"):
+                preferred_data[name[: -len("__map")]] = value
+        return working_data, preferred_data
+
+    def _parameter_declaration_map(self):
+        parameter_types = {
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+            "parameter_inline",
+            "parameter_inline_indexed",
+        }
+        return {
+            declaration["name"]: declaration
+            for declaration in self.ast.get("declarations", [])
+            if declaration.get("type") in parameter_types
+        }
+
+    def _validate_1d_mapping_values(self, parameter_declarations, working_data):
+        for name, declaration in parameter_declarations.items():
+            dimensions = declaration.get("dimensions", []) or []
+            if len(dimensions) != 1 or dimensions[0].get("type") not in (
+                "named_set_dimension",
+                "named_range_dimension",
+            ):
+                continue
+            value = working_data.get(name)
+            if not isinstance(value, dict):
+                continue
+            bad_key = next(
+                (key for key, item in value.items() if isinstance(item, (list, tuple, dict))),
+                None,
+            )
+            if bad_key is not None:
+                raise SemanticError(
+                    f"Parameter '{name}' declared as 1-D over '{dimensions[0].get('name', '')}' expects scalar values per key, "
+                    f"but data provides an array for key {repr(bad_key)}. Use scalar values (e.g., 2.0), not [2.0]."
+                )
+
     def _generate_data_declarations(self, data_dict):
+        """Generate Python code for data declarations and AST tuple/set declarations."""
         logger.debug("Entering _generate_data_declarations")
         self._normalize_data_declaration_inputs(data_dict)
-        """Generates Python code for data declarations from the .dat file and tuple/set declarations from AST."""
-        # Emit tuple types and sets of tuples from AST declarations (if present)
-        # Track parameters we transform into dict (or nested dict) so expression code can index via symbolic keys
         self.dict_params = set()
-
-        def _tuple_array_records(data_value, field_names, index_values=None):
-            if isinstance(data_value, dict):
-                items = sorted(data_value.items(), key=lambda kv: kv[0])
-            elif isinstance(index_values, list) and len(index_values) == len(data_value):
-                items = zip(index_values, data_value)
-            else:
-                items = enumerate(data_value, start=1)
-            records = {}
-            for key, rec in items:
-                if isinstance(rec, dict):
-                    records[key] = {fn: rec.get(fn) for fn in field_names if fn in rec}
-                    continue
-                d = {}
-                for i, fn in enumerate(field_names):
-                    if i < len(rec):
-                        d[fn] = rec[i]
-                records[key] = d
-            return records
-
-        def _tuple_set_array_records(data_value, index_values=None):
-            if isinstance(data_value, dict):
-                items = sorted(data_value.items(), key=lambda kv: kv[0])
-            elif isinstance(index_values, list) and len(index_values) == len(data_value):
-                items = zip(index_values, data_value)
-            else:
-                items = enumerate(data_value, start=1)
-            return {key: list(records or []) for key, records in items}
-
-        if hasattr(self, "ast") and "declarations" in self.ast:
-            for decl in self.ast["declarations"]:
-                if decl.get("type") == "tuple_type":
-                    self.tuple_types = getattr(self, "tuple_types", {})
-                    self.tuple_types[decl["name"]] = decl["fields"]
-                elif decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    set_name = decl["name"]
-                    tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
-                    if tuple_list:
-                        self._add_code_line(f"{set_name} = {repr(tuple_list)}")
-                elif decl.get("type") == "set_of_tuples_array_external":
-                    set_name = decl["name"]
-                    dimensions = decl.get("dimensions") or []
-                    index_values = None
-                    if len(dimensions) == 1:
-                        dim = dimensions[0]
-                        if dim.get("type") in ("named_range_dimension", "named_set_dimension"):
-                            index_values = data_dict.get(dim.get("name"))
-                    data_value = data_dict.get(set_name)
-                    if data_value is not None:
-                        self._add_code_line(f"{set_name} = {repr(_tuple_set_array_records(data_value, index_values))}")
-                elif decl.get("type") in ("typed_set", "typed_set_external"):
-                    set_name = decl["name"]
-                    elements = decl.get("value")
-                    if (not elements) and set_name in data_dict:
-                        elements = data_dict[set_name]
-                    if elements is None:
-                        elements = []
-                    elems_str = ", ".join(repr(e) for e in elements)
-                    self._add_code_line(f"{set_name} = [{elems_str}]")
-                    self._add_code_line(f"{set_name}_index = {{v:i for i,v in enumerate({set_name})}}")
-                elif decl.get("type") in ("tuple_array", "tuple_array_external"):
-                    arr_name = decl["name"]
-                    tuple_type = decl["tuple_type"]
-                    index_set = decl["index_set"]
-                    data_list = data_dict.get(arr_name)
-                    if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
-                        fields = self.tuple_types[tuple_type]
-                        field_names = [f["name"] for f in fields]
-                        tuple_dicts = _tuple_array_records(data_list, field_names, data_dict.get(index_set))
-                        self._add_code_line(f"{arr_name} = {repr(tuple_dicts)}")
-        # Build a working_data that merges .dat data with inline model values (typed sets, params)
-        working_data = dict(data_dict or {})
-        if hasattr(self, "ast") and "declarations" in self.ast:
-            # Include typed sets so named_set dimensions can be keyed
-            for decl in self.ast["declarations"]:
-                t = decl.get("type")
-                if t in ("typed_set", "typed_set_external"):
-                    name = decl["name"]
-                    if name not in working_data:
-                        vals = decl.get("value")
-                        if vals is not None:
-                            working_data[name] = vals
-                # Inline scalar or array parameters
-                if t in ("parameter_inline", "parameter_inline_indexed"):
-                    name = decl["name"]
-                    if name not in working_data and decl.get("value") is not None:
-                        working_data[name] = decl["value"]
-
-        # Preferred view: generators should prefer normalized mappings when present.
-        # Mappings are stored under the key '<name>__map' by the core normalizer.
-        working_data_pref = dict(working_data)
-        for k in list(working_data.keys()):
-            if k.endswith("__map"):
-                base = k[: -len("__map")]
-                # Allow normalized mapping to shadow the original value for generator emission
-                working_data_pref[base] = working_data[k]
+        self._emit_structured_data_declarations(data_dict)
+        working_data, working_data_pref = self._build_working_data(data_dict)
 
         # Do not exit early on empty data_dict; inline params may still need emission
         self._add_code_line("# Data from .dat file")
 
         # New: validation for 1-D params over set/range where data is provided as a dict with list values.
-        param_decl_map = {
-            d["name"]: d
-            for d in self.ast.get("declarations", [])
-            if d.get("type")
-            in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            )
-        }
-        for name, decl in param_decl_map.items():
-            dims = decl.get("dimensions", []) or []
-            if len(dims) == 1 and dims[0].get("type") in (
-                "named_set_dimension",
-                "named_range_dimension",
-            ):
-                val = working_data_pref.get(name)
-                if isinstance(val, dict):
-                    bad_key = next(
-                        (k for k, v in val.items() if isinstance(v, (list, tuple, dict))),
-                        None,
-                    )
-                    if bad_key is not None:
-                        raise SemanticError(
-                            f"Parameter '{name}' declared as 1-D over '{dims[0].get('name', '')}' expects scalar values per key, "
-                            f"but data provides an array for key {repr(bad_key)}. Use scalar values (e.g., 2.0), not [2.0]."
-                        )
-
-        param_decl_map = {
-            d["name"]: d
-            for d in self.ast.get("declarations", [])
-            if d.get("type")
-            in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            )
-        }
+        param_decl_map = self._parameter_declaration_map()
+        self._validate_1d_mapping_values(param_decl_map, working_data_pref)
 
         # --- helpers for evaluating bounds and normalizing set elements ---
         def _eval_expr_bound(expr):
@@ -871,66 +858,8 @@ class GurobiCodeGenerator:
             if value is not None and isinstance(value, (list, tuple)) and pdecl is not None:
                 self._check_parameter_shape(value, pdecl.get("dimensions", []), working_data, name)
 
-        """Generates Python code for data declarations from the .dat file and tuple/set declarations from AST."""
-        # Emit tuple types and sets of tuples from AST declarations (if present)
-        # Keep dict_params
         self.dict_params = set(self.dict_params)
-        if hasattr(self, "ast") and "declarations" in self.ast:
-            for decl in self.ast["declarations"]:
-                if decl.get("type") == "tuple_type":
-                    self.tuple_types = getattr(self, "tuple_types", {})
-                    self.tuple_types[decl["name"]] = decl["fields"]
-                elif decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    set_name = decl["name"]
-                    tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
-                    if tuple_list:
-                        self._add_code_line(f"{set_name} = {repr(tuple_list)}")
-                elif decl.get("type") == "set_of_tuples_array_external":
-                    set_name = decl["name"]
-                    dimensions = decl.get("dimensions") or []
-                    index_values = None
-                    if len(dimensions) == 1:
-                        dim = dimensions[0]
-                        if dim.get("type") in ("named_range_dimension", "named_set_dimension"):
-                            index_values = data_dict.get(dim.get("name"))
-                    data_value = data_dict.get(set_name)
-                    if data_value is not None:
-                        self._add_code_line(f"{set_name} = {repr(_tuple_set_array_records(data_value, index_values))}")
-                elif decl.get("type") in ("typed_set", "typed_set_external"):
-                    set_name = decl["name"]
-                    elements = decl.get("value")
-                    if (not elements) and set_name in data_dict:
-                        elements = data_dict[set_name]
-                    if elements is None:
-                        elements = []
-                    elems_str = ", ".join(repr(e) for e in elements)
-                    self._add_code_line(f"{set_name} = [{elems_str}]")
-                    self._add_code_line(f"{set_name}_index = {{v:i for i,v in enumerate({set_name})}}")
-                elif decl.get("type") in ("tuple_array", "tuple_array_external"):
-                    arr_name = decl["name"]
-                    tuple_type = decl["tuple_type"]
-                    index_set = decl["index_set"]
-                    data_list = data_dict.get(arr_name)
-                    if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
-                        fields = self.tuple_types[tuple_type]
-                        field_names = [f["name"] for f in fields]
-                        tuple_dicts = _tuple_array_records(data_list, field_names, data_dict.get(index_set))
-                        self._add_code_line(f"{arr_name} = {repr(tuple_dicts)}")
-        # If truly nothing to emit, still end section cleanly
-        # Rebuild param_decl_map (unchanged)
-        param_decl_map = {
-            d["name"]: d
-            for d in self.ast.get("declarations", [])
-            if d.get("type")
-            in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            )
-        }
+        self._emit_structured_data_declarations(data_dict)
 
         for name, value in working_data_pref.items():
             if name in already_emitted:
