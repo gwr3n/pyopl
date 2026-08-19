@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -244,6 +246,173 @@ def _handle_compare(args: argparse.Namespace) -> int:
         return 1
 
 
+def _genai_kwargs(args: argparse.Namespace) -> dict:
+    kwargs = {}
+    if getattr(args, "llm_model", None):
+        kwargs["model_name"] = args.llm_model
+    if getattr(args, "provider", None):
+        kwargs["llm_provider"] = args.provider
+    return kwargs
+
+
+def _emit_output(text: str, out_file: Optional[str]) -> None:
+    if out_file:
+        _write_text(Path(out_file), text)
+    else:
+        print(text)
+
+
+def _handle_genai_list_models(args: argparse.Namespace) -> int:
+    provider = args.provider
+    prefix = getattr(args, "prefix", None)
+    listers = {
+        "openai": list_openai_models,
+        "google": list_gemini_models,
+        "ollama": list_ollama_models,
+    }
+    try:
+        list_models = listers[provider]
+        models = list_models(prefix=prefix) if prefix else list_models()
+        print("\n".join(models))
+        return 0
+    except Exception as exc:
+        print(f"Error listing models for {provider}: {exc}", file=sys.stderr)
+        return 3
+
+
+def _handle_genai_list_methods(_args: argparse.Namespace) -> int:
+    methods = (
+        ("SyntAGM", "pyopl_generative"),
+        ("Standard", "pyopl_standard"),
+        ("Chain of Thought", "pyopl_chain_of_thought"),
+        ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+        ("CAFA", "pyopl_cafa"),
+        ("Chain of Experts", "pyopl_chain_of_experts"),
+        ("Reflexion", "pyopl_reflexion"),
+    )
+    for label, key in methods:
+        print(f"{label}: {key}")
+    return 0
+
+
+def _handle_genai_generate(args: argparse.Namespace) -> int:
+    try:
+        stats = generative_solve(
+            args.prompt,
+            args.model_file,
+            args.data_file,
+            iterations=getattr(args, "iterations", 5),
+            return_statistics=True,
+            **_genai_kwargs(args),
+        )
+        text = json.dumps(stats, indent=2, sort_keys=True, default=str)
+        _emit_output(text, getattr(args, "out_file", None))
+        return 0
+    except Exception as exc:
+        print(f"Error during generative_solve: {exc}", file=sys.stderr)
+        return 4
+
+
+def _handle_genai_ask(args: argparse.Namespace) -> int:
+    try:
+        feedback = generative_feedback(
+            args.prompt,
+            args.model_file,
+            args.data_file,
+            **_genai_kwargs(args),
+        )
+        text = json.dumps(feedback, indent=2, sort_keys=True, default=str)
+        _emit_output(text, getattr(args, "out_file", None))
+        return 0
+    except Exception as exc:
+        print(f"Error during generative_feedback: {exc}", file=sys.stderr)
+        return 4
+
+
+def _unique_insight_paths() -> tuple[Path, Path]:
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    tmp_dir = Path(os.getcwd()) / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"gen_pyopl_{timestamp}"
+    model_path = tmp_dir / f"{base_name}.mod"
+    data_path = tmp_dir / f"{base_name}.dat"
+    suffix = 1
+    while model_path.exists() or data_path.exists():
+        model_path = tmp_dir / f"{base_name}_{suffix}.mod"
+        data_path = tmp_dir / f"{base_name}_{suffix}.dat"
+        suffix += 1
+    return model_path, data_path
+
+
+def _insight_summary(feedback) -> str:
+    if isinstance(feedback, dict):
+        return feedback.get("feedback") or feedback.get("summary") or json.dumps(feedback, indent=2)
+    return str(feedback)
+
+
+def _handle_genai_insight(args: argparse.Namespace) -> int:
+    model_path, data_path = _unique_insight_paths()
+    try:
+        generative_solve(
+            args.prompt,
+            str(model_path),
+            str(data_path),
+            iterations=getattr(args, "iterations", 5),
+            return_statistics=True,
+            **_genai_kwargs(args),
+        )
+    except Exception as exc:
+        print(f"Error during generation: {exc}", file=sys.stderr)
+        return 4
+
+    solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "scipy"
+    try:
+        with redirect_stdout(sys.stderr):
+            results = _run_solve(model_path, data_path, solver_key)
+    except Exception as exc:
+        print(f"Error solving generated model: {exc}", file=sys.stderr)
+        return 1
+
+    solution = json.dumps(results, indent=2, sort_keys=True, default=str)
+    feedback_prompt = (
+        "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
+        f"Include key findings and suggested next steps.\n\nSolution:\n{solution}"
+    )
+    try:
+        feedback = generative_feedback(
+            feedback_prompt,
+            str(model_path),
+            str(data_path),
+            **_genai_kwargs(args),
+        )
+    except Exception as exc:
+        print(f"Error during feedback/translation: {exc}", file=sys.stderr)
+        return 4
+
+    markdown = (
+        "# GenAI Insight\n\n"
+        f"## Problem Description\n\n{args.prompt}\n\n"
+        f"## Insight\n\n{_insight_summary(feedback)}\n"
+    )
+    _emit_output(markdown, getattr(args, "out_file", None))
+    return 0
+
+
+def _handle_genai(args: argparse.Namespace) -> int:
+    handlers = {
+        "insight": _handle_genai_insight,
+        "list-models": _handle_genai_list_models,
+        "list-methods": _handle_genai_list_methods,
+        "generate": _handle_genai_generate,
+        "ask": _handle_genai_ask,
+    }
+    handler = handlers.get(getattr(args, "genai_cmd", None))
+    if handler is None:
+        print("Unknown command", file=sys.stderr)
+        return 2
+    return handler(args)
+
+
 def _dispatch_command(args: argparse.Namespace) -> int:
     # Default/no-command => launch IDE (preserve existing behaviour)
     if not args.command:
@@ -265,190 +434,7 @@ def _dispatch_command(args: argparse.Namespace) -> int:
         return _handle_compare(args)
 
     if args.command == "genai":
-        cmd = getattr(args, "genai_cmd", None)
-        # genai insight: generate model+data -> solve -> ask for lay-summary
-        if cmd == "insight":
-            prompt = args.prompt
-            provider = getattr(args, "provider", None)
-            llm_model = getattr(args, "llm_model", None)
-            iterations = getattr(args, "iterations", 5)
-            solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "scipy"
-
-            # Build unique tmp filenames using same scheme as IDE
-            import os
-            from datetime import datetime
-
-            display_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            safe_ts = display_ts.replace(":", "-").replace(" ", "_")
-            tmp_dir = Path(os.getcwd()) / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            base_name = f"gen_pyopl_{safe_ts}"
-            model_path = tmp_dir / f"{base_name}.mod"
-            data_path = tmp_dir / f"{base_name}.dat"
-            i = 1
-            while model_path.exists() or data_path.exists():
-                model_path = tmp_dir / f"{base_name}_{i}.mod"
-                data_path = tmp_dir / f"{base_name}_{i}.dat"
-                i += 1
-
-            try:
-                gen_kwargs: dict = {}
-                if llm_model:
-                    gen_kwargs["model_name"] = llm_model
-                if provider:
-                    gen_kwargs["llm_provider"] = provider
-                stats = generative_solve(
-                    prompt,
-                    str(model_path),
-                    str(data_path),
-                    iterations=iterations,
-                    return_statistics=True,
-                    **gen_kwargs,
-                )
-            except Exception as e:
-                print(f"Error during generation: {e}", file=sys.stderr)
-                return 4
-
-            # Solve generated model
-            try:
-                with redirect_stdout(sys.stderr):
-                    results = _run_solve(Path(model_path), Path(data_path), solver_key)
-            except Exception as e:
-                print(f"Error solving generated model: {e}", file=sys.stderr)
-                return 1
-
-            # Compose a feedback prompt asking to explain the results in lay terms
-            sol_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-            feedback_prompt = f"Translate the following optimization solution into clear, non-technical language targeting a lay user. Include key findings and suggested next steps.\n\nSolution:\n{sol_text}"
-
-            try:
-                fb_kwargs: dict = {}
-                if llm_model:
-                    fb_kwargs["model_name"] = llm_model
-                if provider:
-                    fb_kwargs["llm_provider"] = provider
-                feedback = generative_feedback(
-                    feedback_prompt,
-                    str(model_path),
-                    str(data_path),
-                    **fb_kwargs,
-                )
-            except Exception as e:
-                print(f"Error during feedback/translation: {e}", file=sys.stderr)
-                return 4
-
-            # feedback may be a dict with 'feedback' or a string
-            summary = None
-            if isinstance(feedback, dict):
-                summary = feedback.get("feedback") or feedback.get("summary") or json.dumps(feedback, indent=2)
-            else:
-                summary = str(feedback)
-
-            # Include original problem description and format as Markdown
-            if isinstance(prompt, str):
-                prompt_text = prompt
-            else:
-                try:
-                    prompt_text = json.dumps(prompt, indent=2, sort_keys=True, default=str)
-                except Exception:
-                    prompt_text = str(prompt)
-
-            md = "# GenAI Insight\n\n"
-            md += "## Problem Description\n\n"
-            md += prompt_text + "\n\n"
-            md += "## Insight\n\n"
-            md += summary + "\n"
-            out_file = getattr(args, "out_file", None)
-            if out_file:
-                _write_text(Path(out_file), md)
-            else:
-                print(md)
-            return 0
-        if cmd == "list-models":
-            provider = args.provider
-            prefix = getattr(args, "prefix", None)
-            try:
-                if provider == "openai":
-                    models = list_openai_models(prefix=prefix) if prefix else list_openai_models()
-                elif provider == "google":
-                    models = list_gemini_models(prefix=prefix) if prefix else list_gemini_models()
-                else:
-                    models = list_ollama_models(prefix=prefix) if prefix else list_ollama_models()
-                print("\n".join(models))
-                return 0
-            except Exception as e:
-                print(f"Error listing models for {provider}: {e}", file=sys.stderr)
-                return 3
-
-        if cmd == "list-methods":
-            methods = [
-                ("SyntAGM", "pyopl_generative"),
-                ("Standard", "pyopl_standard"),
-                ("Chain of Thought", "pyopl_chain_of_thought"),
-                ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
-                ("CAFA", "pyopl_cafa"),
-                ("Chain of Experts", "pyopl_chain_of_experts"),
-                ("Reflexion", "pyopl_reflexion"),
-            ]
-            for label, key in methods:
-                print(f"{label}: {key}")
-            return 0
-
-        if cmd == "generate":
-            prompt = args.prompt
-            model_out = args.model_file
-            data_out = args.data_file
-            try:
-                gen_kwargs2: dict = {}
-                if getattr(args, "llm_model", None):
-                    gen_kwargs2["model_name"] = getattr(args, "llm_model")
-                if getattr(args, "provider", None):
-                    gen_kwargs2["llm_provider"] = getattr(args, "provider")
-                stats = generative_solve(
-                    prompt,
-                    model_out,
-                    data_out,
-                    iterations=getattr(args, "iterations", 5),
-                    return_statistics=True,
-                    **gen_kwargs2,
-                )
-                out_text = json.dumps(stats, indent=2, sort_keys=True, default=str)
-                out_file = getattr(args, "out_file", None)
-                if out_file:
-                    _write_text(Path(out_file), out_text)
-                else:
-                    print(out_text)
-                return 0
-            except Exception as e:
-                print(f"Error during generative_solve: {e}", file=sys.stderr)
-                return 4
-
-        if cmd == "ask":
-            prompt = args.prompt
-            model_file = args.model_file
-            data_file = args.data_file
-            try:
-                fb_kwargs2: dict = {}
-                if getattr(args, "llm_model", None):
-                    fb_kwargs2["model_name"] = getattr(args, "llm_model")
-                if getattr(args, "provider", None):
-                    fb_kwargs2["llm_provider"] = getattr(args, "provider")
-                feedback = generative_feedback(
-                    prompt,
-                    model_file,
-                    data_file,
-                    **fb_kwargs2,
-                )
-                out_text = json.dumps(feedback, indent=2, sort_keys=True, default=str)
-                out_file = getattr(args, "out_file", None)
-                if out_file:
-                    _write_text(Path(out_file), out_text)
-                else:
-                    print(out_text)
-                return 0
-            except Exception as e:
-                print(f"Error during generative_feedback: {e}", file=sys.stderr)
-                return 4
+        return _handle_genai(args)
 
     # Unknown command
     print("Unknown command", file=sys.stderr)
