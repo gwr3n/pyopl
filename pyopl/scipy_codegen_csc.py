@@ -5402,6 +5402,74 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         row[self.var_indices[flag_name]] += big_m
         append_ub_row(row, big_m - cons_const)
 
+    def _try_handle_weighted_boolean_sum_constraint(
+        self,
+        left,
+        right,
+        op_sym_top,
+        env,
+        bool_expr_var,
+        state,
+    ):
+        sum_node = self._unwrap_parenthesized_node(left)
+        if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
+            return False
+        inner = self._unwrap_parenthesized_node(sum_node.get("expression"))
+        if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
+            return False
+
+        weighted_bool = None
+        for weight_node, bool_node in (
+            (inner.get("left"), inner.get("right")),
+            (inner.get("right"), inner.get("left")),
+        ):
+            bool_node = self._unwrap_parenthesized_node(bool_node)
+            if (
+                isinstance(bool_node, dict)
+                and bool_node.get("sem_type") == "boolean"
+                and bool_node.get("type") not in ("name", "indexed_name")
+            ):
+                weighted_bool = weight_node, bool_node
+                break
+        if weighted_bool is None or op_sym_top not in (">=", "==", "<=", ">", "<"):
+            return False
+
+        try:
+            rhs_coef, rhs_const = self._eval_expr(right, dict(env or {}))
+        except Exception:
+            return False
+        if rhs_coef != {} or not isinstance(rhs_const, (int, float)):
+            return False
+
+        weight_node, bool_node = weighted_bool
+        rhs_value = float(rhs_const)
+        if op_sym_top == ">":
+            rhs_value += BOOL_EPS
+        elif op_sym_top == "<":
+            rhs_value -= BOOL_EPS
+
+        row = [0.0] * len(self.var_names)
+        for env2, _idx_tuple in self._iter_filtered_environments(
+            sum_node.get("iterators", []),
+            env,
+            sum_node.get("index_constraint"),
+        ):
+            weight_coef, weight_const = self._eval_expr(weight_node, env2)
+            if weight_coef or isinstance(weight_const, (str, tuple)):
+                raise SemanticError("Weighted boolean sums require numeric weights")
+            bool_var = bool_expr_var(bool_node, env2)
+            if len(row) < len(self.var_names):
+                row.extend([0.0] * (len(self.var_names) - len(row)))
+            row[self.var_indices[bool_var]] += float(weight_const)
+
+        if op_sym_top in (">=", ">"):
+            self._append_sparse_row(state, [-coef for coef in row], -rhs_value, sense="ub")
+        elif op_sym_top in ("<=", "<"):
+            self._append_sparse_row(state, row, rhs_value, sense="ub")
+        else:
+            self._append_sparse_row(state, row, rhs_value, sense="eq")
+        return True
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -5515,89 +5583,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 left = constr["left"]
                 right = constr["right"]
                 op_sym_top = constr.get("op")
-
-                def _weighted_bool_sum_early(node):
-                    node = _unwrap_paren(node)
-                    if not (isinstance(node, dict) and node.get("type") == "sum"):
-                        return None
-                    inner = _unwrap_paren(node.get("expression"))
-                    if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
-                        return None
-
-                    def _is_composite_boolean(expr_node):
-                        return isinstance(expr_node, dict) and expr_node.get("type") not in ("name", "indexed_name")
-
-                    for weight_node, bool_node in (
-                        (inner.get("left"), inner.get("right")),
-                        (inner.get("right"), inner.get("left")),
-                    ):
-                        bool_node = _unwrap_paren(bool_node)
-                        if (
-                            isinstance(bool_node, dict)
-                            and bool_node.get("sem_type") == "boolean"
-                            and _is_composite_boolean(bool_node)
-                        ):
-                            return node, weight_node, bool_node
-                    return None
-
-                weighted_bool = _weighted_bool_sum_early(left)
-                rhs_coef_wb = None
-                rhs_const_wb = None
-                if weighted_bool is not None:
-                    try:
-                        rhs_coef_wb, rhs_const_wb = self._eval_expr(right, dict(env or {}))
-                    except Exception:
-                        rhs_coef_wb, rhs_const_wb = None, None
-                if (
-                    weighted_bool is not None
-                    and op_sym_top in (">=", "==", "<=", ">", "<")
-                    and rhs_coef_wb == {}
-                    and isinstance(rhs_const_wb, (int, float))
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_handle_weighted_boolean_sum_constraint(
+                    left,
+                    right,
+                    op_sym_top,
+                    env,
+                    _bool_expr_var,
+                    state,
                 ):
-                    sum_node, weight_node, bool_node = weighted_bool
-                    rhs_value = float(rhs_const_wb)
-                    if op_sym_top == ">":
-                        rhs_value += BOOL_EPS
-                    elif op_sym_top == "<":
-                        rhs_value -= BOOL_EPS
-                    iterators = sum_node.get("iterators", [])
-                    row = [0.0] * len(self.var_names)
-                    for env2, _idx_tuple in self._iter_filtered_environments(
-                        iterators,
-                        env,
-                        sum_node.get("index_constraint"),
-                    ):
-                        weight_coef, weight_const = self._eval_expr(weight_node, env2)
-                        if weight_coef or isinstance(weight_const, (str, tuple)):
-                            raise SemanticError("Weighted boolean sums require numeric weights")
-                        zvar = _bool_expr_var(bool_node, env2)
-                        if len(row) < len(self.var_names):
-                            row.extend([0.0] * (len(self.var_names) - len(row)))
-                        row[self.var_indices[zvar]] += float(weight_const)
-                    if op_sym_top in (">=", ">"):
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(-coef)
-                        b_ub.append(-rhs_value)
-                        ub_row_idx += 1
-                    elif op_sym_top in ("<=", "<"):
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(rhs_value)
-                        ub_row_idx += 1
-                    else:
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(rhs_value)
-                        eq_row_idx += 1
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
                     return
 
                 is_sum, inner_cmp, k_val, iterators, index_constraint = _detect_sum_of_comparisons(
