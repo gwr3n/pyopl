@@ -5220,6 +5220,188 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return
         raise SemanticError("Unsupported implication consequent form")
 
+    def _handle_implication_constraint(
+        self,
+        constr,
+        env,
+        bool_expr_var,
+        comparison_truth_var,
+        append_eq_row,
+        append_ub_row,
+    ):
+        ant_unwrapped, cons_unwrapped = self._normalize_implication_nodes(
+            constr["antecedent"],
+            constr["consequent"],
+        )
+        if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not"):
+            antecedent_name = bool_expr_var(ant_unwrapped, env)
+            ant_unwrapped = {
+                "type": "constraint",
+                "op": "==",
+                "left": {"type": "name", "value": antecedent_name, "sem_type": "boolean"},
+                "right": {"type": "number", "value": 1},
+            }
+        if isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") in ("and", "or", "not"):
+            consequent_name = bool_expr_var(cons_unwrapped, env)
+            cons_unwrapped = {
+                "type": "constraint",
+                "op": "==",
+                "left": {"type": "name", "value": consequent_name, "sem_type": "boolean"},
+                "right": {"type": "number", "value": 1},
+            }
+
+        def extract_var_eq_val(node, val):
+            if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
+                return None
+            left = node["left"]
+            right = node["right"]
+
+            def is_var(value):
+                return isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+
+            if is_var(left) and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == val:
+                return left
+            if is_var(right) and isinstance(left, dict) and left.get("type") == "number" and left.get("value") == val:
+                return right
+            return None
+
+        ant_var_node = extract_var_eq_val(ant_unwrapped, 1)
+        ant_eq_zero = extract_var_eq_val(ant_unwrapped, 0)
+        if ant_eq_zero is not None:
+            self._gate_affine_implication_consequent(
+                ant_eq_zero,
+                0,
+                cons_unwrapped,
+                env,
+                append_ub_row,
+            )
+            return
+
+        if ant_var_node:
+            self._handle_boolean_antecedent_implication(
+                ant_var_node,
+                cons_unwrapped,
+                env,
+                append_ub_row,
+            )
+            return
+
+        if not (
+            isinstance(ant_unwrapped, dict)
+            and ant_unwrapped.get("type") == "constraint"
+            and isinstance(cons_unwrapped, dict)
+            and cons_unwrapped.get("type") == "constraint"
+        ):
+            raise SemanticError("Implication antecedent must be boolean var == 1 or linear constraint")
+        ant_op = ant_unwrapped.get("op")
+        cons_op = cons_unwrapped.get("op")
+        supported_ops = {">=", ">", "<=", "<", "=="}
+        if ant_op not in supported_ops or cons_op not in supported_ops:
+            raise SemanticError("Unsupported implication comparison operator")
+
+        if ant_op != "==":
+            antecedent_comparison = {
+                "type": "binop",
+                "op": ant_op,
+                "left": ant_unwrapped.get("left"),
+                "right": ant_unwrapped.get("right"),
+                "sem_type": "boolean",
+            }
+            flag_name = comparison_truth_var(antecedent_comparison, env)
+            self._gate_affine_implication_consequent(
+                {"type": "name", "value": flag_name},
+                1,
+                cons_unwrapped,
+                env,
+                append_ub_row,
+            )
+            return
+
+        def linear_expression(expr):
+            if not isinstance(expr, dict):
+                raise SemanticError("Unsupported expression in implication linearization")
+            try:
+                coef, const = self._eval_expr(expr, dict(env or {}))
+            except Exception as exc:
+                raise SemanticError("Unsupported linear expression form in implication") from exc
+            if not isinstance(const, (int, float)):
+                raise SemanticError("Unsupported linear expression form in implication")
+            return dict(coef), float(const)
+
+        def expression_difference(left, right):
+            left_coef, left_const = linear_expression(left)
+            right_coef, right_const = linear_expression(right)
+            coef = left_coef.copy()
+            for name, value in right_coef.items():
+                coef[name] = coef.get(name, 0.0) - value
+            return coef, left_const - right_const
+
+        ant_coef, ant_const = expression_difference(
+            ant_unwrapped.get("left"),
+            ant_unwrapped.get("right"),
+        )
+        diff_min, diff_max = self._finite_integer_affine_bounds(
+            ant_coef,
+            ant_const,
+            "Equality implication antecedent",
+        )
+        if not hasattr(self, "_impl_counter"):
+            self._impl_counter = 0
+        flag_name = f"implication_flag_c{self._impl_counter}"
+        self._impl_counter += 1
+        negative_flag = f"{flag_name}_negative"
+        positive_flag = f"{flag_name}_positive"
+        for name in (flag_name, negative_flag, positive_flag):
+            self.var_names.append(name)
+            self.var_indices[name] = len(self.var_names) - 1
+            self.bounds.append([0, 1])
+            self.integrality.append(1)
+            if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                self.c.append(0.0)
+
+        partition_row = [0.0] * len(self.var_names)
+        for name in (flag_name, negative_flag, positive_flag):
+            partition_row[self.var_indices[name]] = 1.0
+        append_eq_row(partition_row, 1.0)
+
+        lower_row = [0.0] * len(self.var_names)
+        upper_row = [0.0] * len(self.var_names)
+        for name, coef in ant_coef.items():
+            lower_row[self.var_indices[name]] -= coef
+            upper_row[self.var_indices[name]] += coef
+        lower_row[self.var_indices[negative_flag]] += diff_min
+        lower_row[self.var_indices[positive_flag]] += 1.0
+        upper_row[self.var_indices[negative_flag]] += 1.0
+        upper_row[self.var_indices[positive_flag]] -= diff_max
+        append_ub_row(lower_row, ant_const)
+        append_ub_row(upper_row, -ant_const)
+
+        if cons_op == "==":
+            raise SemanticError("Equality consequent not yet supported")
+        if cons_op in ("<=", "<"):
+            cons_coef, cons_const = expression_difference(
+                cons_unwrapped.get("left"),
+                cons_unwrapped.get("right"),
+            )
+        elif cons_op in (">=", ">"):
+            cons_coef, cons_const = expression_difference(
+                cons_unwrapped.get("right"),
+                cons_unwrapped.get("left"),
+            )
+        else:
+            raise SemanticError("Unsupported consequent operator")
+        _cons_min, cons_max = self._finite_affine_bounds(
+            cons_coef,
+            cons_const,
+            "Equality implication consequent",
+        )
+        big_m = max(0.0, cons_max)
+        row = [0.0] * len(self.var_names)
+        for name, coef in cons_coef.items():
+            row[self.var_indices[name]] += coef
+        row[self.var_indices[flag_name]] += big_m
+        append_ub_row(row, big_m - cons_const)
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -5320,212 +5502,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if self._try_enforce_reified_implication_literal(constr, env, _bool_expr_var, append_eq_row):
                 return
             if constr.get("type") == "implication_constraint":
-                ant = constr["antecedent"]
-                cons = constr["consequent"]
-
-                # Unwrap antecedent & consequent if they are equality-to-true wrappers
-                ant_unwrapped, cons_unwrapped = self._normalize_implication_nodes(ant, cons)
-                if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not"):
-                    antecedent_name = _bool_expr_var(ant_unwrapped, env)
-                    ant_unwrapped = {
-                        "type": "constraint",
-                        "op": "==",
-                        "left": {"type": "name", "value": antecedent_name, "sem_type": "boolean"},
-                        "right": {"type": "number", "value": 1},
-                    }
-                if isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") in ("and", "or", "not"):
-                    consequent_name = _bool_expr_var(cons_unwrapped, env)
-                    cons_unwrapped = {
-                        "type": "constraint",
-                        "op": "==",
-                        "left": {"type": "name", "value": consequent_name, "sem_type": "boolean"},
-                        "right": {"type": "number", "value": 1},
-                    }
-
-                # (Optional) OR antecedent handling could introduce additional auxiliary; not yet supported
-                # (Optional) OR antecedent handling could introduce additional auxiliary; not yet supported
-                def _extract_var_eq_val(node, val):
-                    if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
-                        return None
-                    left = node["left"]
-                    right = node["right"]
-
-                    def is_var(x):
-                        return isinstance(x, dict) and x.get("type") in (
-                            "name",
-                            "indexed_name",
-                        )
-
-                    if (
-                        is_var(left)
-                        and isinstance(right, dict)
-                        and right.get("type") == "number"
-                        and right.get("value") == val
-                    ):
-                        return left
-                    if is_var(right) and isinstance(left, dict) and left.get("type") == "number" and left.get("value") == val:
-                        return right
-                    return None
-
-                ant_var_node = _extract_var_eq_val(ant_unwrapped, 1)
-
-                ant_eq_zero = _extract_var_eq_val(ant_unwrapped, 0)
-                if ant_eq_zero is not None:
-                    self._gate_affine_implication_consequent(
-                        ant_eq_zero,
-                        0,
-                        cons_unwrapped,
-                        env,
-                        append_ub_row,
-                    )
-                    return
-
-                # Fast-path: pattern (x > 0) => (y == 1)  or (x >= 0) => (y == 1)
-                # Recognize antecedent: constraint with op in ('>','>=') comparing single var to 0; consequent: var == 1 on boolean var
-                def _is_zero_number(n):
-                    return isinstance(n, dict) and n.get("type") == "number" and abs(n.get("value")) < LINEAR_ZERO_TOLERANCE
-
-                # --- General linear antecedent -> linear consequent (Option A canonical big-M) ---
-                if not ant_var_node:
-                    # Expect both antecedent and consequent to be simple constraints
-                    if not (
-                        isinstance(ant_unwrapped, dict)
-                        and ant_unwrapped.get("type") == "constraint"
-                        and isinstance(cons_unwrapped, dict)
-                        and cons_unwrapped.get("type") == "constraint"
-                    ):
-                        raise SemanticError("Implication antecedent must be boolean var == 1 or linear constraint")
-                    ant_c = ant_unwrapped
-                    cons_c = cons_unwrapped
-                    ant_op = ant_c.get("op")
-                    cons_op = cons_c.get("op")
-                    supported_ops = {">=", ">", "<=", "<", "=="}
-                    if ant_op not in supported_ops or cons_op not in supported_ops:
-                        raise SemanticError("Unsupported implication comparison operator")
-                    # We currently do not support equality antecedent (would require splitting); raise for clarity.
-                    if ant_op == "==":
-                        # Equality antecedent: (left == right) => consequent
-                        # Strategy: encode equality with a flag that is forced to 1 iff diff==0 using bounding big-M rows similar to previous implementation.
-                        # Then reuse consequent gating with that flag.
-                        # Build diff = left - right
-                        def _lin_eq(expr):
-                            if not isinstance(expr, dict):
-                                raise SemanticError("Unsupported expression in implication linearization")
-                            try:
-                                coef, const = self._eval_expr(expr, dict(env or {}))
-                            except Exception as exc:
-                                raise SemanticError("Unsupported linear expression form in implication") from exc
-                            if not isinstance(const, (int, float)):
-                                raise SemanticError("Unsupported linear expression form in implication")
-                            return dict(coef), float(const)
-
-                        def _diff_eq(left, right):
-                            ld, lc = _lin_eq(left)
-                            rd, rc = _lin_eq(right)
-                            coef = ld.copy()
-                            for k, v in rd.items():
-                                coef[k] = coef.get(k, 0.0) - v
-                            return coef, lc - rc
-
-                        ant_coef, ant_const = _diff_eq(ant_c.get("left"), ant_c.get("right"))
-                        diff_min, diff_max = self._finite_integer_affine_bounds(
-                            ant_coef,
-                            ant_const,
-                            "Equality implication antecedent",
-                        )
-                        if not hasattr(self, "_impl_counter"):
-                            self._impl_counter = 0
-                        flag_name = f"implication_flag_c{self._impl_counter}"
-                        self._impl_counter += 1
-                        negative_flag = f"{flag_name}_negative"
-                        positive_flag = f"{flag_name}_positive"
-                        for name in (flag_name, negative_flag, positive_flag):
-                            self.var_names.append(name)
-                            self.var_indices[name] = len(self.var_names) - 1
-                            self.bounds.append([0, 1])
-                            self.integrality.append(1)
-                            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                                self.c.append(0.0)
-
-                        # Helper to add row
-                        def _add_row(coef_dict, flag_coef, rhs):
-                            row = [0.0] * len(self.var_names)
-                            for v, c in coef_dict.items():
-                                if v not in self.var_indices:
-                                    raise SemanticError(f"Variable '{v}' not indexed")
-                                row[self.var_indices[v]] += c
-                            row[self.var_indices[flag_name]] += flag_coef
-                            append_ub_row(row, rhs)
-
-                        partition_row = [0.0] * len(self.var_names)
-                        for name in (flag_name, negative_flag, positive_flag):
-                            partition_row[self.var_indices[name]] = 1.0
-                        append_eq_row(partition_row, 1.0)
-
-                        # Exact integer partition: diff is negative, zero, or positive.
-                        lower_row = [0.0] * len(self.var_names)
-                        upper_row = [0.0] * len(self.var_names)
-                        for var, coef in ant_coef.items():
-                            lower_row[self.var_indices[var]] -= coef
-                            upper_row[self.var_indices[var]] += coef
-                        lower_row[self.var_indices[negative_flag]] += diff_min
-                        lower_row[self.var_indices[positive_flag]] += 1.0
-                        upper_row[self.var_indices[negative_flag]] += 1.0
-                        upper_row[self.var_indices[positive_flag]] -= diff_max
-                        append_ub_row(lower_row, ant_const)
-                        append_ub_row(upper_row, -ant_const)
-
-                        # Proceed to consequent gating using flag_name
-                        # Build consequent diff normalization below reusing logic after antecedent handling
-                        # Prepare consequent components
-                        def _emit_consequent(cons_node, op):
-                            if op == "==":
-                                raise SemanticError("Equality consequent not yet supported")
-                            if op in ("<=", "<"):
-                                diff_c_coef, diff_c_const = _diff_eq(cons_node.get("left"), cons_node.get("right"))
-                            elif op in (">=", ">"):
-                                diff_c_coef, diff_c_const = _diff_eq(cons_node.get("right"), cons_node.get("left"))
-                            else:
-                                raise SemanticError("Unsupported consequent operator")
-                            return diff_c_coef, diff_c_const
-
-                        diff_c_coef, diff_c_const = _emit_consequent(cons_c, cons_op)
-                        _diff_c_min, diff_c_max = self._finite_affine_bounds(
-                            diff_c_coef,
-                            diff_c_const,
-                            "Equality implication consequent",
-                        )
-                        M_c = max(0.0, diff_c_max)
-                        coefc = diff_c_coef.copy()
-                        rhs_c = M_c - diff_c_const
-                        # diff_c + M_c*flag <= M_c
-                        row = [0.0] * len(self.var_names)
-                        for v, c in coefc.items():
-                            row[self.var_indices[v]] += c
-                        row[self.var_indices[flag_name]] += M_c
-                        append_ub_row(row, rhs_c)
-                        return
-
-                    antecedent_comparison = {
-                        "type": "binop",
-                        "op": ant_op,
-                        "left": ant_c.get("left"),
-                        "right": ant_c.get("right"),
-                        "sem_type": "boolean",
-                    }
-                    flag_name = _comparison_truth_var(antecedent_comparison, env)
-                    self._gate_affine_implication_consequent(
-                        {"type": "name", "value": flag_name},
-                        1,
-                        cons_c,
-                        env,
-                        append_ub_row,
-                    )
-                    return
-                self._handle_boolean_antecedent_implication(
-                    ant_var_node,
-                    cons_unwrapped,
+                self._handle_implication_constraint(
+                    constr,
                     env,
+                    _bool_expr_var,
+                    _comparison_truth_var,
+                    append_eq_row,
                     append_ub_row,
                 )
                 return
