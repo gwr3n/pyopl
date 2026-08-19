@@ -258,140 +258,137 @@ class GurobiCodeGenerator:
             walk(c)
 
     # === Declaration and Data Section ===
-    def _generate_data_declarations(self, data_dict):
-        # (patch now only in the main parameter emission loop below)
+    def _eval_data_bound(self, expr, data_dict):
+        if expr["type"] == "number":
+            return int(expr["value"])
+        if expr["type"] == "name":
+            return int(data_dict[expr["value"]])
+        if expr["type"] == "binop":
+            left = self._eval_data_bound(expr["left"], data_dict)
+            right = self._eval_data_bound(expr["right"], data_dict)
+            operations = {
+                "+": lambda: left + right,
+                "-": lambda: left - right,
+                "*": lambda: left * right,
+                "/": lambda: left // right,
+            }
+            operation = operations.get(expr["op"])
+            if operation is not None:
+                return operation()
+            raise Exception(f"Unsupported binop in range bound expr: {expr['op']}")
+        raise Exception(f"Unsupported range bound expr: {expr}")
 
-        logger.debug("Entering _generate_data_declarations")
-
-        # Normalize external set_of_tuples in data_dict to dict-with-elements for downstream consumers/tests
-        if hasattr(self, "ast") and "declarations" in self.ast:
-            for decl in self.ast["declarations"]:
-                if decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    set_name = decl.get("name")
-                    if set_name in data_dict and isinstance(data_dict[set_name], list):
-                        data_dict[set_name] = {"elements": data_dict[set_name]}
-
-        # --- Recursive shape check for multi-dimensional parameters ---
-        def check_shape(param_data, dims, data_dict, param_name, dim=0):
-            if not dims:
-                logger.debug("shape %s: reached scalar at dim %d", param_name, dim)
-                return
-            d = dims[0]
-            # Determine expected length for this dimension
-            if d.get("type") == "named_range_dimension":
-                range_decl = self._find_declaration_by_name(d["name"], types=["range_declaration_inline"])
-                if range_decl:
-
-                    def eval_expr(expr):
-                        if expr["type"] == "number":
-                            return int(expr["value"])
-                        elif expr["type"] == "name":
-                            return int(data_dict[expr["value"]])
-                        elif expr["type"] == "binop":
-                            op = expr["op"]
-                            left = eval_expr(expr["left"])
-                            right = eval_expr(expr["right"])
-                            if op == "+":
-                                return left + right
-                            elif op == "-":
-                                return left - right
-                            elif op == "*":
-                                return left * right
-                            elif op == "/":
-                                return left // right
-                            else:
-                                raise Exception(f"Unsupported binop in range bound expr: {op}")
-                        else:
-                            raise Exception(f"Unsupported range bound expr: {expr}")
-
-                    start_idx = eval_expr(range_decl["start"])
-                    end_idx = eval_expr(range_decl["end"])
-                    expected_len = end_idx - start_idx + 1
-                else:
-                    expected_len = None
-            elif d.get("type") == "named_set_dimension":
-                set_obj = data_dict.get(d["name"])
-                if set_obj is not None:
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        expected_len = len(set_obj["elements"])
-                    else:
-                        expected_len = len(set_obj)
-                else:
-                    expected_len = None
-            else:
-                expected_len = None
-            logger.debug(
-                "shape %s: dim %d expected_len=%s actual=%s dim_type=%s dim_name=%s",
-                param_name,
-                dim + 1,
-                expected_len,
-                (len(param_data) if isinstance(param_data, (list, tuple)) else "scalar"),
-                d.get("type"),
-                d.get("name", None),
+    def _expected_dimension_length(self, dimension, data_dict):
+        if dimension.get("type") == "named_range_dimension":
+            range_decl = self._find_declaration_by_name(
+                dimension["name"], types=["range_declaration_inline"]
             )
-            if expected_len is not None:
-                if not isinstance(param_data, (list, tuple)):
-                    from .semantic_error import SemanticError
+            if range_decl:
+                start_idx = self._eval_data_bound(range_decl["start"], data_dict)
+                end_idx = self._eval_data_bound(range_decl["end"], data_dict)
+                return end_idx - start_idx + 1
+            return None
+        if dimension.get("type") != "named_set_dimension":
+            return None
+        set_obj = data_dict.get(dimension["name"])
+        if set_obj is None:
+            return None
+        if isinstance(set_obj, dict) and "elements" in set_obj:
+            return len(set_obj["elements"])
+        return len(set_obj)
 
-                    logger.debug(
-                        "shape error %s: expected %dD array, got scalar at dim %d",
-                        param_name,
-                        len(dims),
-                        dim + 1,
-                    )
-                    raise SemanticError(
-                        f"Parameter '{param_name}' expected a {len(dims)}D array, got scalar at dimension {dim+1}."
-                    )
-                if len(param_data) != expected_len:
-                    from .semantic_error import SemanticError
+    def _check_parameter_shape(self, param_data, dimensions, data_dict, param_name, dim=0):
+        if not dimensions:
+            logger.debug("shape %s: reached scalar at dim %d", param_name, dim)
+            return
+        dimension = dimensions[0]
+        expected_len = self._expected_dimension_length(dimension, data_dict)
+        logger.debug(
+            "shape %s: dim %d expected_len=%s actual=%s dim_type=%s dim_name=%s",
+            param_name,
+            dim + 1,
+            expected_len,
+            (len(param_data) if isinstance(param_data, (list, tuple)) else "scalar"),
+            dimension.get("type"),
+            dimension.get("name", None),
+        )
+        if expected_len is None:
+            return
+        if not isinstance(param_data, (list, tuple)):
+            logger.debug(
+                "shape error %s: expected %dD array, got scalar at dim %d",
+                param_name,
+                len(dimensions),
+                dim + 1,
+            )
+            raise SemanticError(
+                f"Parameter '{param_name}' expected a {len(dimensions)}D array, got scalar at dimension {dim+1}."
+            )
+        if len(param_data) != expected_len:
+            logger.debug(
+                "shape error %s: data length %d does not match declared dimension '%s' length %d at dim %d",
+                param_name,
+                len(param_data),
+                dimension.get("name"),
+                expected_len,
+                dim + 1,
+            )
+            raise SemanticError(
+                f"Parameter '{param_name}' data length {len(param_data)} does not match declared dimension '{dimension.get('name')}' of length {expected_len} at dimension {dim+1}."
+            )
+        if len(dimensions) > 1:
+            for sub_data in param_data:
+                self._check_parameter_shape(
+                    sub_data, dimensions[1:], data_dict, param_name, dim + 1
+                )
 
-                    logger.debug(
-                        "shape error %s: data length %d does not match declared dimension '%s' length %d at dim %d",
-                        param_name,
-                        len(param_data),
-                        d.get("name"),
-                        expected_len,
-                        dim + 1,
-                    )
-                    raise SemanticError(
-                        f"Parameter '{param_name}' data length {len(param_data)} does not match declared dimension '{d.get('name')}' of length {expected_len} at dimension {dim+1}."
-                    )
-                if len(dims) > 1:
-                    for i, sub in enumerate(param_data):
-                        check_shape(sub, dims[1:], data_dict, param_name, dim + 1)
+    def _normalize_data_declaration_inputs(self, data_dict):
+        declarations = self.ast.get("declarations", []) if hasattr(self, "ast") else []
+        for declaration in declarations:
+            if declaration.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                set_name = declaration.get("name")
+                if set_name in data_dict and isinstance(data_dict[set_name], list):
+                    data_dict[set_name] = {"elements": data_dict[set_name]}
 
-        # Convert flat key-value lists to dicts in data_dict before shape checking
-        if hasattr(self, "ast") and "declarations" in self.ast:
-            for decl in self.ast["declarations"]:
-                if decl.get("type") in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                ) and decl.get("dimensions"):
-                    param_data = data_dict.get(decl["name"])
-                    # DEBUG: Print Stores contents and length if this is Capacity
-                    if decl["name"] == "Capacity" and "Stores" in data_dict:
-                        logger.debug(
-                            "[data_dict] Stores: %s len=%d",
-                            data_dict["Stores"],
-                            len(data_dict["Stores"]),
-                        )
-                    # Detect flat key-value list: even length, alternating str and number
-                    if isinstance(param_data, list) and len(param_data) % 2 == 0 and len(param_data) > 0:
-                        is_flat_kv = all(
-                            (isinstance(param_data[i], str) and isinstance(param_data[i + 1], (int, float)))
-                            for i in range(0, len(param_data), 2)
-                        )
-                        if is_flat_kv:
-                            # Convert to dict in data_dict
-                            data_dict[decl["name"]] = {param_data[i]: param_data[i + 1] for i in range(0, len(param_data), 2)}
-                            continue
-                    # Only apply shape check to lists/arrays, not dicts
-                    if param_data is not None and isinstance(param_data, (list, tuple)):
-                        check_shape(param_data, decl["dimensions"], data_dict, decl["name"])
+        parameter_types = (
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+            "parameter_inline",
+            "parameter_inline_indexed",
+        )
+        for declaration in declarations:
+            if declaration.get("type") not in parameter_types or not declaration.get("dimensions"):
+                continue
+            param_name = declaration["name"]
+            param_data = data_dict.get(param_name)
+            if param_name == "Capacity" and "Stores" in data_dict:
+                logger.debug(
+                    "[data_dict] Stores: %s len=%d",
+                    data_dict["Stores"],
+                    len(data_dict["Stores"]),
+                )
+            if isinstance(param_data, list) and param_data and len(param_data) % 2 == 0:
+                is_flat_kv = all(
+                    isinstance(param_data[index], str)
+                    and isinstance(param_data[index + 1], (int, float))
+                    for index in range(0, len(param_data), 2)
+                )
+                if is_flat_kv:
+                    data_dict[param_name] = {
+                        param_data[index]: param_data[index + 1]
+                        for index in range(0, len(param_data), 2)
+                    }
+                    continue
+            if isinstance(param_data, (list, tuple)):
+                self._check_parameter_shape(
+                    param_data, declaration["dimensions"], data_dict, param_name
+                )
+
+    def _generate_data_declarations(self, data_dict):
+        logger.debug("Entering _generate_data_declarations")
+        self._normalize_data_declaration_inputs(data_dict)
         """Generates Python code for data declarations from the .dat file and tuple/set declarations from AST."""
         # Emit tuple types and sets of tuples from AST declarations (if present)
         # Track parameters we transform into dict (or nested dict) so expression code can index via symbolic keys
@@ -872,7 +869,7 @@ class GurobiCodeGenerator:
                     pass
 
             if value is not None and isinstance(value, (list, tuple)) and pdecl is not None:
-                check_shape(value, pdecl.get("dimensions", []), working_data, name)
+                self._check_parameter_shape(value, pdecl.get("dimensions", []), working_data, name)
 
         """Generates Python code for data declarations from the .dat file and tuple/set declarations from AST."""
         # Emit tuple types and sets of tuples from AST declarations (if present)
