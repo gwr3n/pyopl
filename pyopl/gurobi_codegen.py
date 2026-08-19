@@ -2168,107 +2168,128 @@ class GurobiCodeGenerator:
         )
         return True
 
+    def _normalize_true_comparison(self, operator, left_node, right_node):
+        left = self._unwrap_parenthesized(left_node)
+        right = self._unwrap_parenthesized(right_node)
+        if operator != "==":
+            return operator, left_node, right_node
+        if (
+            isinstance(right, dict)
+            and right.get("type") == "boolean_literal"
+            and right.get("value") is True
+            and self._is_comparison_node(left)
+        ):
+            return left["op"], left["left"], left["right"]
+        if (
+            isinstance(left, dict)
+            and left.get("type") == "boolean_literal"
+            and left.get("value") is True
+            and self._is_comparison_node(right)
+        ):
+            return right["op"], right["left"], right["right"]
+        return operator, left_node, right_node
+
+    def _emit_boolean_literal_constraint(
+        self,
+        operator,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        if operator != "==":
+            return False
+        if isinstance(right_node, dict) and right_node.get("type") == "boolean_literal":
+            expression_node = left_node
+            literal_node = right_node
+        elif isinstance(left_node, dict) and left_node.get("type") == "boolean_literal":
+            expression_node = right_node
+            literal_node = left_node
+        else:
+            return False
+        if not self._is_boolean_expr_node(expression_node):
+            return False
+        boolean_expression = self._boolean_expr_to_binary_expr(
+            expression_node, current_iterators, constr_name_prefix
+        )
+        target = 1 if literal_node.get("value") else 0
+        self._add_code_line(
+            f"model.addConstr({boolean_expression} == {target}, name={self._format_name_expr(constr_name_prefix)})"
+        )
+        return True
+
+    def _emit_boolean_comparison_constraint(
+        self,
+        operator,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        if operator not in ("==", "<=", ">="):
+            return False
+        left_is_boolean = self._is_boolean_decision_variable(left_node)
+        right_is_boolean = self._is_boolean_decision_variable(right_node)
+        if left_is_boolean and self._is_comparison_node(right_node):
+            left_expression = self._traverse_expression(left_node, current_iterators)
+            right_expression = self._reify_scoped_comparison(
+                right_node, current_iterators
+            )
+        elif right_is_boolean and self._is_comparison_node(left_node):
+            left_expression = self._reify_scoped_comparison(
+                left_node, current_iterators
+            )
+            right_expression = self._traverse_expression(
+                right_node, current_iterators
+            )
+        else:
+            return False
+        self._add_code_line(
+            f"model.addConstr({left_expression} {operator} {right_expression}, name={self._format_name_expr(constr_name_prefix)})"
+        )
+        return True
+
+    def _emit_ordinary_constraint(
+        self,
+        operator,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        left_expression = self._traverse_expression(left_node, current_iterators)
+        right_expression = self._traverse_expression(right_node, current_iterators)
+        comparison = self._gurobi_comparison_expr(
+            left_expression, operator, right_expression
+        )
+        self._add_code_line(
+            f"model.addConstr({comparison}, name={self._format_name_expr(constr_name_prefix)})"
+        )
+
     def _constraint_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         # Defer expression string generation until after pattern-specific rewrites to avoid
         # creating TempConstr objects (by evaluating comparisons) that we later try to combine arithmetically.
-        op = constraint_node["op"]
-        left_node = constraint_node["left"]
-        right_node = constraint_node["right"]
+        op, left_node, right_node = self._normalize_true_comparison(
+            constraint_node["op"],
+            constraint_node["left"],
+            constraint_node["right"],
+        )
 
-        # --- NEW: normalize comparison wrapped as boolean equality ---
-        # Unwrap parentheses
-        def _unwrap(n):
-            while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                n = n.get("expression")
-            return n
-
-        def _is_comparison(n):
-            return (
-                isinstance(n, dict)
-                and n.get("type") in ("binop", "constraint")
-                and n.get("op") in (">=", "<=", "==", ">", "<")
-            )
-
-        L = _unwrap(left_node)
-        R = _unwrap(right_node)
-
-        # Handle (comparison) == true
-        if (
-            op == "=="
-            and isinstance(R, dict)
-            and R.get("type") == "boolean_literal"
-            and R.get("value") is True
-            and _is_comparison(L)
+        if self._emit_boolean_literal_constraint(
+            op,
+            left_node,
+            right_node,
+            constr_name_prefix,
+            current_iterators,
         ):
-            if L.get("type") == "constraint":
-                op = L["op"]
-                left_node = L["left"]
-                right_node = L["right"]
-            else:  # binop comparison
-                op = L["op"]
-                left_node = L["left"]
-                right_node = L["right"]
-            # refresh locals for downstream logic
-            L = _unwrap(left_node)
-            R = _unwrap(right_node)
-
-        # Handle true == (comparison)
-        elif (
-            op == "=="
-            and isinstance(L, dict)
-            and L.get("type") == "boolean_literal"
-            and L.get("value") is True
-            and _is_comparison(R)
+            return
+        if self._emit_boolean_comparison_constraint(
+            op,
+            left_node,
+            right_node,
+            constr_name_prefix,
+            current_iterators,
         ):
-            if R.get("type") == "constraint":
-                op = R["op"]
-                left_node = R["left"]
-                right_node = R["right"]
-            else:  # binop comparison
-                op = R["op"]
-                left_node = R["left"]
-                right_node = R["right"]
-            L = _unwrap(left_node)
-            R = _unwrap(right_node)
-
-        if op == "==" and isinstance(R, dict) and R.get("type") == "boolean_literal" and self._is_boolean_expr_node(L):
-            bool_expr = self._boolean_expr_to_binary_expr(L, current_iterators, constr_name_prefix)
-            target = 1 if R.get("value") else 0
-            self._add_code_line(f"model.addConstr({bool_expr} == {target}, name={self._format_name_expr(constr_name_prefix)})")
-            return
-
-        if op == "==" and isinstance(L, dict) and L.get("type") == "boolean_literal" and self._is_boolean_expr_node(R):
-            bool_expr = self._boolean_expr_to_binary_expr(R, current_iterators, constr_name_prefix)
-            target = 1 if L.get("value") else 0
-            self._add_code_line(f"model.addConstr({bool_expr} == {target}, name={self._format_name_expr(constr_name_prefix)})")
-            return
-
-        def _is_bool_dvar_node(node):
-            if not isinstance(node, dict):
-                return False
-            node_type = node.get("type")
-            if node_type == "name":
-                decl = self._find_declaration_by_name(node.get("value"))
-            elif node_type == "indexed_name":
-                decl = self._find_declaration_by_name(node.get("name"))
-            else:
-                return False
-            return decl is not None and decl.get("var_type") == "boolean"
-
-        if op in ("==", "<=", ">=") and _is_bool_dvar_node(left_node) and _is_comparison(R):
-            bool_var = self._traverse_expression(left_node, current_iterators)
-            comp_var = self._reify_scoped_comparison(R, current_iterators)
-            self._add_code_line(
-                f"model.addConstr({bool_var} {op} {comp_var}, name={self._format_name_expr(constr_name_prefix)})"
-            )
-            return
-
-        if op in ("==", "<=", ">=") and _is_bool_dvar_node(right_node) and _is_comparison(L):
-            bool_var = self._traverse_expression(right_node, current_iterators)
-            comp_var = self._reify_scoped_comparison(L, current_iterators)
-            self._add_code_line(
-                f"model.addConstr({comp_var} {op} {bool_var}, name={self._format_name_expr(constr_name_prefix)})"
-            )
             return
 
         if self._emit_direct_cardinality_constraint(
@@ -2296,22 +2317,13 @@ class GurobiCodeGenerator:
             )
             return
 
-        # Fast path: if both sides are comparison-free linear expressions (no need for transformation) just emit
-        if (
-            op in (">=", "<=", "==", ">", "<")
-            and not (isinstance(left_node, dict) and left_node.get("type") == "sum")
-            and not (isinstance(right_node, dict) and right_node.get("type") == "sum")
-        ):
-            left_expr_str = self._traverse_expression(left_node, current_iterators)
-            right_expr_str = self._traverse_expression(right_node, current_iterators)
-            comparison_expr = self._gurobi_comparison_expr(left_expr_str, op, right_expr_str)
-            self._add_code_line(f"model.addConstr({comparison_expr}, name={self._format_name_expr(constr_name_prefix)}" f")")
-            return
-        # Generic path
-        left_expr_str = self._traverse_expression(left_node, current_iterators)
-        right_expr_str = self._traverse_expression(right_node, current_iterators)
-        comparison_expr = self._gurobi_comparison_expr(left_expr_str, op, right_expr_str)
-        self._add_code_line(f"model.addConstr({comparison_expr}, name={self._format_name_expr(constr_name_prefix)})")
+        self._emit_ordinary_constraint(
+            op,
+            left_node,
+            right_node,
+            constr_name_prefix,
+            current_iterators,
+        )
 
     def _emit_index_condition(self, node, current_iterators):
         """
