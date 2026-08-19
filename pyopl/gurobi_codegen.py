@@ -511,6 +511,218 @@ class GurobiCodeGenerator:
                     f"but data provides an array for key {repr(bad_key)}. Use scalar values (e.g., 2.0), not [2.0]."
                 )
 
+    def _named_range_bounds(self, range_dimension, working_data):
+        start_node = range_dimension.get("start")
+        end_node = range_dimension.get("end")
+        if isinstance(start_node, dict) and isinstance(end_node, dict):
+            return (
+                self._eval_data_bound(start_node, working_data),
+                self._eval_data_bound(end_node, working_data),
+            )
+        range_name = range_dimension.get("name")
+        declaration = self._find_declaration_by_name(
+            range_name, types=["range_declaration_inline"]
+        )
+        if isinstance(declaration, dict):
+            return (
+                self._eval_data_bound(declaration["start"], working_data),
+                self._eval_data_bound(declaration["end"], working_data),
+            )
+        range_data = working_data.get(range_name)
+        if isinstance(range_data, dict) and range_data.get("type") == "range_data":
+            return int(range_data["start"]), int(range_data["end"])
+        raise SemanticError(f"Named range '{range_name}' has no bounds.")
+
+    def _is_tuple_range_parameter(self, declaration):
+        if declaration is None:
+            return False
+        dimensions = declaration.get("dimensions", [])
+        return (
+            len(dimensions) == 2
+            and dimensions[0].get("type") == "named_set_dimension"
+            and dimensions[1].get("type") == "named_range_dimension"
+        )
+
+    def _emit_tuple_range_dict_rows(self, name, value, declaration, working_data):
+        if not (
+            self._is_tuple_range_parameter(declaration)
+            and isinstance(value, dict)
+            and all(isinstance(row, (list, tuple)) for row in value.values())
+        ):
+            return False
+        range_dimension = declaration["dimensions"][1]
+        start, end = self._named_range_bounds(range_dimension, working_data)
+        expected_len = end - start + 1
+        flattened = {}
+        for key, row in value.items():
+            if len(row) != expected_len:
+                raise SemanticError(
+                    f"Parameter '{name}' row for key {key} has length {len(row)}; expected {expected_len}."
+                )
+            key_object = tuple(key) if isinstance(key, (list, tuple)) else key
+            for position in range(start, end + 1):
+                flattened[(key_object, position)] = row[position - start]
+        self._add_code_line(f"{name} = {repr(flattened)}")
+        self.dict_params.add(name)
+        return True
+
+    def _emit_tuple_range_list_rows(self, name, value, declaration, working_data):
+        if not (
+            self._is_tuple_range_parameter(declaration)
+            and isinstance(value, list)
+            and value
+        ):
+            return False
+        set_name = declaration["dimensions"][0]["name"]
+        range_dimension = declaration["dimensions"][1]
+        set_elements = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
+        set_elements = [
+            tuple(element) if isinstance(element, (list, tuple)) else (element,)
+            for element in set_elements
+        ]
+        start, end = self._named_range_bounds(range_dimension, working_data)
+        expected_len = end - start + 1
+        if all(isinstance(item, (list, tuple)) and len(item) == 2 for item in value):
+            flattened = {}
+            valid = True
+            for key_raw, row in value:
+                key_object = tuple(key_raw) if isinstance(key_raw, (list, tuple)) else key_raw
+                if not isinstance(row, (list, tuple)) or len(row) != expected_len:
+                    valid = False
+                    break
+                for offset, cell in enumerate(row):
+                    flattened[(key_object, start + offset)] = cell
+            if valid and flattened:
+                self._add_code_line(f"{name} = {repr(flattened)}")
+                logger.info(
+                    "Emitting tuple-range flattened dict for '%s' with %d entries",
+                    name,
+                    len(flattened),
+                )
+                self.dict_params.add(name)
+                return True
+        if len(set_elements) != len(value) or not all(
+            isinstance(row, (list, tuple)) and len(row) == expected_len for row in value
+        ):
+            return False
+        flattened = {
+            (set_elements[index], position): value[index][position - start]
+            for index in range(len(set_elements))
+            for position in range(start, end + 1)
+        }
+        self._add_code_line(f"{name} = {repr(flattened)}")
+        logger.info(
+            "Emitting row-major flattened dict for '%s' with %d entries",
+            name,
+            len(flattened),
+        )
+        self.dict_params.add(name)
+        return True
+
+    def _emit_typed_set_data(self, name, value):
+        declaration = self._find_declaration_by_name(
+            name, types=["typed_set", "typed_set_external"]
+        )
+        if declaration is None:
+            return False
+        elements = ", ".join(repr(element) for element in value)
+        self._add_code_line(f"{name} = [{elements}]")
+        self._add_code_line(f"{name}_index = {{v:i for i,v in enumerate({name})}}")
+        return True
+
+    def _emit_1d_range_parameter(self, name, value, declaration, data_dict, working_data):
+        dimensions = declaration.get("dimensions", []) if declaration is not None else []
+        if not (
+            isinstance(value, list)
+            and value
+            and len(dimensions) == 1
+            and dimensions[0].get("type") == "named_range_dimension"
+        ):
+            return False
+        range_name = dimensions[0]["name"]
+        set_declaration = self._find_declaration_by_name(
+            range_name, types=["typed_set", "typed_set_external"]
+        )
+        if set_declaration and range_name in data_dict:
+            set_elements = data_dict[range_name]
+            if len(set_elements) != len(value):
+                raise SemanticError(
+                    f"Parameter '{name}' has {len(value)} items but declared set '{range_name}' has {len(set_elements)} elements."
+                )
+            items = ", ".join(
+                f"{json.dumps(key)}: {json.dumps(item)}"
+                for key, item in zip(set_elements, value)
+            )
+            self._add_code_line(f"{name} = {{{items}}}")
+            self.dict_params.add(name)
+            return True
+        range_declaration = self._find_declaration_by_name(
+            range_name, types=["range_declaration_inline"]
+        )
+        if range_declaration is None:
+            return False
+        start = self._eval_data_bound(range_declaration["start"], working_data)
+        end = self._eval_data_bound(range_declaration["end"], working_data)
+        expected_len = end - start + 1
+        if len(value) != expected_len:
+            raise SemanticError(
+                f"Parameter '{name}' has {len(value)} items but declared range '{range_name}' expects {expected_len}."
+            )
+        items = ", ".join(
+            f"{index}: {json.dumps(value[index - start])}"
+            for index in range(start, end + 1)
+        )
+        self._add_code_line(f"{name} = {{{items}}}")
+        self.dict_params.add(name)
+        return True
+
+    def _emit_1d_set_parameter(self, name, value, declaration, data_dict):
+        dimensions = declaration.get("dimensions", []) if declaration is not None else []
+        if not (
+            isinstance(value, list)
+            and value
+            and len(dimensions) == 1
+            and dimensions[0].get("type") == "named_set_dimension"
+        ):
+            return False
+        set_name = dimensions[0]["name"]
+        set_declaration = self._find_declaration_by_name(
+            set_name,
+            types=[
+                "set_of_tuples",
+                "set_of_tuples_external",
+                "typed_set",
+                "typed_set_external",
+                "set_declaration",
+            ],
+        )
+        if set_declaration is not None:
+            if set_declaration.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                set_elements = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict) or []
+            else:
+                set_elements = data_dict.get(set_name, set_declaration.get("value", []))
+            if isinstance(set_elements, dict) and "elements" in set_elements:
+                set_elements = set_elements["elements"]
+            if set_elements is not None and len(set_elements) == len(value):
+                mapping = dict(zip(set_elements, value))
+                self._add_code_line(f"{name} = {repr(mapping)}")
+                self.dict_params.add(name)
+                return True
+        if set_name not in data_dict:
+            return False
+        set_elements = data_dict[set_name]
+        if isinstance(set_elements, dict) and "elements" in set_elements:
+            set_elements = set_elements["elements"]
+        if len(set_elements) != len(value):
+            return False
+        items = ", ".join(
+            f"{json.dumps(key)}: {json.dumps(item)}"
+            for key, item in zip(set_elements, value)
+        )
+        self._add_code_line(f"{name} = {{{items}}}")
+        self.dict_params.add(name)
+        return True
+
     def _generate_data_declarations(self, data_dict):
         """Generate Python code for data declarations and AST tuple/set declarations."""
         logger.debug("Entering _generate_data_declarations")
@@ -864,165 +1076,11 @@ class GurobiCodeGenerator:
         for name, value in working_data_pref.items():
             if name in already_emitted:
                 continue
-            # PATCH: 2D param with (tuple set, range) where .dat supplies dict-of-lists:
-            # Demand = [ <"StoreA"> [1,2,3], <"StoreB"> [4,5,6] ];
-            if (
-                name in param_decl_map
-                and isinstance(value, dict)
-                and len(param_decl_map[name].get("dimensions", [])) == 2
-                and param_decl_map[name]["dimensions"][0].get("type") == "named_set_dimension"
-                and param_decl_map[name]["dimensions"][1].get("type") == "named_range_dimension"
-                and all(isinstance(v, (list, tuple)) for v in value.values())
-            ):
-                set_name = param_decl_map[name]["dimensions"][0]["name"]
-                range_dim = param_decl_map[name]["dimensions"][1]
-
-                def eval_expr(expr):
-                    if isinstance(expr, dict):
-                        if expr.get("type") == "number":
-                            return int(expr["value"])
-                        if expr.get("type") == "name":
-                            return int(working_data[expr["value"]])
-                        if expr.get("type") == "binop":
-                            op = expr["op"]
-                            left = eval_expr(expr["left"])
-                            right = eval_expr(expr["right"])
-                            if op == "+":
-                                return left + right
-                            if op == "-":
-                                return left - right
-                            if op == "*":
-                                return left * right
-                            if op == "/":
-                                return left // right
-                    raise Exception(f"Unsupported range bound expr: {expr}")
-
-                # NEW: robust bounds resolver for named ranges
-                def get_range_bounds(rng_dim):
-                    s_node = rng_dim.get("start")
-                    e_node = rng_dim.get("end")
-                    if isinstance(s_node, dict) and isinstance(e_node, dict):
-                        return eval_expr(s_node), eval_expr(e_node)
-                    decl_rng = self._find_declaration_by_name(rng_dim.get("name"), types=["range_declaration_inline"])
-                    if isinstance(decl_rng, dict):
-                        return eval_expr(decl_rng["start"]), eval_expr(decl_rng["end"])
-                    rd = working_data.get(rng_dim.get("name"))
-                    if isinstance(rd, dict) and rd.get("type") == "range_data":
-                        return int(rd["start"]), int(rd["end"])
-                    raise SemanticError(f"Named range '{rng_dim.get('name')}' has no bounds.")
-
-                start, end = get_range_bounds(range_dim)
-                expected_len = end - start + 1
-                dict_val = {}
-                for k, row in value.items():
-                    if len(row) != expected_len:
-                        raise SemanticError(
-                            f"Parameter '{name}' row for key {k} has length {len(row)}; expected {expected_len}."
-                        )
-                    key_obj = tuple(k) if isinstance(k, (list, tuple)) else k
-                    for p in range(start, end + 1):
-                        dict_val[(key_obj, p)] = row[p - start]
-                self._add_code_line(f"{name} = {repr(dict_val)}")
-                self.dict_params.add(name)
+            declaration = param_decl_map.get(name)
+            if self._emit_tuple_range_dict_rows(name, value, declaration, working_data):
                 continue
-            # PATCH: emit 1D arrays indexed by a set of tuples as dicts with tuple keys (robust to set['elements'])
-            if (
-                name in param_decl_map
-                and param_decl_map[name] is not None
-                and param_decl_map[name].get("type")
-                in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                )
-                and isinstance(value, list)
-                and len(value) > 0
-                and len(param_decl_map[name].get("dimensions", [])) == 2
-                and param_decl_map[name]["dimensions"][0].get("type") == "named_set_dimension"
-                and param_decl_map[name]["dimensions"][1].get("type") == "named_range_dimension"
-            ):
-                set_name = param_decl_map[name]["dimensions"][0]["name"]
-                range_dim = param_decl_map[name]["dimensions"][1]
-
-                # Evaluate start/end for the range (robust to missing inline start/end on named range)
-                def eval_expr(expr):
-                    if isinstance(expr, dict):
-                        if expr.get("type") == "number":
-                            return int(expr["value"])
-                        if expr.get("type") == "name":
-                            return int(working_data[expr["value"]])
-                        if expr.get("type") == "binop":
-                            op = expr["op"]
-                            left = eval_expr(expr["left"])
-                            right = eval_expr(expr["right"])
-                            if op == "+":
-                                return left + right
-                            if op == "-":
-                                return left - right
-                            if op == "*":
-                                return left * right
-                            if op == "/":
-                                return left // right
-                    raise Exception(f"Unsupported range bound expr: {expr}")
-
-                def get_range_bounds(rng_dim):
-                    s_node = rng_dim.get("start")
-                    e_node = rng_dim.get("end")
-                    if isinstance(s_node, dict) and isinstance(e_node, dict):
-                        return eval_expr(s_node), eval_expr(e_node)
-                    decl_rng = self._find_declaration_by_name(rng_dim.get("name"), types=["range_declaration_inline"])
-                    if isinstance(decl_rng, dict):
-                        return eval_expr(decl_rng["start"]), eval_expr(decl_rng["end"])
-                    rd = working_data.get(rng_dim.get("name"))
-                    if isinstance(rd, dict) and rd.get("type") == "range_data":
-                        return int(rd["start"]), int(rd["end"])
-                    raise SemanticError(f"Named range '{rng_dim.get('name')}' has no bounds.")
-
-                # Normalize tuple-set elements from data (.dat) or AST
-                set_elems = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
-                # Ensure tuple keys; preserve 1-field tuples as (x,)
-                set_elems = [tuple(e) if isinstance(e, (list, tuple)) else (e,) for e in set_elems]
-
-                start, end = get_range_bounds(range_dim)
-                expected_len = end - start + 1
-                # Handle list-of-pairs form produced by .dat files:
-                # [ <tuple_key> <row_values>, ... ] where each element is [key, row]
-                if isinstance(value, (list, tuple)) and all(
-                    isinstance(item, (list, tuple)) and len(item) == 2 for item in value
-                ):
-                    ok = True
-                    dict_val = {}
-                    for item in value:
-                        key_raw, row = item[0], item[1]
-                        key_obj = tuple(key_raw) if isinstance(key_raw, (list, tuple)) else key_raw
-                        if not isinstance(row, (list, tuple)) or len(row) != expected_len:
-                            ok = False
-                            break
-                        for p_idx, cell in enumerate(row):
-                            p = start + p_idx
-                            dict_val[(key_obj, p)] = cell
-                    if ok and dict_val:
-                        self._add_code_line(f"{name} = {repr(dict_val)}")
-                        # Runtime debug: indicate emitted flattened (tuple,period) dict
-                        logger.info("Emitting tuple-range flattened dict for '%s' with %d entries", name, len(dict_val))
-                        self.dict_params.add(name)
-                        continue
-
-                # Only emit when shape matches (row-major list across set, each row length == expected_len)
-                if len(set_elems) == len(value) and all(
-                    isinstance(row, (list, tuple)) and len(row) == expected_len for row in value
-                ):
-                    dict_val = {
-                        (set_elems[i], p): value[i][p - start] for i in range(len(set_elems)) for p in range(start, end + 1)
-                    }
-                    self._add_code_line(f"{name} = {repr(dict_val)}")
-                    # Runtime debug: indicate emitted row-major->flattened dict
-                    logger.info("Emitting row-major flattened dict for '%s' with %d entries", name, len(dict_val))
-                    self.dict_params.add(name)
-                    continue
+            if self._emit_tuple_range_list_rows(name, value, declaration, working_data):
+                continue
             if name in param_decl_map:
                 logger.debug(
                     "_generate_data_declarations: Emitting parameter %s type=%s dims=%s",
@@ -1030,151 +1088,15 @@ class GurobiCodeGenerator:
                     param_decl_map[name].get("type"),
                     param_decl_map[name].get("dimensions"),
                 )
-            # --- PATCH: always emit typed sets as lists, not dicts ---
-            decl = self._find_declaration_by_name(name, types=["typed_set", "typed_set_external"])
-            if decl is not None:
-                elems_str = ", ".join(repr(e) for e in value)
-                self._add_code_line(f"{name} = [{elems_str}]")
-                self._add_code_line(f"{name}_index = {{v:i for i,v in enumerate({name})}}")
+            if self._emit_typed_set_data(name, value):
                 continue
-            # --- PATCH: emit 1D arrays indexed by a range as dicts with OPL indices as keys ---
-            param_decl = param_decl_map.get(name)
-            if (
-                param_decl is not None
-                and param_decl.get("type")
-                in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                )
-                and isinstance(value, list)
-                and len(value) > 0
-                and len(param_decl.get("dimensions", [])) == 1
-                and param_decl["dimensions"][0].get("type") == "named_range_dimension"
+            if self._emit_1d_range_parameter(
+                name, value, declaration, data_dict, working_data
             ):
-                # Get the OPL range or set (e.g., Warehouses = 1..nbWarehouses or Products = ["ProdA", ...])
-                range_name = param_decl["dimensions"][0]["name"]
-                # Check if it's a typed set (string-indexed)
-                set_decl = self._find_declaration_by_name(range_name, types=["typed_set", "typed_set_external"])
-                if set_decl and range_name in data_dict:
-                    set_elems = data_dict[range_name]
-                    if len(set_elems) == len(value):
-                        dict_val = {set_elems[i]: value[i] for i in range(len(set_elems))}
-                        dict_items = ", ".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in dict_val.items())
-                        self._add_code_line(f"{name} = {{{dict_items}}}")
-                        self.dict_params.add(name)
-                        continue
-                    else:
-                        raise SemanticError(
-                            f"Parameter '{name}' has {len(value)} items but declared set '{range_name}' has {len(set_elems)} elements."
-                        )
-                # Otherwise, treat as integer-indexed range
-                range_decl = self._find_declaration_by_name(range_name, types=["range_declaration_inline"])
-                if range_decl:
-                    # Evaluate start/end (assume int literals or parameter names in data_dict)
-                    start = range_decl["start"]
-                    end = range_decl["end"]
-
-                    def eval_expr(expr):
-                        if expr["type"] == "number":
-                            return int(expr["value"])
-                        elif expr["type"] == "name":
-                            return int(working_data[expr["value"]])
-                        elif expr["type"] == "binop":
-                            op = expr["op"]
-                            left = eval_expr(expr["left"])
-                            right = eval_expr(expr["right"])
-                            if op == "+":
-                                return left + right
-                            elif op == "-":
-                                return left - right
-                            elif op == "*":
-                                return left * right
-                            elif op == "/":
-                                return left // right  # integer division
-                            else:
-                                raise Exception(f"Unsupported binop in range bound expr: {op}")
-                        else:
-                            raise Exception(f"Unsupported range bound expr: {expr}")
-
-                    start_idx = eval_expr(start)
-                    end_idx = eval_expr(end)
-                    expected_len = end_idx - start_idx + 1
-                    if len(value) == expected_len:
-                        dict_val = {i: value[i - start_idx] for i in range(start_idx, end_idx + 1)}
-                        dict_items = ", ".join(f"{k}: {json.dumps(v)}" for k, v in dict_val.items())
-                        self._add_code_line(f"{name} = {{{dict_items}}}")
-                        self.dict_params.add(name)
-                        continue
-                    else:
-                        raise SemanticError(
-                            f"Parameter '{name}' has {len(value)} items but declared range '{range_name}' expects {expected_len}."
-                        )
-
-            # --- PATCH: emit 1D arrays indexed by a named set as dicts with set elements as keys ---
-            if (
-                param_decl is not None
-                and param_decl.get("type")
-                in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                )
-                and isinstance(value, list)
-                and len(value) > 0
-                and len(param_decl.get("dimensions", [])) == 1
-                and param_decl["dimensions"][0].get("type") == "named_set_dimension"
-            ):
-                set_name = param_decl["dimensions"][0]["name"]
-                # New: handle sets declared in AST (including set_of_tuples), not only data_dict-backed sets
-                set_decl = self._find_declaration_by_name(
-                    set_name,
-                    types=[
-                        "set_of_tuples",
-                        "set_of_tuples_external",
-                        "typed_set",
-                        "typed_set_external",
-                        "set_declaration",
-                    ],
-                )
-                if set_decl is not None:
-                    # Prefer tuple set elements via helper, else inline typed set values, else data_dict
-                    if set_decl.get("type") in (
-                        "set_of_tuples",
-                        "set_of_tuples_external",
-                    ):
-                        set_elems = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict) or []
-                    else:
-                        set_elems = data_dict.get(set_name, set_decl.get("value", []))
-                    # Normalize {elements:[...]} shape to list
-                    if isinstance(set_elems, dict) and "elements" in set_elems:
-                        set_elems = set_elems["elements"]
-                    if set_elems is not None and len(set_elems) == len(value):
-                        # Use repr to support tuple keys; TupleSetHelper already returns tuples for tuple sets
-                        dict_val = {set_elems[i]: value[i] for i in range(len(set_elems))}
-                        self._add_code_line(f"{name} = {repr(dict_val)}")
-                        self.dict_params.add(name)
-                        continue
-                # Original data_dict-backed path
-                if set_name in data_dict:
-                    set_elems = data_dict[set_name]
-                    # Normalize potential {elements:[...]}
-                    if isinstance(set_elems, dict) and "elements" in set_elems:
-                        set_elems = set_elems["elements"]
-                    if len(set_elems) == len(value):
-                        dict_val = {set_elems[i]: value[i] for i in range(len(set_elems))}
-                        dict_items = ", ".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in dict_val.items())
-                        self._add_code_line(f"{name} = {{{dict_items}}}")
-                        self.dict_params.add(name)
-                        continue
-
-                self._add_code_line("")
+                continue
+            if self._emit_1d_set_parameter(name, value, declaration, data_dict):
+                continue
+            self._add_code_line("")
 
     def _generate_declarations(self, declarations):
         """Generates Python code for decision variables, ranges, and parameters declared in the .mod file."""
