@@ -5470,6 +5470,114 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(state, row, rhs_value, sense="eq")
         return True
 
+    def _try_handle_sum_of_comparisons_constraint(
+        self,
+        left,
+        right,
+        op_sym_top,
+        env,
+        comparison_truth_var,
+        state,
+    ):
+        is_sum, inner_comparison, threshold, iterators, index_constraint = self._detect_sum_of_comparisons(
+            left,
+            right,
+            op_sym_top,
+        )
+        if not is_sum:
+            return False
+        if op_sym_top == ">=" and threshold <= 0:
+            return True
+
+        truth_indices = []
+        for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
+            comparison = {
+                "type": "binop",
+                "op": inner_comparison.get("op"),
+                "left": inner_comparison.get("left"),
+                "right": inner_comparison.get("right"),
+                "sem_type": "boolean",
+            }
+            truth_name = comparison_truth_var(comparison, env2)
+            truth_indices.append(self.var_indices[truth_name])
+
+        row = [0.0] * len(self.var_names)
+        if op_sym_top == ">=":
+            for truth_index in truth_indices:
+                row[truth_index] -= 1.0
+            self._append_sparse_row(state, row, -threshold, sense="ub")
+        else:
+            for truth_index in truth_indices:
+                row[truth_index] += 1.0
+            self._append_sparse_row(state, row, threshold, sense="eq")
+        return True
+
+    def _handle_not_equal_constraint(self, left, right, env, state):
+        left_is_boolean = self._is_declared_boolean_var_node(left)
+        right_is_boolean = self._is_declared_boolean_var_node(right)
+        left_is_literal = isinstance(left, dict) and left.get("type") == "number" and left.get("value") in (0, 1)
+        right_is_literal = isinstance(right, dict) and right.get("type") == "number" and right.get("value") in (0, 1)
+
+        if (left_is_boolean and right_is_boolean) or (left_is_boolean and right_is_literal) or (
+            right_is_boolean and left_is_literal
+        ):
+            if left_is_boolean and right_is_boolean:
+                left_name = (
+                    self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
+                )
+                right_name = (
+                    self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
+                )
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[left_name]] = 1.0
+                row[self.var_indices[right_name]] = 1.0
+                self._append_sparse_row(state, row, 1.0, sense="eq")
+                self._add_code_line("# encoded != (boolean xor)")
+                return
+
+            variable_node = left if left_is_boolean else right
+            literal_node = right if variable_node is left else left
+            variable_name = (
+                self._multi_indexed_var_name(variable_node, env)
+                if variable_node.get("type") == "indexed_name"
+                else variable_node["value"]
+            )
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[variable_name]] = 1.0
+            self._append_sparse_row(state, row, float(1 - literal_node.get("value")), sense="eq")
+            self._add_code_line("# encoded != (boolean var vs literal)")
+            return
+
+        left_coef, left_const = self._eval_expr(left, env)
+        right_coef, right_const = self._eval_expr(right, env)
+        diff_coef = dict(left_coef)
+        for name, coef in right_coef.items():
+            diff_coef[name] = diff_coef.get(name, 0.0) - coef
+        diff_const = float(left_const) - float(right_const)
+        diff_min, diff_max = self._finite_integer_affine_bounds(
+            diff_coef,
+            diff_const,
+            "Integer not-equal constraint",
+        )
+        big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
+        if not hasattr(self, "_neq_counter"):
+            self._neq_counter = 0
+        direction_name = f"neq_direction_c{self._neq_counter}"
+        self._neq_counter += 1
+        self.var_names.append(direction_name)
+        self.var_indices[direction_name] = len(self.var_names) - 1
+        self.bounds.append([0, 1])
+        self.integrality.append(1)
+        self.c.append(0.0)
+
+        negative_row = dict(diff_coef)
+        negative_row[direction_name] = -big_m
+        self._append_sparse_coef_row(state, negative_row, -1.0 - diff_const, sense="ub")
+        positive_row = {name: -coef for name, coef in diff_coef.items()}
+        positive_row[direction_name] = big_m
+        self._append_sparse_coef_row(state, positive_row, big_m - 1.0 + diff_const, sense="ub")
+        self._add_code_line("# encoded integer != via direction binary")
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -5494,12 +5602,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(state, row, rhs, sense="ub")
             ub_row_idx = state.ub_row_idx
 
-        def append_ub_coef_row(row_coef_dict, rhs):
-            nonlocal ub_row_idx
-            state.ub_row_idx = ub_row_idx
-            self._append_sparse_coef_row(state, row_coef_dict, rhs, sense="ub")
-            ub_row_idx = state.ub_row_idx
-
         # Collected per-variable bounds from simple constraints (var >= c, var <= c, var == c)
         if not hasattr(self, "_collected_lbs"):
             self._collected_lbs = {}
@@ -5512,12 +5614,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             comparison_truth_cache=self._comparison_truth_cache,
             subtree_var_cache=self._bool_subtree_cache,
         )
-
-        def _new_aux():
-            return self._new_bool_aux_var()
-
-        def _atomic_bool(node, env):
-            return self._atomic_bool_var(node, env)
 
         def _comparison_truth_var(node, env):
             nonlocal eq_row_idx, ub_row_idx
@@ -5537,7 +5633,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             ub_row_idx = ctx.state.ub_row_idx
             return result
 
-        def handle_constraint(constr, env, constr_name_prefix=None):
+        def handle_constraint(constr, env):
             nonlocal eq_row_idx, ub_row_idx
 
             self._ensure_constraint_parameters_bound(constr)
@@ -5548,13 +5644,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
             def _is_simple_comparison(n):
                 return self._is_simple_boolean_comparison(n)
-
-            def _detect_sum_of_comparisons(left, right, op_sym_top):
-                return self._detect_sum_of_comparisons(left, right, op_sym_top)
-
-            # Local helper: check if a node is a boolean tree
-            def _is_bool_tree(node):
-                return self._is_bool_tree_node(node)
 
             # --- Patch: Always create auxiliary for non-trivial boolean expressions ---
             # Only for constraints of the form (bool_expr) == True/1 or >=1 or <=1
@@ -5597,49 +5686,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     ub_row_idx = state.ub_row_idx
                     return
 
-                is_sum, inner_cmp, k_val, iterators, index_constraint = _detect_sum_of_comparisons(
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_handle_sum_of_comparisons_constraint(
                     left,
                     right,
                     op_sym_top,
-                )
-                if is_sum:
-                    if op_sym_top == ">=" and k_val <= 0:
-                        return
-                    z_indices = []
-
-                    for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
-                        comp_inst = {
-                            "type": "binop",
-                            "op": inner_cmp.get("op"),
-                            "left": inner_cmp.get("left"),
-                            "right": inner_cmp.get("right"),
-                            "sem_type": "boolean",
-                        }
-                        z_name = _comparison_truth_var(comp_inst, env2)
-                        z_indices.append(self.var_indices[z_name])
-                    if op_sym_top == ">=":
-                        # -sum z <= -k
-                        row = [0.0] * len(self.var_names)
-                        for zi in z_indices:
-                            row[zi] -= 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(-k_val)
-                        ub_row_idx += 1
-                    else:  # ==
-                        row = [0.0] * len(self.var_names)
-                        for zi in z_indices:
-                            row[zi] += 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(k_val)
-                        eq_row_idx += 1
+                    env,
+                    _comparison_truth_var,
+                    state,
+                ):
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
                     return
                 # Pattern B: b == (sum(i)(comparison) >= k)
                 if op_sym_top == "==" and isinstance(left, dict) and left.get("type") == "name":
@@ -5768,101 +5826,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
                 # --- Direct handling for top-level '!=' before boolean tree/general linear pass ---
                 if op_sym_top == "!=":
-                    # Fast path boolean XOR / var vs literal for tight linearization
-                    def _is_boolean_var_node(node):
-                        if not (isinstance(node, dict) and node.get("type") in ("name", "indexed_name")):
-                            return False
-                        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
-                        for d in self.ast.get("declarations", []):
-                            if (
-                                d.get("name") == base_name
-                                and d.get("type") in ("dvar", "dvar_indexed")
-                                and d.get("var_type") == "boolean"
-                            ):
-                                return True
-                        return False
-
-                    def _is_number_literal(node, vals):
-                        return isinstance(node, dict) and node.get("type") == "number" and node.get("value") in vals
-
-                    if (
-                        (_is_boolean_var_node(left) and _is_boolean_var_node(right))
-                        or (_is_boolean_var_node(left) and _is_number_literal(right, (0, 1)))
-                        or (_is_boolean_var_node(right) and _is_number_literal(left, (0, 1)))
-                    ):
-                        if _is_boolean_var_node(left) and _is_boolean_var_node(right):
-                            v_left = (
-                                self._multi_indexed_var_name(left, env)
-                                if left.get("type") == "indexed_name"
-                                else left["value"]
-                            )
-                            v_right = (
-                                self._multi_indexed_var_name(right, env)
-                                if right.get("type") == "indexed_name"
-                                else right["value"]
-                            )
-                            row = [0.0] * len(self.var_names)
-                            row[self.var_indices[v_left]] = 1.0
-                            row[self.var_indices[v_right]] = 1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            b_eq.append(1.0)
-                            self._add_code_line("# encoded != (boolean xor)")
-                            eq_row_idx += 1
-                            return
-                        var_node = left if _is_boolean_var_node(left) else right
-                        lit_node = right if var_node is left else left
-                        vname = (
-                            self._multi_indexed_var_name(var_node, env)
-                            if var_node.get("type") == "indexed_name"
-                            else var_node["value"]
-                        )
-                        lit_val = lit_node.get("value")
-                        enforce = 1 - lit_val
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[vname]] = 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(float(enforce))
-                        self._add_code_line("# encoded != (boolean var vs literal)")
-                        eq_row_idx += 1
-                        return
-                    left_coef, left_const = self._eval_expr(left, env)
-                    right_coef, right_const = self._eval_expr(right, env)
-                    diff_coef = dict(left_coef)
-                    for name, coef in right_coef.items():
-                        diff_coef[name] = diff_coef.get(name, 0.0) - coef
-                    diff_const = float(left_const) - float(right_const)
-                    diff_min, diff_max = self._finite_integer_affine_bounds(
-                        diff_coef,
-                        diff_const,
-                        "Integer not-equal constraint",
-                    )
-                    big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
-                    if not hasattr(self, "_neq_counter"):
-                        self._neq_counter = 0
-                    direction_name = f"neq_direction_c{self._neq_counter}"
-                    self._neq_counter += 1
-                    self.var_names.append(direction_name)
-                    self.var_indices[direction_name] = len(self.var_names) - 1
-                    self.bounds.append([0, 1])
-                    self.integrality.append(1)
-                    self.c.append(0.0)
-
-                    # diff <= -1 + M*d or diff >= 1 - M*(1-d).
-                    negative_row = dict(diff_coef)
-                    negative_row[direction_name] = -big_m
-                    append_ub_coef_row(negative_row, -1.0 - diff_const)
-                    positive_row = {name: -coef for name, coef in diff_coef.items()}
-                    positive_row[direction_name] = big_m
-                    append_ub_coef_row(positive_row, big_m - 1.0 + diff_const)
-                    self._add_code_line("# encoded integer != via direction binary")
+                    state.eq_row_idx = eq_row_idx
+                    state.ub_row_idx = ub_row_idx
+                    self._handle_not_equal_constraint(left, right, env, state)
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
                     return
 
                 # --- NOT rewrite normalization ---
