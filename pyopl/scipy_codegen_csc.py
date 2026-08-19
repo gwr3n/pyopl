@@ -4786,6 +4786,75 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 )
         return False, None, None, None, None
 
+    @classmethod
+    def _unwrap_boolean_true_constraint(cls, node):
+        if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
+            return node
+        left = node.get("left")
+        right = node.get("right")
+
+        def is_true(value):
+            return isinstance(value, dict) and value.get("type") == "boolean_literal" and value.get("value") is True
+
+        if is_true(left):
+            expression = right
+        elif is_true(right):
+            expression = left
+        else:
+            return node
+        if not isinstance(expression, dict) or expression.get("type") not in (
+            "parenthesized_expression",
+            "binop",
+            "and",
+            "or",
+            "not",
+        ):
+            return node
+        inner = cls._unwrap_parenthesized_node(expression)
+        if not isinstance(inner, dict):
+            return node
+        if inner.get("type") in ("and", "or", "not"):
+            return inner
+        if inner.get("type") != "binop":
+            return node
+        return {
+            "type": "constraint",
+            "op": inner.get("op"),
+            "left": inner.get("left"),
+            "right": inner.get("right"),
+        }
+
+    @classmethod
+    def _normalize_implication_nodes(cls, antecedent, consequent):
+        return cls._unwrap_boolean_true_constraint(antecedent), cls._unwrap_boolean_true_constraint(consequent)
+
+    def _try_enforce_reified_implication_literal(self, constr, env, bool_expr_var, append_eq_row):
+        if not (
+            constr.get("type") == "constraint"
+            and isinstance(constr.get("left"), dict)
+            and constr.get("left").get("type") == "implies"
+        ):
+            return False
+        auxiliary = bool_expr_var(constr.get("left"), env)
+        logger.debug(f"[DEBUG] Created auxiliary {auxiliary} for implies expr: {constr.get('left')}")
+        right = constr.get("right")
+        if isinstance(right, dict) and (
+            (right.get("type") == "boolean_literal" and right.get("value") is True)
+            or (right.get("type") == "number" and right.get("value") == 1)
+        ):
+            value = 1.0
+        elif isinstance(right, dict) and (
+            (right.get("type") == "boolean_literal" and right.get("value") is False)
+            or (right.get("type") == "number" and right.get("value") == 0)
+        ):
+            value = 0.0
+        else:
+            return False
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[auxiliary]] = 1.0
+        append_eq_row(row, value)
+        return True
+
     def _is_declared_boolean_var_node(self, node):
         if not self._is_var_reference_node(node):
             return False
@@ -5087,105 +5156,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             def _detect_sum_of_comparisons(left, right, op_sym_top):
                 return self._detect_sum_of_comparisons(left, right, op_sym_top)
 
-            def _normalize_implication_nodes(ant, cons):
-                """
-                Normalize and unwrap implication constraint nodes for antecedent and consequent.
-                Returns (ant_unwrapped, cons_unwrapped).
-                """
-
-                def _unwrap_bool_eq_true(node):
-                    if not (isinstance(node, dict) and node.get("type") == "constraint" and node.get("op") == "=="):
-                        return node
-                    left = node.get("left")
-                    right = node.get("right")
-
-                    def _is_true(x):
-                        return isinstance(x, dict) and x.get("type") == "boolean_literal" and x.get("value") is True
-
-                    expr_side = None
-                    # --- Patch: Detect and handle sum-of-comparisons/cardinality constraints ---
-                    if constr.get("type") == "constraint" and constr.get("op") in (
-                        ">=",
-                        "==",
-                        ">",
-                        "<",
-                    ):
-                        left = constr.get("left")
-                        right = constr.get("right")
-                        op_sym_top = constr.get("op")
-                        LU_left = _unwrap_paren(left)
-                        LU_right = _unwrap_paren(right)
-                        # Only handle sum-of-comparisons for >=, ==, <=, >, <
-                        if (
-                            isinstance(LU_left, dict)
-                            and LU_left.get("type") == "sum"
-                            and isinstance(LU_right, dict)
-                            and LU_right.get("type") == "number"
-                        ):
-                            inner_cmp = _unwrap_paren(LU_left.get("expression"))
-                            if _is_simple_comparison(inner_cmp):
-                                k_val = LU_right.get("value")
-                                iterators = LU_left.get("iterators", [])
-                                # For each index, reify the comparison to a boolean aux
-                                aux_vars = []
-                                for env2, _idx_tuple in self._iter_filtered_environments(
-                                    iterators,
-                                    env,
-                                    LU_left.get("index_constraint"),
-                                ):
-                                    aux_var = self._bool_expr_var(inner_cmp, env2)
-                                    aux_vars.append(aux_var)
-                                # Build sum row: sum(aux_vars) op k_val
-                                row = [0.0] * len(self.var_names)
-                                for aux in aux_vars:
-                                    idx = self.var_indices.get(aux)
-                                    if idx is not None:
-                                        row[idx] += 1.0
-                                # For >=, ==, <=, >, <
-                                if op_sym_top == ">=":
-                                    append_ub_row([-coef for coef in row], -k_val)
-                                elif op_sym_top == "==":
-                                    append_eq_row(row, k_val)
-                                elif op_sym_top == ">":
-                                    # sum(aux_vars) > k_val  <=> sum(aux_vars) >= k_val+1
-                                    append_ub_row([-coef for coef in row], -(k_val + 1))
-                                elif op_sym_top == "<":
-                                    # sum(aux_vars) < k_val  <=> sum(aux_vars) <= k_val-1
-                                    append_ub_row(row, k_val - 1)
-                                return
-                    if _is_true(left):
-                        expr_side = right
-                    elif _is_true(right):
-                        expr_side = left
-                    if (
-                        not expr_side
-                        or not isinstance(expr_side, dict)
-                        or expr_side.get("type") not in ("parenthesized_expression", "binop", "and", "or", "not")
-                    ):
-                        return node
-                    inner = expr_side.get("expression") if expr_side.get("type") == "parenthesized_expression" else expr_side
-                    if not isinstance(inner, dict):
-                        return node
-                    if inner.get("type") in ("and", "or", "not"):
-                        return inner
-                    if inner.get("type") != "binop":
-                        return node
-                    return {
-                        "type": "constraint",
-                        "op": inner.get("op"),
-                        "left": inner.get("left"),
-                        "right": inner.get("right"),
-                    }
-
-                def _unwrap_paren(n):
-                    while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                        n = n.get("expression")
-                    return n
-
-                ant_unwrapped = _unwrap_bool_eq_true(ant)
-                cons_unwrapped = _unwrap_bool_eq_true(cons)
-                return ant_unwrapped, cons_unwrapped
-
             # Local helper: check if a node is a boolean tree
             def _is_bool_tree(node):
                 return self._is_bool_tree_node(node)
@@ -5201,39 +5171,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._collect_passive_constraint_bounds(constr, env, _bool_expr_var)
             # Implication constraints: antecedent => consequent
             # --- Patch: ensure auxiliary variables for nested implications ---
-            if (
-                constr.get("type") == "constraint"
-                and isinstance(constr.get("left"), dict)
-                and constr.get("left").get("type") == "implies"
-            ):
-                # Reify implies as auxiliary
-                aux = _bool_expr_var(constr.get("left"), env)
-                logger.debug(f"[DEBUG] Created auxiliary {aux} for implies expr: {constr.get('left')}")
-                # Enforce aux == right (should be boolean literal True/False or 0/1)
-                right = constr.get("right")
-                if isinstance(right, dict) and (
-                    (right.get("type") == "boolean_literal" and right.get("value") is True)
-                    or (right.get("type") == "number" and right.get("value") == 1)
-                ):
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[aux]] = 1.0
-                    append_eq_row(row, 1.0)
-                    return
-                elif isinstance(right, dict) and (
-                    (right.get("type") == "boolean_literal" and right.get("value") is False)
-                    or (right.get("type") == "number" and right.get("value") == 0)
-                ):
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[aux]] = 1.0
-                    append_eq_row(row, 0.0)
-                    return
-                # Otherwise, fall through
+            if self._try_enforce_reified_implication_literal(constr, env, _bool_expr_var, append_eq_row):
+                return
             if constr.get("type") == "implication_constraint":
                 ant = constr["antecedent"]
                 cons = constr["consequent"]
 
                 # Unwrap antecedent & consequent if they are equality-to-true wrappers
-                ant_unwrapped, cons_unwrapped = _normalize_implication_nodes(ant, cons)
+                ant_unwrapped, cons_unwrapped = self._normalize_implication_nodes(ant, cons)
                 if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not"):
                     antecedent_name = _bool_expr_var(ant_unwrapped, env)
                     ant_unwrapped = {
