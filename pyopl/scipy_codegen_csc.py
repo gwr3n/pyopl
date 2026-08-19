@@ -4233,16 +4233,128 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return (right, left)
         return None
 
+    @staticmethod
+    def _is_boolean_expression_node(node):
+        return isinstance(node, dict) and (
+            node.get("sem_type") == "boolean"
+            or node.get("type") in ("boolean_literal", "and", "or", "not")
+            or (
+                node.get("type") == "constraint"
+                and node.get("op") == "=="
+                and (
+                    (isinstance(node.get("left"), dict) and node["left"].get("type") in ("name", "indexed_name"))
+                    or (isinstance(node.get("right"), dict) and node["right"].get("type") in ("name", "indexed_name"))
+                )
+            )
+        )
+
+    def _register_boolean_aux_node(self, node):
+        vname = node["name"]
+        if vname not in self.var_indices:
+            self.var_names.append(vname)
+            self.var_indices[vname] = len(self.var_names) - 1
+            self.bounds.append([0, 1])
+            if hasattr(self, "integrality"):
+                self.integrality.append(1)
+            else:
+                self.integrality = [1]
+            if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                self.c.append(0.0)
+            logger.debug(f"[DEBUG] Registered aux_var node: {vname} (idx={self.var_indices[vname]})")
+        else:
+            logger.debug(f"[DEBUG] aux_var node already registered: {vname} (idx={self.var_indices[vname]})")
+        return vname
+
     def _bool_expr_var(self, node, env, ctx: _ConstraintBuildContext):
         env_memo_key = (
             id(node),
             tuple(sorted((name, repr(value)) for name, value in (env or {}).items())),
         )
+        struct_key = self._bool_struct_key(node, env)
+        if struct_key in ctx.subtree_var_cache:
+            return ctx.subtree_var_cache[struct_key]
+        if env_memo_key in ctx.expr_memo:
+            return ctx.expr_memo[env_memo_key]
 
-        def struct_key(n):
-            return self._bool_struct_key(n, env)
+        result = self._encode_bool_expr_var(node, env, ctx, struct_key, env_memo_key)
+        ctx.subtree_var_cache[struct_key] = result
+        ctx.expr_memo[env_memo_key] = result
+        return result
 
-        sk = struct_key(node)
+    def _boolean_composite_operands(self, node):
+        tie_vars = []
+        operands = []
+        for operand in (node["left"], node["right"]):
+            equality = self._extract_bool_var_equality(operand)
+            if equality:
+                tie_vars.append(equality[0])
+                operand = equality[1]
+            operands.append(operand)
+        return operands[0], operands[1], tie_vars
+
+    def _tie_boolean_vars(self, var_nodes, target_var, env, ctx):
+        for var_node in var_nodes:
+            vname = (
+                self._multi_indexed_var_name(var_node, env)
+                if var_node.get("type") == "indexed_name"
+                else var_node["value"]
+            )
+            if vname in self.var_indices and target_var in self.var_indices:
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[vname]] = 1.0
+                row[self.var_indices[target_var]] = -1.0
+                self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+
+    def _append_boolean_composite_rows(self, op, result_var, left_var, right_var, ctx):
+        result_idx = self.var_indices[result_var]
+        left_idx = self.var_indices[left_var]
+        right_idx = self.var_indices[right_var]
+        if op == "and":
+            rows = (
+                ({result_idx: 1.0, left_idx: -1.0}, 0.0),
+                ({result_idx: 1.0, right_idx: -1.0}, 0.0),
+                ({result_idx: -1.0, left_idx: 1.0, right_idx: 1.0}, 1.0),
+            )
+        else:
+            rows = (
+                ({result_idx: -1.0, left_idx: 1.0}, 0.0),
+                ({result_idx: -1.0, right_idx: 1.0}, 0.0),
+                ({result_idx: 1.0, left_idx: -1.0, right_idx: -1.0}, 0.0),
+            )
+        for coefficients, rhs in rows:
+            row = [0.0] * len(self.var_names)
+            for index, coefficient in coefficients.items():
+                row[index] += coefficient
+            self._append_sparse_row(ctx.state, row, rhs, sense="ub")
+
+    def _encode_boolean_composite(self, node, env, ctx, env_memo_key):
+        struct_key = self._bool_struct_key(node, env)
+        if struct_key in ctx.subtree_var_cache:
+            shared_aux = ctx.subtree_var_cache[struct_key]
+            ctx.expr_memo[env_memo_key] = shared_aux
+            tie_vars = []
+            for operand in (node["left"], node["right"]):
+                equality = self._extract_bool_var_equality(operand)
+                if equality:
+                    tie_vars.append(equality[0])
+            self._tie_boolean_vars(tie_vars, shared_aux, env, ctx)
+            return shared_aux
+
+        left_node, right_node, tie_vars = self._boolean_composite_operands(node)
+        left_var = self._bool_expr_var(left_node, env, ctx)
+        right_var = self._bool_expr_var(right_node, env, ctx)
+        if left_var == right_var:
+            result_var = left_var
+        else:
+            result_var = self._new_bool_aux_var()
+            self._append_boolean_composite_rows(node["type"], result_var, left_var, right_var, ctx)
+        ctx.expr_memo[env_memo_key] = result_var
+        ctx.subtree_var_cache[struct_key] = result_var
+        self._tie_boolean_vars(tie_vars, result_var, env, ctx)
+        return result_var
+
+    def _encode_bool_expr_var(self, node, env, ctx, struct_key, env_memo_key):
+        sk = struct_key
         if sk in ctx.subtree_var_cache:
             return ctx.subtree_var_cache[sk]
         if env_memo_key in ctx.expr_memo:
@@ -4252,21 +4364,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         t = node.get("type")
         # Handle special aux_var node for boolean XOR
         if t == "aux_var" and node.get("sem_type") == "boolean":
-            vname = node["name"]
-            # Register the variable if not already present
-            if vname not in self.var_indices:
-                self.var_names.append(vname)
-                self.var_indices[vname] = len(self.var_names) - 1
-                self.bounds.append([0, 1])
-                if hasattr(self, "integrality"):
-                    self.integrality.append(1)
-                else:
-                    self.integrality = [1]
-                if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                    self.c.append(0.0)
-                logger.debug(f"[DEBUG] Registered aux_var node: {vname} (idx={self.var_indices[vname]})")
-            else:
-                logger.debug(f"[DEBUG] aux_var node already registered: {vname} (idx={self.var_indices[vname]})")
+            vname = self._register_boolean_aux_node(node)
             ctx.subtree_var_cache[sk] = vname
             ctx.expr_memo[env_memo_key] = vname
             return vname
@@ -4275,25 +4373,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             inner = node.get("expression")
             return self._bool_expr_var(inner, env, ctx)
 
-        def _is_boolean_expression(expr):
-            return isinstance(expr, dict) and (
-                expr.get("sem_type") == "boolean"
-                or expr.get("type") in ("boolean_literal", "and", "or", "not")
-                or (
-                    expr.get("type") == "constraint"
-                    and expr.get("op") == "=="
-                    and (
-                        (isinstance(expr.get("left"), dict) and expr["left"].get("type") in ("name", "indexed_name"))
-                        or (isinstance(expr.get("right"), dict) and expr["right"].get("type") in ("name", "indexed_name"))
-                    )
-                )
-            )
-
         is_boolean_neq = (
             t == "constraint"
             and node.get("op") == "!="
-            and _is_boolean_expression(node.get("left"))
-            and _is_boolean_expression(node.get("right"))
+            and self._is_boolean_expression_node(node.get("left"))
+            and self._is_boolean_expression_node(node.get("right"))
         )
         if t == "constraint" and node.get("op") in ("<=", "<", ">=", ">", "!=", "==") and not is_boolean_neq:
             is_atomic_boolean = False
@@ -4323,7 +4407,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             left = node["left"]
             right = node["right"]
 
-            if _is_boolean_expression(left) and _is_boolean_expression(right):
+            if self._is_boolean_expression_node(left) and self._is_boolean_expression_node(right):
                 x = self._bool_expr_var(left, env, ctx)
                 y = self._bool_expr_var(right, env, ctx)
                 z = self._new_bool_aux_var()
@@ -4436,109 +4520,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             ctx.subtree_var_cache[sk] = z
             return z
         if t in ("and", "or"):
-            # Use tuple-based struct_key for normalization and sharing
-            sk = struct_key(node)
-            if sk in ctx.subtree_var_cache:
-                shared_aux = ctx.subtree_var_cache[sk]
-                ctx.expr_memo[env_memo_key] = shared_aux
-                # Tie all relevant variables to shared_aux
-                tie_vars = []
-
-                left_node = node["left"]
-                right_node = node["right"]
-                left_eq = self._extract_bool_var_equality(left_node)
-                if left_eq:
-                    tie_vars.append(left_eq[0])
-                right_eq = self._extract_bool_var_equality(right_node)
-                if right_eq:
-                    tie_vars.append(right_eq[0])
-                for var_node in tie_vars:
-                    vname = (
-                        self._multi_indexed_var_name(var_node, env)
-                        if var_node.get("type") == "indexed_name"
-                        else var_node["value"]
-                    )
-                    if vname in self.var_indices and shared_aux in self.var_indices:
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[vname]] = 1.0
-                        row[self.var_indices[shared_aux]] = -1.0
-                        self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
-                return shared_aux
-            # Otherwise, create new aux and record
-            tie_vars = []
-
-            left_node = node["left"]
-            right_node = node["right"]
-            left_eq = self._extract_bool_var_equality(left_node)
-            if left_eq:
-                tie_vars.append(left_eq[0])
-                left_node = left_eq[1]
-            right_eq = self._extract_bool_var_equality(right_node)
-            if right_eq:
-                tie_vars.append(right_eq[0])
-                right_node = right_eq[1]
-            left_v = self._bool_expr_var(left_node, env, ctx)
-            right_v = self._bool_expr_var(right_node, env, ctx)
-            if left_v == right_v:
-                ctx.expr_memo[env_memo_key] = left_v
-                ctx.subtree_var_cache[sk] = left_v
-                for var_node in tie_vars:
-                    vname = (
-                        self._multi_indexed_var_name(var_node, env)
-                        if var_node.get("type") == "indexed_name"
-                        else var_node["value"]
-                    )
-                    if vname in self.var_indices and left_v in self.var_indices:
-                        row = [0.0] * len(self.var_names)
-                        v_idx = self.var_indices[vname]
-                        e_idx = self.var_indices[left_v]
-                        row[v_idx] = 1.0
-                        row[e_idx] = -1.0
-                        self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
-                return left_v
-            z = self._new_bool_aux_var()
-            if t == "and":
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[left_v]] = -1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[right_v]] = -1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = -1.0
-                row[self.var_indices[left_v]] += 1.0
-                row[self.var_indices[right_v]] += 1.0
-                self._append_sparse_row(ctx.state, row, 1.0, sense="ub")
-            else:  # or
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = -1.0
-                row[self.var_indices[left_v]] = 1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = -1.0
-                row[self.var_indices[right_v]] = 1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[z]] = 1.0
-                row[self.var_indices[left_v]] -= 1.0
-                row[self.var_indices[right_v]] -= 1.0
-                self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-            ctx.expr_memo[env_memo_key] = z
-            ctx.subtree_var_cache[sk] = z
-            for var_node in tie_vars:
-                vname = (
-                    self._multi_indexed_var_name(var_node, env)
-                    if var_node.get("type") == "indexed_name"
-                    else var_node["value"]
-                )
-                if vname in self.var_indices and z in self.var_indices:
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[vname]] = 1.0
-                    row[self.var_indices[z]] = -1.0
-                    self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
-            return z
+            return self._encode_boolean_composite(node, env, ctx, env_memo_key)
         # Lower 'implies' to (not left) or right
         if t == "implies":
             not_left = {"type": "not", "value": node["left"]}
