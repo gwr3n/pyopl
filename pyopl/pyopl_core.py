@@ -3908,12 +3908,18 @@ class OPLCompiler:
                 metadata[iterator_name] = meta
             return metadata
 
-        def eval_expr(expr: dict[str, Any], env: dict[str, Any], iter_meta: Optional[dict[str, dict[str, Any]]] = None) -> Any:
-            expr_type = expr.get("type") if isinstance(expr, dict) else None
+        def eval_simple_expr(
+            expr: dict[str, Any],
+            env: dict[str, Any],
+            iter_meta: Optional[dict[str, dict[str, Any]]],
+        ) -> Any:
+            expr_type = expr.get("type")
             if expr_type == "number":
                 value = expr.get("value")
                 if value is None:
-                    raise SemanticError("Numeric literal missing value in computed parameter expression.")
+                    raise SemanticError(
+                        "Numeric literal missing value in computed parameter expression."
+                    )
                 return float(value)
             if expr_type == "boolean_literal":
                 return 1.0 if expr.get("value") else 0.0
@@ -3928,227 +3934,284 @@ class OPLCompiler:
                     return float(value) if isinstance(value, (int, float)) else value
                 if name in working_data:
                     return working_data[name]
-                raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
+                raise SemanticError(
+                    f"Unknown name '{name}' in computed parameter expression."
+                )
             if expr_type == "conditional":
                 condition = expr.get("condition")
                 then_branch = expr.get("then")
                 else_branch = expr.get("else")
-                if not isinstance(condition, dict) or not isinstance(then_branch, dict) or not isinstance(else_branch, dict):
-                    raise SemanticError("Conditional expression must contain expression nodes.")
+                if not all(
+                    isinstance(node, dict)
+                    for node in (condition, then_branch, else_branch)
+                ):
+                    raise SemanticError(
+                        "Conditional expression must contain expression nodes."
+                    )
                 cond_value = eval_expr(condition, env, iter_meta)
                 branch = then_branch if bool(cond_value) else else_branch
                 return eval_expr(branch, env, iter_meta)
-            if expr_type == "field_access":
-                base = expr.get("base")
-                field = expr.get("field")
-                if not isinstance(base, dict) or not isinstance(field, str):
-                    raise SemanticError("Cannot resolve tuple field name in computed parameter.")
-                base_value = eval_expr(base, env, iter_meta)
-                tuple_type = None
-                if isinstance(base, dict):
-                    base_sem_type = base.get("sem_type")
-                    if isinstance(base_sem_type, str) and base_sem_type in tuple_fields_by_type:
-                        tuple_type = base_sem_type
-                if (
-                    tuple_type is None
-                    and isinstance(base, dict)
-                    and base.get("type") == "name"
-                    and isinstance(iter_meta, dict)
-                ):
-                    iterator_name = base.get("value")
-                    meta = iter_meta.get(iterator_name) if iterator_name else None
-                    if isinstance(meta, dict):
-                        tuple_type = meta.get("tuple_type")
-                if tuple_type is None:
-                    raise SemanticError("Cannot resolve tuple type for field access in computed parameter.")
-                fields = tuple_fields_by_type.get(tuple_type) or []
-                try:
-                    idx = fields.index(field)
-                except ValueError as exc:
-                    raise SemanticError(f"Unknown field '{field}' for tuple type '{tuple_type}'.") from exc
-                try:
-                    value = base_value[idx]
-                except Exception as exc:
-                    raise SemanticError(f"Field access failed on base value: {exc}") from exc
-                return float(value) if isinstance(value, (int, float)) else value
-            if expr_type == "indexed_name":
-                base = expr.get("name")
-                if not isinstance(base, str):
-                    raise SemanticError("Parameter name missing for indexed access.")
-                dims = expr.get("dimensions", [])
-                arr = working_data.get(base)
-                if arr is None:
-                    raise SemanticError(f"Parameter '{base}' not found for indexed access.")
-                cur = arr
-                for dim in dims:
-                    idx_value = eval_index(dim, env)
-                    if isinstance(idx_value, float) and idx_value.is_integer():
-                        idx_value = int(idx_value)
-                    if isinstance(cur, list):
-                        if not isinstance(idx_value, (int, float)):
-                            raise SemanticError(
-                                f"List parameter '{base}' requires integer indices, got {type(idx_value).__name__}: {idx_value!r}"
-                            )
-                        pos = int(idx_value) - 1
-                        try:
-                            cur = cur[pos]
-                        except Exception as exc:
-                            raise SemanticError(f"Index out of bounds for '{base}' at {idx_value}: {exc}") from exc
-                    elif isinstance(cur, dict):
-                        try:
-                            cur = cur[idx_value]
-                        except Exception as exc:
-                            raise SemanticError(f"Key '{idx_value!r}' not found in parameter '{base}': {exc}") from exc
-                    else:
-                        raise SemanticError(f"Cannot index into value of type {type(cur).__name__} for '{base}'.")
-                return float(cur) if isinstance(cur, (int, float)) else cur
-            if expr_type == "sum":
-                iterators = expr.get("iterators", [])
-                index_constraint = expr.get("index_constraint")
-                body = expr.get("expression")
-                domains = iterator_domains(iterators)
+            raise SemanticError(
+                f"Unsupported node in computed parameter expression: {expr_type}"
+            )
 
-                def rec_sum(depth: int, local_env: dict[str, Any]) -> float:
-                    if depth == len(iterators):
-                        if index_constraint is not None:
-                            cond_value = eval_expr(index_constraint, local_env, iter_meta_local)
-                            if isinstance(cond_value, (int, float)):
-                                if not bool(cond_value):
-                                    return 0.0
-                            elif not cond_value:
-                                return 0.0
-                        if not isinstance(body, dict):
-                            raise SemanticError("Aggregate expression must be an expression node.")
-                        return float(eval_expr(body, local_env, iter_meta_local))
-                    iterator_name = iterators[depth]["iterator"]
-                    total = 0.0
-                    for value in domains[depth]:
-                        local_env[iterator_name] = value
-                        total += rec_sum(depth + 1, local_env)
-                    local_env.pop(iterator_name, None)
-                    return total
+        def eval_field_access(
+            expr: dict[str, Any],
+            env: dict[str, Any],
+            iter_meta: Optional[dict[str, dict[str, Any]]],
+        ) -> Any:
+            base = expr.get("base")
+            field = expr.get("field")
+            if not isinstance(base, dict) or not isinstance(field, str):
+                raise SemanticError(
+                    "Cannot resolve tuple field name in computed parameter."
+                )
+            base_value = eval_expr(base, env, iter_meta)
+            base_sem_type = base.get("sem_type")
+            tuple_type = (
+                base_sem_type
+                if isinstance(base_sem_type, str)
+                and base_sem_type in tuple_fields_by_type
+                else None
+            )
+            if tuple_type is None and base.get("type") == "name" and iter_meta:
+                iterator_name = base.get("value")
+                meta = iter_meta.get(iterator_name) if iterator_name else None
+                if isinstance(meta, dict):
+                    tuple_type = meta.get("tuple_type")
+            if tuple_type is None:
+                raise SemanticError(
+                    "Cannot resolve tuple type for field access in computed parameter."
+                )
+            fields = tuple_fields_by_type.get(tuple_type) or []
+            try:
+                field_index = fields.index(field)
+            except ValueError as exc:
+                raise SemanticError(
+                    f"Unknown field '{field}' for tuple type '{tuple_type}'."
+                ) from exc
+            try:
+                value = base_value[field_index]
+            except Exception as exc:
+                raise SemanticError(f"Field access failed on base value: {exc}") from exc
+            return float(value) if isinstance(value, (int, float)) else value
 
-                iter_meta_local = iterator_metadata(iterators)
-                return rec_sum(0, dict(env))
-            if expr_type in ("max_agg", "min_agg"):
-                iterators = expr.get("iterators", [])
-                index_constraint = expr.get("index_constraint")
-                body = expr.get("expression")
-                domains = iterator_domains(iterators)
-                iter_meta_local = iterator_metadata(iterators)
-                best = None
+        def eval_indexed_name(expr: dict[str, Any], env: dict[str, Any]) -> Any:
+            base = expr.get("name")
+            if not isinstance(base, str):
+                raise SemanticError("Parameter name missing for indexed access.")
+            current = working_data.get(base)
+            if current is None:
+                raise SemanticError(f"Parameter '{base}' not found for indexed access.")
+            for dimension in expr.get("dimensions", []):
+                index_value = eval_index(dimension, env)
+                if isinstance(index_value, float) and index_value.is_integer():
+                    index_value = int(index_value)
+                if isinstance(current, list):
+                    if not isinstance(index_value, (int, float)):
+                        raise SemanticError(
+                            f"List parameter '{base}' requires integer indices, got "
+                            f"{type(index_value).__name__}: {index_value!r}"
+                        )
+                    try:
+                        current = current[int(index_value) - 1]
+                    except Exception as exc:
+                        raise SemanticError(
+                            f"Index out of bounds for '{base}' at {index_value}: {exc}"
+                        ) from exc
+                    continue
+                if isinstance(current, dict):
+                    try:
+                        current = current[index_value]
+                    except Exception as exc:
+                        raise SemanticError(
+                            f"Key '{index_value!r}' not found in parameter '{base}': {exc}"
+                        ) from exc
+                    continue
+                raise SemanticError(
+                    f"Cannot index into value of type {type(current).__name__} for '{base}'."
+                )
+            return float(current) if isinstance(current, (int, float)) else current
 
-                def rec_agg(depth: int, local_env: dict[str, Any]) -> None:
-                    nonlocal best
-                    if depth == len(iterators):
-                        if index_constraint is not None:
-                            cond_value = eval_expr(index_constraint, local_env, iter_meta_local)
-                            if isinstance(cond_value, (int, float)):
-                                if not bool(cond_value):
-                                    return
-                            elif not cond_value:
-                                return
-                        if not isinstance(body, dict):
-                            raise SemanticError("Aggregate expression must be an expression node.")
-                        value = float(eval_expr(body, local_env, iter_meta_local))
-                        if best is None:
-                            best = value
-                        elif expr_type == "max_agg":
-                            if value > best:
-                                best = value
-                        elif value < best:
-                            best = value
+        def aggregate_parts(expr: dict[str, Any]) -> tuple[list[dict[str, Any]], Any, Any, list[list[Any]], dict[str, dict[str, Any]]]:
+            iterators = expr.get("iterators", [])
+            return (
+                iterators,
+                expr.get("index_constraint"),
+                expr.get("expression"),
+                iterator_domains(iterators),
+                iterator_metadata(iterators),
+            )
+
+        def aggregate_item_allowed(
+            index_constraint: Any,
+            local_env: dict[str, Any],
+            local_meta: dict[str, dict[str, Any]],
+        ) -> bool:
+            if index_constraint is None:
+                return True
+            return bool(eval_expr(index_constraint, local_env, local_meta))
+
+        def eval_sum(expr: dict[str, Any], env: dict[str, Any]) -> float:
+            iterators, index_constraint, body, domains, local_meta = aggregate_parts(expr)
+
+            def recurse(depth: int, local_env: dict[str, Any]) -> float:
+                if depth == len(iterators):
+                    if not aggregate_item_allowed(index_constraint, local_env, local_meta):
+                        return 0.0
+                    if not isinstance(body, dict):
+                        raise SemanticError(
+                            "Aggregate expression must be an expression node."
+                        )
+                    return float(eval_expr(body, local_env, local_meta))
+                iterator_name = iterators[depth]["iterator"]
+                total = 0.0
+                for value in domains[depth]:
+                    local_env[iterator_name] = value
+                    total += recurse(depth + 1, local_env)
+                local_env.pop(iterator_name, None)
+                return total
+
+            return recurse(0, dict(env))
+
+        def eval_extreme_aggregate(expr: dict[str, Any], env: dict[str, Any]) -> float:
+            iterators, index_constraint, body, domains, local_meta = aggregate_parts(expr)
+            values: list[float] = []
+
+            def recurse(depth: int, local_env: dict[str, Any]) -> None:
+                if depth == len(iterators):
+                    if not aggregate_item_allowed(index_constraint, local_env, local_meta):
                         return
-                    iterator_name = iterators[depth]["iterator"]
-                    for value in domains[depth]:
-                        local_env[iterator_name] = value
-                        rec_agg(depth + 1, local_env)
-                    local_env.pop(iterator_name, None)
+                    if not isinstance(body, dict):
+                        raise SemanticError(
+                            "Aggregate expression must be an expression node."
+                        )
+                    values.append(float(eval_expr(body, local_env, local_meta)))
+                    return
+                iterator_name = iterators[depth]["iterator"]
+                for value in domains[depth]:
+                    local_env[iterator_name] = value
+                    recurse(depth + 1, local_env)
+                local_env.pop(iterator_name, None)
 
-                rec_agg(0, dict(env))
-                if best is None:
-                    raise SemanticError("Aggregate domain is empty in computed parameter expression.")
-                return best
-            if expr_type == "and":
-                left = expr.get("left")
-                right = expr.get("right")
-                if not isinstance(left, dict) or not isinstance(right, dict):
-                    raise SemanticError("Logical 'and' operands must be expression nodes.")
-                return bool(eval_expr(left, env)) and bool(eval_expr(right, env))
-            if expr_type == "or":
-                left = expr.get("left")
-                right = expr.get("right")
-                if not isinstance(left, dict) or not isinstance(right, dict):
-                    raise SemanticError("Logical 'or' operands must be expression nodes.")
-                return bool(eval_expr(left, env)) or bool(eval_expr(right, env))
+            recurse(0, dict(env))
+            if not values:
+                raise SemanticError(
+                    "Aggregate domain is empty in computed parameter expression."
+                )
+            return max(values) if expr.get("type") == "max_agg" else min(values)
+
+        def eval_logical(expr: dict[str, Any], env: dict[str, Any]) -> bool:
+            expr_type = expr.get("type")
             if expr_type == "not":
                 value = expr.get("value")
                 if not isinstance(value, dict):
-                    raise SemanticError("Logical 'not' operand must be an expression node.")
+                    raise SemanticError(
+                        "Logical 'not' operand must be an expression node."
+                    )
                 return not bool(eval_expr(value, env))
-            if expr_type == "binop":
-                op = expr.get("op")
-                left = expr.get("left")
-                right = expr.get("right")
-                if not isinstance(left, dict) or not isinstance(right, dict):
-                    raise SemanticError("Binary operator operands must be expression nodes.")
-                left_value = eval_expr(left, env)
-                right_value = eval_expr(right, env)
-                if op == "+":
-                    return float(left_value) + float(right_value)
-                if op == "-":
-                    return float(left_value) - float(right_value)
-                if op == "*":
-                    return float(left_value) * float(right_value)
-                if op == "/":
-                    return float(left_value) / float(right_value)
-                if op == "%":
-                    return float(left_value) % float(right_value)
-                if op in ("<", "<=", ">", ">=", "==", "!="):
-                    if op == "<":
-                        return 1.0 if (float(left_value) < float(right_value)) else 0.0
-                    if op == "<=":
-                        return 1.0 if (float(left_value) <= float(right_value)) else 0.0
-                    if op == ">":
-                        return 1.0 if (float(left_value) > float(right_value)) else 0.0
-                    if op == ">=":
-                        return 1.0 if (float(left_value) >= float(right_value)) else 0.0
-                    if op == "==":
-                        return 1.0 if (left_value == right_value) else 0.0
-                    if op == "!=":
-                        return 1.0 if (left_value != right_value) else 0.0
-                raise SemanticError(f"Unsupported operator in computed parameter expression: {op}")
-            if expr_type == "uminus":
-                value = expr.get("value")
-                if not isinstance(value, dict):
-                    raise SemanticError("Unary minus operand must be an expression node.")
-                return -float(eval_expr(value, env))
-            if expr_type == "parenthesized_expression":
-                inner = expr.get("expression")
+            left = expr.get("left")
+            right = expr.get("right")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                raise SemanticError(
+                    f"Logical '{expr_type}' operands must be expression nodes."
+                )
+            if expr_type == "and":
+                return bool(eval_expr(left, env)) and bool(eval_expr(right, env))
+            return bool(eval_expr(left, env)) or bool(eval_expr(right, env))
+
+        def eval_binary(expr: dict[str, Any], env: dict[str, Any]) -> float:
+            operator = expr.get("op")
+            left = expr.get("left")
+            right = expr.get("right")
+            if not isinstance(left, dict) or not isinstance(right, dict):
+                raise SemanticError("Binary operator operands must be expression nodes.")
+            left_value = eval_expr(left, env)
+            right_value = eval_expr(right, env)
+            arithmetic = {
+                "+": lambda: float(left_value) + float(right_value),
+                "-": lambda: float(left_value) - float(right_value),
+                "*": lambda: float(left_value) * float(right_value),
+                "/": lambda: float(left_value) / float(right_value),
+                "%": lambda: float(left_value) % float(right_value),
+            }
+            comparisons = {
+                "<": lambda: float(left_value) < float(right_value),
+                "<=": lambda: float(left_value) <= float(right_value),
+                ">": lambda: float(left_value) > float(right_value),
+                ">=": lambda: float(left_value) >= float(right_value),
+                "==": lambda: left_value == right_value,
+                "!=": lambda: left_value != right_value,
+            }
+            if operator in arithmetic:
+                return arithmetic[operator]()
+            if operator in comparisons:
+                return 1.0 if comparisons[operator]() else 0.0
+            raise SemanticError(
+                f"Unsupported operator in computed parameter expression: {operator}"
+            )
+
+        def eval_unary_or_function(expr: dict[str, Any], env: dict[str, Any]) -> Any:
+            expr_type = expr.get("type")
+            if expr_type in ("uminus", "parenthesized_expression"):
+                key = "value" if expr_type == "uminus" else "expression"
+                inner = expr.get(key)
                 if not isinstance(inner, dict):
-                    raise SemanticError("Parenthesized expression must contain an expression node.")
-                return eval_expr(inner, env)
+                    label = "Unary minus operand" if expr_type == "uminus" else "Parenthesized expression"
+                    raise SemanticError(f"{label} must contain an expression node.")
+                value = eval_expr(inner, env)
+                return -float(value) if expr_type == "uminus" else value
             if expr_type == "funcall":
                 func_name = expr.get("name")
                 args = expr.get("args", [])
                 if func_name in UNARY_MATH_FUNCTIONS and len(args) == 1:
-                    arg = args[0]
-                    if not isinstance(arg, dict):
-                        raise SemanticError("Unsupported function argument in computed parameter expression.")
-                    func = UNARY_MATH_FUNCTIONS[func_name][0]
-                    value = func(float(eval_expr(arg, env)))
-                    return int(value) if UNARY_MATH_FUNCTIONS[func_name][1] == "int" else value
-                raise SemanticError(f"Unsupported function '{func_name}' in computed parameter expression.")
-            if expr_type in ("maxl", "minl"):
-                values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
-                try:
-                    nums = [float(value) for value in values]
-                except Exception as exc:
-                    raise SemanticError(f"{expr_type} in parameter must be numeric and ground.") from exc
-                if not nums:
-                    raise SemanticError(f"{expr_type} requires at least one argument.")
-                return max(nums) if expr_type == "maxl" else min(nums)
-            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
+                    argument = args[0]
+                    if not isinstance(argument, dict):
+                        raise SemanticError(
+                            "Unsupported function argument in computed parameter expression."
+                        )
+                    function, result_type = UNARY_MATH_FUNCTIONS[func_name]
+                    value = function(float(eval_expr(argument, env)))
+                    return int(value) if result_type == "int" else value
+                raise SemanticError(
+                    f"Unsupported function '{func_name}' in computed parameter expression."
+                )
+            values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
+            try:
+                numbers = [float(value) for value in values]
+            except Exception as exc:
+                raise SemanticError(
+                    f"{expr_type} in parameter must be numeric and ground."
+                ) from exc
+            if not numbers:
+                raise SemanticError(f"{expr_type} requires at least one argument.")
+            return max(numbers) if expr_type == "maxl" else min(numbers)
+
+        def eval_expr(
+            expr: dict[str, Any],
+            env: dict[str, Any],
+            iter_meta: Optional[dict[str, dict[str, Any]]] = None,
+        ) -> Any:
+            expr_type = expr.get("type") if isinstance(expr, dict) else None
+            if expr_type in {"number", "boolean_literal", "string_literal", "name", "conditional"}:
+                return eval_simple_expr(expr, env, iter_meta)
+            if expr_type == "field_access":
+                return eval_field_access(expr, env, iter_meta)
+            if expr_type == "indexed_name":
+                return eval_indexed_name(expr, env)
+            if expr_type == "sum":
+                return eval_sum(expr, env)
+            if expr_type in {"max_agg", "min_agg"}:
+                return eval_extreme_aggregate(expr, env)
+            if expr_type in {"and", "or", "not"}:
+                return eval_logical(expr, env)
+            if expr_type == "binop":
+                return eval_binary(expr, env)
+            if expr_type in {"uminus", "parenthesized_expression", "funcall", "maxl", "minl"}:
+                return eval_unary_or_function(expr, env)
+            raise SemanticError(
+                f"Unsupported node in computed parameter expression: {expr_type}"
+            )
 
         def cast_value(value: Any, var_type: Any) -> Any:
             if isinstance(var_type, str) and var_type.startswith("int"):
