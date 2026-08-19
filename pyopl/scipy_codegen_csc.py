@@ -5841,6 +5841,94 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(state, row, 0.0, sense="ub")
         return True
 
+    def _flatten_boolean_operator(self, node, operator):
+        if isinstance(node, dict) and node.get("type") == operator:
+            return self._flatten_boolean_operator(node.get("left"), operator) + self._flatten_boolean_operator(
+                node.get("right"), operator
+            )
+        return [node]
+
+    def _resolve_atomic_boolean_literal(self, atom, env):
+        if not (isinstance(atom, dict) and atom.get("type") == "constraint" and atom.get("op") == "=="):
+            raise SemanticError("Unsupported atomic boolean term for SciPy AND/OR linearization")
+        left = atom.get("left")
+        right = atom.get("right")
+        if self._is_var_reference_node(left) and self._is_number_01_node(right):
+            variable_node, value_node = left, right
+        elif self._is_number_01_node(left) and self._is_var_reference_node(right):
+            variable_node, value_node = right, left
+        else:
+            raise SemanticError("Unsupported comparison in boolean linearization (expected v == 0/1)")
+        variable_name = (
+            self._multi_indexed_var_name(variable_node, env)
+            if variable_node.get("type") == "indexed_name"
+            else variable_node["value"]
+        )
+        if variable_name not in self.var_indices:
+            raise SemanticError(f"Variable '{variable_name}' not found for boolean linearization")
+        return variable_name, 1 if value_node["value"] == 1 else -1
+
+    def _try_handle_and_or_literal_fast_path(self, left, right, op_sym, env, bool_expr_var, state):
+        left = self._unwrap_parenthesized_node(left)
+        right = self._unwrap_parenthesized_node(right)
+        if self._is_boolean_literal_node(left) and isinstance(right, dict) and right.get("type") in ("and", "or"):
+            left, right = right, left
+        if not (
+            isinstance(left, dict)
+            and left.get("type") in ("and", "or")
+            and self._is_boolean_literal_node(right)
+            and op_sym == "=="
+        ):
+            return False
+
+        operator = left["type"]
+        target_value = bool(right.get("value", True))
+        try:
+            literals = [
+                self._resolve_atomic_boolean_literal(atom, env)
+                for atom in self._flatten_boolean_operator(left, operator)
+            ]
+        except SemanticError:
+            literals = None
+
+        if literals is not None:
+            literal_count = len(literals)
+            if operator == "and" and target_value:
+                for variable_name, polarity in literals:
+                    row = [0.0] * len(self.var_names)
+                    row[self.var_indices[variable_name]] = 1.0
+                    self._append_sparse_row(state, row, 1.0 if polarity == 1 else 0.0, sense="eq")
+            elif operator == "and":
+                row = [0.0] * len(self.var_names)
+                constant_shift = 0.0
+                for variable_name, polarity in literals:
+                    row[self.var_indices[variable_name]] += polarity
+                    if polarity == -1:
+                        constant_shift += 1.0
+                self._append_sparse_row(state, row, literal_count - 1 - constant_shift, sense="ub")
+            elif operator == "or":
+                row = [0.0] * len(self.var_names)
+                constant_shift = 0.0
+                for variable_name, polarity in literals:
+                    row[self.var_indices[variable_name]] += polarity
+                    if polarity == -1:
+                        constant_shift += 1.0
+                if target_value:
+                    self._append_sparse_row(state, [-coefficient for coefficient in row], constant_shift - 1.0, sense="ub")
+                else:
+                    self._append_sparse_row(state, row, -constant_shift, sense="eq")
+                return True
+            return True
+
+        try:
+            expression_var = bool_expr_var(left, env)
+        except SemanticError:
+            return False
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[expression_var]] = 1.0
+        self._append_sparse_row(state, row, 1.0 if target_value else 0.0, sense="eq")
+        return True
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6188,154 +6276,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # --- Boolean AND/OR linearization fast path (supports boolean literal on either side) ---
                 # Pattern: (AND/OR tree of atomic comparisons var==0/1) == boolean_literal
                 # Also: boolean_literal == (AND/OR tree ...)
-                def is_bool_lit(node):
-                    return isinstance(node, dict) and node.get("type") == "boolean_literal"
-
-                def is_and_or(node):
-                    return isinstance(node, dict) and node.get("type") in ("and", "or")
-
                 left = self._unwrap_parenthesized_node(left)
                 right = self._unwrap_parenthesized_node(right)
-                # Swap if literal on left
-                if is_bool_lit(left) and is_and_or(right):
-                    left, right = right, left
-                if is_and_or(left) and is_bool_lit(right) and constr.get("op") == "==":
-                    bool_op = left["type"]
-                    target_val = bool(right.get("value", True))
-
-                    def flatten(op_node, op_type):
-                        nodes = []
-                        if isinstance(op_node, dict) and op_node.get("type") == op_type:
-                            nodes.extend(flatten(op_node["left"], op_type))
-                            nodes.extend(flatten(op_node["right"], op_type))
-                        else:
-                            nodes.append(op_node)
-                        return nodes
-
-                    atomic_nodes = flatten(left, bool_op)
-
-                    def resolve_var_and_polarity(atom):
-                        # Expect (v == 0/1) or (0/1 == v)
-                        if not (isinstance(atom, dict) and atom.get("type") == "constraint" and atom.get("op") == "=="):
-                            raise SemanticError("Unsupported atomic boolean term for SciPy AND/OR linearization")
-                        left = atom["left"]
-                        right = atom["right"]
-
-                        def is_num01(node):
-                            return isinstance(node, dict) and node.get("type") == "number" and node.get("value") in (0, 1)
-
-                        def is_var(node):
-                            return isinstance(node, dict) and node.get("type") in (
-                                "name",
-                                "indexed_name",
-                            )
-
-                        if is_var(left) and is_num01(right):
-                            varname = (
-                                self._multi_indexed_var_name(left, env)
-                                if left.get("type") == "indexed_name"
-                                else left["value"]
-                            )
-                            val = right["value"]
-                        elif is_num01(left) and is_var(right):
-                            varname = (
-                                self._multi_indexed_var_name(right, env)
-                                if right.get("type") == "indexed_name"
-                                else right["value"]
-                            )
-                            val = left["value"]
-                        else:
-                            raise SemanticError("Unsupported comparison in boolean linearization (expected v == 0/1)")
-                        if varname not in self.var_indices:
-                            raise SemanticError(f"Variable '{varname}' not found for boolean linearization")
-                        polarity = 1 if val == 1 else -1  # 1 => v, -1 => (1 - v)
-                        return varname, polarity
-
-                    try:
-                        literals = [resolve_var_and_polarity(a) for a in atomic_nodes]
-                    except SemanticError:
-                        literals = None
-                    if literals is not None:
-                        k = len(literals)
-                        if bool_op == "and":
-                            if target_val:
-                                # All literals true -> enforce each atomic equality
-                                for vname, polarity in literals:
-                                    row = [0.0] * len(self.var_names)
-                                    idx_var = self.var_indices[vname]
-                                    row[idx_var] = 1.0
-                                    rhs_val = 1.0 if polarity == 1 else 0.0
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                            A_eq_rows.append(eq_row_idx)
-                                            A_eq_cols.append(i)
-                                            A_eq_data.append(coef)
-                                    b_eq.append(rhs_val)
-                                    eq_row_idx += 1
-                            else:
-                                # At least one literal false -> sum(literals) <= k-1
-                                coef = [0.0] * len(self.var_names)
-                                const_shift = 0.0
-                                for vname, polarity in literals:
-                                    idx_var = self.var_indices[vname]
-                                    if polarity == 1:
-                                        coef[idx_var] += 1.0
-                                    else:
-                                        coef[idx_var] += -1.0
-                                        const_shift += 1.0
-                                rhs_limit = (k - 1) - const_shift
-                                for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
-                                        A_ub_rows.append(ub_row_idx)
-                                        A_ub_cols.append(i)
-                                        A_ub_data.append(coef_i)
-                                b_ub.append(rhs_limit)
-                                ub_row_idx += 1
-                        elif bool_op == "or":
-                            coef = [0.0] * len(self.var_names)
-                            const_shift = 0.0
-                            for vname, polarity in literals:
-                                idx_var = self.var_indices[vname]
-                                if polarity == 1:
-                                    coef[idx_var] += 1.0
-                                else:
-                                    coef[idx_var] += -1.0
-                                    const_shift += 1.0
-                            if target_val:
-                                # sum(lits) >= 1  => -sum(lits) <= -1
-                                for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
-                                        A_ub_rows.append(ub_row_idx)
-                                        A_ub_cols.append(i)
-                                        A_ub_data.append(-coef_i)
-                                b_ub.append(const_shift - 1.0)
-                                ub_row_idx += 1
-                            else:
-                                # sum(lits) == 0 => equality rows
-                                for i, coef_i in enumerate(coef):
-                                    if abs(coef_i) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef_i)
-                                b_eq.append(-const_shift)
-                                eq_row_idx += 1
-                                return  # handled boolean constraint
-                            return  # handled via fast path
-                    # Fast path pattern recognized but not all atomic -> build with auxiliaries
-                    try:
-                        expr_var = _bool_expr_var(left, env)
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[expr_var]] = 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(1.0 if target_val else 0.0)
-                        eq_row_idx += 1
-                        return
-                    except SemanticError:
-                        pass
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_handle_and_or_literal_fast_path(
+                    left,
+                    right,
+                    constr.get("op"),
+                    env,
+                    _bool_expr_var,
+                    state,
+                ):
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    return
 
                 # Capture left_type for composite evaluation
                 left_type = left.get("type") if isinstance(left, dict) else None
