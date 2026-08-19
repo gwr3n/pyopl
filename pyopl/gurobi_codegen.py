@@ -2999,216 +2999,240 @@ class GurobiCodeGenerator:
             self._add_code_line(line)
         return aux_name
 
+    def _comparison_sum_struct_key(self, expr_node, current_iterators):
+        inner_expression = self._unwrap_parenthesized(expr_node.get("expression"))
+        if not self._is_comparison_node(inner_expression):
+            return None
+
+        iterator_names = [iterator["iterator"] for iterator in expr_node["iterators"]]
+        iterator_map = current_iterators.copy()
+        iterator_map.update({name: name for name in iterator_names})
+        try:
+            left_text = self._traverse_expression(inner_expression["left"], iterator_map, symbolic=True)
+            right_text = self._traverse_expression(inner_expression["right"], iterator_map, symbolic=True)
+        except Exception:
+            return None
+
+        index_constraint = expr_node.get("index_constraint")
+        index_text = None
+        if index_constraint is not None:
+            try:
+                index_text = self._traverse_expression(index_constraint, iterator_map, symbolic=True)
+            except Exception:
+                index_text = "IC_ERR"
+        return (
+            f"cmp_sum|{tuple(iterator_names)}|{inner_expression['op']}|"
+            f"{left_text}|{right_text}|{index_text}"
+        )
+
+    def _sum_iterator_range(self, iterator_range, iterator_map):
+        range_type = iterator_range["type"]
+        if range_type == "range_specifier":
+            start = self._traverse_expression(iterator_range["start"], iterator_map, symbolic=True)
+            end = self._traverse_expression(iterator_range["end"], iterator_map, symbolic=True)
+            return f"range({start}, {end} + 1)"
+        if range_type == "named_range":
+            try:
+                return self._emit_range_from_declaration(iterator_range["name"], iterator_map, True)
+            except SemanticError:
+                set_name = self._emit_set_name_if_declared(iterator_range["name"])
+                if set_name:
+                    return set_name
+                raise ValueError(f"Range or set '{iterator_range['name']}' not found in declarations.")
+        if range_type == "indexed_set":
+            index_expression = self._expr_indexed_name(
+                {
+                    "type": "indexed_name",
+                    "name": iterator_range["name"],
+                    "dimensions": iterator_range.get("dimensions", []),
+                },
+                iterator_map,
+                symbolic=True,
+            )
+            dimensions = iterator_range.get("dimensions", [])
+            if " if isinstance(" not in index_expression and len(dimensions) == 1:
+                dimension = dimensions[0]
+                if isinstance(dimension, dict) and dimension.get("type") == "name_reference_index":
+                    key = dimension["name"]
+                    return (
+                        f"({iterator_range['name']}[{key}] if isinstance({iterator_range['name']}, dict) "
+                        f"else {index_expression})"
+                    )
+            return index_expression
+        if range_type in ("named_set", "named_set_dimension"):
+            set_name = self._emit_set_name_if_declared(iterator_range["name"])
+            if set_name:
+                return set_name
+            raise ValueError(f"Set '{iterator_range['name']}' not found in declarations.")
+        raise ValueError(f"Unsupported range type for sum: {range_type}")
+
+    def _prepare_sum_iterators(self, iterators, current_iterators):
+        loop_vars = []
+        loop_ranges = []
+        iterator_map = current_iterators.copy()
+        for iterator in iterators:
+            name = iterator["iterator"]
+            logger.debug(f"[GurobiCodeGen] SUM iterator: {iterator}")
+            loop_ranges.append(self._sum_iterator_range(iterator["range"], iterator_map))
+            loop_vars.append(name)
+            iterator_map[name] = name
+        return loop_vars, loop_ranges, iterator_map
+
+    def _reused_comparison_sum(self, expr_node, current_iterators, structural_key=None, scope_vars=()):
+        if hasattr(self, "_comparison_sum_meta") and id(expr_node) in self._comparison_sum_meta:
+            meta_reuse = self._comparison_sum_meta[id(expr_node)]
+            if meta_reuse.get("list_name"):
+                cached_scope = tuple(meta_reuse.get("scope_vars") or ())
+                if not cached_scope or all(name in current_iterators for name in cached_scope):
+                    list_expr, _ = self._comparison_sum_accessors(meta_reuse, current_iterators)
+                    return f"gp.quicksum({list_expr})"
+        if structural_key and hasattr(self, "_comparison_sum_key_map") and structural_key in self._comparison_sum_key_map:
+            metadata = self._comparison_sum_key_map[structural_key]
+            metadata_scope = tuple(metadata.get("scope_vars") or ())
+            if metadata_scope == tuple(scope_vars) and (
+                not metadata_scope or all(name in current_iterators for name in metadata_scope)
+            ):
+                list_expr, _ = self._comparison_sum_accessors(metadata, current_iterators)
+                return f"gp.quicksum({list_expr})"
+        return None
+
+    def _emit_comparison_sum(
+        self,
+        expr_node,
+        comparison,
+        current_iterators,
+        new_iterators,
+        loop_vars,
+        loop_ranges,
+        scope_vars,
+        scope_ranges,
+        structural_key,
+    ):
+        self._sum_cmp_counter = getattr(self, "_sum_cmp_counter", 0) + 1
+        list_name = f"_cmp_sum_list_{self._sum_cmp_counter}"
+        list_append_target = list_name
+        metadata = {
+            "list_name": list_name,
+            "len_var": None,
+            "len_name": None,
+            "scope_vars": tuple(scope_vars),
+        }
+        self._comparison_sum_meta = getattr(self, "_comparison_sum_meta", {})
+        self._comparison_sum_meta[id(expr_node)] = metadata
+        if structural_key:
+            self._comparison_sum_key_map = getattr(self, "_comparison_sum_key_map", {})
+            self._comparison_sum_key_map[structural_key] = metadata
+
+        scope_key_expression = None
+        length_name = None
+        if scope_vars:
+            self._add_code_line(f"{list_name} = {{}}  # scoped auxiliaries for sum of comparisons")
+            length_name = f"{list_name}_len"
+            self._add_code_line(f"{length_name} = {{}}")
+            metadata["len_name"] = length_name
+            self._add_code_line(self._construct_loop_header(scope_vars, scope_ranges))
+            self.indent_level += 1
+            scope_key_expression = self._format_scope_key_expr(scope_vars, {name: name for name in scope_vars})
+            list_append_target = f"{list_name}[{scope_key_expression}]"
+            self._add_code_line(f"{list_append_target} = []")
+        else:
+            self._add_code_line(f"{list_name} = []  # auxiliaries for sum of comparisons")
+
+        self._add_code_line(self._construct_loop_header(loop_vars, loop_ranges))
+        self.indent_level += 1
+        index_constraint = expr_node.get("index_constraint")
+        if index_constraint is not None:
+            condition = self._traverse_expression(index_constraint, new_iterators)
+            self._add_code_line(f"if {condition}:")
+            self.indent_level += 1
+
+        left_node = comparison["left"]
+        right_node = comparison["right"]
+        operator = comparison["op"]
+        left_expression = self._traverse_expression(left_node, new_iterators)
+        right_expression = self._traverse_expression(right_node, new_iterators)
+        auxiliary = f"cmp_aux_{self._sum_cmp_counter}_" + "_".join(loop_vars)
+        self._add_code_line(
+            f"{auxiliary} = model.addVar(vtype=GRB.BINARY)  # reified "
+            f"({left_expression} {operator} {right_expression})"
+        )
+        reification = self._emit_reify_comparison(
+            left_node, right_node, left_expression, right_expression, operator, auxiliary
+        )
+        for line in reification.split("\n"):
+            self._add_code_line(line)
+        self._add_code_line(f"{list_append_target}.append({auxiliary})")
+
+        if index_constraint is not None:
+            self.indent_level -= 1
+        self.indent_level -= 1
+        if scope_vars:
+            self._add_code_line(
+                f"{length_name}[{scope_key_expression}] = len({list_append_target})  "
+                "# cardinality of comparison terms"
+            )
+            self.indent_level -= 1
+        else:
+            length_variable = f"{list_name}_len"
+            self._add_code_line(f"{length_variable} = len({list_name})  # cardinality of comparison terms")
+            metadata["len_var"] = length_variable
+        list_expression, _ = self._comparison_sum_accessors(metadata, current_iterators)
+        return f"gp.quicksum({list_expression})"
+
+    def _emit_ordinary_sum(self, inner_expression, index_constraint, new_iterators, loop_vars, loop_ranges):
+        inner_text = self._traverse_expression(inner_expression, new_iterators)
+        logger.debug(f"[GurobiCodeGen] SUM inner_expr_str: {inner_text}")
+        generators = " ".join(f"for {var} in {iterator_range}" for var, iterator_range in zip(loop_vars, loop_ranges))
+        generator = f"{inner_text} {generators}"
+        if index_constraint is not None:
+            condition = self._traverse_expression(index_constraint, new_iterators)
+            logger.debug(f"[GurobiCodeGen] SUM cond_str: {condition}")
+            generator += f" if {condition}"
+        logger.debug(f"[GurobiCodeGen] SUM generated quicksum: gp.quicksum({generator})")
+        return f"gp.quicksum({generator})"
+
     def _expr_sum(self, expr_node, current_iterators, symbolic):
         iterators = expr_node["iterators"]
         index_constraint = expr_node.get("index_constraint")
         inner_expression = expr_node["expression"]
-        if hasattr(self, "_comparison_sum_meta") and id(expr_node) in self._comparison_sum_meta:
-            meta_reuse = self._comparison_sum_meta[id(expr_node)]
-            if meta_reuse.get("list_name"):
-                scope_vars = tuple(meta_reuse.get("scope_vars") or ())
-                if not scope_vars or all(name in current_iterators for name in scope_vars):
-                    list_expr, _ = self._comparison_sum_accessors(meta_reuse, current_iterators)
-                    return f"gp.quicksum({list_expr})"
+        reused = self._reused_comparison_sum(expr_node, current_iterators)
+        if reused is not None:
+            return reused
 
-        def _struct_key(node):
-            if not isinstance(node, dict) or node.get("type") != "sum":
-                return None
-            expr_inner = node.get("expression")
-            while isinstance(expr_inner, dict) and expr_inner.get("type") == "parenthesized_expression":
-                expr_inner = expr_inner.get("expression")
-            if not (
-                isinstance(expr_inner, dict)
-                and expr_inner.get("type") in ("binop", "constraint")
-                and expr_inner.get("op") in (">=", ">", "<=", "<", "==")
-            ):
-                return None
-            it_names = [it["iterator"] for it in iterators]
-            temp_iter_map = current_iterators.copy()
-            for nm in it_names:
-                temp_iter_map[nm] = nm
-            try:
-                left_txt = self._traverse_expression(expr_inner["left"], temp_iter_map, symbolic=True)
-                right_txt = self._traverse_expression(expr_inner["right"], temp_iter_map, symbolic=True)
-            except Exception:
-                return None
-            idxc_txt = None
-            if index_constraint is not None:
-                try:
-                    idxc_txt = self._traverse_expression(index_constraint, temp_iter_map, symbolic=True)
-                except Exception:
-                    idxc_txt = "IC_ERR"
-            return f"cmp_sum|{tuple(it_names)}|{expr_inner['op']}|{left_txt}|{right_txt}|{idxc_txt}"
-
-        loop_vars = []
-        loop_ranges = []
         logger.debug(
-            f"[GurobiCodeGen] SUM: iterators={iterators}, index_constraint={index_constraint}, inner_expression={inner_expression}"
+            f"[GurobiCodeGen] SUM: iterators={iterators}, index_constraint={index_constraint}, "
+            f"inner_expression={inner_expression}"
         )
-        temp_iter_map = current_iterators.copy()
-        for it in iterators:
-            name = it["iterator"]
-            rng = it["range"]
-            logger.debug(f"[GurobiCodeGen] SUM iterator: {it}")
-            if rng["type"] == "range_specifier":
-                start = self._traverse_expression(rng["start"], temp_iter_map, symbolic=True)
-                end = self._traverse_expression(rng["end"], temp_iter_map, symbolic=True)
-                loop_ranges.append(f"range({start}, {end} + 1)")
-            elif rng["type"] == "named_range":
-                try:
-                    loop_ranges.append(self._emit_range_from_declaration(rng["name"], temp_iter_map, True))
-                except SemanticError:
-                    set_name = self._emit_set_name_if_declared(rng["name"])
-                    if set_name:
-                        loop_ranges.append(set_name)
-                    else:
-                        raise ValueError(f"Range or set '{rng['name']}' not found in declarations.")
-            elif rng["type"] == "indexed_set":
-                idx_expr = self._expr_indexed_name(
-                    {"type": "indexed_name", "name": rng["name"], "dimensions": rng.get("dimensions", [])},
-                    temp_iter_map,
-                    symbolic=True,
-                )
-                if " if isinstance(" not in idx_expr and len(rng.get("dimensions", [])) == 1:
-                    dim = rng["dimensions"][0]
-                    if isinstance(dim, dict) and dim.get("type") == "name_reference_index":
-                        key = dim["name"]
-                        idx_expr = f"({rng['name']}[{key}] if isinstance({rng['name']}, dict) else {idx_expr})"
-                loop_ranges.append(idx_expr)
-            elif rng["type"] in ("named_set", "named_set_dimension"):
-                set_name = self._emit_set_name_if_declared(rng["name"])
-                if set_name:
-                    loop_ranges.append(set_name)
-                else:
-                    raise ValueError(f"Set '{rng['name']}' not found in declarations.")
-            else:
-                raise ValueError(f"Unsupported range type for sum: {rng['type']}")
-            loop_vars.append(name)
-            temp_iter_map[name] = name
-        new_iterators = temp_iter_map.copy()
+        loop_vars, loop_ranges, new_iterators = self._prepare_sum_iterators(iterators, current_iterators)
         logger.debug(f"[GurobiCodeGen] SUM loop_vars={loop_vars}, loop_ranges={loop_ranges}")
         scope_vars, scope_ranges = self._active_scope_iterators(current_iterators, loop_vars)
-        key = _struct_key(expr_node)
-        if key and hasattr(self, "_comparison_sum_key_map") and key in self._comparison_sum_key_map:
-            meta = self._comparison_sum_key_map[key]
-            meta_scope = tuple(meta.get("scope_vars") or ())
-            if meta_scope == tuple(scope_vars) and (not meta_scope or all(name in current_iterators for name in meta_scope)):
-                list_expr, _ = self._comparison_sum_accessors(meta, current_iterators)
-                return f"gp.quicksum({list_expr})"
+        structural_key = self._comparison_sum_struct_key(expr_node, current_iterators)
+        reused = self._reused_comparison_sum(expr_node, current_iterators, structural_key, scope_vars)
+        if reused is not None:
+            return reused
 
         previous_active_ranges = getattr(self, "_active_iterator_ranges", {}).copy()
         active_ranges = previous_active_ranges.copy()
-        active_ranges.update({var: rng for var, rng in zip(loop_vars, loop_ranges)})
+        active_ranges.update({var: iterator_range for var, iterator_range in zip(loop_vars, loop_ranges)})
         self._active_iterator_ranges = active_ranges
         try:
+            comparison = self._unwrap_parenthesized(inner_expression)
+            if self._is_comparison_node(comparison):
+                return self._emit_comparison_sum(
+                    expr_node,
+                    comparison,
+                    current_iterators,
+                    new_iterators,
+                    loop_vars,
+                    loop_ranges,
+                    scope_vars,
+                    scope_ranges,
+                    structural_key,
+                )
 
-            def _unwrap_paren(n):
-                while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                    n = n.get("expression")
-                return n
-
-            inner_unwrapped = _unwrap_paren(inner_expression)
-
-            def _is_comparison(node):
-                if not isinstance(node, dict):
-                    return False
-                t = node.get("type")
-                if t == "binop" and node.get("op") in (">=", "<=", "==", ">", "<"):
-                    return True
-                if t == "constraint" and node.get("op") in (">=", "<=", "==", ">", "<"):
-                    return True
-                return False
-
-            if _is_comparison(inner_unwrapped):
-                if not hasattr(self, "_sum_cmp_counter"):
-                    self._sum_cmp_counter = 0
-                self._sum_cmp_counter += 1
-                list_name = f"_cmp_sum_list_{self._sum_cmp_counter}"
-                list_append_target = list_name
-                self._comparison_sum_meta = getattr(self, "_comparison_sum_meta", {})
-                meta_entry = {
-                    "list_name": list_name,
-                    "len_var": None,
-                    "len_name": None,
-                    "scope_vars": tuple(scope_vars),
-                }
-                self._comparison_sum_meta[id(expr_node)] = meta_entry
-                if key:
-                    if not hasattr(self, "_comparison_sum_key_map"):
-                        self._comparison_sum_key_map = {}
-                    self._comparison_sum_key_map[key] = meta_entry
-                scope_key_expr = None
-                if scope_vars:
-                    self._add_code_line(f"{list_name} = {{}}  # scoped auxiliaries for sum of comparisons")
-                    len_name = f"{list_name}_len"
-                    self._add_code_line(f"{len_name} = {{}}")
-                    meta_entry["len_name"] = len_name
-                    if len(scope_vars) == 1:
-                        outer_loop_header = f"for {scope_vars[0]} in {scope_ranges[0]}:"
-                    else:
-                        self._add_code_line("import itertools  # needed for multi-index forall")
-                        outer_loop_header = f"for {', '.join(scope_vars)} in itertools.product({', '.join(scope_ranges)}):"
-                    self._add_code_line(outer_loop_header)
-                    self.indent_level += 1
-                    scope_key_expr = self._format_scope_key_expr(scope_vars, {name: name for name in scope_vars})
-                    list_append_target = f"{list_name}[{scope_key_expr}]"
-                    self._add_code_line(f"{list_append_target} = []")
-                else:
-                    self._add_code_line(f"{list_name} = []  # auxiliaries for sum of comparisons")
-                if len(loop_vars) == 1:
-                    loop_header = f"for {loop_vars[0]} in {loop_ranges[0]}:"
-                else:
-                    self._add_code_line("import itertools  # needed for multi-index forall")
-                    loop_header = f"for {', '.join(loop_vars)} in itertools.product({', '.join(loop_ranges)}):"
-                self._add_code_line(loop_header)
-                self.indent_level += 1
-                if index_constraint is not None:
-                    cond_str = self._traverse_expression(index_constraint, new_iterators)
-                    self._add_code_line(f"if {cond_str}:")
-                    self.indent_level += 1
-                cmp_node = inner_unwrapped
-                if cmp_node.get("type") == "constraint":
-                    left_node = cmp_node["left"]
-                    right_node = cmp_node["right"]
-                    op = cmp_node["op"]
-                else:
-                    left_node = cmp_node["left"]
-                    right_node = cmp_node["right"]
-                    op = cmp_node["op"]
-                left_expr = self._traverse_expression(left_node, new_iterators)
-                right_expr = self._traverse_expression(right_node, new_iterators)
-                aux_sym = f"cmp_aux_{self._sum_cmp_counter}_" + "_".join(loop_vars)
-                self._add_code_line(f"{aux_sym} = model.addVar(vtype=GRB.BINARY)  # reified ({left_expr} {op} {right_expr})")
-                for _line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_sym).split(
-                    "\n"
-                ):
-                    self._add_code_line(_line)
-                self._add_code_line(f"{list_append_target}.append({aux_sym})")
-                if index_constraint is not None:
-                    self.indent_level -= 1
-                self.indent_level -= 1
-                if scope_vars:
-                    self._add_code_line(
-                        f"{len_name}[{scope_key_expr}] = len({list_append_target})  # cardinality of comparison terms"
-                    )
-                    self.indent_level -= 1
-                else:
-                    len_var = f"{list_name}_len"
-                    self._add_code_line(f"{len_var} = len({list_name})  # cardinality of comparison terms")
-                    meta_entry["len_var"] = len_var
-                list_expr, _ = self._comparison_sum_accessors(meta_entry, current_iterators)
-                return f"gp.quicksum({list_expr})"
-
-            inner_expr_str = self._traverse_expression(inner_expression, new_iterators)
-            logger.debug(f"[GurobiCodeGen] SUM inner_expr_str: {inner_expr_str}")
-            gens = " ".join([f"for {v} in {r}" for v, r in zip(loop_vars, loop_ranges)])
-            gen = f"{inner_expr_str} {gens}"
-            if index_constraint is not None:
-                cond_str = self._traverse_expression(index_constraint, new_iterators)
-                logger.debug(f"[GurobiCodeGen] SUM cond_str: {cond_str}")
-                gen += f" if {cond_str}"
-            logger.debug(f"[GurobiCodeGen] SUM generated quicksum: gp.quicksum({gen})")
-            return f"gp.quicksum({gen})"
+            return self._emit_ordinary_sum(
+                inner_expression, index_constraint, new_iterators, loop_vars, loop_ranges
+            )
         finally:
             self._active_iterator_ranges = previous_active_ranges
 
