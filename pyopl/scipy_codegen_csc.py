@@ -1847,6 +1847,115 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             logger.debug(f"[resolve_variable] Indexed variable not found: {vname} (indices={indices})")
         return None
 
+    def _normalize_parameter_lookup_value(self, name: str, val: object, indices: list | None, logger) -> object:
+        if not isinstance(val, list) or indices is None:
+            return val
+
+        try:
+            converted = None
+            if len(val) % 2 == 0 and val:
+                keys = val[::2]
+                values = val[1::2]
+                if all(isinstance(key, (list, tuple, str)) for key in keys) and all(
+                    isinstance(value, (int, float)) for value in values
+                ):
+                    converted = {
+                        tuple(key) if isinstance(key, (list, tuple)) else key: value
+                        for key, value in zip(keys, values)
+                    }
+
+            if converted is None and all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
+                pairs = [(entry[0], entry[1]) for entry in val]
+                if all(
+                    isinstance(key, (list, tuple, str)) and isinstance(value, (int, float))
+                    for key, value in pairs
+                ):
+                    converted = {
+                        tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in pairs
+                    }
+
+            if converted is not None:
+                self.data_dict[name] = converted
+                logger.debug(f"[resolve_parameter] Converted flat KV list to dict for param '{name}': {converted}")
+                return converted
+        except Exception:
+            pass
+
+        return val
+
+    def _parameter_list_start_index(self, name: str, dimension_index: int) -> int:
+        try:
+            decl = self._find_decl(name)
+            if not decl or not decl.get("dimensions") or dimension_index >= len(decl["dimensions"]):
+                return 1
+
+            dim_decl = decl["dimensions"][dimension_index]
+            dimension_type = dim_decl.get("type")
+            if dimension_type == "range_index":
+                return int(self._eval_bound(dim_decl["start"]))
+            if dimension_type == "named_range_dimension":
+                range_decl = self._find_decl(dim_decl.get("name"), "range_declaration_inline")
+                if range_decl:
+                    return int(self._eval_bound(range_decl["start"]))
+        except Exception:
+            pass
+        return 1
+
+    def _lookup_indexed_parameter(self, name: str, indices: list, env: dict, val: object, logger):
+        if isinstance(val, dict) and any(isinstance(key, tuple) for key in val):
+            evaluated_indices = [self._eval_index(index, env) for index in indices]
+            tuple_key = (
+                evaluated_indices[0]
+                if len(evaluated_indices) == 1 and isinstance(evaluated_indices[0], tuple)
+                else tuple(evaluated_indices)
+            )
+            if tuple_key in val:
+                resolved = val[tuple_key]
+                logger.debug(f"[resolve_parameter] Found composite-key param: {resolved!r}")
+                if isinstance(resolved, (int, float)):
+                    return False, float(resolved), False
+                return False, resolved, False
+
+        resolved = val
+        for dimension_index, index in enumerate(indices):
+            evaluated_index = self._eval_index(index, env)
+            logger.debug(
+                f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, "
+                f"v={resolved}, env={env}"
+            )
+            if isinstance(resolved, dict):
+                logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
+                resolved = resolved[evaluated_index]
+                continue
+            if isinstance(evaluated_index, float) and evaluated_index.is_integer():
+                evaluated_index = int(evaluated_index)
+            if not isinstance(evaluated_index, int):
+                raise ValueError(
+                    f"Index '{index}' could not be resolved to int (got {evaluated_index!r}) "
+                    f"for param '{name}' with env={env}"
+                )
+
+            if isinstance(resolved, list):
+                start_index = self._parameter_list_start_index(name, dimension_index)
+                offset = evaluated_index - start_index
+                logger.debug(
+                    f"[resolve_parameter] List lookup with start={start_index}: v[{offset}] (len={len(resolved)})"
+                )
+                resolved = resolved[offset]
+            else:
+                logger.debug(
+                    f"[resolve_parameter] List/dict lookup: v[{evaluated_index}] (type={type(resolved)})"
+                )
+                resolved = resolved[evaluated_index]
+
+        if isinstance(resolved, (int, float)):
+            logger.debug(f"[resolve_parameter] Found numeric param: {resolved}")
+            return False, float(resolved), False
+        if isinstance(resolved, (str, bool, dict, list, tuple)):
+            logger.debug(f"[resolve_parameter] Found indexed param: {resolved!r}")
+            return False, resolved, False
+        return None
+
     def _resolve_parameter(
         self,
         name: str,
@@ -1860,126 +1969,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
 
         logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        # Prefer normalized mapping when available (stored as '<name>__map')
         val = self.data_dict.get(f"{name}__map", self.data_dict.get(name))
-        # Convert flat key/value list with tuple-like keys into a dict for tuple-indexed parameters
-        if isinstance(val, list) and indices is not None:
-            try:
-                converted = None
-                # Case 1: flat alternating keys and values: [key, val, key, val, ...]
-                # Apply ONLY if keys are str/tuple/list AND vals are numeric scalars (int/float).
-                if len(val) % 2 == 0 and len(val) > 0:
-                    keys = val[::2]
-                    vals = val[1::2]
-                    if all(isinstance(k, (list, tuple, str)) for k in keys) and all(
-                        isinstance(v2, (int, float)) for v2 in vals
-                    ):
-                        d = {}
-                        for k, v2 in zip(keys, vals):
-                            d[tuple(k) if isinstance(k, (list, tuple)) else k] = v2
-                        converted = d
-                # Case 2: list of pairs [[key, val], [key, val], ...]
-                # Apply ONLY if each pair has key as str/tuple/list and value numeric (int/float).
-                if converted is None and all(isinstance(e, (list, tuple)) and len(e) == 2 for e in val):
-                    pair_ok = True
-                    for k, v2 in val:
-                        if not isinstance(k, (list, tuple, str)) or not isinstance(v2, (int, float)):
-                            pair_ok = False
-                            break
-                    if pair_ok:
-                        d = {}
-                        for k, v2 in val:
-                            d[tuple(k) if isinstance(k, (list, tuple)) else k] = v2
-                        converted = d
-                if converted is not None:
-                    val = converted
-                    self.data_dict[name] = converted
-                    logger.debug(f"[resolve_parameter] Converted flat KV list to dict for param '{name}': {converted}")
-            except Exception:
-                pass
+        val = self._normalize_parameter_lookup_value(name, val, indices, logger)
         logger.debug(f"[resolve_parameter] Lookup param: {name}, indices={indices}, val={val}, env={env}")
         if indices is not None and val is not None:
             try:
-                v = val
-                # NEW: support dicts keyed by composite tuples (e.g., {('RoleA','CoreSite'): 1.0})
-                if isinstance(v, dict) and any(isinstance(k, tuple) for k in v.keys()):
-                    # Build composite key from all indices at once
-                    rem_evals = [self._eval_index(idx, env) for idx in indices]
-                    tuple_key = rem_evals[0] if len(rem_evals) == 1 and isinstance(rem_evals[0], tuple) else tuple(rem_evals)
-                    if tuple_key in v:
-                        v = v[tuple_key]
-                        if isinstance(v, (int, float)):
-                            logger.debug(f"[resolve_parameter] Found numeric param: {v}")
-                            return False, float(v), False
-                        if isinstance(v, (str, bool)):
-                            logger.debug(f"[resolve_parameter] Found scalar indexed param: {v!r}")
-                            return False, v, False
-                        if isinstance(v, dict):
-                            logger.debug(f"[resolve_parameter] Found dict param: {v}")
-                            return False, v, False
-                        if isinstance(v, (list, tuple)):
-                            logger.debug(f"[resolve_parameter] Found list/tuple param: {v}")
-                            return False, v, False
-                        return False, v, False
-                # Fallback: stepwise lookup for nested dict/list
-                for i, idx in enumerate(indices):
-                    idx_eval = self._eval_index(idx, env)
-                    logger.debug(f"[resolve_parameter] Index eval: idx={idx}, idx_eval={idx_eval}, v={v}, env={env}")
-                    if isinstance(v, dict):
-                        logger.debug(f"[resolve_parameter] Dict lookup: v[{idx_eval}] (keys={list(v.keys())})")
-                        v = v[idx_eval]
-                        continue
-                    # Always cast to int if possible (OPL indices are ints)
-                    if isinstance(idx_eval, float) and idx_eval.is_integer():
-                        idx_eval = int(idx_eval)
-                    if not isinstance(idx_eval, int):
-                        logger.debug(f"[resolve_parameter] Non-int index: idx_eval={idx_eval} (type={type(idx_eval)})")
-                        raise ValueError(
-                            f"Index '{idx}' could not be resolved to int (got {idx_eval!r}) for param '{name}' with env={env}"
-                        )
-
-                    # If value is a Python list, determine the declared start index for this
-                    # parameter dimension (defaults to 1 to preserve existing behaviour).
-                    if isinstance(v, list) and isinstance(idx_eval, int):
-                        start_idx = 1
-                        try:
-                            decl = self._find_decl(name)
-                            if decl and decl.get("dimensions") and i < len(decl["dimensions"]):
-                                dim_decl = decl["dimensions"][i]
-                                dtyp = dim_decl.get("type")
-                                if dtyp == "range_index":
-                                    start_idx = int(self._eval_bound(dim_decl["start"]))
-                                elif dtyp == "named_range_dimension":
-                                    rng_decl = self._find_decl(dim_decl.get("name"), "range_declaration_inline")
-                                    if rng_decl:
-                                        start_idx = int(self._eval_bound(rng_decl["start"]))
-                        except Exception:
-                            # Fall back to 1-based if any error occurs while resolving declaration
-                            start_idx = 1
-
-                        offset = idx_eval - start_idx
-                        logger.debug(f"[resolve_parameter] List lookup with start={start_idx}: v[{offset}] (len={len(v)})")
-                        v = v[offset]
-                    else:
-                        logger.debug(f"[resolve_parameter] List/dict lookup: v[{idx_eval}] (type={type(v)})")
-                        v = v[idx_eval]
-                # Numeric scalar
-                if isinstance(v, (int, float)):
-                    logger.debug(f"[resolve_parameter] Found numeric param: {v}")
-                    return False, float(v), False
-                if isinstance(v, (str, bool)):
-                    logger.debug(f"[resolve_parameter] Found scalar indexed param: {v!r}")
-                    return False, v, False
-                if isinstance(v, dict):
-                    logger.debug(f"[resolve_parameter] Found dict param: {v}")
-                    return False, v, False
-                if isinstance(v, (list, tuple)):
-                    logger.debug(f"[resolve_parameter] Found list/tuple param: {v}")
-                    return False, v, False
+                resolved = self._lookup_indexed_parameter(name, indices, env, val, logger)
+                if resolved is not None:
+                    return resolved
             except Exception as e:
                 logger.debug(f"[resolve_parameter] Exception during lookup: {e}")
-                pass
-        # NEW: support scalar string/boolean parameters (e.g., source = "London")
         if indices is None and val is not None and isinstance(val, (str, bool)):
             logger.debug(f"[resolve_parameter] Found scalar non-numeric param: {val!r}")
             return False, val, False
