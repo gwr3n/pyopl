@@ -5565,6 +5565,60 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             upper_row[truth_index] += 1.0
         return lower_row, upper_row, threshold - 1.0
 
+    def _rewrite_not_literal_constraint(self, left, right, op_sym_top):
+        if not (
+            op_sym_top == "=="
+            and isinstance(left, dict)
+            and left.get("type") == "not"
+            and isinstance(right, dict)
+            and right.get("type") == "boolean_literal"
+        ):
+            return None
+
+        inner = self._unwrap_parenthesized_node(left.get("value"))
+        if not bool(right.get("value")):
+            return {
+                "type": "constraint",
+                "op": "==",
+                "left": inner,
+                "right": {"type": "boolean_literal", "value": True, "sem_type": "boolean"},
+            }, False
+
+        if isinstance(inner, dict) and inner.get("type") == "constraint":
+            inner_op = inner.get("op")
+            inner_left = inner.get("left")
+            inner_right = inner.get("right")
+            if inner_op in ("<=", ">="):
+                arithmetic_op = "+" if inner_op == "<=" else "-"
+                inverted_op = ">=" if inner_op == "<=" else "<="
+                adjusted_right = {
+                    "type": "binop",
+                    "op": arithmetic_op,
+                    "left": inner_right,
+                    "right": {"type": "number", "value": BOOL_EPS, "sem_type": "float"},
+                    "sem_type": inner_right.get("sem_type", "float"),
+                }
+                return {
+                    "type": "constraint",
+                    "op": inverted_op,
+                    "left": inner_left,
+                    "right": adjusted_right,
+                }, False
+            if inner_op in ("==", "!="):
+                return {
+                    "type": "constraint",
+                    "op": "!=" if inner_op == "==" else "==",
+                    "left": inner_left,
+                    "right": inner_right,
+                }, inner_op == "=="
+
+        return {
+            "type": "constraint",
+            "op": "==",
+            "left": inner,
+            "right": {"type": "boolean_literal", "value": False, "sem_type": "boolean"},
+        }, False
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -5840,111 +5894,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return
 
                 # --- NOT rewrite normalization ---
-                if (
-                    op_sym_top == "=="
-                    and isinstance(left, dict)
-                    and left.get("type") == "not"
-                    and isinstance(right, dict)
-                    and right.get("type") == "boolean_literal"
-                ):
-                    inner = left.get("value")
-                    # Unwrap parentheses
-                    while isinstance(inner, dict) and inner.get("type") == "parenthesized_expression":
-                        inner = inner.get("expression")
-                    want_true = bool(right.get("value"))
-                    if not want_true:
-                        # (!E) == false -> E == true
-                        new_c = {
-                            "type": "constraint",
-                            "op": "==",
-                            "left": inner,
-                            "right": {
-                                "type": "boolean_literal",
-                                "value": True,
-                                "sem_type": "boolean",
-                            },
-                        }
-                        handle_constraint(new_c, env=env)
-                        return
-                    # want_true: !(E) == true
-                    # If E is already a constraint we can invert
-                    if isinstance(inner, dict) and inner.get("type") == "constraint":
-                        op_in = inner.get("op")
-                        l_in = inner.get("left")
-                        r_in = inner.get("right")
-                        EPS = BOOL_EPS
-                        if op_in == "<=":
-                            # l > r -> l >= r + eps
-                            new_right = {
-                                "type": "binop",
-                                "op": "+",
-                                "left": r_in,
-                                "right": {
-                                    "type": "number",
-                                    "value": EPS,
-                                    "sem_type": "float",
-                                },
-                                "sem_type": r_in.get("sem_type", "float"),
-                            }
-                            new_c = {
-                                "type": "constraint",
-                                "op": ">=",
-                                "left": l_in,
-                                "right": new_right,
-                            }
-                            handle_constraint(new_c, env=env)
-                            return
-                        if op_in == ">=":
-                            new_right = {
-                                "type": "binop",
-                                "op": "-",
-                                "left": r_in,
-                                "right": {
-                                    "type": "number",
-                                    "value": EPS,
-                                    "sem_type": "float",
-                                },
-                                "sem_type": r_in.get("sem_type", "float"),
-                            }
-                            new_c = {
-                                "type": "constraint",
-                                "op": "<=",
-                                "left": l_in,
-                                "right": new_right,
-                            }
-                            handle_constraint(new_c, env=env)
-                            return
-                        if op_in == "==":
-                            new_c = {
-                                "type": "constraint",
-                                "op": "!=",
-                                "left": l_in,
-                                "right": r_in,
-                            }
-                            self._add_code_line("# encoded != (NOT of ==)")
-                            handle_constraint(new_c, env=env)
-                            return
-                        if op_in == "!=":
-                            new_c = {
-                                "type": "constraint",
-                                "op": "==",
-                                "left": l_in,
-                                "right": r_in,
-                            }
-                            handle_constraint(new_c, env=env)
-                            return
-                    # Fallback: treat !(bool_expr)==true as bool_expr==false (introduce literal flip)
-                    new_c = {
-                        "type": "constraint",
-                        "op": "==",
-                        "left": inner,
-                        "right": {
-                            "type": "boolean_literal",
-                            "value": False,
-                            "sem_type": "boolean",
-                        },
-                    }
-                    handle_constraint(new_c, env=env)
+                rewritten_not = self._rewrite_not_literal_constraint(left, right, op_sym_top)
+                if rewritten_not is not None:
+                    new_constraint, marks_not_of_equality = rewritten_not
+                    if marks_not_of_equality:
+                        self._add_code_line("# encoded != (NOT of ==)")
+                    handle_constraint(new_constraint, env=env)
                     return
 
                 # --- Boolean variable equality with composite boolean expression (reuse auxiliaries) ---
