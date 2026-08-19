@@ -3059,10 +3059,127 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if nested:
             data_dict[name] = nested
 
-    def _generate_data_declarations(self, data_dict):
+    def _data_range_bounds(self, range_dimension, data_dict):
+        start_node = range_dimension.get("start")
+        end_node = range_dimension.get("end")
+        if isinstance(start_node, dict) and isinstance(end_node, dict):
+            return self._eval_data_bound(start_node, data_dict), self._eval_data_bound(end_node, data_dict)
+        range_name = range_dimension.get("name")
+        declaration = self._find_decl(range_name, "range_declaration_inline")
+        if isinstance(declaration, dict):
+            return (
+                self._eval_data_bound(declaration["start"], data_dict),
+                self._eval_data_bound(declaration["end"], data_dict),
+            )
+        range_data = data_dict.get(range_name)
+        if isinstance(range_data, dict) and range_data.get("type") == "range_data":
+            return int(range_data["start"]), int(range_data["end"])
+        raise SemanticError(f"Named range '{range_name}' has no bounds.")
 
-        # Track inline tuple-indexed parameters we already emitted as dicts so we don't overwrite them later
-        emitted_inline_tuple_params = set()
+    def _normalize_tuple_set_range_parameter(self, declaration, data_dict):
+        dimensions = declaration.get("dimensions", [])
+        name = declaration.get("name")
+        if not (
+            len(dimensions) == 2
+            and dimensions[0].get("type") == "named_set_dimension"
+            and dimensions[1].get("type") == "named_range_dimension"
+            and isinstance(data_dict.get(name), list)
+        ):
+            return
+        set_name = dimensions[0]["name"]
+        set_declaration = self._find_decl(set_name, "set_of_tuples") or self._find_decl(
+            set_name, "set_of_tuples_external"
+        )
+        if set_name in data_dict:
+            raw_set = data_dict[set_name]
+            set_values = raw_set["elements"] if isinstance(raw_set, dict) and "elements" in raw_set else raw_set
+        elif set_declaration and set_declaration.get("value"):
+            set_values = [value["elements"] for value in set_declaration["value"]]
+        else:
+            return
+        set_elements = [tuple(value) if isinstance(value, (list, tuple)) else (value,) for value in set_values]
+        start, end = self._data_range_bounds(dimensions[1], data_dict)
+        parameter_rows = data_dict[name]
+        expected_length = end - start + 1
+        if not (
+            len(set_elements) == len(parameter_rows)
+            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in parameter_rows)
+        ):
+            return
+        data_dict[name] = {
+            key: {index: float(row[index - start]) for index in range(start, end + 1)}
+            for key, row in zip(set_elements, parameter_rows)
+        }
+
+    def _emit_ast_data_declarations(self, data_dict):
+        for declaration in self.ast.get("declarations", []):
+            declaration_type = declaration.get("type")
+            if declaration_type == "tuple_type":
+                self.tuple_types = getattr(self, "tuple_types", {})
+                self.tuple_types[declaration["name"]] = declaration["fields"]
+            elif declaration_type == "set_of_tuples":
+                set_name = declaration["name"]
+                tuple_values = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
+                if tuple_values:
+                    self._add_code_line(f"{set_name} = {repr(tuple_values)}")
+                    self.data_dict[set_name] = tuple_values
+            elif declaration_type in ("typed_set", "typed_set_external"):
+                set_name = declaration["name"]
+                value = data_dict.get(set_name, declaration.get("value"))
+                if declaration_type == "typed_set_external" and value is None:
+                    continue
+                value = value or []
+                self._add_code_line(f"{set_name} = {repr(value)}")
+                self.data_dict[set_name] = list(value)
+                if isinstance(value, list) and all(isinstance(element, (str, int)) for element in value):
+                    self._add_code_line(f"{set_name}_index = {{v: i for i, v in enumerate({set_name})}}")
+            elif declaration_type in ("tuple_array", "tuple_array_external"):
+                self._emit_tuple_array_data(declaration, data_dict)
+            elif declaration_type == "parameter_inline_indexed":
+                if self._emit_inline_indexed_parameter(declaration, data_dict):
+                    return True
+        return False
+
+    def _emit_tuple_array_data(self, declaration, data_dict):
+        array_name = declaration["name"]
+        tuple_type = declaration["tuple_type"]
+        data_list = data_dict.get(array_name)
+        if data_list is None or tuple_type not in getattr(self, "tuple_types", {}):
+            return
+        field_names = [field["name"] for field in self.tuple_types[tuple_type]]
+        index_values = data_dict.get(declaration["index_set"])
+        if isinstance(data_list, dict):
+            items = sorted(data_list.items(), key=lambda item: item[0])
+        elif isinstance(index_values, list) and len(index_values) == len(data_list):
+            items = zip(index_values, data_list)
+        else:
+            items = enumerate(data_list, start=1)
+        structured = {}
+        for key, value in items:
+            if isinstance(value, dict):
+                structured[key] = {field: value.get(field) for field in field_names if field in value}
+            else:
+                structured[key] = {field: value[index] for index, field in enumerate(field_names) if index < len(value)}
+        self._add_code_line(f"{array_name} = {repr(structured)}")
+        self.data_dict[array_name] = structured
+
+    def _emit_inline_indexed_parameter(self, declaration, data_dict):
+        dimensions = declaration.get("dimensions", [])
+        name = declaration["name"]
+        if len(dimensions) == 1 and dimensions[0].get("type") == "named_set_dimension":
+            set_name = dimensions[0]["name"]
+            set_declaration = self._find_decl(set_name, "set_of_tuples")
+            if set_declaration:
+                keys = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
+                tuple_keys = [key if isinstance(key, tuple) else tuple(key) for key in keys]
+                parameter_dict = dict(zip(tuple_keys, declaration["value"]))
+                self._add_code_line(f"{name} = {repr(parameter_dict)}")
+                return True
+        self._add_code_line(f"{name} = {repr(declaration['value'])}")
+        self.data_dict[name] = declaration["value"]
+        return False
+
+    def _generate_data_declarations(self, data_dict):
 
         # New: validation for 1-D params over set/range where data is dict with non-scalar values.
         param_decl_map = self._get_param_decl_map()
@@ -3117,175 +3234,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self._normalize_set_range_parameter(decl, data_dict)
                 self._normalize_set_set_parameter(decl, data_dict)
 
-        # --- Convert 2D arrays indexed by tuple-set × range into nested dicts ---
         for decl in self.ast.get("declarations", []):
-            if (
-                decl.get("type")
-                in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                )
-                and isinstance(data_dict.get(decl["name"]), list)
-                and len(decl.get("dimensions", [])) == 2
-                and decl["dimensions"][0].get("type") == "named_set_dimension"
-                and decl["dimensions"][1].get("type") == "named_range_dimension"
+            if decl.get("type") in (
+                "parameter_external",
+                "parameter_external_indexed",
+                "parameter_external_explicit",
+                "parameter_external_explicit_indexed",
+                "parameter_inline",
+                "parameter_inline_indexed",
             ):
-                name = decl["name"]
-                set_name = decl["dimensions"][0]["name"]
-                rng = decl["dimensions"][1]
-                param_rows = data_dict.get(name)
-                set_vals = None
-                set_decl = self._find_decl(set_name, "set_of_tuples") or self._find_decl(set_name, "set_of_tuples_external")
-                if set_name in data_dict:
-                    raw = data_dict[set_name]
-                    set_vals = raw["elements"] if isinstance(raw, dict) and "elements" in raw else raw
-                elif set_decl and set_decl.get("value"):
-                    set_vals = [t["elements"] for t in set_decl["value"]]
-                if set_vals is None:
-                    continue
-                set_elems = [tuple(e) if isinstance(e, (list, tuple)) else (e,) for e in set_vals]
-
-                def eval_bound(expr):
-                    if expr["type"] == "number":
-                        return int(expr["value"])
-                    if expr["type"] == "name":
-                        return int(data_dict[expr["value"]])
-                    if expr["type"] == "binop":
-                        op = expr["op"]
-                        left = eval_bound(expr["left"])
-                        right = eval_bound(expr["right"])
-                        return (
-                            left + right
-                            if op == "+"
-                            else (left - right if op == "-" else left * right if op == "*" else left // right)
-                        )
-                    raise Exception("Unsupported range bound expr")
-
-                # NEW: handle named ranges without inline start/end
-                def get_range_bounds(rng_dim):
-                    s_node = rng_dim.get("start")
-                    e_node = rng_dim.get("end")
-                    if isinstance(s_node, dict) and isinstance(e_node, dict):
-                        return eval_bound(s_node), eval_bound(e_node)
-                    # Fallback to range declaration in AST
-                    rng_name = rng_dim.get("name")
-                    decl_rng = self._find_decl(rng_name, "range_declaration_inline")
-                    if isinstance(decl_rng, dict):
-                        return eval_bound(decl_rng["start"]), eval_bound(decl_rng["end"])
-                    # Fallback to .dat-provided range
-                    rd = data_dict.get(rng_name)
-                    if isinstance(rd, dict) and rd.get("type") == "range_data":
-                        return int(rd["start"]), int(rd["end"])
-                    raise SemanticError(f"Named range '{rng_name}' has no bounds.")
-
-                start, end = get_range_bounds(rng)
-                expected_len = end - start + 1
-                if not (
-                    len(set_elems) == len(param_rows)
-                    and all(isinstance(row, (list, tuple)) and len(row) == expected_len for row in param_rows)
-                ):
-                    continue
-                nested = {}
-                for i, key in enumerate(set_elems):
-                    nested[key] = {p: float(param_rows[i][p - start]) for p in range(start, end + 1)}
-                data_dict[name] = nested
-        # --- Length check for 1D parameters indexed by a range or set (parity with Gurobi) ---
+                self._normalize_tuple_set_range_parameter(decl, data_dict)
         param_decl_map = self._get_param_decl_map()
-        # Emit tuple types and sets of tuples from AST declarations (if present)
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") == "tuple_type":
-                # Store tuple type info for later use (for field access)
-                self.tuple_types = getattr(self, "tuple_types", {})
-                self.tuple_types[decl["name"]] = decl["fields"]
-            elif decl.get("type") == "set_of_tuples":
-                set_name = decl["name"]
-                tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
-                if tuple_list:
-                    self._add_code_line(f"{set_name} = {repr(tuple_list)}")
-                    # Also make available in data_dict for downstream fallback code paths
-                    try:
-                        self.data_dict[set_name] = tuple_list
-                    except Exception:
-                        pass
-            elif decl.get("type") in ("typed_set", "typed_set_external"):
-                # Prefer data_dict override if provided
-                set_name = decl["name"]
-                if set_name in data_dict:
-                    val = data_dict[set_name]
-                else:
-                    val = decl.get("value")
-                    if decl.get("type") == "typed_set_external" and val is None:
-                        continue
-                    val = val or []
-                self._add_code_line(f"{set_name} = {repr(val)}")
-                # Also update internal data_dict so index remapping can consult set order
-                try:
-                    self.data_dict[set_name] = list(val)
-                except Exception:
-                    pass
-                # Emit an index map for string-labelled scalar sets so list parameters can be accessed by label.
-                # Mirrors Gurobi backend (<SetName>_index) for parity.
-                if isinstance(val, list) and all(isinstance(e, (str, int)) for e in val):
-                    # Provide deterministic positional mapping (1-based like OPL logical position -> Python list index).
-                    # Store both 1-based position (for potential legacy) and provide direct name->position map used below.
-                    self._add_code_line(f"{set_name}_index = {{v: i for i, v in enumerate({set_name})}}")
-            elif decl.get("type") in ("tuple_array", "tuple_array_external"):
-                arr_name = decl["name"]
-                tuple_type = decl["tuple_type"]
-                index_set = decl["index_set"]
-                data_list = data_dict.get(arr_name)
-                if data_list is not None and tuple_type in getattr(self, "tuple_types", {}):
-                    fields = self.tuple_types[tuple_type]
-                    field_names = [f["name"] for f in fields]
-                    index_vals = data_dict.get(index_set)
-                    if isinstance(data_list, dict):
-                        items = sorted(data_list.items(), key=lambda kv: kv[0])
-                    elif isinstance(index_vals, list) and len(index_vals) == len(data_list):
-                        items = zip(index_vals, data_list)
-                    else:
-                        items = enumerate(data_list, start=1)
-                    structured = {}
-                    for key, t in items:
-                        if isinstance(t, dict):
-                            structured[key] = {fn: t.get(fn) for fn in field_names if fn in t}
-                            continue
-                        d = {}
-                        for i, fn in enumerate(field_names):
-                            if i < len(t):
-                                d[fn] = t[i]
-                        structured[key] = d
-                    self._add_code_line(f"{arr_name} = {repr(structured)}")
-                    self.data_dict[arr_name] = structured
-            elif decl.get("type") == "parameter_inline_indexed":
-                # Only emit dict for tuple-indexed, else emit as list
-                dims = decl.get("dimensions", [])
-                name = decl["name"]
-                if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
-                    set_name = dims[0]["name"]
-                    tuple_set = None
-                    for d in self.ast["declarations"]:
-                        if d.get("type") == "set_of_tuples" and d["name"] == set_name:
-                            tuple_set = d
-                            break
-                    if tuple_set:
-                        # Robust: get normalized tuple keys (supports dict-of-literals and plain tuples)
-                        keys = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
-                        tuple_keys = [k if isinstance(k, tuple) else tuple(k) for k in keys]
-                        param_vals = decl["value"]
-                        param_dict = {k: v for k, v in zip(tuple_keys, param_vals)}
-                        self._add_code_line(f"{name} = {repr(param_dict)}")
-                        return
-                # Fallback: emit as list (for range-indexed)
-                self._add_code_line(f"{name} = {repr(decl['value'])}")
-                # Also update internal data_dict so evaluation can resolve inline list-indexed params
-                try:
-                    self.data_dict[name] = decl["value"]
-                except Exception:
-                    pass
+        if self._emit_ast_data_declarations(data_dict):
+            return
         # Emit data from .dat file as before
         if not data_dict:
             self._add_code_line("")
@@ -3315,9 +3276,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return obj
 
         for name, value in data_dict.items():
-            # Skip names already emitted in structured form for tuple-indexed inline params
-            if name in emitted_inline_tuple_params:
-                continue
             # Length check for 1D parameters indexed by a named range
             param_decl = param_decl_map.get(name)
             if (
