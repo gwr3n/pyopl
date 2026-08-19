@@ -5790,6 +5790,47 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         handled = op_sym != "==" or left.get("type") not in ("and", "or")
         return handled, left, right
 
+    def _try_handle_boolean_variable_relation(self, left, right, op_sym, env, bool_expr_var, state):
+        if op_sym not in ("==", "<=", ">="):
+            return False
+        left_is_boolean = self._is_declared_boolean_var_node(left)
+        right_is_boolean = self._is_declared_boolean_var_node(right)
+        if left_is_boolean == right_is_boolean:
+            return False
+
+        variable_node = left if left_is_boolean else right
+        expression_node = right if left_is_boolean else left
+        try:
+            expression_var = bool_expr_var(self._unwrap_parenthesized_node(expression_node), env)
+        except SemanticError:
+            return False
+        variable_name = (
+            variable_node["value"]
+            if variable_node.get("type") == "name"
+            else self._multi_indexed_var_name(variable_node, env)
+        )
+        if left_is_boolean:
+            left_var, right_var = variable_name, expression_var
+        else:
+            left_var, right_var = expression_var, variable_name
+        if left_var == right_var:
+            return True
+
+        row = [0.0] * len(self.var_names)
+        if op_sym == "==":
+            row[self.var_indices[left_var]] = 1.0
+            row[self.var_indices[right_var]] -= 1.0
+            self._append_sparse_row(state, row, 0.0, sense="eq")
+        elif op_sym == "<=":
+            row[self.var_indices[left_var]] = 1.0
+            row[self.var_indices[right_var]] -= 1.0
+            self._append_sparse_row(state, row, 0.0, sense="ub")
+        else:
+            row[self.var_indices[left_var]] = -1.0
+            row[self.var_indices[right_var]] += 1.0
+            self._append_sparse_row(state, row, 0.0, sense="ub")
+        return True
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6119,85 +6160,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 # --- Reified equality of a declared boolean variable and a general boolean expression ---
                 # Pattern: b == (bool_expr) where bool_expr may include comparisons (<=,>=,==,!=) and/or logical operators.
                 # We attempt both orientations (expression on left or right). Falls through silently if expression unsupported.
-                if constr.get("op") in ("==", "<=", ">="):
-
-                    def _is_bool_dvar(n):
-                        return (
-                            isinstance(n, dict)
-                            and n.get("type") in ("name", "indexed_name")
-                            and any(
-                                d.get("name") == (n.get("value") if n.get("type") == "name" else n.get("name"))
-                                and d.get("type") in ("dvar", "dvar_indexed")
-                                and d.get("var_type") == "boolean"
-                                for d in self.ast.get("declarations", [])
-                            )
-                        )
-
-                    left_is_bool = _is_bool_dvar(left)
-                    right_is_bool = _is_bool_dvar(right)
-                    rel_op = constr.get("op")
-
-                    def _emit_bool_relation(lhs_var, rhs_var):
-                        row = [0.0] * len(self.var_names)
-                        if rel_op == "==":
-                            row[self.var_indices[lhs_var]] = 1.0
-                            row[self.var_indices[rhs_var]] -= 1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                    A_eq_rows.append(eq_row_idx)
-                                    A_eq_cols.append(i)
-                                    A_eq_data.append(coef)
-                            b_eq.append(0.0)
-                            return "eq"
-                        if rel_op == "<=":
-                            row[self.var_indices[lhs_var]] = 1.0
-                            row[self.var_indices[rhs_var]] -= 1.0
-                        else:  # >=
-                            row[self.var_indices[lhs_var]] = -1.0
-                            row[self.var_indices[rhs_var]] += 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(0.0)
-                        return "ub"
-
-                    # Try b == expr
-                    if left_is_bool and not right_is_bool:
-                        try:
-                            # Unwrap any parenthesized_expression layers before building boolean subtree
-                            rr = right
-                            while isinstance(rr, dict) and rr.get("type") == "parenthesized_expression":
-                                rr = rr.get("expression")
-                            expr_var = _bool_expr_var(rr, env)
-                            vname = left["value"] if left.get("type") == "name" else self._multi_indexed_var_name(left, env)
-                            if expr_var != vname:
-                                target = _emit_bool_relation(vname, expr_var)
-                                if target == "eq":
-                                    eq_row_idx += 1
-                                else:
-                                    ub_row_idx += 1
-                            return
-                        except SemanticError:
-                            pass
-                    # Try expr == b
-                    if right_is_bool and not left_is_bool:
-                        try:
-                            ll = left
-                            while isinstance(ll, dict) and ll.get("type") == "parenthesized_expression":
-                                ll = ll.get("expression")
-                            expr_var = _bool_expr_var(ll, env)
-                            vname = right["value"] if right.get("type") == "name" else self._multi_indexed_var_name(right, env)
-                            if expr_var != vname:
-                                target = _emit_bool_relation(expr_var, vname)
-                                if target == "eq":
-                                    eq_row_idx += 1
-                                else:
-                                    ub_row_idx += 1
-                            return
-                        except SemanticError:
-                            pass
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_handle_boolean_variable_relation(
+                    left,
+                    right,
+                    constr.get("op"),
+                    env,
+                    _bool_expr_var,
+                    state,
+                ):
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    return
 
                 # --- Boolean AND/OR linearization fast path (supports boolean literal on either side) ---
                 # Pattern: (AND/OR tree of atomic comparisons var==0/1) == boolean_literal

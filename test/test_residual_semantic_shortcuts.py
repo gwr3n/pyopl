@@ -99,6 +99,33 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
                     )
                 )
 
+    def test_boolean_variable_expression_relations_preserve_operand_order(self):
+        expression = {
+            "type": "not",
+            "value": self._atom("a", 1),
+            "sem_type": "boolean",
+        }
+        cases = (
+            (self._name("q", "boolean"), "<=", expression, lambda q, value: q <= value),
+            (self._name("q", "boolean"), ">=", expression, lambda q, value: q >= value),
+            (expression, "<=", self._name("q", "boolean"), lambda q, value: value <= q),
+            (expression, ">=", self._name("q", "boolean"), lambda q, value: value >= q),
+        )
+
+        for left, operator, right, expected in cases:
+            with self.subTest(operator=operator, boolean_on_left=left.get("type") == "name"):
+                ast = self._ast(
+                    [self._decl("a", "boolean"), self._decl("q", "boolean")],
+                    [self._constraint(left, operator, right)],
+                )
+                problem = self._build(ast)
+                for a_value, q_value in itertools.product((0, 1), repeat=2):
+                    expression_value = 1 - a_value
+                    self.assertEqual(
+                        self._assignment_has_auxiliary_extension(problem, {"a": a_value, "q": q_value}),
+                        expected(q_value, expression_value),
+                    )
+
     def test_missing_range_bound_parameter_is_rejected(self):
         ast = self._ast(
             [
