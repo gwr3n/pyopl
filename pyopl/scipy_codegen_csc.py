@@ -5929,6 +5929,122 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._append_sparse_row(state, row, 1.0 if target_value else 0.0, sense="eq")
         return True
 
+    def _try_handle_asserted_and(self, left, right, op_sym, env, handle_constraint):
+        if not (isinstance(left, dict) and left.get("type") == "and" and op_sym == "=="):
+            return False
+        target_value = self._is_boolean_literal_node(right) and right.get("value") is True
+        if not target_value:
+            return True
+
+        def emit_conjunct(node):
+            node = self._unwrap_parenthesized_node(node)
+            if not isinstance(node, dict):
+                return
+            node_type = node.get("type")
+            if node_type == "and":
+                emit_conjunct(node.get("left"))
+                emit_conjunct(node.get("right"))
+                return
+            if node_type in ("not", "or"):
+                handle_constraint(
+                    {
+                        "type": "constraint",
+                        "op": "==",
+                        "left": node,
+                        "right": {"type": "boolean_literal", "value": True, "sem_type": "boolean"},
+                    },
+                    env=env,
+                )
+                return
+            if self._is_linear_comparison(node):
+                handle_constraint(
+                    {"type": "constraint", "op": node["op"], "left": node["left"], "right": node["right"]},
+                    env=env,
+                )
+                return
+            raise self._unsupported_type_error("boolean leaf", node)
+
+        emit_conjunct(left)
+        return True
+
+    def _boolean_or_disjuncts(self, node):
+        node = self._unwrap_parenthesized_node(node)
+        if not isinstance(node, dict):
+            return []
+        node_type = node.get("type")
+        if node_type == "or":
+            return self._boolean_or_disjuncts(node.get("left")) + self._boolean_or_disjuncts(node.get("right"))
+        if node_type == "and":
+            comparisons = []
+            stack = [node]
+            while stack:
+                current = self._unwrap_parenthesized_node(stack.pop())
+                if not isinstance(current, dict):
+                    continue
+                if current.get("type") == "and":
+                    stack.extend((current.get("left"), current.get("right")))
+                elif self._is_linear_comparison(current):
+                    comparisons.append(current)
+                else:
+                    raise self._unsupported_type_error("boolean leaf", current)
+            return [comparisons]
+        if not self._is_linear_comparison(node):
+            raise self._unsupported_type_error("boolean leaf", node)
+        return [[node]]
+
+    def _append_or_guarded_comparison(self, comparison, flag_name, env, state):
+        big_m = self._big_m_for_comparison(comparison, env=env)
+        left_coef, left_const = self._eval_expr(comparison["left"], env)
+        right_node = comparison["right"]
+        right_coef, right_const = (
+            self._eval_expr(right_node, env)
+            if isinstance(right_node, dict)
+            else ({}, right_node if isinstance(right_node, (int, float)) else 0.0)
+        )
+        expression_coef = dict(left_coef)
+        for variable_name, coefficient in right_coef.items():
+            expression_coef[variable_name] = expression_coef.get(variable_name, 0.0) - coefficient
+        expression_const = left_const - right_const
+
+        def guarded_row(sign):
+            row = [0.0] * len(self.var_names)
+            for variable_name, coefficient in expression_coef.items():
+                if variable_name in self.var_indices:
+                    row[self.var_indices[variable_name]] += sign * coefficient
+            row[self.var_indices[flag_name]] += big_m
+            return row
+
+        operator = comparison["op"]
+        if operator in ("<=", "=="):
+            self._append_sparse_row(state, guarded_row(1.0), big_m - expression_const, sense="ub")
+        if operator in (">=", "=="):
+            self._append_sparse_row(state, guarded_row(-1.0), big_m + expression_const, sense="ub")
+
+    def _try_handle_asserted_or(self, left, right, op_sym, env, state):
+        if not (
+            isinstance(left, dict)
+            and left.get("type") == "or"
+            and op_sym == "=="
+            and self._is_boolean_literal_node(right)
+            and right.get("value") is True
+        ):
+            return False
+        flag_names = []
+        for disjunct_index, comparisons in enumerate(self._boolean_or_disjuncts(left)):
+            flag_name = f"or_flag_{disjunct_index}"
+            while flag_name in self.var_indices:
+                flag_name += "_"
+            self._ensure_aux_binary(flag_name)
+            flag_names.append(flag_name)
+            for comparison in comparisons:
+                self._append_or_guarded_comparison(comparison, flag_name, env, state)
+        if flag_names:
+            selector_row = [0.0] * len(self.var_names)
+            for flag_name in flag_names:
+                selector_row[self.var_indices[flag_name]] = -1.0
+            self._append_sparse_row(state, selector_row, -1.0, sense="ub")
+        return True
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6302,206 +6418,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         return
                     leaf_type = left_type
                     if leaf_type == "and":
-                        # Recursively emit each conjunct. A conjunct can be:
-                        # - a linear comparison (directly converted)
-                        # - a nested OR/AND expression (handled by recursive call to handle_constraint)
-                        def _emit_conj(node):
-                            if not isinstance(node, dict):
-                                return
-                            # Unwrap parentheses
-                            while node.get("type") == "parenthesized_expression":
-                                node = node.get("expression")
-                                if not isinstance(node, dict):
-                                    return
-                            t = node.get("type")
-                            if t == "and":
-                                _emit_conj(node.get("left"))
-                                _emit_conj(node.get("right"))
-                                return
-                            if t == "not":
-                                # Delegate NOT handling via existing normalization logic
-                                pseudo = {
-                                    "type": "constraint",
-                                    "op": "==",
-                                    "left": node,
-                                    "right": {
-                                        "type": "boolean_literal",
-                                        "value": True,
-                                        "sem_type": "boolean",
-                                    },
-                                }
-                                handle_constraint(pseudo, env=env)
-                                return
-                            if self._is_linear_comparison(node):
-                                pseudo = {
-                                    "type": "constraint",
-                                    "op": node["op"],
-                                    "left": node["left"],
-                                    "right": node["right"],
-                                }
-                                handle_constraint(pseudo, env=env)
-                                return
-                            if t == "or":
-                                pseudo = {
-                                    "type": "constraint",
-                                    "op": "==",
-                                    "left": node,
-                                    "right": {
-                                        "type": "boolean_literal",
-                                        "value": True,
-                                        "sem_type": "boolean",
-                                    },
-                                }
-                                handle_constraint(pseudo, env=env)
-                                return
-                            raise self._unsupported_type_error("boolean leaf", node)
-
-                        _emit_conj(left)
+                        self._try_handle_asserted_and(left, right, constr.get("op"), env, handle_constraint)
                         return
-                    else:  # OR possibly containing nested AND groups
-                        # Helper: extract disjuncts; each disjunct is list of comparison nodes whose conjunction forms that branch
-                        def _disjuncts(node_or):
-                            if not isinstance(node_or, dict):
-                                return []
-                            # Unwrap any layers of parentheses
-                            while isinstance(node_or, dict) and node_or.get("type") == "parenthesized_expression":
-                                node_or = node_or.get("expression")
-                                if not isinstance(node_or, dict):
-                                    return []
-                            t = node_or.get("type")
-                            if t == "or":
-                                return _disjuncts(node_or.get("left")) + _disjuncts(node_or.get("right"))
-                            if t == "and":
-                                # Conjunction branch: flatten AND to its comparison leaves
-                                comps = []
-                                stack = [node_or]
-                                while stack:
-                                    n = stack.pop()
-                                    if not isinstance(n, dict):
-                                        continue
-                                    # Unwrap parentheses
-                                    while n.get("type") == "parenthesized_expression":
-                                        n = n.get("expression")
-                                        if not isinstance(n, dict):
-                                            break
-                                    if not isinstance(n, dict):
-                                        continue
-                                    if n.get("type") == "and":
-                                        stack.append(n.get("left"))
-                                        stack.append(n.get("right"))
-                                    else:
-                                        en = n
-                                        if en.get("type") == "parenthesized_expression":
-                                            en = en.get("expression")
-                                        if not self._is_linear_comparison(en):
-                                            raise self._unsupported_type_error("boolean leaf", en)
-                                        comps.append(en)
-                                return [comps]
-                            # Single comparison disjunct; node_or is neither or/and after unwrapping
-                            en = node_or
-                            if not self._is_linear_comparison(en):
-                                raise self._unsupported_type_error("boolean leaf", en)
-                            return [[en]]
-
-                        disjuncts = _disjuncts(left)
-                        z_vars = []
-                        for dj_idx, comp_list in enumerate(disjuncts):
-                            z_name = f"or_flag_{dj_idx}"
-                            while z_name in self.var_indices:
-                                z_name += "_"
-                            self.var_names.append(z_name)
-                            self.var_indices[z_name] = len(self.var_names) - 1
-                            self.bounds.append([0, 1])
-                            if hasattr(self, "integrality"):
-                                self.integrality.append(1)
-                            else:
-                                self.integrality = [1]
-                            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                                self.c.append(0.0)
-                            z_vars.append(z_name)
-                            # Tighten M per comparison using collected bounds (compute per comp_node)
-                            for comp_node in comp_list:
-                                # Use current env for tighter M
-                                M = self._big_m_for_comparison(comp_node, env=env)
-                                # Build lhs - rhs
-                                coef_lhs, const_lhs = self._eval_expr(comp_node["left"], env)
-                                right_node = comp_node["right"]
-                                if isinstance(right_node, dict):
-                                    coef_rhs, const_rhs = self._eval_expr(right_node, env)
-                                else:
-                                    coef_rhs, const_rhs = (
-                                        {},
-                                        (right_node if isinstance(right_node, (int, float)) else 0.0),
-                                    )
-                                expr_coef = dict(coef_lhs)
-                                for vn, cf in coef_rhs.items():
-                                    expr_coef[vn] = expr_coef.get(vn, 0.0) - cf
-                                expr_const = const_lhs - const_rhs
-                                op_c = comp_node["op"]
-                                if op_c == "<=":
-                                    row = [0.0] * len(self.var_names)
-                                    for vn, cf in expr_coef.items():
-                                        if vn in self.var_indices:
-                                            row[self.var_indices[vn]] += cf
-                                    row[self.var_indices[z_name]] += M
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(M - expr_const)
-                                    ub_row_idx += 1
-                                elif op_c == ">=":
-                                    row = [0.0] * len(self.var_names)
-                                    for vn, cf in expr_coef.items():
-                                        if vn in self.var_indices:
-                                            row[self.var_indices[vn]] -= cf
-                                    row[self.var_indices[z_name]] += M
-                                    for i, coef in enumerate(row):
-                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(M + expr_const)
-                                    ub_row_idx += 1
-                                elif op_c == "==":
-                                    # Two inequalities
-                                    row1 = [0.0] * len(self.var_names)
-                                    for vn, cf in expr_coef.items():
-                                        if vn in self.var_indices:
-                                            row1[self.var_indices[vn]] += cf
-                                    row1[self.var_indices[z_name]] += M
-                                    for i, coef in enumerate(row1):
-                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(M - expr_const)
-                                    ub_row_idx += 1
-                                    row2 = [0.0] * len(self.var_names)
-                                    for vn, cf in expr_coef.items():
-                                        if vn in self.var_indices:
-                                            row2[self.var_indices[vn]] -= cf
-                                    row2[self.var_indices[z_name]] += M
-                                    for i, coef in enumerate(row2):
-                                        if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                            A_ub_rows.append(ub_row_idx)
-                                            A_ub_cols.append(i)
-                                            A_ub_data.append(coef)
-                                    b_ub.append(M + expr_const)
-                                    ub_row_idx += 1
-                        if z_vars:
-                            row = [0.0] * len(self.var_names)
-                            for z in z_vars:
-                                row[self.var_indices[z]] -= 1.0
-                            for i, coef in enumerate(row):
-                                if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                    A_ub_rows.append(ub_row_idx)
-                                    A_ub_cols.append(i)
-                                    A_ub_data.append(coef)
-                            b_ub.append(-1.0)
-                            ub_row_idx += 1
-                        return
+                    state.eq_row_idx = eq_row_idx
+                    state.ub_row_idx = ub_row_idx
+                    self._try_handle_asserted_or(left, right, constr.get("op"), env, state)
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    return
                 self._emit_plain_linear_constraint(constr, env, append_eq_row, append_ub_row)
             elif constr["type"] == "forall_constraint":
                 iterators = constr.get("iterators")
