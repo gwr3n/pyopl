@@ -2900,87 +2900,166 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         return "\n".join(self.scipy_code_lines)
 
-    def _generate_data_declarations(self, data_dict):
-        # --- Recursive shape check for multi-dimensional parameters ---
-        # --- Recursive shape check for multi-dimensional parameters ---
-        def check_shape(param_data, dims, data_dict, param_name, dim=0):
-            """
-            Minimal shape validation for lists/arrays:
-            - 1D over named_range: length matches end-start+1
-            - 1D over named_set: length matches |set|
-            - 2D over range×range: rectangular with expected sizes
-            - 2D over set×range or set×set: skip here (handled by later normalization)
-            """
-            from .semantic_error import SemanticError
+    def _eval_data_bound(self, expr, data_dict):
+        if not isinstance(expr, dict):
+            raise ValueError("Unsupported range bound expr")
+        expression_type = expr.get("type")
+        if expression_type == "number":
+            return int(expr["value"])
+        if expression_type == "name":
+            return int(data_dict[expr["value"]])
+        if expression_type == "binop":
+            left = self._eval_data_bound(expr["left"], data_dict)
+            right = self._eval_data_bound(expr["right"], data_dict)
+            operator = expr["op"]
+            if operator == "+":
+                return left + right
+            if operator == "-":
+                return left - right
+            if operator == "*":
+                return left * right
+            if operator == "/":
+                return left // right
+        raise ValueError("Unsupported range bound expr")
 
-            if not isinstance(dims, list):
-                return
-            if isinstance(param_data, dict):
-                return  # handled elsewhere (dict normalizations)
-            if len(dims) == 1 and isinstance(param_data, list):
-                d0 = dims[0]
-                if d0.get("type") == "named_range_dimension":
-                    # evaluate [start..end]
-                    rng_name = d0["name"]
-                    rng_decl = next(
-                        (
-                            d
-                            for d in self.ast.get("declarations", [])
-                            if d.get("type") == "range_declaration_inline" and d.get("name") == rng_name
-                        ),
-                        None,
-                    )
-                    if rng_decl:
-
-                        def eval_bound_local(expr):
-                            if expr["type"] == "number":
-                                return int(expr["value"])
-                            if expr["type"] == "name":
-                                return int(data_dict[expr["value"]])
-                            if expr["type"] == "binop":
-                                op = expr["op"]
-                                left = eval_bound_local(expr["left"])
-                                right = eval_bound_local(expr["right"])
-                                return (
-                                    left + right
-                                    if op == "+"
-                                    else left - right if op == "-" else left * right if op == "*" else left // right
-                                )
-                            raise Exception("Unsupported range bound expr")
-
-                        start = eval_bound_local(rng_decl["start"])
-                        end = eval_bound_local(rng_decl["end"])
-                        expected = end - start + 1
-                        if len(param_data) != expected:
-                            raise SemanticError(
-                                f"Parameter '{param_name}' has {len(param_data)} items but declared range '{rng_name}' expects {expected}."
-                            )
-                elif d0.get("type") == "named_set_dimension":
-                    set_name = d0["name"]
-                    elems = data_dict.get(set_name)
-                    if elems is None:
-                        decl = next((d for d in self.ast.get("declarations", []) if d.get("name") == set_name), None)
-                        if decl:
-                            if decl.get("type") == "typed_set":
-                                elems = decl.get("value") or []
-                            elif decl.get("type") == "set_declaration":
-                                elems = decl.get("value") or []
-                    if isinstance(elems, dict) and "elements" in elems:
-                        set_len = len(elems["elements"])
-                    else:
-                        set_len = len(elems or [])
-                    if set_len and len(param_data) != set_len:
-                        raise SemanticError(
-                            f"Parameter '{param_name}' has {len(param_data)} items but declared set '{set_name}' has {set_len} elements."
-                        )
-            if len(dims) == 2 and isinstance(param_data, list):
-                # Only check “rectangular” rows; deeper semantics handled later
-                if not all(isinstance(row, (list, tuple)) for row in param_data):
-                    return
-                row_len = len(param_data[0]) if param_data else 0
-                if not all(len(row) == row_len for row in param_data):
-                    raise SemanticError(f"Parameter '{param_name}' 2-D data must be rectangular (all rows same length).")
+    def _validate_parameter_shape(self, param_data, dimensions, data_dict, parameter_name):
+        if not isinstance(dimensions, list) or isinstance(param_data, dict):
             return
+        if len(dimensions) == 1 and isinstance(param_data, list):
+            dimension = dimensions[0]
+            if dimension.get("type") == "named_range_dimension":
+                range_name = dimension["name"]
+                range_declaration = self._find_decl(range_name, "range_declaration_inline")
+                if range_declaration:
+                    start = self._eval_data_bound(range_declaration["start"], data_dict)
+                    end = self._eval_data_bound(range_declaration["end"], data_dict)
+                    expected_length = end - start + 1
+                    if len(param_data) != expected_length:
+                        raise SemanticError(
+                            f"Parameter '{parameter_name}' has {len(param_data)} items but declared range "
+                            f"'{range_name}' expects {expected_length}."
+                        )
+            elif dimension.get("type") == "named_set_dimension":
+                set_name = dimension["name"]
+                elements = data_dict.get(set_name)
+                if elements is None:
+                    declaration = self._find_decl(set_name)
+                    if declaration and declaration.get("type") in ("typed_set", "set_declaration"):
+                        elements = declaration.get("value") or []
+                set_length = len(elements.get("elements", [])) if isinstance(elements, dict) else len(elements or [])
+                if set_length and len(param_data) != set_length:
+                    raise SemanticError(
+                        f"Parameter '{parameter_name}' has {len(param_data)} items but declared set "
+                        f"'{set_name}' has {set_length} elements."
+                    )
+        if len(dimensions) == 2 and isinstance(param_data, list):
+            if not all(isinstance(row, (list, tuple)) for row in param_data):
+                return
+            row_length = len(param_data[0]) if param_data else 0
+            if not all(len(row) == row_length for row in param_data):
+                raise SemanticError(f"Parameter '{parameter_name}' 2-D data must be rectangular (all rows same length).")
+
+    def _resolve_data_set_elements(self, set_name, data_dict):
+        if set_name in data_dict:
+            set_object = data_dict[set_name]
+            elements = set_object["elements"] if isinstance(set_object, dict) and "elements" in set_object else set_object
+            return [tuple(element) if isinstance(element, (list, tuple)) else element for element in elements]
+        declaration = self._find_decl(set_name)
+        if declaration is None:
+            return None
+        if declaration.get("type") in ("typed_set", "set_declaration"):
+            return declaration.get("value") or []
+        if declaration.get("type") == "set_of_tuples" and declaration.get("value"):
+            return [
+                tuple(value["elements"]) if isinstance(value, dict) and "elements" in value else tuple(value)
+                for value in declaration["value"]
+            ]
+        return None
+
+    def _normalize_set_range_parameter(self, declaration, data_dict):
+        dimensions = declaration.get("dimensions", [])
+        if not (
+            len(dimensions) == 2
+            and dimensions[0].get("type") == "named_set_dimension"
+            and dimensions[1].get("type") == "named_range_dimension"
+        ):
+            return
+        name = declaration["name"]
+        value = data_dict.get(name)
+        if value is None:
+            return
+        range_dimension = dimensions[1]
+        try:
+            start = self._eval_data_bound(range_dimension["start"], data_dict)
+            end = self._eval_data_bound(range_dimension["end"], data_dict)
+        except Exception:
+            return
+        expected_length = end - start + 1
+        set_elements = self._resolve_data_set_elements(dimensions[0]["name"], data_dict)
+        nested = {}
+        if isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
+            for key, row in value.items():
+                normalized_key = tuple(key) if isinstance(key, (list, tuple)) else key
+                if isinstance(row, dict):
+                    nested[normalized_key] = {int(index): float(item) for index, item in row.items()}
+                elif len(row) == expected_length:
+                    nested[normalized_key] = {index: float(row[index - start]) for index in range(start, end + 1)}
+        elif (
+            isinstance(value, list)
+            and set_elements is not None
+            and len(set_elements) == len(value)
+            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in value)
+        ):
+            for key, row in zip(set_elements, value):
+                normalized_key = tuple(key) if isinstance(key, (list, tuple)) else key
+                nested[normalized_key] = {index: float(row[index - start]) for index in range(start, end + 1)}
+        if nested:
+            data_dict[name] = nested
+
+    def _normalize_set_set_parameter(self, declaration, data_dict):
+        dimensions = declaration.get("dimensions", [])
+        if not (
+            len(dimensions) == 2
+            and all(dimension.get("type") == "named_set_dimension" for dimension in dimensions)
+        ):
+            return
+        name = declaration["name"]
+        value = data_dict.get(name)
+        if value is None:
+            return
+        first_keys = self._resolve_data_set_elements(dimensions[0]["name"], data_dict)
+        second_keys = self._resolve_data_set_elements(dimensions[1]["name"], data_dict)
+        if not (first_keys and second_keys):
+            return
+        nested = {}
+        if (
+            isinstance(value, list)
+            and len(value) == len(first_keys)
+            and all(isinstance(row, (list, tuple)) and len(row) == len(second_keys) for row in value)
+        ):
+            for first_key, row in zip(first_keys, value):
+                normalized_first = tuple(first_key) if isinstance(first_key, (list, tuple)) else first_key
+                nested[normalized_first] = {
+                    tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
+                    for second_key, item in zip(second_keys, row)
+                }
+        elif isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
+            for first_key, row in value.items():
+                normalized_first = tuple(first_key) if isinstance(first_key, (list, tuple)) else first_key
+                if isinstance(row, dict):
+                    nested[normalized_first] = {
+                        tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
+                        for second_key, item in row.items()
+                    }
+                elif len(row) == len(second_keys):
+                    nested[normalized_first] = {
+                        tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
+                        for second_key, item in zip(second_keys, row)
+                    }
+        if nested:
+            data_dict[name] = nested
+
+    def _generate_data_declarations(self, data_dict):
 
         # Track inline tuple-indexed parameters we already emitted as dicts so we don't overwrite them later
         emitted_inline_tuple_params = set()
@@ -3024,57 +3103,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     continue
                 # Only apply shape check to lists/arrays, not dicts
                 if param_data is not None and isinstance(param_data, (list, tuple)):
-                    check_shape(param_data, decl["dimensions"], data_dict, decl["name"])
+                    self._validate_parameter_shape(param_data, decl["dimensions"], data_dict, decl["name"])
 
-        # --- NEW: accept keyed-row and row-major forms for 2D parameters, aligned with Gurobi ---
-        # Helper to evaluate a simple bound expression (number/name/binop) into int
-        def _eval_bound_local(expr):
-            if isinstance(expr, dict):
-                t = expr.get("type")
-                if t == "number":
-                    return int(expr["value"])
-                if t == "name":
-                    return int(data_dict[expr["value"]])
-                if t == "binop":
-                    op = expr["op"]
-                    left = _eval_bound_local(expr["left"])
-                    right = _eval_bound_local(expr["right"])
-                    if op == "+":
-                        return left + right
-                    if op == "-":
-                        return left - right
-                    if op == "*":
-                        return left * right
-                    if op == "/":
-                        return left // right
-            raise Exception("Unsupported range bound expr")
-
-        # Resolve set elements (typed set or generic set)
-        def _resolve_set_elems(set_name):
-            if set_name in data_dict:
-                set_obj = data_dict[set_name]
-                # typed_set may be a list; set_of_tuples may be dict with 'elements'
-                if isinstance(set_obj, dict) and "elements" in set_obj:
-                    elems = set_obj["elements"]
-                else:
-                    elems = set_obj
-                # normalize tuple keys for tuple sets
-                norm = [tuple(e) if isinstance(e, (list, tuple)) else e for e in elems]
-                return norm
-            # Fallback to AST declared values (typed_set or set_declaration)
-            for d in self.ast.get("declarations", []):
-                if d.get("name") == set_name:
-                    if d.get("type") == "typed_set":
-                        return d.get("value") or []
-                    if d.get("type") == "set_declaration":
-                        return d.get("value") or []
-                    if d.get("type") == "set_of_tuples" and d.get("value"):
-                        return [
-                            (tuple(t["elements"]) if isinstance(t, dict) and "elements" in t else tuple(t)) for t in d["value"]
-                        ]
-            return None
-
-        # 2D: set × range — accept dict-of-lists or list-of-rows
         for decl in self.ast.get("declarations", []):
             if decl.get("type") in (
                 "parameter_external",
@@ -3084,118 +3114,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 "parameter_inline",
                 "parameter_inline_indexed",
             ):
-                name = decl["name"]
-                dims = decl.get("dimensions", [])
-                if not (
-                    len(dims) == 2
-                    and dims[0].get("type") == "named_set_dimension"
-                    and dims[1].get("type") == "named_range_dimension"
-                ):
-                    continue
-                val = data_dict.get(name)
-                if val is None:
-                    continue
-                set_name = dims[0]["name"]
-                rng = dims[1]
-                # Compute range bounds
-                try:
-                    start = _eval_bound_local(rng["start"])
-                    end = _eval_bound_local(rng["end"])
-                except Exception:
-                    continue
-                expected_len = end - start + 1
-                set_elems = _resolve_set_elems(set_name)
-                # keyed-row: dict-of-lists keyed by set elements
-                if isinstance(val, dict) and all(isinstance(row, (list, tuple, dict)) for row in val.values()):
-                    nested = {}
-                    for k, row in val.items():
-                        key_obj = tuple(k) if isinstance(k, (list, tuple)) else k
-                        if isinstance(row, dict):
-                            # assume already keyed by p
-                            nested[key_obj] = {int(p): float(v) for p, v in row.items()}
-                        else:
-                            if len(row) != expected_len:
-                                continue
-                            nested[key_obj] = {p: float(row[p - start]) for p in range(start, end + 1)}
-                    if nested:
-                        data_dict[name] = nested
-                # row-major: list-of-rows in set order (if we can resolve set order)
-                elif (
-                    isinstance(val, list)
-                    and set_elems is not None
-                    and len(set_elems) == len(val)
-                    and all(isinstance(row, (list, tuple)) and len(row) == expected_len for row in val)
-                ):
-                    nested = {}
-                    for i, key in enumerate(set_elems):
-                        nested_key = tuple(key) if isinstance(key, (list, tuple)) else key
-                        nested[nested_key] = {p: float(val[i][p - start]) for p in range(start, end + 1)}
-                    data_dict[name] = nested
-
-        # 2D: set × set — accept list-of-rows (row-major) or dict-of-lists keyed by first set
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            ):
-                name = decl["name"]
-                dims = decl.get("dimensions", [])
-                if not (
-                    len(dims) == 2
-                    and dims[0].get("type") == "named_set_dimension"
-                    and dims[1].get("type") == "named_set_dimension"
-                ):
-                    continue
-                val = data_dict.get(name)
-                if val is None:
-                    continue
-                set1 = dims[0]["name"]
-                set2 = dims[1]["name"]
-                keys1 = _resolve_set_elems(set1)
-                keys2 = _resolve_set_elems(set2)
-                if not (keys1 and keys2):
-                    continue
-                # row-major: list-of-rows
-                if (
-                    isinstance(val, list)
-                    and len(val) == len(keys1)
-                    and all(isinstance(row, (list, tuple)) and len(row) == len(keys2) for row in val)
-                ):
-                    nested = {}
-                    for i, k1 in enumerate(keys1):
-                        k1n = tuple(k1) if isinstance(k1, (list, tuple)) else k1
-                        nested[k1n] = {}
-                        for j, k2 in enumerate(keys2):
-                            k2n = tuple(k2) if isinstance(k2, (list, tuple)) else k2
-                            nested[k1n][k2n] = float(val[i][j])
-                    data_dict[name] = nested
-                # keyed-row: dict-of-lists keyed by first set
-                elif isinstance(val, dict) and all(isinstance(row, (list, tuple, dict)) for row in val.values()):
-                    nested = {}
-                    for k1, row in val.items():
-                        k1n = tuple(k1) if isinstance(k1, (list, tuple)) else k1
-                        if isinstance(row, dict):
-                            # assume already keyed by second set elements
-                            # coerce keys to tuple when needed
-                            inner = {}
-                            for k2, v in row.items():
-                                k2n = tuple(k2) if isinstance(k2, (list, tuple)) else k2
-                                inner[k2n] = float(v)
-                            nested[k1n] = inner
-                        else:
-                            if len(row) != len(keys2):
-                                continue
-                            inner = {}
-                            for j, k2 in enumerate(keys2):
-                                k2n = tuple(k2) if isinstance(k2, (list, tuple)) else k2
-                                inner[k2n] = float(row[j])
-                            nested[k1n] = inner
-                    if nested:
-                        data_dict[name] = nested
+                self._normalize_set_range_parameter(decl, data_dict)
+                self._normalize_set_set_parameter(decl, data_dict)
 
         # --- Convert 2D arrays indexed by tuple-set × range into nested dicts ---
         for decl in self.ast.get("declarations", []):
