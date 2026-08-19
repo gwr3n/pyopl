@@ -20,3 +20,5 @@ venv*
 docs/dev_notes.md
 pricing_table.md
 model_prices_and_context_window_backup.json
+.github/copilot-instructions.md
+.github/skills/*
