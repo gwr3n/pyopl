@@ -5619,6 +5619,77 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             "right": {"type": "boolean_literal", "value": False, "sem_type": "boolean"},
         }, False
 
+    def _boolean_equality_expression_var(self, node, env, bool_expr_var):
+        unwrapped = self._unwrap_parenthesized_node(node)
+        if not isinstance(unwrapped, dict) or unwrapped.get("type") in ("boolean_literal", "sum"):
+            return None
+        if (
+            unwrapped.get("type") == "constraint"
+            and unwrapped.get("op") in (">=", ">")
+            and isinstance(unwrapped.get("left"), dict)
+            and unwrapped["left"].get("type") == "binop"
+            and self._is_boolean_sum_term(unwrapped["left"])
+        ):
+            return None
+        if (
+            unwrapped.get("type") == "binop"
+            and unwrapped.get("op") in (">=", ">")
+            and isinstance(unwrapped.get("left"), dict)
+            and unwrapped["left"].get("type") == "sum"
+        ):
+            return None
+        return bool_expr_var(node, env)
+
+    def _is_boolean_sum_term(self, node):
+        if not isinstance(node, dict):
+            return False
+        if node.get("type") == "binop" and node.get("op") == "+":
+            return self._is_boolean_sum_term(node.get("left")) and self._is_boolean_sum_term(node.get("right"))
+        if node.get("type") == "number":
+            return True
+        if node.get("type") not in ("name", "indexed_name"):
+            return False
+        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+        declaration = self._find_decl(base_name)
+        return bool(declaration and declaration.get("var_type") == "boolean")
+
+    def _try_tie_boolean_variable_expression(self, left, right, op_sym_top, env, bool_expr_var, state):
+        if op_sym_top != "==" or not isinstance(left, dict) or not isinstance(right, dict):
+            return False
+        for variable_node, expression_node in ((left, right), (right, left)):
+            if not self._is_declared_boolean_var_node(variable_node):
+                continue
+            unwrapped = self._unwrap_parenthesized_node(expression_node)
+            if not (
+                isinstance(unwrapped, dict)
+                and (
+                    unwrapped.get("sem_type") == "boolean"
+                    or unwrapped.get("type") in ("and", "or", "not", "implies", "boolean_literal")
+                    or (
+                        unwrapped.get("type") == "constraint"
+                        and unwrapped.get("op") in ("==", "!=", "<=", ">=", "<", ">")
+                    )
+                )
+            ):
+                continue
+            expression_var = self._boolean_equality_expression_var(expression_node, env, bool_expr_var)
+            if expression_var is None:
+                continue
+            variable_name = (
+                self._multi_indexed_var_name(variable_node, env)
+                if variable_node.get("type") == "indexed_name"
+                else variable_node.get("value")
+            )
+            if expression_var != variable_name:
+                if not isinstance(expression_var, str):
+                    raise SemanticError(f"expr_var is not a string: {repr(expression_var)}")
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[variable_name]] = 1.0
+                row[self.var_indices[expression_var]] = -1.0
+                self._append_sparse_row(state, row, 0.0, sense="eq")
+            return True
+        return False
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -5903,120 +5974,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return
 
                 # --- Boolean variable equality with composite boolean expression (reuse auxiliaries) ---
-                if op_sym_top == "==" and isinstance(left, dict) and isinstance(right, dict):
-
-                    def _is_decl_bool_var(node):
-                        if not (isinstance(node, dict) and node.get("type") in ("name", "indexed_name")):
-                            return False
-                        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
-                        declaration = self._find_decl(base_name)
-                        return bool(
-                            declaration
-                            and declaration.get("type") in ("dvar", "dvar_indexed")
-                            and declaration.get("var_type") == "boolean"
-                        )
-
-                    def _try_expr(node):
-                        unwrapped = node
-                        while isinstance(unwrapped, dict) and unwrapped.get("type") == "parenthesized_expression":
-                            unwrapped = unwrapped.get("expression")
-                        if isinstance(unwrapped, dict) and unwrapped.get("type") == "boolean_literal":
-                            return None
-                        if isinstance(unwrapped, dict) and unwrapped.get("type") == "sum":
-                            return None
-                        if (
-                            isinstance(unwrapped, dict)
-                            and unwrapped.get("type") == "constraint"
-                            and unwrapped.get("op") in (">=", ">")
-                            and isinstance(unwrapped.get("left"), dict)
-                            and unwrapped["left"].get("type") == "binop"
-                        ):
-
-                            def is_boolean_sum_term(term):
-                                if not isinstance(term, dict):
-                                    return False
-                                if term.get("type") == "binop" and term.get("op") == "+":
-                                    return is_boolean_sum_term(term.get("left")) and is_boolean_sum_term(term.get("right"))
-                                if term.get("type") == "number":
-                                    return True
-                                if term.get("type") not in ("name", "indexed_name"):
-                                    return False
-                                base_name = term.get("value") if term.get("type") == "name" else term.get("name")
-                                declaration = self._find_decl(base_name)
-                                return bool(declaration and declaration.get("var_type") == "boolean")
-
-                            if is_boolean_sum_term(unwrapped["left"]):
-                                return None
-                        if (
-                            isinstance(unwrapped, dict)
-                            and unwrapped.get("type") == "binop"
-                            and unwrapped.get("op") in (">=", ">")
-                            and isinstance(unwrapped.get("left"), dict)
-                            and unwrapped["left"].get("type") == "sum"
-                        ):
-                            return None
-                        return _bool_expr_var(node, env)
-
-                    def _is_boolean_expression(node):
-                        unwrapped = node
-                        while isinstance(unwrapped, dict) and unwrapped.get("type") == "parenthesized_expression":
-                            unwrapped = unwrapped.get("expression")
-                        return bool(
-                            isinstance(unwrapped, dict)
-                            and (
-                                unwrapped.get("sem_type") == "boolean"
-                                or unwrapped.get("type") in ("and", "or", "not", "implies", "boolean_literal")
-                                or (
-                                    unwrapped.get("type") == "constraint"
-                                    and unwrapped.get("op") in ("==", "!=", "<=", ">=", "<", ">")
-                                )
-                            )
-                        )
-
-                    if _is_decl_bool_var(left) and _is_boolean_expression(right):
-                        expr_var = _try_expr(right)
-                        if expr_var is not None:
-                            v_left = (
-                                self._multi_indexed_var_name(left, env)
-                                if left.get("type") == "indexed_name"
-                                else left.get("value")
-                            )
-                            if expr_var != v_left:
-                                if not isinstance(expr_var, str):
-                                    raise SemanticError(f"expr_var is not a string: {repr(expr_var)}")
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[v_left]] = 1.0
-                                row[self.var_indices[expr_var]] = -1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
-                            return
-                    if _is_decl_bool_var(right) and _is_boolean_expression(left):
-                        expr_var = _try_expr(left)
-                        if expr_var is not None:
-                            v_right = (
-                                self._multi_indexed_var_name(right, env)
-                                if right.get("type") == "indexed_name"
-                                else right.get("value")
-                            )
-                            if expr_var != v_right:
-                                if not isinstance(expr_var, str):
-                                    raise SemanticError(f"expr_var is not a string: {repr(expr_var)}")
-                                row = [0.0] * len(self.var_names)
-                                row[self.var_indices[v_right]] = 1.0
-                                row[self.var_indices[expr_var]] = -1.0
-                                for i, coef in enumerate(row):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_eq_rows.append(eq_row_idx)
-                                        A_eq_cols.append(i)
-                                        A_eq_data.append(coef)
-                                b_eq.append(0.0)
-                                eq_row_idx += 1
-                            return
+                state.eq_row_idx = eq_row_idx
+                state.ub_row_idx = ub_row_idx
+                if self._try_tie_boolean_variable_expression(
+                    left,
+                    right,
+                    op_sym_top,
+                    env,
+                    _bool_expr_var,
+                    state,
+                ):
+                    eq_row_idx = state.eq_row_idx
+                    ub_row_idx = state.ub_row_idx
+                    return
 
                 # --- Generic boolean comparison handling (>=, <=, !=, plus fallback ==) ---
                 # Supports: (bool_expr) OP literal where OP in {>=, <=, !=, ==} and literal in {0,1, True, False}
