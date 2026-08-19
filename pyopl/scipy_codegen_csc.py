@@ -4773,14 +4773,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             and left_unwrapped.get("type") == "sum"
             and isinstance(right_unwrapped, dict)
             and right_unwrapped.get("type") == "number"
-            and op_sym_top in (">=", "==")
+            and op_sym_top in (">=", "==", ">", "<=", "<")
         ):
             inner_cmp = self._unwrap_parenthesized_node(left_unwrapped.get("expression"))
             if self._is_simple_boolean_comparison(inner_cmp):
+                threshold = right_unwrapped.get("value")
+                if op_sym_top == ">":
+                    threshold += 1
+                elif op_sym_top == "<":
+                    threshold -= 1
                 return (
                     True,
                     inner_cmp,
-                    right_unwrapped.get("value"),
+                    threshold,
                     left_unwrapped.get("iterators", []),
                     left_unwrapped.get("index_constraint"),
                 )
@@ -5486,7 +5491,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         )
         if not is_sum:
             return False
-        if op_sym_top == ">=" and threshold <= 0:
+        normalized_op = ">=" if op_sym_top == ">" else "<=" if op_sym_top == "<" else op_sym_top
+        if normalized_op == ">=" and threshold <= 0:
             return True
 
         truth_indices = []
@@ -5502,14 +5508,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             truth_indices.append(self.var_indices[truth_name])
 
         row = [0.0] * len(self.var_names)
-        if op_sym_top == ">=":
+        if normalized_op == ">=":
             for truth_index in truth_indices:
                 row[truth_index] -= 1.0
             self._append_sparse_row(state, row, -threshold, sense="ub")
-        else:
+        elif normalized_op == "==":
             for truth_index in truth_indices:
                 row[truth_index] += 1.0
             self._append_sparse_row(state, row, threshold, sense="eq")
+        else:
+            for truth_index in truth_indices:
+                row[truth_index] += 1.0
+            self._append_sparse_row(state, row, threshold, sense="ub")
         return True
 
     def _reified_comparison_sum_rows(self, left, right, op_sym_top, env, comparison_truth_var):
@@ -6030,6 +6040,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     lower_row, upper_row, upper_rhs = reified_rows
                     append_ub_row(lower_row, 0.0)
                     append_ub_row(upper_row, upper_rhs)
+                    return
                 # Unwrap parentheses on left (and right if needed) early so pre-normalization sees inner binop/composite
                 while (
                     isinstance(left, dict)
@@ -6183,163 +6194,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 def is_and_or(node):
                     return isinstance(node, dict) and node.get("type") in ("and", "or")
 
-                # --- Early pattern: sum of freshly formed comparisons cardinality (sum(...) >= k / == k) ---
-                # And reified form: b == (sum(...) >= k)
-                def _unwrap(node):
-                    while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
-                        node = node.get("expression")
-                    return node
-
-                left = _unwrap(left)
-                right = _unwrap(right)
-
-                # Helper: detect sum-of-comparisons form
-                def _is_comparison(n):
-                    return isinstance(n, dict) and n.get("type") == "binop" and n.get("op") in (">=", "<=", "==", ">", "<")
-
-                def _sum_of_comparisons(node):
-                    if not (isinstance(node, dict) and node.get("type") == "sum"):
-                        return False
-                    inner = node.get("expression")
-                    # Allow parenthesized comparison inside sum
-                    inner = _unwrap(inner)
-                    return _is_comparison(inner)
-
-                # Case 1: Direct cardinality constraint: sum(...) op k
-                if (
-                    constr.get("op") in (">=", "==", ">", "<=", "<")
-                    and _sum_of_comparisons(left)
-                    and isinstance(right, dict)
-                    and right.get("type") == "number"
-                ):
-                    sum_node = left
-                    k_val = right.get("value")
-                    if constr.get("op") == ">":
-                        k_val = k_val + 1  # strict > to >= k+1
-                    if constr.get("op") == "<":
-                        k_val = k_val - 1  # sum < k  => sum <= k-1
-                    # Expand sum, create auxiliary binaries for each comparison instance
-                    iterators = sum_node.get("iterators", [])
-                    loop_vars, loop_ranges = self._unroll_iterators(iterators)
-                    comp_proto = _unwrap(sum_node.get("expression"))
-                    z_vars = []
-
-                    for idx_tuple in itertools.product(*loop_ranges) if loop_ranges else [()]:
-                        env2 = dict(env or {})
-                        for v, val in zip(loop_vars, idx_tuple):
-                            env2[v] = val
-                        z_vars.append(_bool_expr_var(comp_proto, env2))
-                    # Now apply cardinality constraint on z_vars
-                    if constr.get("op") in (">=", ">"):
-                        # -sum z_i <= -k
-                        row = [0.0] * len(self.var_names)
-                        for z in z_vars:
-                            row[self.var_indices[z]] -= 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(-k_val)
-                        ub_row_idx += 1
-                    elif constr.get("op") == "==":
-                        row = [0.0] * len(self.var_names)
-                        for z in z_vars:
-                            row[self.var_indices[z]] += 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_eq_rows.append(eq_row_idx)
-                                A_eq_cols.append(i)
-                                A_eq_data.append(coef)
-                        b_eq.append(k_val)
-                        eq_row_idx += 1
-                    elif constr.get("op") in ("<=", "<"):
-                        # sum z_i <= k
-                        row = [0.0] * len(self.var_names)
-                        for z in z_vars:
-                            row[self.var_indices[z]] += 1.0
-                        for i, coef in enumerate(row):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(k_val)
-                        ub_row_idx += 1
-                    return
-                # Case 2: Reified form b == (sum(...) >= k)
-                if constr.get("op") == "==" and (
-                    (isinstance(left, dict) and left.get("type") in ("name", "indexed_name"))
-                    or (isinstance(right, dict) and right.get("type") in ("name", "indexed_name"))
-                ):
-                    # Normalize so that boolean variable is on left
-                    if isinstance(right, dict) and right.get("type") in (
-                        "name",
-                        "indexed_name",
-                    ):
-                        left, right = right, left
-                    bool_var = left
-                    cmp_expr = _unwrap(right)
-                    if (
-                        isinstance(cmp_expr, dict)
-                        and cmp_expr.get("type") == "binop"
-                        and cmp_expr.get("op") in (">=", ">")
-                        and _sum_of_comparisons(cmp_expr.get("left"))
-                        and isinstance(cmp_expr.get("right"), dict)
-                        and cmp_expr.get("right").get("type") == "number"
-                    ):
-                        sum_node = cmp_expr.get("left")
-                        k_val = cmp_expr.get("right").get("value")
-                        if cmp_expr.get("op") == ">":
-                            k_val = k_val + 1
-                        iterators = sum_node.get("iterators", [])
-                        comp_proto = _unwrap(sum_node.get("expression"))
-                        z_vars = []
-                        for env2, _idx_tuple in self._iter_filtered_environments(
-                            iterators,
-                            env,
-                            sum_node.get("index_constraint"),
-                        ):
-                            z_vars.append(_bool_expr_var(comp_proto, env2))
-                        # Cardinality reification b == (sum z_i >= k)
-                        # Retrieve/ensure boolean variable index
-                        b_vname = (
-                            self._multi_indexed_var_name(bool_var, env)
-                            if bool_var.get("type") == "indexed_name"
-                            else bool_var["value"]
-                        )
-                        if b_vname not in self.var_indices:
-                            # Declare a new boolean variable (edge case)
-                            self.var_names.append(b_vname)
-                            self.var_indices[b_vname] = len(self.var_names) - 1
-                            self.bounds.append([0, 1])
-                            self.integrality.append(1)
-                            self.c.append(0.0)
-                        n = len(z_vars)
-                        # 1) b - sum z_i + k - 1 <= 0
-                        rowA = [0.0] * len(self.var_names)
-                        rowA[self.var_indices[b_vname]] += 1.0
-                        for z in z_vars:
-                            rowA[self.var_indices[z]] -= 1.0
-                        for i, coef in enumerate(rowA):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(-k_val + 1)
-                        ub_row_idx += 1
-                        # 2) sum z_i + (n - k)*b <= n
-                        rowB = [0.0] * len(self.var_names)
-                        for z in z_vars:
-                            rowB[self.var_indices[z]] += 1.0
-                        rowB[self.var_indices[b_vname]] += n - k_val
-                        for i, coef in enumerate(rowB):
-                            if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                A_ub_rows.append(ub_row_idx)
-                                A_ub_cols.append(i)
-                                A_ub_data.append(coef)
-                        b_ub.append(n)
-                        ub_row_idx += 1
-                        return
+                left = self._unwrap_parenthesized_node(left)
+                right = self._unwrap_parenthesized_node(right)
                 # Swap if literal on left
                 if is_bool_lit(left) and is_and_or(right):
                     left, right = right, left
