@@ -126,6 +126,32 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
                         expected(q_value, expression_value),
                     )
 
+    def test_csc_forall_dispatches_single_and_multiple_constraint_bodies(self):
+        iterator = {
+            "iterator": "i",
+            "range": {"type": "range_specifier", "start": self._number(1), "end": self._number(2)},
+        }
+        lower_bound = self._constraint(self._name("x"), ">=", self._number(0))
+        upper_bound = self._constraint(self._name("x"), "<=", self._number(2))
+        ast = self._ast(
+            [self._decl("x", "float")],
+            [
+                {"type": "forall_constraint", "iterators": [iterator], "constraint": lower_bound},
+                {"type": "forall_constraint", "iterators": [iterator], "constraints": [lower_bound, upper_bound]},
+            ],
+        )
+
+        problem = self._build(ast)
+
+        self.assertEqual(len(problem.A_ub), 6)
+
+        invalid_ast = self._ast(
+            [self._decl("x", "float")],
+            [{"type": "forall_constraint", "iterators": None, "constraint": lower_bound}],
+        )
+        with self.assertRaisesRegex(SemanticError, "forall_constraint|iterators"):
+            self._build(invalid_ast)
+
     def test_missing_range_bound_parameter_is_rejected(self):
         ast = self._ast(
             [

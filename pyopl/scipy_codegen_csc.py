@@ -6045,6 +6045,53 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(state, selector_row, -1.0, sense="ub")
         return True
 
+    def _handle_forall_constraint(self, constraint, env, handle_constraint):
+        iterators = constraint.get("iterators")
+        if iterators is None:
+            raise self._unsupported_type_error("forall_constraint", "missing iterators")
+        if "constraint" in constraint:
+            inner_constraints = [constraint["constraint"]]
+        elif "constraints" in constraint:
+            inner_constraints = constraint["constraints"]
+        else:
+            raise self._unsupported_type_error("forall_constraint", "missing constraint(s)")
+        for inner_env, _index_tuple in self._iter_filtered_environments(
+            iterators,
+            env,
+            constraint.get("index_constraint"),
+        ):
+            for inner_constraint in inner_constraints:
+                handle_constraint(inner_constraint, env=inner_env)
+
+    def _normalize_comparison_literal_constraint(self, constraint):
+        left = self._unwrap_parenthesized_node(constraint.get("left"))
+        right = self._unwrap_parenthesized_node(constraint.get("right"))
+        constraint["left"] = left
+        constraint["right"] = right
+        operator = constraint.get("op")
+        is_comparison = (
+            isinstance(left, dict)
+            and left.get("type") == "binop"
+            and left.get("sem_type") == "boolean"
+            and left.get("op") in ("<=", ">=", "==", "!=")
+        )
+        if not (
+            operator == "=="
+            and is_comparison
+            and isinstance(right, dict)
+            and right.get("type") == "boolean_literal"
+        ):
+            return left, right, operator
+        if right.get("value") is True:
+            constraint["op"] = left["op"]
+            constraint["left"] = left["left"]
+            constraint["right"] = left["right"]
+        else:
+            wrapped = {"type": "constraint", "op": left["op"], "left": left["left"], "right": left["right"]}
+            constraint["left"] = {"type": "not", "value": wrapped, "sem_type": "boolean"}
+            constraint["right"] = {"type": "boolean_literal", "value": True, "sem_type": "boolean"}
+        return constraint["left"], constraint["right"], constraint["op"]
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6245,69 +6292,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     append_ub_row(lower_row, 0.0)
                     append_ub_row(upper_row, upper_rhs)
                     return
-                # Unwrap parentheses on left (and right if needed) early so pre-normalization sees inner binop/composite
-                while (
-                    isinstance(left, dict)
-                    and left.get("type") == "parenthesized_expression"
-                    and isinstance(left.get("expression"), dict)
-                ):
-                    left = left.get("expression")
-                    constr["left"] = left
-                # (rare) also unwrap right if it's a parenthesized boolean literal or binop used in symmetric patterns
-                while (
-                    isinstance(right, dict)
-                    and right.get("type") == "parenthesized_expression"
-                    and isinstance(right.get("expression"), dict)
-                ):
-                    right = right.get("expression")
-                    constr["right"] = right
-                # Pre-normalize (comparison_binop)==true -> comparison constraint
-                if (
-                    op_sym_top == "=="
-                    and isinstance(right, dict)
-                    and right.get("type") == "boolean_literal"
-                    and right.get("value") is True
-                    and isinstance(left, dict)
-                    and left.get("type") == "binop"
-                    and left.get("sem_type") == "boolean"
-                    and left.get("op") in ("<=", ">=", "==", "!=")
-                ):
-                    constr["op"] = left["op"]
-                    constr["left"] = left["left"]
-                    constr["right"] = left["right"]
-                    left = constr["left"]
-                    right = constr["right"]
-                    op_sym_top = constr["op"]
-                # (comparison_binop)==false -> NOT(comparison)==true form
-                if (
-                    op_sym_top == "=="
-                    and isinstance(right, dict)
-                    and right.get("type") == "boolean_literal"
-                    and right.get("value") is False
-                    and isinstance(left, dict)
-                    and left.get("type") == "binop"
-                    and left.get("sem_type") == "boolean"
-                    and left.get("op") in ("<=", ">=", "==", "!=")
-                ):
-                    wrapped = {
-                        "type": "constraint",
-                        "op": left["op"],
-                        "left": left["left"],
-                        "right": left["right"],
-                    }
-                    constr["left"] = {
-                        "type": "not",
-                        "value": wrapped,
-                        "sem_type": "boolean",
-                    }
-                    constr["right"] = {
-                        "type": "boolean_literal",
-                        "value": True,
-                        "sem_type": "boolean",
-                    }
-                    left = constr["left"]
-                    right = constr["right"]
-                    op_sym_top = constr["op"]
+                left, right, op_sym_top = self._normalize_comparison_literal_constraint(constr)
 
                 # Special pattern: boolean var == (x != y)  (capture inequality truth value)
 
@@ -6428,19 +6413,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return
                 self._emit_plain_linear_constraint(constr, env, append_eq_row, append_ub_row)
             elif constr["type"] == "forall_constraint":
-                iterators = constr.get("iterators")
-                index_constraint = constr.get("index_constraint")
-                if iterators is None:
-                    raise self._unsupported_type_error("forall_constraint", "missing iterators")
-                if "constraint" in constr:
-                    inner_constraints = [constr["constraint"]]
-                elif "constraints" in constr:
-                    inner_constraints = constr["constraints"]
-                else:
-                    raise self._unsupported_type_error("forall_constraint", "missing constraint(s)")
-                for env2, _idx_tuple in self._iter_filtered_environments(iterators, env, index_constraint):
-                    for inner in inner_constraints:
-                        handle_constraint(inner, env=env2)
+                self._handle_forall_constraint(constr, env, handle_constraint)
             elif constr["type"] == "implication_constraint":
                 # Should have been handled by early branch; unreachable
                 return
