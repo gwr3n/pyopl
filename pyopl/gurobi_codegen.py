@@ -2006,6 +2006,168 @@ class GurobiCodeGenerator:
         self._decl_parameter_external_explicit(decl)
 
     # === Constraint Node Handlers ===
+    def _is_boolean_decision_variable(self, node):
+        if not isinstance(node, dict):
+            return False
+        node_type = node.get("type")
+        if node_type == "name":
+            declaration = self._find_declaration_by_name(node.get("value"))
+        elif node_type == "indexed_name":
+            declaration = self._find_declaration_by_name(node.get("name"))
+        else:
+            return False
+        return declaration is not None and declaration.get("var_type") == "boolean"
+
+    def _not_equal_big_m(self, left_node, right_node):
+        left_bounds = self._linear_bounds_safe(left_node)
+        right_bounds = self._linear_bounds_safe(right_node)
+        if left_bounds is None or right_bounds is None or None in (*left_bounds, *right_bounds):
+            return 1e6
+        left_lower, left_upper = left_bounds
+        right_lower, right_upper = right_bounds
+        difference_lower = left_lower - right_upper
+        difference_upper = left_upper - right_lower
+        return max(1.0, 1.0 - difference_lower, 1.0 + difference_upper)
+
+    def _emit_not_equal_constraint(
+        self,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        left_expression = self._traverse_expression(left_node, current_iterators)
+        right_expression = self._traverse_expression(right_node, current_iterators)
+        if self._is_boolean_decision_variable(left_node) and self._is_boolean_decision_variable(right_node):
+            self._add_code_line(
+                f"model.addConstr({left_expression} + {right_expression} == 1, name='{constr_name_prefix}_xor')"
+            )
+            return
+
+        flag_name = f"neq_flag_{constr_name_prefix}"
+        if current_iterators:
+            self._add_code_line(f"{flag_name} = model.addVar(vtype=GRB.BINARY)")
+        else:
+            self._add_code_line(
+                f"{flag_name} = model.addVar(vtype=GRB.BINARY, name='{flag_name}')"
+            )
+        big_m = self._not_equal_big_m(left_node, right_node)
+        self._add_code_line(
+            f"model.addConstr({left_expression} - {right_expression} + {big_m} * {flag_name} >= 1, name={self._format_name_expr(constr_name_prefix, '_neq1')})"
+        )
+        self._add_code_line(
+            f"model.addConstr({right_expression} - {left_expression} + {big_m} * (1 - {flag_name}) >= 1, name={self._format_name_expr(constr_name_prefix, '_neq2')})"
+        )
+
+    def _unwrap_parenthesized(self, node):
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        return node
+
+    def _is_comparison_node(self, node):
+        node = self._unwrap_parenthesized(node)
+        return (
+            isinstance(node, dict)
+            and node.get("type") in ("binop", "constraint")
+            and node.get("op") in (">=", ">", "<=", "<", "==")
+        )
+
+    def _is_comparison_sum(self, node):
+        node = self._unwrap_parenthesized(node)
+        return (
+            isinstance(node, dict)
+            and node.get("type") == "sum"
+            and self._is_comparison_node(node.get("expression"))
+        )
+
+    def _comparison_sum_metadata(self, sum_node, current_iterators):
+        if not hasattr(self, "_comparison_sum_meta"):
+            self._comparison_sum_meta = {}
+        if id(sum_node) not in self._comparison_sum_meta:
+            try:
+                self._traverse_expression(sum_node, current_iterators)
+            except Exception:
+                pass
+        return self._comparison_sum_meta.get(id(sum_node))
+
+    def _emit_direct_cardinality_constraint(
+        self,
+        operator,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        if not (
+            operator in (">", ">=", "==", "<=", "<")
+            and isinstance(right_node, dict)
+            and right_node.get("type") == "number"
+            and self._is_comparison_sum(left_node)
+        ):
+            return False
+        sum_node = self._unwrap_parenthesized(left_node)
+        threshold = right_node.get("value")
+        effective_threshold = threshold + 1 if operator == ">" else threshold
+        metadata = self._comparison_sum_metadata(sum_node, current_iterators)
+        if not metadata:
+            return False
+        list_name, _ = self._comparison_sum_accessors(metadata, current_iterators)
+        emitted_operator = ">=" if operator in (">", ">=") else "<=" if operator in ("<", "<=") else "=="
+        self._add_code_line(
+            f"model.addConstr(gp.quicksum({list_name}) {emitted_operator} {effective_threshold}, name={self._format_name_expr(constr_name_prefix, '_card')})"
+        )
+        return True
+
+    def _reified_cardinality_parts(self, node):
+        node = self._unwrap_parenthesized(node)
+        if not (
+            isinstance(node, dict)
+            and node.get("type") in ("constraint", "binop")
+            and node.get("op") in (">=", ">")
+            and isinstance(node.get("right"), dict)
+            and node["right"].get("type") == "number"
+        ):
+            return None
+        sum_node = self._unwrap_parenthesized(node.get("left"))
+        if not isinstance(sum_node, dict) or sum_node.get("type") != "sum":
+            return None
+        threshold = node["right"]["value"] + (1 if node.get("op") == ">" else 0)
+        return sum_node, threshold, node.get("type")
+
+    def _emit_reified_cardinality_constraint(
+        self,
+        operator,
+        left_node,
+        right_node,
+        constr_name_prefix,
+        current_iterators,
+    ):
+        if operator != "==" or not isinstance(left_node, dict):
+            return False
+        parts = self._reified_cardinality_parts(right_node)
+        if parts is None or left_node.get("type") not in ("name", "indexed_name"):
+            return False
+        sum_node, threshold, node_type = parts
+        metadata = self._comparison_sum_metadata(sum_node, current_iterators)
+        if not metadata:
+            return False
+        list_name, length_expression = self._comparison_sum_accessors(
+            metadata, current_iterators
+        )
+        boolean_variable = self._traverse_expression(left_node, current_iterators)
+        label = "Reified cardinality (binop)" if node_type == "binop" else "Reified cardinality"
+        self._add_code_line(
+            f"# {label}: {boolean_variable} == (sum(comparisons) >= {threshold})"
+        )
+        length_expression = length_expression or f"len({list_name})"
+        self._add_code_line(
+            f"model.addConstr({threshold} * {boolean_variable} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})"
+        )
+        self._add_code_line(
+            f"model.addConstr(gp.quicksum({list_name}) - ({threshold}-1) - ({length_expression} - {threshold} + 1) * {boolean_variable} <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card2')})"
+        )
+        return True
+
     def _constraint_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         # Defer expression string generation until after pattern-specific rewrites to avoid
         # creating TempConstr objects (by evaluating comparisons) that we later try to combine arithmetically.
@@ -2109,190 +2271,28 @@ class GurobiCodeGenerator:
             )
             return
 
-        # --- Direct cardinality constraint: sum(comparisons) op k (supports >, >=, ==) ---
-        def _unwrap(n):
-            while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                n = n.get("expression")
-            return n
-
-        def _is_sum_of_comparisons(n):
-            n = _unwrap(n)
-            if not (isinstance(n, dict) and n.get("type") == "sum"):
-                return False
-            inner = _unwrap(n.get("expression"))
-            return (
-                isinstance(inner, dict)
-                and inner.get("type") in ("binop", "constraint")
-                and inner.get("op") in (">=", ">", "<=", "<", "==")
-            )
-
-        if (
-            op in (">", ">=", "==", "<=", "<")
-            and isinstance(right_node, dict)
-            and right_node.get("type") == "number"
-            and _is_sum_of_comparisons(left_node)
+        if self._emit_direct_cardinality_constraint(
+            op,
+            left_node,
+            right_node,
+            constr_name_prefix,
+            current_iterators,
         ):
-            sum_node = _unwrap(left_node)
-            k_val = right_node.get("value")
-            effective_k = k_val + 1 if op == ">" else k_val
-            # Force traversal so that _expr_sum reifies comparisons and stores metadata
-            if not hasattr(self, "_comparison_sum_meta"):
-                self._comparison_sum_meta = {}
-            if id(sum_node) not in self._comparison_sum_meta:
-                try:
-                    self._traverse_expression(sum_node, current_iterators)
-                except Exception:
-                    pass
-            meta = self._comparison_sum_meta.get(id(sum_node))
-            if meta:
-                list_name, _ = self._comparison_sum_accessors(meta, current_iterators)
-                if op in (">", ">="):
-                    self._add_code_line(
-                        f"model.addConstr(gp.quicksum({list_name}) >= {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})"
-                    )
-                elif op == "==":
-                    self._add_code_line(
-                        f"model.addConstr(gp.quicksum({list_name}) == {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})"
-                    )
-                elif op in ("<=", "<"):
-                    self._add_code_line(
-                        f"model.addConstr(gp.quicksum({list_name}) <= {effective_k}, name={self._format_name_expr(constr_name_prefix, '_card')})"
-                    )
-                return
-        # Stage 2: detect reified cardinality equality b == (sum(comparisons) >= k)
-        if op == "==" and isinstance(right_node, dict):
-            # Unwrap any parentheses on right side: b == ( ... )
-            r = right_node
-            while isinstance(r, dict) and r.get("type") == "parenthesized_expression":
-                r = r.get("expression")
-            # Pattern A: right is constraint (possibly wrapped) of form (sum_expr >= number)
-            if (
-                isinstance(r, dict)
-                and r.get("type") == "constraint"
-                and r.get("op") in (">=", ">")
-                and isinstance(r.get("left"), dict)
-                and isinstance(r.get("right"), dict)
-                and r["right"].get("type") == "number"
-            ):
-                sum_candidate = r["left"]
-                # The left side might itself be parenthesized wrapping the sum
-                while isinstance(sum_candidate, dict) and sum_candidate.get("type") == "parenthesized_expression":
-                    sum_candidate = sum_candidate.get("expression")
-                if isinstance(sum_candidate, dict) and sum_candidate.get("type") == "sum":
-                    sum_node = sum_candidate
-                    k_val = r["right"]["value"]
-                    if r.get("op") == ">":
-                        k_val = k_val + 1  # strict > => >= k+1 for integer sum
-                    # Ensure metadata map exists
-                    if not hasattr(self, "_comparison_sum_meta"):
-                        self._comparison_sum_meta = {}
-                    # Force traversal to build metadata if entry missing
-                    if id(sum_node) not in self._comparison_sum_meta:
-                        try:
-                            self._traverse_expression(sum_node, current_iterators)
-                        except Exception:
-                            pass
-                    meta = self._comparison_sum_meta.get(id(sum_node))
-                    if meta and isinstance(left_node, dict) and left_node.get("type") in ("name", "indexed_name"):
-                        list_name, len_var = self._comparison_sum_accessors(meta, current_iterators)
-                        bool_var = self._traverse_expression(left_node, current_iterators)
-                        self._add_code_line(f"# Reified cardinality: {bool_var} == (sum(comparisons) >= {k_val})")
-                        len_var = len_var or f"len({list_name})"
-                        self._add_code_line(
-                            f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})"
-                        )
-                        self._add_code_line(
-                            f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card2')})"
-                        )
-                        return
-            # Pattern B: right is a binop (>= or >) directly: b == ( sum(...) >= k )
-            if (
-                isinstance(r, dict)
-                and r.get("type") == "binop"
-                and r.get("op") in (">=", ">")
-                and isinstance(r.get("left"), dict)
-                and isinstance(r.get("right"), dict)
-                and r["right"].get("type") == "number"
-            ):
-                sum_candidate = r["left"]
-                while isinstance(sum_candidate, dict) and sum_candidate.get("type") == "parenthesized_expression":
-                    sum_candidate = sum_candidate.get("expression")
-                if isinstance(sum_candidate, dict) and sum_candidate.get("type") == "sum":
-                    k_val = r["right"]["value"]
-                    if r.get("op") == ">":
-                        k_val = k_val + 1
-                    if not hasattr(self, "_comparison_sum_meta"):
-                        self._comparison_sum_meta = {}
-                    if id(sum_candidate) not in self._comparison_sum_meta:
-                        try:
-                            self._traverse_expression(sum_candidate, current_iterators)
-                        except Exception:
-                            pass
-                    meta = self._comparison_sum_meta.get(id(sum_candidate))
-                    if meta and isinstance(left_node, dict) and left_node.get("type") in ("name", "indexed_name"):
-                        list_name, len_var = self._comparison_sum_accessors(meta, current_iterators)
-                        bool_var = self._traverse_expression(left_node, current_iterators)
-                        self._add_code_line(f"# Reified cardinality (binop): {bool_var} == (sum(comparisons) >= {k_val})")
-                        len_var = len_var or f"len({list_name})"
-                        self._add_code_line(
-                            f"model.addConstr({k_val} * {bool_var} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})"
-                        )
-                        self._add_code_line(
-                            f"model.addConstr(gp.quicksum({list_name}) - ({k_val}-1) - ({len_var} - {k_val} + 1) * {bool_var} <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card2')})"
-                        )
-                        return
-        # Specialized handling for '!=' now supported
+            return
+        if self._emit_reified_cardinality_constraint(
+            op,
+            left_node,
+            right_node,
+            constr_name_prefix,
+            current_iterators,
+        ):
+            return
         if op == "!=":
-            left_expr_str = self._traverse_expression(left_node, current_iterators)
-            right_expr_str = self._traverse_expression(right_node, current_iterators)
-
-            # Helper to detect boolean decision variable nodes
-            def _is_bool_var(node):
-                if not isinstance(node, dict):
-                    return False
-                t = node.get("type")
-                if t == "name":
-                    decl = self._find_declaration_by_name(node.get("value"))
-                elif t == "indexed_name":
-                    decl = self._find_declaration_by_name(node.get("name"))
-                else:
-                    return False
-                return decl is not None and decl.get("var_type") == "boolean"
-
-            left_node = constraint_node["left"]
-            right_node = constraint_node["right"]
-            # Boolean XOR rewrite: a != b  -> a + b == 1
-            if _is_bool_var(left_node) and _is_bool_var(right_node):
-                self._add_code_line(
-                    f"model.addConstr({left_expr_str} + {right_expr_str} == 1, name='{constr_name_prefix}_xor')"
-                )
-                return
-            # Numeric big-M disjunctive enforcement: x != y
-            # Introduce binary delta: either x - y >= 1 OR y - x >= 1
-            delta = f"neq_flag_{constr_name_prefix}"
-            if current_iterators:
-                # Inside a forall loop: omit explicit name to avoid duplicate Gurobi var names per iteration
-                self._add_code_line(f"{delta} = model.addVar(vtype=GRB.BINARY)")
-            else:
-                self._add_code_line(f"{delta} = model.addVar(vtype=GRB.BINARY, name='{delta}')")
-            # Reuse linear bounds logic from implication section (copied to class helpers) to estimate |x - y| width.
-            bigM_default = 1e6
-            lB = self._linear_bounds_safe(left_node)
-            rB = self._linear_bounds_safe(right_node)
-            if lB is not None and rB is not None and None not in (*lB, *rB):
-                lL, lU = lB
-                rL, rU = rB
-                diff_lower = lL - rU
-                diff_upper = lU - rL
-                bigM = max(1.0, 1.0 - diff_lower, 1.0 + diff_upper)
-            else:
-                bigM = bigM_default
-            # Encode as specified: a - b + M*δ >= 1 ; b - a + M*(1-δ) >= 1
-            self._add_code_line(
-                f"model.addConstr({left_expr_str} - {right_expr_str} + {bigM} * {delta} >= 1, name={self._format_name_expr(constr_name_prefix, '_neq1')})"
-            )
-            self._add_code_line(
-                f"model.addConstr({right_expr_str} - {left_expr_str} + {bigM} * (1 - {delta}) >= 1, name={self._format_name_expr(constr_name_prefix, '_neq2')})"
+            self._emit_not_equal_constraint(
+                left_node,
+                right_node,
+                constr_name_prefix,
+                current_iterators,
             )
             return
 
