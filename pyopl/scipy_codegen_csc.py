@@ -3179,198 +3179,130 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.data_dict[name] = declaration["value"]
         return False
 
-    def _generate_data_declarations(self, data_dict):
-
-        # New: validation for 1-D params over set/range where data is dict with non-scalar values.
-        param_decl_map = self._get_param_decl_map()
-        for name, decl in param_decl_map.items():
-            dims = decl.get("dimensions", []) or []
-            if len(dims) == 1 and dims[0].get("type") in (
+    def _prepare_parameter_data(self, data_dict):
+        parameter_declarations = self._get_param_decl_map()
+        for name, declaration in parameter_declarations.items():
+            dimensions = declaration.get("dimensions", []) or []
+            if len(dimensions) == 1 and dimensions[0].get("type") in (
                 "named_set_dimension",
                 "named_range_dimension",
             ):
-                val = data_dict.get(name)
-                if isinstance(val, dict):
+                value = data_dict.get(name)
+                if isinstance(value, dict):
                     bad_key = next(
-                        (k for k, v in val.items() if isinstance(v, (list, tuple, dict))),
+                        (key for key, item in value.items() if isinstance(item, (list, tuple, dict))),
                         None,
                     )
                     if bad_key is not None:
-                        from .semantic_error import SemanticError
-
                         raise SemanticError(
-                            f"Parameter '{name}' declared as 1-D over '{dims[0].get('name', '')}' expects scalar values per key, "
-                            f"but data provides an array for key {repr(bad_key)}. Use scalar values (e.g., 2.0), not [2.0]."
+                            f"Parameter '{name}' declared as 1-D over '{dimensions[0].get('name', '')}' expects "
+                            f"scalar values per key, but data provides an array for key {repr(bad_key)}. "
+                            "Use scalar values (e.g., 2.0), not [2.0]."
                         )
 
-        # Convert flat key-value lists to dicts in data_dict before shape checking
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            ) and decl.get("dimensions"):
-                param_data = data_dict.get(decl["name"])
-                converted = self._convert_flat_kv_to_dict(param_data)
-                if converted is not None:
-                    data_dict[decl["name"]] = converted
-                    continue
-                # Only apply shape check to lists/arrays, not dicts
-                if param_data is not None and isinstance(param_data, (list, tuple)):
-                    self._validate_parameter_shape(param_data, decl["dimensions"], data_dict, decl["name"])
+        parameter_types = (
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+            "parameter_inline",
+            "parameter_inline_indexed",
+        )
+        for declaration in self.ast.get("declarations", []):
+            if declaration.get("type") not in parameter_types or not declaration.get("dimensions"):
+                continue
+            name = declaration["name"]
+            parameter_data = data_dict.get(name)
+            converted = self._convert_flat_kv_to_dict(parameter_data)
+            if converted is not None:
+                data_dict[name] = converted
+            elif isinstance(parameter_data, (list, tuple)):
+                self._validate_parameter_shape(parameter_data, declaration["dimensions"], data_dict, name)
 
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            ):
-                self._normalize_set_range_parameter(decl, data_dict)
-                self._normalize_set_set_parameter(decl, data_dict)
+        for declaration in self.ast.get("declarations", []):
+            if declaration.get("type") not in parameter_types:
+                continue
+            self._normalize_set_range_parameter(declaration, data_dict)
+            self._normalize_set_set_parameter(declaration, data_dict)
+            self._normalize_tuple_set_range_parameter(declaration, data_dict)
+        return parameter_declarations
 
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") in (
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-                "parameter_inline",
-                "parameter_inline_indexed",
-            ):
-                self._normalize_tuple_set_range_parameter(decl, data_dict)
-        param_decl_map = self._get_param_decl_map()
-        if self._emit_ast_data_declarations(data_dict):
+    def _validate_runtime_parameter_length(self, name, value, declaration, data_dict):
+        if declaration is None or not isinstance(value, list) or not value:
             return
-        # Emit data from .dat file as before
-        if not data_dict:
-            self._add_code_line("")
+        dimensions = declaration.get("dimensions", [])
+        if len(dimensions) != 1:
             return
-        self._add_code_line("# Data from .dat file")
-        # Collect tuple array names so we don't overwrite structured dicts created earlier
-        tuple_array_names = {
-            d["name"] for d in self.ast.get("declarations", []) if d.get("type") in ("tuple_array", "tuple_array_external")
-        }
-
-        def convert_keys(obj):
-            if isinstance(obj, dict):
-                new_dict = {}
-                for k, v in obj.items():
-                    if not isinstance(k, str):
-                        if isinstance(k, tuple):
-                            key_str = ",".join(str(x) for x in k)
-                        else:
-                            key_str = str(k)
-                        new_dict[key_str] = convert_keys(v)
-                    else:
-                        new_dict[k] = convert_keys(v)
-                return new_dict
-            elif isinstance(obj, list):
-                return [convert_keys(x) for x in obj]
-            else:
-                return obj
-
-        for name, value in data_dict.items():
-            # Length check for 1D parameters indexed by a named range
-            param_decl = param_decl_map.get(name)
-            if (
-                param_decl is not None
-                and param_decl.get("type")
-                in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
+        dimension = dimensions[0]
+        if dimension.get("type") == "named_range_dimension":
+            range_name = dimension["name"]
+            range_declaration = self._find_decl(range_name, "range_declaration_inline")
+            if range_declaration:
+                start = self._eval_data_bound(range_declaration["start"], data_dict)
+                end = self._eval_data_bound(range_declaration["end"], data_dict)
+                expected_length = end - start + 1
+                if len(value) != expected_length:
+                    raise SemanticError(
+                        f"Parameter '{name}' has {len(value)} items but declared range "
+                        f"'{range_name}' expects {expected_length}."
+                    )
+        elif dimension.get("type") == "named_set_dimension":
+            set_name = dimension["name"]
+            set_elements = data_dict.get(set_name)
+            if set_elements is not None:
+                set_length = (
+                    len(set_elements["elements"])
+                    if isinstance(set_elements, dict) and "elements" in set_elements
+                    else len(set_elements)
                 )
-                and isinstance(value, list)
-                and len(value) > 0
-                and len(param_decl.get("dimensions", [])) == 1
-            ):
-                dim = param_decl["dimensions"][0]
-                if dim.get("type") == "named_range_dimension":
-                    range_name = dim["name"]
-                    range_decl = self._find_decl(range_name, decl_type="range_declaration_inline")
-                    if range_decl:
-                        # Evaluate start/end (assume int literals or parameter names in data_dict)
-                        def eval_expr(expr):
-                            if expr["type"] == "number":
-                                return int(expr["value"])
-                            elif expr["type"] == "name":
-                                return int(data_dict[expr["value"]])
-                            elif expr["type"] == "binop":
-                                op = expr["op"]
-                                left = eval_expr(expr["left"])
-                                right = eval_expr(expr["right"])
-                                if op == "+":
-                                    return left + right
-                                elif op == "-":
-                                    return left - right
-                                elif op == "*":
-                                    return left * right
-                                elif op == "/":
-                                    return left // right
-                                else:
-                                    raise Exception(f"Unsupported binop in range bound expr: {op}")
-                            else:
-                                raise Exception(f"Unsupported range bound expr: {expr}")
+                if set_length != len(value):
+                    raise SemanticError(
+                        f"Parameter '{name}' has {len(value)} items but declared set "
+                        f"'{set_name}' has {set_length} elements."
+                    )
 
-                        start_idx = eval_expr(range_decl["start"])
-                        end_idx = eval_expr(range_decl["end"])
-                        expected_len = end_idx - start_idx + 1
-                        if len(value) != expected_len:
-                            from .semantic_error import SemanticError
-
-                            raise SemanticError(
-                                f"Parameter '{name}' has {len(value)} items but declared range '{range_name}' expects {expected_len}."
-                            )
-                elif dim.get("type") == "named_set_dimension":
-                    set_name = dim["name"]
-                    set_elems = data_dict.get(set_name)
-                    if set_elems is not None:
-                        if isinstance(set_elems, dict) and "elements" in set_elems:
-                            set_len = len(set_elems["elements"])
-                        else:
-                            set_len = len(set_elems)
-                        if set_len != len(value):
-                            from .semantic_error import SemanticError
-
-                            raise SemanticError(
-                                f"Parameter '{name}' has {len(value)} items but declared set '{set_name}' has {set_len} elements."
-                            )
-            # Skip tuple arrays: we already emitted a structured dict (name -> record dict) above.
+    def _emit_runtime_data(self, data_dict, parameter_declarations):
+        self._add_code_line("# Data from .dat file")
+        tuple_array_names = {
+            declaration["name"]
+            for declaration in self.ast.get("declarations", [])
+            if declaration.get("type") in ("tuple_array", "tuple_array_external")
+        }
+        structured_names = {
+            declaration["name"]
+            for declaration in self.ast.get("declarations", [])
+            if declaration.get("type")
+            in ("tuple_array", "tuple_array_external", "set_of_tuples", "set_of_tuples_external")
+        }
+        for name, value in data_dict.items():
+            self._validate_runtime_parameter_length(name, value, parameter_declarations.get(name), data_dict)
             if name in tuple_array_names:
                 continue
             if isinstance(value, dict) and value.get("type") == "range_data":
-                pass
-            elif isinstance(value, (list, dict)):
-                # Emit Python literals (preserve True/False, tuple keys), not JSON
+                continue
+            if isinstance(value, (list, dict)):
                 self._add_code_line(f"{name} = {repr(value)}")
-                # If this is a set override and we haven't already created an index map, emit index map.
-                if name not in {
-                    d["name"]
-                    for d in self.ast.get("declarations", [])
-                    if d.get("type")
-                    in (
-                        "tuple_array",
-                        "tuple_array_external",
-                        "set_of_tuples",
-                        "set_of_tuples_external",
-                    )
-                }:
-                    if isinstance(value, list) and value and all(isinstance(e, (str, int)) for e in value):
-                        self._add_code_line(f"{name}_index = {{v: i for i, v in enumerate({name})}}")
+                if (
+                    name not in structured_names
+                    and isinstance(value, list)
+                    and value
+                    and all(isinstance(element, (str, int)) for element in value)
+                ):
+                    self._add_code_line(f"{name}_index = {{v: i for i, v in enumerate({name})}}")
             elif isinstance(value, str):
                 self._add_code_line(f"{name} = {repr(value)}")
             else:
                 self._add_code_line(f"{name} = {value}")
         self._add_code_line("")
+
+    def _generate_data_declarations(self, data_dict):
+        parameter_declarations = self._prepare_parameter_data(data_dict)
+        if self._emit_ast_data_declarations(data_dict):
+            return
+        if not data_dict:
+            self._add_code_line("")
+            return
+        self._emit_runtime_data(data_dict, parameter_declarations)
 
     def _handle_tuple_type_declaration(self, decl):
         """
