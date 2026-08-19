@@ -6092,6 +6092,93 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             constraint["right"] = {"type": "boolean_literal", "value": True, "sem_type": "boolean"}
         return constraint["left"], constraint["right"], constraint["op"]
 
+    def _try_handle_constraint_special_forms(
+        self,
+        constraint,
+        env,
+        bool_expr_var,
+        comparison_truth_var,
+        append_ub_row,
+        state,
+    ):
+        left = constraint["left"]
+        right = constraint["right"]
+        operator = constraint.get("op")
+        if self._try_handle_weighted_boolean_sum_constraint(left, right, operator, env, bool_expr_var, state):
+            return True, left, right, operator
+        if self._try_handle_sum_of_comparisons_constraint(
+            left,
+            right,
+            operator,
+            env,
+            comparison_truth_var,
+            state,
+        ):
+            return True, left, right, operator
+        reified_rows = self._reified_comparison_sum_rows(left, right, operator, env, comparison_truth_var)
+        if reified_rows is not None:
+            lower_row, upper_row, upper_rhs = reified_rows
+            append_ub_row(lower_row, 0.0)
+            append_ub_row(upper_row, upper_rhs)
+            return True, left, right, operator
+        left, right, operator = self._normalize_comparison_literal_constraint(constraint)
+        return False, left, right, operator
+
+    def _handle_normalized_constraint(
+        self,
+        constraint,
+        left,
+        right,
+        operator,
+        env,
+        bool_expr_var,
+        state,
+        handle_constraint,
+        append_eq_row,
+        append_ub_row,
+    ):
+        if operator == "!=":
+            self._handle_not_equal_constraint(left, right, env, state)
+            return
+        rewritten_not = self._rewrite_not_literal_constraint(left, right, operator)
+        if rewritten_not is not None:
+            new_constraint, marks_not_of_equality = rewritten_not
+            if marks_not_of_equality:
+                self._add_code_line("# encoded != (NOT of ==)")
+            handle_constraint(new_constraint, env=env)
+            return
+        if self._try_tie_boolean_variable_expression(left, right, operator, env, bool_expr_var, state):
+            return
+        if self._try_handle_reified_boolean_sum(left, right, operator, env, state):
+            return
+        literal_result = self._try_handle_bool_tree_literal_comparison(
+            left,
+            right,
+            operator,
+            env,
+            bool_expr_var,
+            state,
+        )
+        if literal_result is not None:
+            handled, left, right = literal_result
+            if handled:
+                return
+        if self._try_handle_boolean_variable_relation(left, right, operator, env, bool_expr_var, state):
+            return
+        left = self._unwrap_parenthesized_node(left)
+        right = self._unwrap_parenthesized_node(right)
+        if self._try_handle_and_or_literal_fast_path(left, right, operator, env, bool_expr_var, state):
+            return
+        if isinstance(left, dict) and left.get("type") in ("and", "or") and operator == "==":
+            if not (self._is_boolean_literal_node(right) and right.get("value") is True):
+                return
+            if left.get("type") == "and":
+                self._try_handle_asserted_and(left, right, operator, env, handle_constraint)
+            else:
+                self._try_handle_asserted_or(left, right, operator, env, state)
+            return
+        self._emit_plain_linear_constraint(constraint, env, append_eq_row, append_ub_row)
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -6218,13 +6305,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
             self._ensure_constraint_parameters_bound(constr)
 
-            # Helper functions must be defined before use
-            def _unwrap_paren(n):
-                return self._unwrap_parenthesized_node(n)
-
-            def _is_simple_comparison(n):
-                return self._is_simple_boolean_comparison(n)
-
             # --- Patch: Always create auxiliary for non-trivial boolean expressions ---
             # Only for constraints of the form (bool_expr) == True/1 or >=1 or <=1
 
@@ -6249,169 +6329,36 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 )
                 return
             if constr["type"] == "constraint":
-                left = constr["left"]
-                right = constr["right"]
-                op_sym_top = constr.get("op")
                 state.eq_row_idx = eq_row_idx
                 state.ub_row_idx = ub_row_idx
-                if self._try_handle_weighted_boolean_sum_constraint(
-                    left,
-                    right,
-                    op_sym_top,
+                handled, left, right, operator = self._try_handle_constraint_special_forms(
+                    constr,
                     env,
                     _bool_expr_var,
-                    state,
-                ):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                if self._try_handle_sum_of_comparisons_constraint(
-                    left,
-                    right,
-                    op_sym_top,
-                    env,
                     _comparison_truth_var,
-                    state,
-                ):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-                # Pattern B: b == (sum(i)(comparison) >= k)
-                reified_rows = self._reified_comparison_sum_rows(
-                    left,
-                    right,
-                    op_sym_top,
-                    env,
-                    _comparison_truth_var,
-                )
-                if reified_rows is not None:
-                    lower_row, upper_row, upper_rhs = reified_rows
-                    append_ub_row(lower_row, 0.0)
-                    append_ub_row(upper_row, upper_rhs)
-                    return
-                left, right, op_sym_top = self._normalize_comparison_literal_constraint(constr)
-
-                # Special pattern: boolean var == (x != y)  (capture inequality truth value)
-
-                # --- Direct handling for top-level '!=' before boolean tree/general linear pass ---
-                if op_sym_top == "!=":
-                    state.eq_row_idx = eq_row_idx
-                    state.ub_row_idx = ub_row_idx
-                    self._handle_not_equal_constraint(left, right, env, state)
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-
-                # --- NOT rewrite normalization ---
-                rewritten_not = self._rewrite_not_literal_constraint(left, right, op_sym_top)
-                if rewritten_not is not None:
-                    new_constraint, marks_not_of_equality = rewritten_not
-                    if marks_not_of_equality:
-                        self._add_code_line("# encoded != (NOT of ==)")
-                    handle_constraint(new_constraint, env=env)
-                    return
-
-                # --- Boolean variable equality with composite boolean expression (reuse auxiliaries) ---
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                if self._try_tie_boolean_variable_expression(
-                    left,
-                    right,
-                    op_sym_top,
-                    env,
-                    _bool_expr_var,
-                    state,
-                ):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-
-                # --- Generic boolean comparison handling (>=, <=, !=, plus fallback ==) ---
-                # Supports: (bool_expr) OP literal where OP in {>=, <=, !=, ==} and literal in {0,1, True, False}
-                # bool_expr may be composed of and/or/not trees over atomic constraints var==0/1.
-                # Normalize so left is boolean expression, right is literal if pattern matches
-                op_sym = constr.get("op")
-
-                # Reified pattern: b == (sum(bool vars) >= k)
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                if self._try_handle_reified_boolean_sum(left, right, op_sym, env, state):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-                literal_result = self._try_handle_bool_tree_literal_comparison(
-                    left,
-                    right,
-                    op_sym,
-                    env,
-                    _bool_expr_var,
+                    append_ub_row,
                     state,
                 )
-                if literal_result is not None:
-                    handled, left, right = literal_result
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    if handled:
-                        return
-
-                # --- Reified equality of a declared boolean variable and a general boolean expression ---
-                # Pattern: b == (bool_expr) where bool_expr may include comparisons (<=,>=,==,!=) and/or logical operators.
-                # We attempt both orientations (expression on left or right). Falls through silently if expression unsupported.
+                eq_row_idx = state.eq_row_idx
+                ub_row_idx = state.ub_row_idx
+                if handled:
+                    return
                 state.eq_row_idx = eq_row_idx
                 state.ub_row_idx = ub_row_idx
-                if self._try_handle_boolean_variable_relation(
+                self._handle_normalized_constraint(
+                    constr,
                     left,
                     right,
-                    constr.get("op"),
+                    operator,
                     env,
                     _bool_expr_var,
                     state,
-                ):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-
-                # --- Boolean AND/OR linearization fast path (supports boolean literal on either side) ---
-                # Pattern: (AND/OR tree of atomic comparisons var==0/1) == boolean_literal
-                # Also: boolean_literal == (AND/OR tree ...)
-                left = self._unwrap_parenthesized_node(left)
-                right = self._unwrap_parenthesized_node(right)
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                if self._try_handle_and_or_literal_fast_path(
-                    left,
-                    right,
-                    constr.get("op"),
-                    env,
-                    _bool_expr_var,
-                    state,
-                ):
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-
-                # Capture left_type for composite evaluation
-                left_type = left.get("type") if isinstance(left, dict) else None
-                # Handle AND/OR composite equality early
-                if left_type in ("and", "or") and constr.get("op") == "==":
-                    target_val = right.get("type") == "boolean_literal" and right.get("value") is True
-                    if not target_val:
-                        # Already handled earlier by fast path (AND/OR == false). Nothing further required.
-                        return
-                    leaf_type = left_type
-                    if leaf_type == "and":
-                        self._try_handle_asserted_and(left, right, constr.get("op"), env, handle_constraint)
-                        return
-                    state.eq_row_idx = eq_row_idx
-                    state.ub_row_idx = ub_row_idx
-                    self._try_handle_asserted_or(left, right, constr.get("op"), env, state)
-                    eq_row_idx = state.eq_row_idx
-                    ub_row_idx = state.ub_row_idx
-                    return
-                self._emit_plain_linear_constraint(constr, env, append_eq_row, append_ub_row)
+                    handle_constraint,
+                    append_eq_row,
+                    append_ub_row,
+                )
+                eq_row_idx = state.eq_row_idx
+                ub_row_idx = state.ub_row_idx
             elif constr["type"] == "forall_constraint":
                 self._handle_forall_constraint(constr, env, handle_constraint)
             elif constr["type"] == "implication_constraint":
