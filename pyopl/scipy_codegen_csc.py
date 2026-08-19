@@ -5512,6 +5512,59 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(state, row, threshold, sense="eq")
         return True
 
+    def _reified_comparison_sum_rows(self, left, right, op_sym_top, env, comparison_truth_var):
+        if op_sym_top != "==" or not isinstance(left, dict) or left.get("type") != "name":
+            return None
+        comparison = self._unwrap_parenthesized_node(right)
+        if not (
+            isinstance(comparison, dict)
+            and comparison.get("type") == "binop"
+            and comparison.get("op") in (">=", ">")
+        ):
+            return None
+        sum_node = self._unwrap_parenthesized_node(comparison.get("left"))
+        threshold_node = comparison.get("right")
+        if not (
+            isinstance(sum_node, dict)
+            and sum_node.get("type") == "sum"
+            and isinstance(threshold_node, dict)
+            and threshold_node.get("type") == "number"
+        ):
+            return None
+        inner_comparison = self._unwrap_parenthesized_node(sum_node.get("expression"))
+        if not self._is_simple_boolean_comparison(inner_comparison):
+            return None
+
+        truth_indices = []
+        for env2, _idx_tuple in self._iter_filtered_environments(
+            sum_node.get("iterators", []),
+            env,
+            sum_node.get("index_constraint"),
+        ):
+            comparison_instance = {
+                "type": "binop",
+                "op": inner_comparison.get("op"),
+                "left": inner_comparison.get("left"),
+                "right": inner_comparison.get("right"),
+                "sem_type": "boolean",
+            }
+            truth_name = comparison_truth_var(comparison_instance, env2)
+            truth_indices.append(self.var_indices[truth_name])
+
+        boolean_name = left.get("value")
+        if boolean_name not in self.var_indices:
+            self._ensure_aux_binary(boolean_name)
+        threshold = threshold_node.get("value")
+        truth_count = len(truth_indices)
+        lower_row = [0.0] * len(self.var_names)
+        lower_row[self.var_indices[boolean_name]] = threshold
+        upper_row = [0.0] * len(self.var_names)
+        upper_row[self.var_indices[boolean_name]] = -(truth_count - threshold + 1)
+        for truth_index in truth_indices:
+            lower_row[truth_index] -= 1.0
+            upper_row[truth_index] += 1.0
+        return lower_row, upper_row, threshold - 1.0
+
     def _handle_not_equal_constraint(self, left, right, env, state):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
@@ -5700,64 +5753,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     ub_row_idx = state.ub_row_idx
                     return
                 # Pattern B: b == (sum(i)(comparison) >= k)
-                if op_sym_top == "==" and isinstance(left, dict) and left.get("type") == "name":
-                    r_un = _unwrap_paren(right)
-                    if isinstance(r_un, dict) and r_un.get("type") == "binop" and r_un.get("op") in (">=", ">"):
-                        sum_side = _unwrap_paren(r_un.get("left"))
-                        k_node = r_un.get("right")
-                        if (
-                            isinstance(sum_side, dict)
-                            and sum_side.get("type") == "sum"
-                            and isinstance(k_node, dict)
-                            and k_node.get("type") == "number"
-                        ):
-                            inner_cmp = _unwrap_paren(sum_side.get("expression"))
-                            if _is_simple_comparison(inner_cmp):
-                                k_val = k_node.get("value")
-                                iterators = sum_side.get("iterators", [])
-                                z_indices = []
-                                for env2, _idx_tuple in self._iter_filtered_environments(
-                                    iterators,
-                                    env,
-                                    sum_side.get("index_constraint"),
-                                ):
-                                    comp_inst = {
-                                        "type": "binop",
-                                        "op": inner_cmp.get("op"),
-                                        "left": inner_cmp.get("left"),
-                                        "right": inner_cmp.get("right"),
-                                        "sem_type": "boolean",
-                                    }
-                                    z_name = _comparison_truth_var(comp_inst, env2)
-                                    z_indices.append(self.var_indices[z_name])
-                                b_var = left.get("value")
-                                if b_var not in self.var_indices:
-                                    self._ensure_aux_binary(b_var)
-                                N = len(z_indices)
-                                # k*b - sum z <= 0
-                                rowA = [0.0] * len(self.var_names)
-                                rowA[self.var_indices[b_var]] += k_val
-                                for zi in z_indices:
-                                    rowA[zi] -= 1.0
-                                for i, coef in enumerate(rowA):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_ub_rows.append(ub_row_idx)
-                                        A_ub_cols.append(i)
-                                        A_ub_data.append(coef)
-                                b_ub.append(0.0)
-                                ub_row_idx += 1
-                                # sum z - (k-1) - (N-k+1)*b <= 0
-                                rowB = [0.0] * len(self.var_names)
-                                for zi in z_indices:
-                                    rowB[zi] += 1.0
-                                rowB[self.var_indices[b_var]] -= N - k_val + 1
-                                for i, coef in enumerate(rowB):
-                                    if abs(coef) > LINEAR_ZERO_TOLERANCE:
-                                        A_ub_rows.append(ub_row_idx)
-                                        A_ub_cols.append(i)
-                                        A_ub_data.append(coef)
-                                b_ub.append(k_val - 1.0)
-                                ub_row_idx += 1
+                reified_rows = self._reified_comparison_sum_rows(
+                    left,
+                    right,
+                    op_sym_top,
+                    env,
+                    _comparison_truth_var,
+                )
+                if reified_rows is not None:
+                    lower_row, upper_row, upper_rhs = reified_rows
+                    append_ub_row(lower_row, 0.0)
+                    append_ub_row(upper_row, upper_rhs)
                 # Unwrap parentheses on left (and right if needed) early so pre-normalization sees inner binop/composite
                 while (
                     isinstance(left, dict)
