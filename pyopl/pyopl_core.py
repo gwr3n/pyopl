@@ -4584,36 +4584,35 @@ class OPLCompiler:
     def _is_false_boolean_node(node: Any) -> bool:
         return isinstance(node, dict) and node.get("type") == "boolean_literal" and node.get("value") is False
 
-    def _simplify_boolean_node(self, node: Any, env: dict[str, Any], dvars: set[str]) -> Any:
-        if not isinstance(node, dict):
-            return node
+    def _rebuild_boolean_node(self, node: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> dict[str, Any]:
         node_type = node.get("type")
         if node_type in ("and", "or"):
-            node = {
+            return {
                 "type": node_type,
                 "left": self._simplify_boolean_node(node.get("left"), env, dvars),
                 "right": self._simplify_boolean_node(node.get("right"), env, dvars),
                 "sem_type": "boolean",
             }
-        elif node_type == "not":
-            node = {"type": "not", "value": self._simplify_boolean_node(node.get("value"), env, dvars), "sem_type": "boolean"}
-        elif node_type == "parenthesized_expression":
-            inner = self._simplify_boolean_node(node.get("expression"), env, dvars)
-            node = {
-                "type": "parenthesized_expression",
-                "expression": inner,
-                "sem_type": inner.get("sem_type") if isinstance(inner, dict) else None,
+        if node_type == "not":
+            return {
+                "type": "not",
+                "value": self._simplify_boolean_node(node.get("value"), env, dvars),
+                "sem_type": "boolean",
             }
-        elif (
-            node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!=")
-        ):
-            node = {
+        if node_type == "parenthesized_expression":
+            inner = self._simplify_boolean_node(node.get("expression"), env, dvars)
+            return {"type": "parenthesized_expression", "expression": inner, "sem_type": inner.get("sem_type") if isinstance(inner, dict) else None}
+        if node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!="):
+            return {
                 "type": "binop",
                 "op": node.get("op"),
                 "left": self._simplify_boolean_node(node.get("left"), env, dvars),
                 "right": self._simplify_boolean_node(node.get("right"), env, dvars),
                 "sem_type": "boolean",
             }
+        return node
+
+    def _fold_boolean_node(self, node: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> Any:
         is_boolean = node.get("sem_type") == "boolean" or node.get("type") in ("and", "or", "not")
         if is_boolean and not self._expr_contains_dvar(node, dvars):
             try:
@@ -4630,45 +4629,36 @@ class OPLCompiler:
                 if node["type"] == "or":
                     return self._boolean_literal(True) if right.get("value") else left
                 return left if right.get("value") else self._boolean_literal(False)
-        if (
-            node.get("type") == "not"
-            and isinstance(node.get("value"), dict)
-            and node["value"].get("type") == "boolean_literal"
-        ):
+        if node.get("type") == "not" and isinstance(node.get("value"), dict) and node["value"].get("type") == "boolean_literal":
             return self._boolean_literal(not node["value"].get("value"))
         return node
 
-    def _simplify_constraint_node(self, constraint: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> list[dict]:
-        if constraint.get("type") == "constraint" and constraint.get("op") == "==":
-            right = constraint.get("right")
-            if isinstance(right, dict) and right.get("type") == "boolean_literal":
-                left = self._simplify_boolean_node(constraint.get("left"), env, dvars)
-                while isinstance(left, dict) and left.get("type") == "parenthesized_expression":
-                    left = left.get("expression")
-                if isinstance(left, dict) and left.get("type") == "boolean_literal":
-                    if left.get("value") == right.get("value"):
-                        return []
-                    return [
-                        {
-                            "type": "constraint",
-                            "op": "==",
-                            "left": {"type": "number", "value": 0, "sem_type": "int"},
-                            "right": {"type": "number", "value": 1, "sem_type": "int"},
-                        }
-                    ]
-                if isinstance(left, dict) and left.get("type") == "binop" and left.get("sem_type") == "boolean":
-                    op = left.get("op")
-                    if isinstance(op, str) and right.get("value") is True:
-                        return [{"type": "constraint", "op": op, "left": left.get("left"), "right": left.get("right")}]
-                    if isinstance(op, str):
-                        negated = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}.get(op)
-                        if isinstance(negated, str):
-                            return [
-                                {"type": "constraint", "op": negated, "left": left.get("left"), "right": left.get("right")}
-                            ]
-                return [{"type": "constraint", "op": "==", "left": left, "right": right}]
-        if constraint.get("type") != "forall_constraint":
+    def _simplify_boolean_node(self, node: Any, env: dict[str, Any], dvars: set[str]) -> Any:
+        if not isinstance(node, dict):
+            return node
+        return self._fold_boolean_node(self._rebuild_boolean_node(node, env, dvars), env, dvars)
+
+    def _simplify_boolean_equality(self, constraint: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> list[dict]:
+        right = constraint.get("right")
+        if not isinstance(right, dict) or right.get("type") != "boolean_literal":
             return [constraint]
+        left = self._simplify_boolean_node(constraint.get("left"), env, dvars)
+        while isinstance(left, dict) and left.get("type") == "parenthesized_expression":
+            left = left.get("expression")
+        if isinstance(left, dict) and left.get("type") == "boolean_literal":
+            if left.get("value") == right.get("value"):
+                return []
+            return [{"type": "constraint", "op": "==", "left": {"type": "number", "value": 0, "sem_type": "int"}, "right": {"type": "number", "value": 1, "sem_type": "int"}}]
+        if isinstance(left, dict) and left.get("type") == "binop" and left.get("sem_type") == "boolean":
+            operator = left.get("op")
+            if isinstance(operator, str) and right.get("value") is True:
+                return [{"type": "constraint", "op": operator, "left": left.get("left"), "right": left.get("right")}]
+            negated = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}.get(operator)
+            if isinstance(negated, str):
+                return [{"type": "constraint", "op": negated, "left": left.get("left"), "right": left.get("right")}]
+        return [{"type": "constraint", "op": "==", "left": left, "right": right}]
+
+    def _simplify_forall_constraint(self, constraint: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> list[dict]:
         index_constraint = constraint.get("index_constraint")
         if isinstance(index_constraint, dict):
             index_constraint = self._simplify_boolean_node(index_constraint, env, dvars)
@@ -4684,13 +4674,16 @@ class OPLCompiler:
         simplified = [item for child in children for item in self._simplify_constraint_node(child, env, dvars)]
         if not simplified:
             return []
-        result = {
-            "type": "forall_constraint",
-            "iterators": constraint.get("iterators", []),
-            "index_constraint": index_constraint,
-        }
+        result = {"type": "forall_constraint", "iterators": constraint.get("iterators", []), "index_constraint": index_constraint}
         result["constraint" if len(simplified) == 1 else "constraints"] = simplified[0] if len(simplified) == 1 else simplified
         return [result]
+
+    def _simplify_constraint_node(self, constraint: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> list[dict]:
+        if constraint.get("type") == "constraint" and constraint.get("op") == "==":
+            return self._simplify_boolean_equality(constraint, env, dvars)
+        if constraint.get("type") != "forall_constraint":
+            return [constraint]
+        return self._simplify_forall_constraint(constraint, env, dvars)
 
     def _simplify_ground_booleans(self, ast: dict, env: dict) -> None:
         """
@@ -5074,6 +5067,46 @@ class OPLCompiler:
             return val
         raise SemanticError(f"Condition does not evaluate to boolean: {expr}")
 
+    def _eval_ground_indexed_expr(self, expr: dict, env: dict) -> Any:
+        base = expr.get("name")
+        if base not in env:
+            raise SemanticError(f"Unknown symbol in ground expression: {base}")
+        target = env[base]
+        for dimension in expr.get("dimensions", []):
+            index = self._eval_ground_expr(dimension, env)
+            if isinstance(index, bool):
+                index = int(index)
+            try:
+                target = target[index]
+            except Exception as error:
+                raise SemanticError(f"Index error in ground expression {base}[...]: {error}") from error
+        return target
+
+    def _eval_ground_binop(self, expr: dict, env: dict) -> Any:
+        operator = expr.get("op")
+        left = self._eval_ground_expr(expr.get("left"), env)
+        right = self._eval_ground_expr(expr.get("right"), env)
+        operations = {
+            "+": lambda: left + right,
+            "-": lambda: left - right,
+            "*": lambda: left * right,
+            "/": lambda: left / right,
+            "%": lambda: left % right,
+            "<": lambda: left < right,
+            "<=": lambda: left <= right,
+            ">": lambda: left > right,
+            ">=": lambda: left >= right,
+            "==": lambda: left == right,
+            "!=": lambda: left != right,
+        }
+        operation = operations.get(operator)
+        if operation is None:
+            raise SemanticError(f"Unsupported operator in ground expression: {operator}")
+        try:
+            return operation()
+        except Exception as error:
+            raise SemanticError(f"Error evaluating ground binop '{operator}': {error}") from error
+
     def _eval_ground_expr(self, expr: Any, env: dict):
         if not isinstance(expr, dict):
             return expr
@@ -5091,22 +5124,7 @@ class OPLCompiler:
             # If it's a known scalar set/range name etc., leave as-is or raise
             raise SemanticError(f"Unknown symbol in ground expression: {name}")
         if t == "indexed_name":
-            base = expr.get("name")
-            if base not in env:
-                raise SemanticError(f"Unknown symbol in ground expression: {base}")
-            target = env[base]
-            dims = expr.get("dimensions", [])
-            # Evaluate each index dimension
-            for d in dims:
-                idx = self._eval_ground_expr(d, env)
-                # Coerce booleans to int if needed
-                if isinstance(idx, bool):
-                    idx = int(idx)
-                try:
-                    target = target[idx]
-                except Exception as e:
-                    raise SemanticError(f"Index error in ground expression {base}[...]: {e}") from e
-            return target
+            return self._eval_ground_indexed_expr(expr, env)
         if t == "parenthesized_expression":
             return self._eval_ground_expr(expr.get("expression"), env)
         if t == "not":
@@ -5123,35 +5141,7 @@ class OPLCompiler:
             cond = self._eval_ground_condition(expr.get("condition"), env)
             return self._eval_ground_expr(expr.get("then") if cond else expr.get("else"), env)
         if t == "binop":
-            op = expr.get("op")
-            left = self._eval_ground_expr(expr.get("left"), env)
-            right = self._eval_ground_expr(expr.get("right"), env)
-            try:
-                if op == "+":
-                    return left + right
-                if op == "-":
-                    return left - right
-                if op == "*":
-                    return left * right
-                if op == "/":
-                    return left / right
-                if op == "%":
-                    return left % right
-                if op == "<":
-                    return left < right
-                if op == "<=":
-                    return left <= right
-                if op == ">":
-                    return left > right
-                if op == ">=":
-                    return left >= right
-                if op == "==":
-                    return left == right
-                if op == "!=":
-                    return left != right
-            except Exception as e:
-                raise SemanticError(f"Error evaluating ground binop '{op}': {e}") from e
-            raise SemanticError(f"Unsupported operator in ground expression: {op}")
+            return self._eval_ground_binop(expr, env)
         # Unsupported in conditions
         raise SemanticError(f"Unsupported expression in ground condition: {t}")
 
