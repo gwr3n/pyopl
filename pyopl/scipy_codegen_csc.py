@@ -4764,46 +4764,44 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         except Exception:
             pass
 
-    def _try_enforce_bool_tree_literal_constraint(self, constr, env, bool_expr_var, append_eq_row) -> bool:
-        """Handle constraints that directly force a composed boolean tree to a literal truth value."""
+    def _bool_tree_literal_constraint_parts(self, constr):
         if constr.get("type") != "constraint" or constr.get("op") not in ("==", ">=", "<=", "!="):
-            return False
+            return None
         left = constr.get("left")
         right = constr.get("right")
         if not self._is_bool_tree_node(left) or self._is_bool_tree_node(
-            {
-                "type": "constraint",
-                "left": left,
-                "op": "==",
-                "right": {"type": "number", "value": 1},
-            }
+            {"type": "constraint", "left": left, "op": "==", "right": {"type": "number", "value": 1}}
         ):
-            return False
+            return None
+        return left, right, constr.get("op")
 
+    @staticmethod
+    def _is_number_literal(node, value):
+        return isinstance(node, dict) and node.get("type") == "number" and node.get("value") == value
+
+    def _emit_bool_tree_literal_row(self, aux, value, append_eq_row):
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[aux]] = 1.0
+        append_eq_row(row, float(value))
+
+    def _try_enforce_bool_tree_literal_constraint(self, constr, env, bool_expr_var, append_eq_row) -> bool:
+        """Handle constraints that directly force a composed boolean tree to a literal truth value."""
+        parts = self._bool_tree_literal_constraint_parts(constr)
+        if parts is None:
+            return False
+        left, right, operator = parts
         aux = bool_expr_var(left, env)
         logger.debug(f"[DEBUG] Created auxiliary {aux} for boolean expr: {left}")
-
-        if constr.get("op") == ">=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
-            logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {constr.get('op')} {right}")
+        if (operator, right) in ((">=", {"type": "number", "value": 0}), ("<=", {"type": "number", "value": 1})):
+            logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {operator} {right}")
             return True
-        if constr.get("op") == "<=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
-            logger.debug(f"[DEBUG] Skipping tautological constraint: {aux} {constr.get('op')} {right}")
+        if operator == "==" and isinstance(right, dict):
+            self._emit_bool_tree_literal_row(aux, right.get("value", 0), append_eq_row)
             return True
-
-        if constr.get("op") == "==":
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[aux]] = 1.0
-            append_eq_row(row, float(right.get("value", 0)))
-            return True
-        if constr.get("op") == ">=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 1:
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[aux]] = 1.0
-            append_eq_row(row, 1.0)
-            return True
-        if constr.get("op") == "!=" and isinstance(right, dict) and right.get("type") == "number" and right.get("value") == 0:
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[aux]] = 1.0
-            append_eq_row(row, 1.0)
+        if (operator == ">=" and self._is_number_literal(right, 1)) or (
+            operator == "!=" and self._is_number_literal(right, 0)
+        ):
+            self._emit_bool_tree_literal_row(aux, 1, append_eq_row)
             return True
         return False
 
@@ -5954,54 +5952,46 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return
         self._emit_plain_linear_constraint(constraint, env, append_eq_row, append_ub_row)
 
-    def _handle_not_equal_constraint(self, left, right, env, state):
+    def _not_equal_boolean_operands(self, left, right):
         left_is_boolean = self._is_declared_boolean_var_node(left)
         right_is_boolean = self._is_declared_boolean_var_node(right)
         left_is_literal = isinstance(left, dict) and left.get("type") == "number" and left.get("value") in (0, 1)
         right_is_literal = isinstance(right, dict) and right.get("type") == "number" and right.get("value") in (0, 1)
+        if (left_is_boolean or right_is_boolean) and (left_is_boolean or left_is_literal) and (right_is_boolean or right_is_literal):
+            return left_is_boolean, right_is_boolean
+        return None
 
-        if (
-            (left_is_boolean and right_is_boolean)
-            or (left_is_boolean and right_is_literal)
-            or (right_is_boolean and left_is_literal)
-        ):
-            if left_is_boolean and right_is_boolean:
-                left_name = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                right_name = (
-                    self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                )
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[left_name]] = 1.0
-                row[self.var_indices[right_name]] = 1.0
-                self._append_sparse_row(state, row, 1.0, sense="eq")
-                self._add_code_line("# encoded != (boolean xor)")
-                return
+    def _boolean_not_equal_name(self, node, env):
+        return self._multi_indexed_var_name(node, env) if node.get("type") == "indexed_name" else node["value"]
 
-            variable_node = left if left_is_boolean else right
-            literal_node = right if variable_node is left else left
-            variable_name = (
-                self._multi_indexed_var_name(variable_node, env)
-                if variable_node.get("type") == "indexed_name"
-                else variable_node["value"]
-            )
+    def _emit_boolean_not_equal(self, left, right, env, state, left_is_boolean, right_is_boolean):
+        if left_is_boolean and right_is_boolean:
+            left_name = self._boolean_not_equal_name(left, env)
+            right_name = self._boolean_not_equal_name(right, env)
             row = [0.0] * len(self.var_names)
-            row[self.var_indices[variable_name]] = 1.0
-            self._append_sparse_row(state, row, float(1 - literal_node.get("value")), sense="eq")
-            self._add_code_line("# encoded != (boolean var vs literal)")
+            row[self.var_indices[left_name]] = 1.0
+            row[self.var_indices[right_name]] = 1.0
+            self._append_sparse_row(state, row, 1.0, sense="eq")
+            self._add_code_line("# encoded != (boolean xor)")
             return
 
+        variable_node = left if left_is_boolean else right
+        literal_node = right if variable_node is left else left
+        variable_name = self._boolean_not_equal_name(variable_node, env)
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[variable_name]] = 1.0
+        self._append_sparse_row(state, row, float(1 - literal_node.get("value")), sense="eq")
+        self._add_code_line("# encoded != (boolean var vs literal)")
+
+    def _not_equal_affine_difference(self, left, right, env):
         left_coef, left_const = self._eval_expr(left, env)
         right_coef, right_const = self._eval_expr(right, env)
         diff_coef = dict(left_coef)
         for name, coef in right_coef.items():
             diff_coef[name] = diff_coef.get(name, 0.0) - coef
-        diff_const = float(left_const) - float(right_const)
-        diff_min, diff_max = self._finite_integer_affine_bounds(
-            diff_coef,
-            diff_const,
-            "Integer not-equal constraint",
-        )
-        big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
+        return diff_coef, float(left_const) - float(right_const)
+
+    def _add_not_equal_direction_binary(self):
         if not hasattr(self, "_neq_counter"):
             self._neq_counter = 0
         direction_name = f"neq_direction_c{self._neq_counter}"
@@ -6011,7 +6001,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.bounds.append([0, 1])
         self.integrality.append(1)
         self.c.append(0.0)
+        return direction_name
 
+    def _emit_integer_not_equal(self, diff_coef, diff_const, env, state):
+        diff_min, diff_max = self._finite_integer_affine_bounds(
+            diff_coef,
+            diff_const,
+            "Integer not-equal constraint",
+        )
+        big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
+        direction_name = self._add_not_equal_direction_binary()
         negative_row = dict(diff_coef)
         negative_row[direction_name] = -big_m
         self._append_sparse_coef_row(state, negative_row, -1.0 - diff_const, sense="ub")
@@ -6019,6 +6018,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         positive_row[direction_name] = big_m
         self._append_sparse_coef_row(state, positive_row, big_m - 1.0 + diff_const, sense="ub")
         self._add_code_line("# encoded integer != via direction binary")
+
+    def _handle_not_equal_constraint(self, left, right, env, state):
+        boolean_operands = self._not_equal_boolean_operands(left, right)
+        if boolean_operands is not None:
+            self._emit_boolean_not_equal(left, right, env, state, *boolean_operands)
+            return
+
+        diff_coef, diff_const = self._not_equal_affine_difference(left, right, env)
+        self._emit_integer_not_equal(diff_coef, diff_const, env, state)
 
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
@@ -6167,29 +6175,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         self.c = self.c[: len(self.var_names)]
                     self.scipy_code_lines[i] = f"c = {self.c}"
 
-    def _accumulate_sum_to_dict(self, expr, env, sign=1):
-        """
-        Accumulate coefficients and constants from an expression into a dict and constant.
-        Handles sum, binop (with sum), and base cases. Delegates to helpers for each case.
-        """
-        from collections import defaultdict
+    def _merge_accumulated_expression(self, target, values, sign, const_ref):
+        coef_dict, const_value = values
+        for name, coefficient in coef_dict.items():
+            target[name] += sign * coefficient
+        if isinstance(const_value, (int, float)):
+            const_ref[0] += sign * float(const_value)
 
-        coef_dict = defaultdict(float)
-        const_ref = [0.0]
-        if expr["type"] == "sum":
-            self._accumulate_sum_expr(expr, env, coef_dict, sign, const_ref)
-        elif expr["type"] == "binop" and (expr["left"].get("type") == "sum" or expr["right"].get("type") == "sum"):
-            self._accumulate_binop_with_sum(expr, env, coef_dict, sign, const_ref)
-        # Explicitly handle simple linear atoms so terms like s[t-1] and demand[t] are preserved
-        elif expr["type"] == "indexed_name":
-            # Uniformly evaluate and merge by variable name; parameters contribute to constant
+    def _accumulate_sum_atom(self, expr, env, coef_dict, sign, const_ref):
+        if expr["type"] == "indexed_name":
             cdict, cval = self._eval_expr(expr, env)
             for vname, coef in cdict.items():
                 coef_dict[vname] += sign * coef
             if isinstance(cval, (int, float)):
                 const_ref[0] += sign * float(cval)
         elif expr["type"] == "name":
-            # Include only if it is a decision variable; numeric parameters contribute to constant
             is_var, val, is_symbolic = self._lookup_var_or_param(expr.get("value"), indices=None, env=env)
             if is_var:
                 vname = val if isinstance(val, str) else expr.get("value")
@@ -6198,21 +6198,46 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 const_ref[0] += sign * float(val)
         elif expr["type"] == "number":
             const_ref[0] += sign * float(expr.get("value", 0.0))
+        else:
+            cdict, cval = self._eval_expr(expr, env)
+            for vname, coef in cdict.items():
+                coef_dict[vname] += sign * coef
+            if isinstance(cval, (int, float)):
+                const_ref[0] += sign * cval
+
+    def _accumulate_sum_binop(self, expr, env, coef_dict, sign, const_ref):
+        ldict, lconst = self._accumulate_sum_to_dict(expr["left"], env, sign=1)
+        rdict, rconst = self._accumulate_sum_to_dict(expr["right"], env, sign=1)
+        factor = 1.0 if expr["op"] == "+" else -1.0
+        self._merge_accumulated_expression(coef_dict, (ldict, lconst), sign, const_ref)
+        for key, value in rdict.items():
+            coef_dict[key] += sign * factor * value
+        const_ref[0] += sign * factor * rconst
+
+    def _accumulate_sum_parenthesized(self, expr, env, coef_dict, sign, const_ref):
+        self._merge_accumulated_expression(
+            coef_dict,
+            self._accumulate_sum_to_dict(expr["expression"], env, sign=1),
+            sign,
+            const_ref,
+        )
+
+    def _accumulate_sum_to_dict(self, expr, env, sign=1):
+        """Accumulate coefficients and constants from an expression into a dict and constant."""
+        from collections import defaultdict
+
+        coef_dict = defaultdict(float)
+        const_ref = [0.0]
+        if expr["type"] == "sum":
+            self._accumulate_sum_expr(expr, env, coef_dict, sign, const_ref)
+        elif expr["type"] == "binop" and (expr["left"].get("type") == "sum" or expr["right"].get("type") == "sum"):
+            self._accumulate_binop_with_sum(expr, env, coef_dict, sign, const_ref)
+        elif expr["type"] in ("indexed_name", "name", "number"):
+            self._accumulate_sum_atom(expr, env, coef_dict, sign, const_ref)
         elif expr["type"] == "binop" and expr.get("op") in ("+", "-"):
-            # Recursively accumulate linear binops
-            ldict, lconst = self._accumulate_sum_to_dict(expr["left"], env, sign=1)
-            rdict, rconst = self._accumulate_sum_to_dict(expr["right"], env, sign=1)
-            for k, v in ldict.items():
-                coef_dict[k] += sign * v
-            factor = 1.0 if expr["op"] == "+" else -1.0
-            for k, v in rdict.items():
-                coef_dict[k] += sign * factor * v
-            const_ref[0] += sign * (lconst + factor * rconst)
+            self._accumulate_sum_binop(expr, env, coef_dict, sign, const_ref)
         elif expr["type"] == "parenthesized_expression":
-            inner_dict, inner_const = self._accumulate_sum_to_dict(expr["expression"], env, sign=1)
-            for k, v in inner_dict.items():
-                coef_dict[k] += sign * v
-            const_ref[0] += sign * inner_const
+            self._accumulate_sum_parenthesized(expr, env, coef_dict, sign, const_ref)
         else:
             cdict, cval = self._eval_expr(expr, env)
             for vname, coef in cdict.items():
