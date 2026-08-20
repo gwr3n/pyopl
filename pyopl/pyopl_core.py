@@ -3661,6 +3661,22 @@ class OPLCompiler:
         if not isinstance(expr, dict):
             return expr
         expr_type = expr.get("type")
+        if expr_type in ("number", "boolean_literal", "string_literal", "name", "name_reference_index", "number_literal_index"):
+            return self._eval_comprehension_atom(expr, env, working_data)
+        if expr_type == "indexed_name":
+            return self._eval_comprehension_indexed_name(expr, env, working_data)
+        if expr_type == "parenthesized_expression":
+            return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
+        if expr_type == "not":
+            return self._eval_comprehension_logical(expr, env, working_data)
+        if expr_type in ("and", "or"):
+            return self._eval_comprehension_logical(expr, env, working_data)
+        if expr_type == "binop":
+            return self._eval_comprehension_binop(expr, env, working_data)
+        raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
+
+    def _eval_comprehension_atom(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+        expr_type = expr.get("type")
         if expr_type == "number":
             return expr.get("value")
         if expr_type == "boolean_literal":
@@ -3671,21 +3687,14 @@ class OPLCompiler:
             return self._resolve_comprehension_name(expr.get("value"), env, working_data)
         if expr_type == "name_reference_index":
             return self._resolve_comprehension_name(expr.get("name"), env, working_data, index=True)
-        if expr_type == "number_literal_index":
-            return expr.get("value")
-        if expr_type == "indexed_name":
-            return self._eval_comprehension_indexed_name(expr, env, working_data)
-        if expr_type == "parenthesized_expression":
-            return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
-        if expr_type == "not":
+        return expr.get("value")
+
+    def _eval_comprehension_logical(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> bool:
+        if expr.get("type") == "not":
             return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data))
-        if expr_type in ("and", "or"):
-            left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data))
-            right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
-            return left and right if expr_type == "and" else left or right
-        if expr_type == "binop":
-            return self._eval_comprehension_binop(expr, env, working_data)
-        raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
+        left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data))
+        right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
+        return left and right if expr.get("type") == "and" else left or right
 
     def _materialize_set_of_tuples_comprehensions(
         self,
@@ -3867,6 +3876,14 @@ class OPLCompiler:
             iter_meta: Optional[dict[str, dict[str, Any]]],
         ) -> Any:
             expr_type = expr.get("type")
+            if expr_type in ("number", "boolean_literal", "string_literal", "name"):
+                return eval_simple_atom(expr, env)
+            if expr_type == "conditional":
+                return eval_simple_conditional(expr, env, iter_meta)
+            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
+
+        def eval_simple_atom(expr: dict[str, Any], env: dict[str, Any]) -> Any:
+            expr_type = expr.get("type")
             if expr_type == "number":
                 value = expr.get("value")
                 if value is None:
@@ -3876,26 +3893,29 @@ class OPLCompiler:
                 return 1.0 if expr.get("value") else 0.0
             if expr_type == "string_literal":
                 return expr.get("value")
-            if expr_type == "name":
-                name = expr.get("value")
-                if not isinstance(name, str):
-                    raise SemanticError("Unknown name in computed parameter expression.")
-                if name in env:
-                    value = env[name]
-                    return float(value) if isinstance(value, (int, float)) else value
-                if name in working_data:
-                    return working_data[name]
-                raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
-            if expr_type == "conditional":
-                condition = expr.get("condition")
-                then_branch = expr.get("then")
-                else_branch = expr.get("else")
-                if not isinstance(condition, dict) or not isinstance(then_branch, dict) or not isinstance(else_branch, dict):
-                    raise SemanticError("Conditional expression must contain expression nodes.")
-                cond_value = eval_expr(condition, env, iter_meta)
-                branch = then_branch if bool(cond_value) else else_branch
-                return eval_expr(branch, env, iter_meta)
-            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
+            name = expr.get("value")
+            if not isinstance(name, str):
+                raise SemanticError("Unknown name in computed parameter expression.")
+            if name in env:
+                value = env[name]
+                return float(value) if isinstance(value, (int, float)) else value
+            if name in working_data:
+                return working_data[name]
+            raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
+
+        def eval_simple_conditional(
+            expr: dict[str, Any],
+            env: dict[str, Any],
+            iter_meta: Optional[dict[str, dict[str, Any]]],
+        ) -> Any:
+            condition = expr.get("condition")
+            then_branch = expr.get("then")
+            else_branch = expr.get("else")
+            if not isinstance(condition, dict) or not isinstance(then_branch, dict) or not isinstance(else_branch, dict):
+                raise SemanticError("Conditional expression must contain expression nodes.")
+            cond_value = eval_expr(condition, env, iter_meta)
+            branch = then_branch if bool(cond_value) else else_branch
+            return eval_expr(branch, env, iter_meta)
 
         def eval_field_access(
             expr: dict[str, Any],
@@ -4213,51 +4233,56 @@ class OPLCompiler:
                 continue
 
             dims = decl.get("dimensions", []) or []
-            domains = []
-            for dim in dims:
-                dim_type = dim.get("type")
-                if dim_type in ("named_set", "named_set_dimension"):
-                    set_name = dim.get("name")
-                    set_obj = working_data.get(set_name, [])
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        domain_elements = list(set_obj["elements"])
-                    else:
-                        domain_elements = list(set_obj or [])
-                    domains.append(domain_elements)
-                elif dim_type in ("named_range", "named_range_dimension"):
-                    domains.append(self._computed_parameter_range_domain(model_ast, working_data, dim, value))
-                else:
-                    domains.append(list(range(1, len(value) + 1)) if isinstance(value, (list, tuple)) else [])
-
-            mapping = {}
-
-            def rec_flat(depth: int, node: Any, prefix: list[Any]) -> None:
-                if depth == len(domains):
-                    if len(prefix) == 1:
-                        key = prefix[0]
-                        if isinstance(key, list):
-                            key = tuple(key)
-                        mapping[key] = node
-                    else:
-                        safe_prefix = tuple(tuple(item) if isinstance(item, list) else item for item in prefix)
-                        mapping[safe_prefix] = node
-                    return
-                if not isinstance(node, (list, tuple)):
-                    raise SemanticError(
-                        f"Parameter '{name}' expected nested list matching declared domains, got {type(node).__name__}"
-                    )
-                domain = domains[depth]
-                for index, key in enumerate(domain):
-                    if index >= len(node):
-                        raise SemanticError(f"Parameter '{name}' data length shorter than domain at dimension {depth+1}")
-                    rec_flat(depth + 1, node[index], prefix + [key])
+            domains = self._computed_parameter_map_domains(model_ast, working_data, dims, value)
+            mapping: dict[Any, Any] = {}
 
             try:
-                rec_flat(0, value, [])
+                self._flatten_computed_parameter_map(name, domains, value, mapping, 0, [])
             except SemanticError:
                 continue
 
             working_data[f"{name}__map"] = mapping
+
+    def _computed_parameter_map_domains(
+        self, model_ast: dict[str, Any], working_data: dict[str, Any], dimensions: list[Any], value: Any
+    ) -> list[list[Any]]:
+        domains = []
+        for dimension in dimensions:
+            dim_type = dimension.get("type")
+            if dim_type in ("named_set", "named_set_dimension"):
+                set_obj = working_data.get(dimension.get("name"), [])
+                elements = set_obj.get("elements") if isinstance(set_obj, dict) else set_obj
+                domains.append(list(elements or []))
+            elif dim_type in ("named_range", "named_range_dimension"):
+                domains.append(self._computed_parameter_range_domain(model_ast, working_data, dimension, value))
+            else:
+                domains.append(list(range(1, len(value) + 1)) if isinstance(value, (list, tuple)) else [])
+        return domains
+
+    def _flatten_computed_parameter_map(
+        self,
+        name: str,
+        domains: list[list[Any]],
+        node: Any,
+        mapping: dict[Any, Any],
+        depth: int,
+        prefix: list[Any],
+    ) -> None:
+        if depth == len(domains):
+            if len(prefix) == 1:
+                key = prefix[0]
+                mapping[tuple(key) if isinstance(key, list) else key] = node
+            else:
+                mapping[tuple(tuple(item) if isinstance(item, list) else item for item in prefix)] = node
+            return
+        if not isinstance(node, (list, tuple)):
+            raise SemanticError(
+                f"Parameter '{name}' expected nested list matching declared domains, got {type(node).__name__}"
+            )
+        for index, key in enumerate(domains[depth]):
+            if index >= len(node):
+                raise SemanticError(f"Parameter '{name}' data length shorter than domain at dimension {depth+1}")
+            self._flatten_computed_parameter_map(name, domains, node[index], mapping, depth + 1, prefix + [key])
 
     def _computed_parameter_range_domain(
         self,
