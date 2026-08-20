@@ -1,5 +1,5 @@
 {
-	"disp": false,
+	"disp": true,
 	"dual_feasibility_tolerance": 1e-07,
 	"ipm_optimality_tolerance": 1e-08,
 	"maxiter": null,
