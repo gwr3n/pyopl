@@ -4409,37 +4409,39 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self._append_sparse_row(ctx.state, row, rhs, sense="ub")
         return self._memoize_boolean_var(ctx, struct_key, env_memo_key, result_var)
 
+    def _boolean_binop_tie_variable(self, node, env, ctx):
+        if node.get("op") != "==":
+            return None
+        left = node.get("left")
+        right = node.get("right")
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+        if self._is_bool_var_node(left) and self._is_bool_composite_node(right, include_not=True):
+            var_side, expr_side = left, right
+        elif self._is_bool_var_node(right) and self._is_bool_composite_node(left, include_not=True):
+            var_side, expr_side = right, left
+        else:
+            return None
+        expr_var = self._bool_expr_var(expr_side, env, ctx)
+        var_name = self._multi_indexed_var_name(var_side, env) if var_side.get("type") == "indexed_name" else var_side["value"]
+        if var_name not in self.var_indices or expr_var not in self.var_indices:
+            return var_name
+        var_idx = self.var_indices[var_name]
+        expr_idx = self.var_indices[expr_var]
+        already_tied = any(abs(row[var_idx]) == 1 and abs(row[expr_idx]) == 1 for row in getattr(self, "A_eq", ()))
+        if not already_tied:
+            row = [0.0] * len(self.var_names)
+            row[var_idx] = 1.0
+            row[expr_idx] = -1.0
+            self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
+        return var_name
+
     def _try_encode_boolean_binop(self, node, env, ctx, struct_key, env_memo_key):
         if node.get("type") != "binop" or node.get("sem_type") != "boolean" or node.get("op") not in ("<=", ">=", "!=", "=="):
             return None
-
-        if node.get("op") == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
-            left = node["left"]
-            right = node["right"]
-            var_side = None
-            expr_side = None
-            if self._is_bool_var_node(left) and self._is_bool_composite_node(right, include_not=True):
-                var_side, expr_side = left, right
-            elif self._is_bool_var_node(right) and self._is_bool_composite_node(left, include_not=True):
-                var_side, expr_side = right, left
-            if var_side is not None and expr_side is not None:
-                expr_var = self._bool_expr_var(expr_side, env, ctx)
-                var_name = (
-                    self._multi_indexed_var_name(var_side, env)
-                    if var_side.get("type") == "indexed_name"
-                    else var_side["value"]
-                )
-                if var_name in self.var_indices and expr_var in self.var_indices:
-                    var_idx = self.var_indices[var_name]
-                    expr_idx = self.var_indices[expr_var]
-                    already_tied = any(abs(row[var_idx]) == 1 and abs(row[expr_idx]) == 1 for row in getattr(self, "A_eq", ()))
-                    if not already_tied:
-                        row = [0.0] * len(self.var_names)
-                        row[var_idx] = 1.0
-                        row[expr_idx] = -1.0
-                        self._append_sparse_row(ctx.state, row, 0.0, sense="eq")
-                return self._memoize_boolean_var(ctx, struct_key, env_memo_key, var_name)
-
+        tied_name = self._boolean_binop_tie_variable(node, env, ctx)
+        if tied_name is not None:
+            return self._memoize_boolean_var(ctx, struct_key, env_memo_key, tied_name)
         result = self._comparison_truth_var(node, env, ctx)
         return self._memoize_boolean_var(ctx, struct_key, env_memo_key, result)
 
@@ -4895,80 +4897,84 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if consequent_op == "==":
             emit_side({var_name: -value for var_name, value in diff_coef.items()}, -diff_const)
 
-    def _handle_boolean_antecedent_implication(
-        self,
-        antecedent_node,
-        consequent_node,
-        env,
-        append_ub_row,
-    ):
-        antecedent_name = (
-            self._multi_indexed_var_name(antecedent_node, env)
-            if antecedent_node.get("type") == "indexed_name"
-            else antecedent_node["value"]
+    @staticmethod
+    def _is_implication_var_node(node):
+        return isinstance(node, dict) and node.get("type") in ("name", "indexed_name")
+
+    @staticmethod
+    def _is_implication_number(node, value):
+        return isinstance(node, dict) and node.get("type") == "number" and node.get("value") == value
+
+    def _implication_variable_name(self, node, env):
+        return self._multi_indexed_var_name(node, env) if node.get("type") == "indexed_name" else node["value"]
+
+    def _is_boolean_decision_variable(self, node):
+        if not self._is_implication_var_node(node):
+            return False
+        base_name = node.get("value") if node.get("type") == "name" else node.get("name")
+        declaration = self._find_decl(base_name)
+        return bool(
+            declaration
+            and declaration.get("type") in ("dvar", "dvar_indexed")
+            and declaration.get("var_type") == "boolean"
         )
+
+    def _implication_boolean_equality_variable(self, consequent, value):
+        if consequent.get("op") != "==":
+            return None
+        left = consequent.get("left")
+        right = consequent.get("right")
+        if self._is_implication_var_node(left) and self._is_implication_number(right, value):
+            return left
+        if self._is_implication_var_node(right) and self._is_implication_number(left, value):
+            return right
+        return None
+
+    def _emit_boolean_implication_row(self, antecedent_name, variable_name, value, append_ub_row):
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[antecedent_name]] = 1.0
+        row[self.var_indices[variable_name]] = -1.0 if value == 1 else 1.0
+        append_ub_row(row, 0.0 if value == 1 else 1.0)
+
+    def _handle_boolean_antecedent_implication(self, antecedent_node, consequent_node, env, append_ub_row):
+        antecedent_name = self._implication_variable_name(antecedent_node, env)
         if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
             raise SemanticError("Implication consequent must be a constraint")
         consequent_op = consequent_node.get("op")
         left = consequent_node.get("left")
         right = consequent_node.get("right")
-
-        def is_var_node(node):
-            return isinstance(node, dict) and node.get("type") in ("name", "indexed_name")
-
-        def is_number_value(node, value):
-            return isinstance(node, dict) and node.get("type") == "number" and node.get("value") == value
-
-        def extract_var_eq_value(value):
-            if consequent_node.get("op") != "==":
-                return None
-            if is_var_node(left) and is_number_value(right, value):
-                return left
-            if is_var_node(right) and is_number_value(left, value):
-                return right
-            return None
-
-        def is_boolean_decision_var(node):
-            if not is_var_node(node):
-                return False
-            base_name = node.get("value") if node.get("type") == "name" else node.get("name")
-            declaration = self._find_decl(base_name)
-            return bool(
-                declaration
-                and declaration.get("type") in ("dvar", "dvar_indexed")
-                and declaration.get("var_type") == "boolean"
-            )
-
-        consequent_var_one = extract_var_eq_value(1)
-        if (consequent_var_one and is_boolean_decision_var(consequent_var_one)) or (
-            consequent_op in (">=", "==") and is_boolean_decision_var(left) and is_number_value(right, 1)
-        ):
+        consequent_var_one = self._implication_boolean_equality_variable(consequent_node, 1)
+        force_one = consequent_var_one and self._is_boolean_decision_variable(consequent_var_one)
+        force_one = force_one or (
+            consequent_op in (">=", "==")
+            and self._is_boolean_decision_variable(left)
+            and self._is_implication_number(right, 1)
+        )
+        if force_one:
             variable_node = consequent_var_one if consequent_var_one else left
-            variable_name = (
-                self._multi_indexed_var_name(variable_node, env)
-                if variable_node.get("type") == "indexed_name"
-                else variable_node["value"]
+            self._emit_boolean_implication_row(
+                antecedent_name,
+                self._implication_variable_name(variable_node, env),
+                1,
+                append_ub_row,
             )
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[antecedent_name]] = 1.0
-            row[self.var_indices[variable_name]] = -1.0
-            append_ub_row(row, 0.0)
             return
 
-        consequent_var_zero = extract_var_eq_value(0)
-        if (consequent_var_zero and is_boolean_decision_var(consequent_var_zero)) or (
-            consequent_op in ("<=", "==") and is_boolean_decision_var(left) and is_number_value(right, 0)
-        ):
+        consequent_var_zero = self._implication_boolean_equality_variable(consequent_node, 0)
+        force_zero = consequent_var_zero and self._is_boolean_decision_variable(consequent_var_zero)
+        force_zero = force_zero or (
+            consequent_op in ("<=", "==")
+            and self._is_boolean_decision_variable(left)
+            and self._is_implication_number(right, 0)
+        )
+        if force_zero:
             variable_node = consequent_var_zero if consequent_var_zero else left
-            variable_name = (
-                self._multi_indexed_var_name(variable_node, env)
-                if variable_node.get("type") == "indexed_name"
-                else variable_node["value"]
+            self._emit_boolean_implication_row(
+                antecedent_name,
+                self._implication_variable_name(variable_node, env),
+                0,
+                append_ub_row,
             )
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[antecedent_name]] = 1.0
-            row[self.var_indices[variable_name]] = 1.0
-            append_ub_row(row, 1.0)
             return
 
         if consequent_op in ("<=", "<", ">=", ">", "=="):
