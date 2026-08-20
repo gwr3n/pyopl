@@ -4986,66 +4986,56 @@ class OPLCompiler:
             self._rewrite_top_level_conditions(ast, env, dvar_names)
             return
 
+    @staticmethod
+    def _make_minmax_forall(iterators, index_constraint, constraint):
+        return {
+            "type": "forall_constraint",
+            "iterators": iterators,
+            "index_constraint": index_constraint,
+            "constraint": constraint,
+        }
+
+    def _lower_minmax_objective(self, ast: dict, objective: dict) -> None:
+        expression = objective.get("expression")
+        if not isinstance(expression, dict) or expression.get("type") not in ("max_agg", "min_agg"):
+            return
+
+        objective_type = objective.get("type")
+        aggregate_type = expression.get("type")
+        if not isinstance(objective_type, str) or not isinstance(aggregate_type, str):
+            return
+        lowering = {
+            ("minimize", "max_agg"): ("__maxagg_obj", "<="),
+            ("maximize", "min_agg"): ("__minagg_obj", ">="),
+        }.get((objective_type, aggregate_type))
+        if lowering is None:
+            raise SemanticError("Non-convex objective: supported only minimize max(...) or maximize min(...).")
+
+        prefix, relation = lowering
+        auxiliary_name = self._gensym(prefix)
+        ast["declarations"].append({"type": "dvar", "var_type": "float", "name": auxiliary_name})
+        auxiliary = {"type": "name", "value": auxiliary_name, "sem_type": "float"}
+        ast["constraints"].append(
+            self._make_minmax_forall(
+                expression["iterators"],
+                expression.get("index_constraint"),
+                {
+                    "type": "constraint",
+                    "op": relation,
+                    "left": expression["expression"],
+                    "right": auxiliary,
+                },
+            )
+        )
+        objective["expression"] = auxiliary
+
     def _lower_minmax_aggregates(self, ast: dict) -> None:
         if not isinstance(ast, dict):
             return
 
-        def make_forall(iterators, idxc, cons):
-            node = {"type": "forall_constraint", "iterators": iterators, "index_constraint": idxc}
-            if isinstance(cons, list):
-                node["constraints"] = cons
-            else:
-                node["constraint"] = cons
-            return node
-
-        # Objective rewrite
-        obj = ast.get("objective")
-        if isinstance(obj, dict):
-            expr = obj.get("expression")
-            if isinstance(expr, dict) and expr.get("type") in ("max_agg", "min_agg"):
-                t = expr["type"]
-                if t == "max_agg" and obj.get("type") == "minimize":
-                    z = self._gensym("__maxagg_obj")
-                    ast["declarations"].append({"type": "dvar", "var_type": "float", "name": z})
-                    # forall(i): e(i) <= z
-                    iters = expr["iterators"]
-                    idxc = expr.get("index_constraint")
-                    e = expr["expression"]
-                    ast["constraints"].append(
-                        make_forall(
-                            iters,
-                            idxc,
-                            {
-                                "type": "constraint",
-                                "op": "<=",
-                                "left": e,
-                                "right": {"type": "name", "value": z, "sem_type": "float"},
-                            },
-                        )
-                    )
-                    ast["objective"]["expression"] = {"type": "name", "value": z, "sem_type": "float"}
-                elif t == "min_agg" and obj.get("type") == "maximize":
-                    z = self._gensym("__minagg_obj")
-                    ast["declarations"].append({"type": "dvar", "var_type": "float", "name": z})
-                    # forall(i): e(i) >= z
-                    iters = expr["iterators"]
-                    idxc = expr.get("index_constraint")
-                    e = expr["expression"]
-                    ast["constraints"].append(
-                        make_forall(
-                            iters,
-                            idxc,
-                            {
-                                "type": "constraint",
-                                "op": ">=",
-                                "left": e,
-                                "right": {"type": "name", "value": z, "sem_type": "float"},
-                            },
-                        )
-                    )
-                    ast["objective"]["expression"] = {"type": "name", "value": z, "sem_type": "float"}
-                else:
-                    raise SemanticError("Non-convex objective: supported only minimize max(...) or maximize min(...).")
+        objective = ast.get("objective")
+        if isinstance(objective, dict):
+            self._lower_minmax_objective(ast, objective)
 
         if "constraints" in ast:
             newC = []
@@ -5261,6 +5251,56 @@ class OPLCompiler:
                 return [dict(node, constraints=children)]
         return [node]
 
+    def _lower_maxmin_objective(self, ast: dict, objective: dict) -> None:
+        expression = objective.get("expression")
+        unwrapped = expression
+        if isinstance(unwrapped, dict) and unwrapped.get("type") == "parenthesized_expression":
+            unwrapped = unwrapped.get("expression")
+
+        lowering = None
+        if objective.get("type") == "minimize" and self._is_maxl_node(unwrapped):
+            lowering = ("__maxl_obj", ">=")
+        elif objective.get("type") == "maximize" and self._is_minl_node(unwrapped):
+            lowering = ("__minl_obj", "<=")
+
+        if lowering is None:
+            if self._contains_maxmin(expression):
+                raise SemanticError(
+                    "Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...)."
+                )
+            return
+
+        if not isinstance(unwrapped, dict):
+            return
+        args, single = self._maxmin_args_or_error(unwrapped)
+        if single:
+            objective["expression"] = args[0]
+            return
+
+        prefix, relation = lowering
+        auxiliary_name = self._gensym(prefix)
+        auxiliary = {"type": "name", "value": auxiliary_name, "sem_type": "float"}
+        (ast.get("declarations") or []).append({"type": "dvar", "var_type": "float", "name": auxiliary_name})
+        objective["expression"] = auxiliary
+        ast["constraints"].extend(
+            {
+                "type": "constraint",
+                "op": relation,
+                "left": auxiliary,
+                "right": argument,
+            }
+            for argument in args
+        )
+
+    def _expand_maxmin_constraints(self, constraints: list[Any]) -> list[Any]:
+        expanded: list[Any] = []
+        for constraint in constraints:
+            if isinstance(constraint, dict):
+                expanded.extend(self._expand_maxmin_constraint(constraint))
+            else:
+                expanded.append(constraint)
+        return expanded
+
     def _lower_maxmin_convex(self, ast: dict) -> None:
         """
         Convex lowering for maxl/minl:
@@ -5271,67 +5311,11 @@ class OPLCompiler:
         if not isinstance(ast, dict):
             return
 
-        # Objective
-        if "objective" in ast and isinstance(ast["objective"], dict):
-            obj = ast["objective"]
-            expr = obj.get("expression")
-            # unwrap parentheses
-            if isinstance(expr, dict) and expr.get("type") == "parenthesized_expression":
-                expr = expr.get("expression")
-
-            if obj.get("type") == "minimize" and isinstance(expr, dict) and self._is_maxl_node(expr):
-                args, single = self._maxmin_args_or_error(expr)
-                if single:
-                    ast["objective"]["expression"] = args[0]
-                else:
-                    zname = self._gensym("__maxl_obj")
-                    # declare aux continuous variable
-                    (ast.get("declarations") or []).append({"type": "dvar", "var_type": "float", "name": zname})
-                    # replace objective expression with aux
-                    ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
-                    # add epigraph constraints: z >= ei
-                    for ei in args:
-                        ast["constraints"].append(
-                            {
-                                "type": "constraint",
-                                "op": ">=",
-                                "left": {"type": "name", "value": zname, "sem_type": "float"},
-                                "right": ei,
-                            }
-                        )
-            elif obj.get("type") == "maximize" and isinstance(expr, dict) and self._is_minl_node(expr):
-                args, single = self._maxmin_args_or_error(expr)
-                if single:
-                    ast["objective"]["expression"] = args[0]
-                else:
-                    zname = self._gensym("__minl_obj")
-                    (ast.get("declarations") or []).append({"type": "dvar", "var_type": "float", "name": zname})
-                    ast["objective"]["expression"] = {"type": "name", "value": zname, "sem_type": "float"}
-                    # hypograph: z <= ei
-                    for ei in args:
-                        ast["constraints"].append(
-                            {
-                                "type": "constraint",
-                                "op": "<=",
-                                "left": {"type": "name", "value": zname, "sem_type": "float"},
-                                "right": ei,
-                            }
-                        )
-            else:
-                # If maxl/minl appears anywhere in objective, reject (non-convex usage)
-                if self._contains_maxmin(obj.get("expression")):
-                    raise SemanticError(
-                        "Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...)."
-                    )
-
-        if "constraints" in ast and isinstance(ast["constraints"], list):
-            new_cons: list[dict] = []
-            for c in ast["constraints"]:
-                if isinstance(c, dict):
-                    new_cons.extend(self._expand_maxmin_constraint(c))
-                else:
-                    new_cons.append(c)
-            ast["constraints"] = new_cons
+        objective = ast.get("objective")
+        if isinstance(objective, dict):
+            self._lower_maxmin_objective(ast, objective)
+        if isinstance(ast.get("constraints"), list):
+            ast["constraints"] = self._expand_maxmin_constraints(ast["constraints"])
 
     # Helper: unique symbol names
     _mm_counter: int = 0
