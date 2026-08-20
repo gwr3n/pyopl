@@ -1322,281 +1322,51 @@ class GurobiCodeGenerator:
         res = _lb_rec(node)
         return res
 
-    def _constraint_implication_constraint(self, constraint_node, constr_name_prefix, current_iterators):
-        """
-        Handles implication constraints: <constraint> => <constraint>.
-        Uses Gurobi indicator constraints when possible, otherwise falls back to big-M encoding.
-        """
-
-        # === Composite Boolean Handling (CNF/DNF style via auxiliaries) ===
-        def is_composite_boolean(node):
-            if not isinstance(node, dict):
-                return False
-            t = node.get("type")
-            if t == "parenthesized_expression":
-                return is_composite_boolean(node.get("expression"))
-            if t in ("and", "or", "not"):
-                return True
-            # Unwrap constraint wrapper of form <bool_expr> == true/false
-            if t == "constraint" and node.get("op") == "==" and isinstance(node.get("left"), dict):
-                left = node["left"]
-                right = node.get("right")
-                if left.get("type") in ("and", "or", "not") and (
-                    not isinstance(right, dict) or right.get("type") == "boolean_literal"
-                ):
-                    return True
-            return False
-
-        if not hasattr(self, "_bool_aux_counter"):
-            self._bool_aux_counter = 0
-
-        def _new_bool_aux(prefix):
-            self._bool_aux_counter += 1
-            name = f"{prefix}_b{self._bool_aux_counter}_{constr_name_prefix}"
-            self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}')")
-            return name
-
-        # Big-M estimation now relies solely on class-level _linear_bounds_safe to avoid duplicated logic.
-        def _estimate_bigM_for_difference(left_node, right_node):
-            # Reuse class-level safe linear bounds (unified logic with other big-M computations)
-            lB = self._linear_bounds_safe(left_node)
-            rB = self._linear_bounds_safe(right_node)
-            if lB is None or rB is None:
-                return None
-            if any(v is None for v in (*lB, *rB)):
-                return None
-            lL, lU = lB
-            rL, rU = rB
-            diff_lower = lL - rU
-            diff_upper = lU - rL
-            span = max(abs(diff_lower), abs(diff_upper))
-            # Guard against degenerate zero span (still need tiny epsilon for strict ops)
-            return max(span, 1e-9)
-
-        bigM_aux_default = 1e6
-
-        def _bind_comparison_to_binary(binvar, comp_node, iterators):
-            """Link linear comparison to binary with near-equivalence:
-            bin=1 => comparison holds; bin=0 => comparison allowed to fail (soft) but encourage correctness.
-            For '==' we enforce both directions with big-M to approximate equivalence.
-            """
-            if comp_node.get("type") == "constraint":
-                left_node = comp_node["left"]
-                if left_node.get("type") == "parenthesized_expression":
-                    left_node = left_node["expression"]
-                if left_node.get("type") == "binop" and left_node.get("sem_type") == "boolean":
-                    left = left_node["left"]
-                    right = left_node["right"]
-                    op = left_node["op"]
-                else:
-                    left = comp_node["left"]
-                    right = comp_node["right"]
-                    op = comp_node["op"]
-            elif comp_node.get("type") == "binop":
-                left = comp_node["left"]
-                right = comp_node["right"]
-                op = comp_node["op"]
-            else:
-                raise ValueError("Unsupported comparison node for boolean linearization")
-            left_expr = self._traverse_expression(left, iterators)
-            right_expr = self._traverse_expression(right, iterators)
-            estM = _estimate_bigM_for_difference(left, right)
-            bigM_aux = estM if estM is not None else bigM_aux_default
-            eps = 0
-            if op == ">=":
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_ge_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_ge_relax_{binvar}')})"
-                )
-            elif op == ">":
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= {eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_gt_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_gt_relax_{binvar}')})"
-                )
-            elif op == "<=":
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_le_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_le_relax_{binvar}')})"
-                )
-            elif op == "<":
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= -{eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_lt_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= 0 - {bigM_aux} * {binvar}, name={self._format_name_expr(constr_name_prefix, f'_aux_lt_relax_{binvar}')})"
-                )
-            elif op == "==":
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq1_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({right_expr} - {left_expr} <= {eps} + {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq2_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({left_expr} - {right_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq3_{binvar}')})"
-                )
-                self._add_code_line(
-                    f"model.addConstr({right_expr} - {left_expr} >= -{eps} - {bigM_aux} * (1 - {binvar}), name={self._format_name_expr(constr_name_prefix, f'_aux_eq4_{binvar}')})"
-                )
-            else:
-                raise ValueError(f"Unsupported comparison operator in boolean linearization: {op}")
-
-        def _boolean_expr_to_binary(node, iterators):
-            # Normalize constraint nodes (simple comparisons) to binop for uniform handling
-            if node.get("type") == "constraint":
-                # Only treat as comparison if op is a standard comparison operator
-                op = node.get("op")
-                if op in (
-                    "==",
-                    "<",
-                    ">",
-                    "<=",
-                    ">=",
-                ):  # '!=' currently not supported in linearization
-                    node = {
-                        "type": "binop",
-                        "op": op,
-                        "left": node["left"],
-                        "right": node["right"],
-                        "sem_type": "boolean",
-                    }
-            # Unwrap parentheses early
-            if node.get("type") == "parenthesized_expression":
-                return _boolean_expr_to_binary(node["expression"], iterators)
-            # Unwrap constraint wrapper (bool_expr == true)
-            if node.get("type") == "constraint" and node.get("op") == "==" and isinstance(node.get("left"), dict):
-                left = node["left"]
-                right = node.get("right")
-                if left.get("type") in ("and", "or", "not") and (
-                    not isinstance(right, dict) or right.get("type") == "boolean_literal"
-                ):
-                    node = left  # treat composite
-            if (
-                node.get("type") in ("constraint", "binop")
-                and node.get("sem_type") == "boolean"
-                and node.get("type") not in ("and", "or", "not")
-            ):
-                b = _new_bool_aux("cmp")
-                _bind_comparison_to_binary(b, node, iterators)
-                return b
-            t = node.get("type")
-            if t == "not":
-                inner = _boolean_expr_to_binary(node["value"], iterators)
-                b = _new_bool_aux("not")
-                self._add_code_line(
-                    f"model.addConstr({b} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{b}')} )"
-                )
-                return b
-            if t == "and":
-                left = _boolean_expr_to_binary(node["left"], iterators)
-                right = _boolean_expr_to_binary(node["right"], iterators)
-                b = _new_bool_aux("and")
-                self._add_code_line(
-                    f"model.addConstr({b} <= {left}, name={self._format_name_expr(constr_name_prefix, f'_and1_{b}')} )"
-                )
-                self._add_code_line(
-                    f"model.addConstr({b} <= {right}, name={self._format_name_expr(constr_name_prefix, f'_and2_{b}')} )"
-                )
-                self._add_code_line(
-                    f"model.addConstr({b} >= {left} + {right} - 1, name={self._format_name_expr(constr_name_prefix, f'_and3_{b}')} )"
-                )
-                return b
-            if t == "or":
-                left = _boolean_expr_to_binary(node["left"], iterators)
-                right = _boolean_expr_to_binary(node["right"], iterators)
-                b = _new_bool_aux("or")
-                self._add_code_line(
-                    f"model.addConstr({b} >= {left}, name={self._format_name_expr(constr_name_prefix, f'_or1_{b}')} )"
-                )
-                self._add_code_line(
-                    f"model.addConstr({b} >= {right}, name={self._format_name_expr(constr_name_prefix, f'_or2_{b}')} )"
-                )
-                self._add_code_line(
-                    f"model.addConstr({b} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, f'_or3_{b}')} )"
-                )
-                return b
-            if t == "boolean_literal":
-                b = _new_bool_aux("lit")
-                val = 1 if node.get("value") else 0
-                self._add_code_line(
-                    f"model.addConstr({b} == {val}, name={self._format_name_expr(constr_name_prefix, f'_lit_{b}')} )"
-                )
-                return b
-            raise ValueError(f"Unsupported boolean expression type for auxiliary binary: {t}")
-
-        if is_composite_boolean(constraint_node["antecedent"]) or is_composite_boolean(constraint_node["consequent"]):
-            ant_bin = _boolean_expr_to_binary(constraint_node["antecedent"], current_iterators)
-            cons_bin = _boolean_expr_to_binary(constraint_node["consequent"], current_iterators)
-            # PATCH: ensure name honors label (if any)
-            self._add_code_line(
-                f"model.addConstr({ant_bin} <= {cons_bin}, name={self._format_name_expr(constr_name_prefix, '_impl_bin')})"
+    def _emit_implication_consequent(
+        self, cons_op, cons_left_expr, cons_right_expr, bigM_cons, flag_var, constr_name_prefix
+    ):
+        if cons_op == "==":
+            constraints = (
+                f"{cons_left_expr} - {cons_right_expr} <= {EQ_TOL} + {bigM_cons} * (1 - {flag_var})",
+                f"{cons_right_expr} - {cons_left_expr} <= {EQ_TOL} + {bigM_cons} * (1 - {flag_var})",
+                f"{cons_left_expr} - {cons_right_expr} >= -{EQ_TOL} - {bigM_cons} * (1 - {flag_var})",
+                f"{cons_right_expr} - {cons_left_expr} >= -{EQ_TOL} - {bigM_cons} * (1 - {flag_var})",
             )
-            return
+            suffixes = ("_cons_eq1", "_cons_eq2", "_cons_eq3", "_cons_eq4")
+        elif cons_op == ">=":
+            constraints = (f"{cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var})",)
+            suffixes = ("_cons_ge",)
+        elif cons_op == ">":
+            constraints = (f"{cons_left_expr} - {cons_right_expr} >= {EPS} - {bigM_cons} * (1 - {flag_var})",)
+            suffixes = ("_cons_gt",)
+        elif cons_op == "<=":
+            constraints = (f"{cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var})",)
+            suffixes = ("_cons_le",)
+        elif cons_op == "<":
+            constraints = (f"{cons_left_expr} - {cons_right_expr} <= -{EPS} + {bigM_cons} * (1 - {flag_var})",)
+            suffixes = ("_cons_lt",)
+        else:
+            raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")
 
-        def wrap_boolean_literal_as_constraint(node):
-            if node.get("type") == "boolean_literal":
-                return {
-                    "type": "constraint",
-                    "op": "==",
-                    "left": node,
-                    "right": {
-                        "type": "boolean_literal",
-                        "value": True,
-                        "sem_type": "boolean",
-                    },
-                }
-            return node
+        for constraint, suffix in zip(constraints, suffixes):
+            self._add_code_line(
+                f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})"
+            )
 
-        # Remaining processing (linear antecedent/consequent case)
-        antecedent = wrap_boolean_literal_as_constraint(constraint_node["antecedent"])
-        consequent = wrap_boolean_literal_as_constraint(constraint_node["consequent"])
-
-        # Derive big-M for implication (use max of antecedent & consequent diff bounds) else fallback
-        bigM_default = 1e6
-
-        def extract_linear_constraint(node):
-            if node.get("type") == "constraint":
-                left_node = node["left"]
-                # Unwrap parenthesized_expression
-                if left_node.get("type") == "parenthesized_expression":
-                    left_node = left_node["expression"]
-                if left_node.get("type") == "binop" and left_node.get("sem_type") == "boolean":
-                    # Comparison binop: extract its numeric sides and operator
-                    left = left_node["left"]
-                    right = left_node["right"]
-                    op = left_node["op"]
-                else:
-                    # Already a normalized constraint: assume left/right numeric and op is comparison
-                    left = node["left"]
-                    right = node["right"]
-                    op = node["op"]
-            elif node.get("type") == "binop":
-                left = node["left"]
-                right = node["right"]
-                op = node["op"]
-            else:
-                raise ValueError("Implication constraints must be between constraints or binops.")
-            left_expr = self._traverse_expression(left, current_iterators)
-            right_expr = self._traverse_expression(right, current_iterators)
-            return left, right, op, left_expr, right_expr
-
-        # Extract both raw nodes and string expressions
-        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = extract_linear_constraint(antecedent)
-        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = extract_linear_constraint(consequent)
-        # Compute separate big-M values for antecedent and consequent
-        M_ant = _estimate_bigM_for_difference(ant_left, ant_right)
-        M_cons = _estimate_bigM_for_difference(cons_left, cons_right)
-        bigM_ant = M_ant if M_ant is not None else bigM_default
-        bigM_cons = M_cons if M_cons is not None else bigM_default
-        eps_sep = EQ_TOL  # epsilon for equality separation on >=/<=
-
-        # Try to use indicator constraint if antecedent is a binary variable equality/inequality
+    def _emit_specialized_implication_indicator(
+        self,
+        ant_left,
+        ant_right,
+        ant_op,
+        ant_left_expr,
+        ant_right_expr,
+        cons_left,
+        cons_right,
+        cons_op,
+        cons_left_expr,
+        cons_right_expr,
+        constr_name_prefix,
+    ):
         def is_binary_var(node):
             if node.get("type") == "name":
                 varname = node["value"]
@@ -1605,89 +1375,297 @@ class GurobiCodeGenerator:
             else:
                 return False
             decl = self._find_declaration_by_name(varname)
-            if decl and decl.get("type") in ("dvar", "dvar_indexed"):
-                return decl.get("var_type") == "boolean"
+            return bool(decl and decl.get("type") in ("dvar", "dvar_indexed") and decl.get("var_type") == "boolean")
+
+        consequent_is_true = cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True
+        consequent_is_one = cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0
+        if cons_op == "==" and is_binary_var(cons_left) and (consequent_is_one or consequent_is_true):
+            if ant_op == ">" and ant_right.get("type") == "number":
+                self._add_code_line(
+                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra')})"
+                )
+                return True
+            if ant_op == ">=" and ant_right.get("type") == "number":
+                try:
+                    adjusted = float(ant_right.get("value", 0)) - EPS
+                    consequent_expr = f"{ant_left_expr} <= {adjusted}"
+                except Exception:
+                    consequent_expr = f"{ant_left_expr} <= ({ant_right_expr} - {EPS})"
+                self._add_code_line(
+                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {consequent_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
+                )
+                return True
+
+        if ant_op not in ("==", ">=", "<=") or not is_binary_var(ant_left):
             return False
+        try:
+            rhs_val = float(ant_right.get("value", 0))
+        except (TypeError, ValueError):
+            return False
+        indicator_value = None
+        if ant_op == "==" and rhs_val in (0, 1):
+            indicator_value = int(rhs_val)
+        elif ant_op == ">=" and rhs_val == 1:
+            indicator_value = 1
+        elif ant_op == "<=" and rhs_val == 0:
+            indicator_value = 0
+        if indicator_value is None or cons_op not in ("==", ">=", "<=", ">", "<"):
+            return False
+        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
+        self._add_code_line(
+            f"model.addGenConstrIndicator({ant_left_expr}, {indicator_value}, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
+        )
+        return True
 
-        # Specialized pattern A: (linear_expr > c) => (binvar == 1)
-        # Contrapositive: (binvar == 0) => linear_expr <= c   [no epsilon]
-        if (
-            cons_op == "=="
-            and is_binary_var(cons_left)
-            and (
-                (cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0)
-                or (cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True)
+    @staticmethod
+    def _normalize_boolean_aux_node(node):
+        if node.get("type") == "constraint":
+            op = node.get("op")
+            if op in ("==", "<", ">", "<=", ">="):
+                return {
+                    "type": "binop",
+                    "op": op,
+                    "left": node["left"],
+                    "right": node["right"],
+                    "sem_type": "boolean",
+                }
+        if node.get("type") == "parenthesized_expression":
+            return GurobiCodeGenerator._normalize_boolean_aux_node(node["expression"])
+        if node.get("type") == "constraint" and node.get("op") == "==" and isinstance(node.get("left"), dict):
+            left = node["left"]
+            right = node.get("right")
+            if left.get("type") in ("and", "or", "not") and (
+                not isinstance(right, dict) or right.get("type") == "boolean_literal"
+            ):
+                return left
+        return node
+
+    @staticmethod
+    def _is_composite_boolean(node):
+        if not isinstance(node, dict):
+            return False
+        node_type = node.get("type")
+        if node_type == "parenthesized_expression":
+            return GurobiCodeGenerator._is_composite_boolean(node.get("expression"))
+        if node_type in ("and", "or", "not"):
+            return True
+        if node_type != "constraint" or node.get("op") != "==":
+            return False
+        left = node.get("left")
+        right = node.get("right")
+        return (
+            isinstance(left, dict)
+            and left.get("type") in ("and", "or", "not")
+            and (not isinstance(right, dict) or right.get("type") == "boolean_literal")
+        )
+
+    @staticmethod
+    def _wrap_boolean_literal_as_constraint(node):
+        if node.get("type") != "boolean_literal":
+            return node
+        return {
+            "type": "constraint",
+            "op": "==",
+            "left": node,
+            "right": {
+                "type": "boolean_literal",
+                "value": True,
+                "sem_type": "boolean",
+            },
+        }
+
+    def _estimate_big_m_for_difference(self, left_node, right_node):
+        left_bounds = self._linear_bounds_safe(left_node)
+        right_bounds = self._linear_bounds_safe(right_node)
+        if left_bounds is None or right_bounds is None:
+            return None
+        if any(value is None for value in (*left_bounds, *right_bounds)):
+            return None
+        left_lower, left_upper = left_bounds
+        right_lower, right_upper = right_bounds
+        difference_lower = left_lower - right_upper
+        difference_upper = left_upper - right_lower
+        return max(abs(difference_lower), abs(difference_upper), 1e-9)
+
+    def _extract_implication_constraint(self, node, current_iterators):
+        if node.get("type") == "constraint":
+            left_node = self._unwrap_parenthesized(node["left"])
+            if left_node.get("type") == "binop" and left_node.get("sem_type") == "boolean":
+                left = left_node["left"]
+                right = left_node["right"]
+                operator = left_node["op"]
+            else:
+                left = node["left"]
+                right = node["right"]
+                operator = node["op"]
+        elif node.get("type") == "binop":
+            left = node["left"]
+            right = node["right"]
+            operator = node["op"]
+        else:
+            raise ValueError("Implication constraints must be between constraints or binops.")
+        left_expression = self._traverse_expression(left, current_iterators)
+        right_expression = self._traverse_expression(right, current_iterators)
+        return left, right, operator, left_expression, right_expression
+
+    def _bind_implication_comparison_to_binary(
+        self, binary, comparison, iterators, constr_name_prefix
+    ):
+        left, right, operator, left_expression, right_expression = (
+            self._extract_implication_constraint(comparison, iterators)
+        )
+        estimated_big_m = self._estimate_big_m_for_difference(left, right)
+        big_m = estimated_big_m if estimated_big_m is not None else 1e6
+        epsilon = 0
+        if operator == ">=":
+            constraints = (
+                (f"{left_expression} - {right_expression} >= -{big_m} * (1 - {binary})", f"_aux_ge_{binary}"),
+                (f"{left_expression} - {right_expression} <= {big_m} * {binary}", f"_aux_ge_relax_{binary}"),
             )
-            and ant_op == ">"
-            and ant_right.get("type") == "number"
-        ):
-            # RHS is a numeric literal: use it directly
+        elif operator == ">":
+            constraints = (
+                (f"{left_expression} - {right_expression} >= {epsilon} - {big_m} * (1 - {binary})", f"_aux_gt_{binary}"),
+                (f"{left_expression} - {right_expression} <= {big_m} * {binary}", f"_aux_gt_relax_{binary}"),
+            )
+        elif operator == "<=":
+            constraints = (
+                (f"{left_expression} - {right_expression} <= {big_m} * (1 - {binary})", f"_aux_le_{binary}"),
+                (f"{left_expression} - {right_expression} >= -{big_m} * {binary}", f"_aux_le_relax_{binary}"),
+            )
+        elif operator == "<":
+            constraints = (
+                (f"{left_expression} - {right_expression} <= -{epsilon} + {big_m} * (1 - {binary})", f"_aux_lt_{binary}"),
+                (f"{left_expression} - {right_expression} >= 0 - {big_m} * {binary}", f"_aux_lt_relax_{binary}"),
+            )
+        elif operator == "==":
+            constraints = (
+                (f"{left_expression} - {right_expression} <= {epsilon} + {big_m} * (1 - {binary})", f"_aux_eq1_{binary}"),
+                (f"{right_expression} - {left_expression} <= {epsilon} + {big_m} * (1 - {binary})", f"_aux_eq2_{binary}"),
+                (f"{left_expression} - {right_expression} >= -{epsilon} - {big_m} * (1 - {binary})", f"_aux_eq3_{binary}"),
+                (f"{right_expression} - {left_expression} >= -{epsilon} - {big_m} * (1 - {binary})", f"_aux_eq4_{binary}"),
+            )
+        else:
+            raise ValueError(
+                f"Unsupported comparison operator in boolean linearization: {operator}"
+            )
+        for constraint, suffix in constraints:
             self._add_code_line(
-                f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra')})"
+                f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})"
             )
-            return
 
-        # Specialized pattern B: (linear_expr >= c) => (binvar == 1)
-        # Contrapositive: (binvar == 0) => linear_expr <= c - EPS
+    def _new_implication_boolean_aux(self, prefix, constr_name_prefix):
+        self._bool_aux_counter = getattr(self, "_bool_aux_counter", 0) + 1
+        name = f"{prefix}_b{self._bool_aux_counter}_{constr_name_prefix}"
+        self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}')")
+        return name
+
+    def _boolean_expr_to_binary(self, node, iterators, constr_name_prefix):
+        node = self._normalize_boolean_aux_node(node)
         if (
-            cons_op == "=="
-            and is_binary_var(cons_left)
-            and (
-                (cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0)
-                or (cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True)
-            )
-            and ant_op == ">="
-            and ant_right.get("type") == "number"
+            node.get("type") in ("constraint", "binop")
+            and node.get("sem_type") == "boolean"
+            and node.get("type") not in ("and", "or", "not")
         ):
-            epsilon_small = EPS
-            # Prefer numeric if possible, otherwise subtract symbolically
-            try:
-                c_numeric = float(ant_right.get("value", 0))
-                adjusted = c_numeric - epsilon_small
+            binary = self._new_implication_boolean_aux("cmp", constr_name_prefix)
+            self._bind_implication_comparison_to_binary(
+                binary, node, iterators, constr_name_prefix
+            )
+            return binary
+        node_type = node.get("type")
+        if node_type == "not":
+            inner = self._boolean_expr_to_binary(
+                node["value"], iterators, constr_name_prefix
+            )
+            binary = self._new_implication_boolean_aux("not", constr_name_prefix)
+            self._add_code_line(
+                f"model.addConstr({binary} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{binary}')} )"
+            )
+            return binary
+        if node_type in ("and", "or"):
+            left = self._boolean_expr_to_binary(
+                node["left"], iterators, constr_name_prefix
+            )
+            right = self._boolean_expr_to_binary(
+                node["right"], iterators, constr_name_prefix
+            )
+            binary = self._new_implication_boolean_aux(node_type, constr_name_prefix)
+            if node_type == "and":
+                bounds = (f"{binary} <= {left}", f"{binary} <= {right}", f"{binary} >= {left} + {right} - 1")
+            else:
+                bounds = (f"{binary} >= {left}", f"{binary} >= {right}", f"{binary} <= {left} + {right}")
+            for index, bound in enumerate(bounds, 1):
                 self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {adjusted}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
+                    f"model.addConstr({bound}, name={self._format_name_expr(constr_name_prefix, f'_{node_type}{index}_{binary}')} )"
                 )
-            except Exception:
-                self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= ({ant_right_expr} - {epsilon_small}), name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
-                )
+            return binary
+        if node_type == "boolean_literal":
+            binary = self._new_implication_boolean_aux("lit", constr_name_prefix)
+            value = 1 if node.get("value") else 0
+            self._add_code_line(
+                f"model.addConstr({binary} == {value}, name={self._format_name_expr(constr_name_prefix, f'_lit_{binary}')} )"
+            )
+            return binary
+        raise ValueError(f"Unsupported boolean expression type for auxiliary binary: {node_type}")
+
+    def _constraint_implication_constraint(self, constraint_node, constr_name_prefix, current_iterators):
+        """
+        Handles implication constraints: <constraint> => <constraint>.
+        Uses Gurobi indicator constraints when possible, otherwise falls back to big-M encoding.
+        """
+
+        if self._is_composite_boolean(
+            constraint_node["antecedent"]
+        ) or self._is_composite_boolean(constraint_node["consequent"]):
+            ant_bin = self._boolean_expr_to_binary(
+                constraint_node["antecedent"], current_iterators, constr_name_prefix
+            )
+            cons_bin = self._boolean_expr_to_binary(
+                constraint_node["consequent"], current_iterators, constr_name_prefix
+            )
+            # PATCH: ensure name honors label (if any)
+            self._add_code_line(
+                f"model.addConstr({ant_bin} <= {cons_bin}, name={self._format_name_expr(constr_name_prefix, '_impl_bin')})"
+            )
             return
 
-        # Indicator constraint: (binvar == 1) => (linear constraint)
-        # Supported: antecedent is (binvar == 1) or (binvar == 0) or (binvar >= 1) or (binvar <= 0)
-        indicator_used = False
-        if ant_op in ("==", ">=", "<=") and is_binary_var(ant_left):
-            try:
-                rhs_val = float(ant_right.get("value", 0))
-                if ant_op == "==" and rhs_val in (0, 1):
-                    binval = int(rhs_val)
-                    # Consequent must be a linear constraint
-                    if cons_op in ("==", ">=", "<=", ">", "<"):
-                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
-                        self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, {binval}, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
-                        )
-                        indicator_used = True
-                elif ant_op == ">=" and rhs_val == 1:
-                    # (binvar >= 1) is equivalent to (binvar == 1)
-                    if cons_op in ("==", ">=", "<=", ">", "<"):
-                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
-                        self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 1, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
-                        )
-                        indicator_used = True
-                elif ant_op == "<=" and rhs_val == 0:
-                    # (binvar <= 0) is equivalent to (binvar == 0)
-                    if cons_op in ("==", ">=", "<=", ">", "<"):
-                        indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
-                        self._add_code_line(
-                            f"model.addGenConstrIndicator({ant_left_expr}, 0, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
-                        )
-                        indicator_used = True
-            except Exception:
-                pass
+        # Remaining processing (linear antecedent/consequent case)
+        antecedent = self._wrap_boolean_literal_as_constraint(
+            constraint_node["antecedent"]
+        )
+        consequent = self._wrap_boolean_literal_as_constraint(
+            constraint_node["consequent"]
+        )
 
-        if indicator_used:
+        # Derive big-M for implication (use max of antecedent & consequent diff bounds) else fallback
+        bigM_default = 1e6
+
+        # Extract both raw nodes and string expressions
+        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = (
+            self._extract_implication_constraint(antecedent, current_iterators)
+        )
+        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = (
+            self._extract_implication_constraint(consequent, current_iterators)
+        )
+        # Compute separate big-M values for antecedent and consequent
+        M_ant = self._estimate_big_m_for_difference(ant_left, ant_right)
+        M_cons = self._estimate_big_m_for_difference(cons_left, cons_right)
+        bigM_ant = M_ant if M_ant is not None else bigM_default
+        bigM_cons = M_cons if M_cons is not None else bigM_default
+        eps_sep = EQ_TOL  # epsilon for equality separation on >=/<=
+
+        if self._emit_specialized_implication_indicator(
+            ant_left,
+            ant_right,
+            ant_op,
+            ant_left_expr,
+            ant_right_expr,
+            cons_left,
+            cons_right,
+            cons_op,
+            cons_left_expr,
+            cons_right_expr,
+            constr_name_prefix,
+        ):
             return
 
         # Robust big-M encoding for general linear implication: flag_var == 1 iff antecedent holds
@@ -1748,37 +1726,14 @@ class GurobiCodeGenerator:
             raise ValueError(f"Unsupported antecedent operator in implication: {ant_op}")
 
         # 2. Enforce consequent only when flag_var == 1 (use bigM_cons)
-        if cons_op == "==":
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq1')})"
-            )
-            self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} <= {eps_sep} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq2')})"
-            )
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq3')})"
-            )
-            self._add_code_line(
-                f"model.addConstr({cons_right_expr} - {cons_left_expr} >= -{eps_sep} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_eq4')})"
-            )
-        elif cons_op == ">=":
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_ge')})"
-            )
-        elif cons_op == ">":
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} >= {eps} - {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_gt')})"
-            )
-        elif cons_op == "<=":
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_le')})"
-            )
-        elif cons_op == "<":
-            self._add_code_line(
-                f"model.addConstr({cons_left_expr} - {cons_right_expr} <= -{eps} + {bigM_cons} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_cons_lt')})"
-            )
-        else:
-            raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")
+        self._emit_implication_consequent(
+            cons_op,
+            cons_left_expr,
+            cons_right_expr,
+            bigM_cons,
+            flag_var,
+            constr_name_prefix,
+        )
 
     # === Declaration Node Handlers ===
     def _decl_tuple_type(self, decl):
