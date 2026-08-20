@@ -60,9 +60,7 @@ class TestCLI(unittest.TestCase):
             settings.write_text('{"time_limit": 2.5}', encoding="utf-8")
 
             with patch("pyopl.pyopl_cli._run_solve", return_value={"status": "OPTIMAL"}) as solve_mock:
-                ret = pyopl_cli.main(
-                    ["solve", str(model), "--solver", "highs", "--solver-settings", str(settings)]
-                )
+                ret = pyopl_cli.main(["solve", str(model), "--solver", "highs", "--solver-settings", str(settings)])
 
         self.assertEqual(ret, 0)
         solve_mock.assert_called_once_with(model, None, "scipy", {"time_limit": 2.5})

@@ -1,5 +1,5 @@
-import unittest
 import os
+import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -31,7 +31,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 os.chdir(tmpdir)
                 settings_path = Path(os.getcwd(), "highs.json")
                 with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=mock.Mock()):
-                    with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process) as process_cls:
+                    with mock.patch.object(
+                        pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process
+                    ) as process_cls:
                         started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
             finally:
                 os.chdir(old_cwd)

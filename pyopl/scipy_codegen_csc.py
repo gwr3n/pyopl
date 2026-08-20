@@ -2283,9 +2283,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
         if not env:
-            cache = getattr(self, "_static_iterator_domain_cache", None)
+            cache: dict[int, list[Any]] | None = getattr(self, "_static_iterator_domain_cache", None)
             if cache is None:
-                cache = self._static_iterator_domain_cache = {}
+                cache = {}
+                self._static_iterator_domain_cache = cache
             cache_key = id(iterator)
             if cache_key in cache:
                 return cache[cache_key]
@@ -2449,9 +2450,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return [(env, (value,))]
 
     def _iterator_domain_contains(self, iterator: dict, domain: list, value: Any) -> bool:
-        cache = getattr(self, "_iterator_domain_membership_cache", None)
+        cache: dict[int, frozenset[Any]] | None = getattr(self, "_iterator_domain_membership_cache", None)
         if cache is None:
-            cache = self._iterator_domain_membership_cache = {}
+            cache = {}
+            self._iterator_domain_membership_cache = cache
         cache_key = id(iterator)
         members = cache.get(cache_key)
         if members is None:

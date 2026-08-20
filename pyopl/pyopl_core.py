@@ -5714,7 +5714,7 @@ def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[
         dict: A dictionary containing the optimization results if successful,
               or status/error information otherwise.
     """
-    results = {
+    results: dict[str, Any] = {
         "status": "FAILED",
         "message": "An unexpected error occurred during compilation or execution.",
         "solution": {},
