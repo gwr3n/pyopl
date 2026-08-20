@@ -52,6 +52,21 @@ class TestCLI(unittest.TestCase):
         self.assertNotEqual(ret, 0)
         self.assertIn("model file not found", err_buf.getvalue())
 
+    def test_cli_loads_solver_settings_json(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model = Path(tmp_dir) / "model.mod"
+            settings = Path(tmp_dir) / "settings.json"
+            model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            settings.write_text('{"time_limit": 2.5}', encoding="utf-8")
+
+            with patch("pyopl.pyopl_cli._run_solve", return_value={"status": "OPTIMAL"}) as solve_mock:
+                ret = pyopl_cli.main(
+                    ["solve", str(model), "--solver", "highs", "--solver-settings", str(settings)]
+                )
+
+        self.assertEqual(ret, 0)
+        solve_mock.assert_called_once_with(model, None, "scipy", {"time_limit": 2.5})
+
     def test_cli_compare_models_json(self):
         result = {
             "status": "equivalent",

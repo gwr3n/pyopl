@@ -1,4 +1,5 @@
 import unittest
+import os
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -12,6 +13,35 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_start_solver_process_loads_settings_from_working_directory(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
+        dummy = SimpleNamespace(
+            _solver_queue=None,
+            _solver_process=None,
+            status_var=mock.Mock(),
+            _append_output=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        process = mock.Mock()
+
+        with TemporaryDirectory() as tmpdir:
+            Path(tmpdir, "highs.json").write_text('{"time_limit": 4.0}', encoding="utf-8")
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=mock.Mock()):
+                    with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process) as process_cls:
+                        started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertTrue(started)
+        process_cls.assert_called_once_with(
+            target=pyopl_ide_bootstrap._solve_wrapper,
+            args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_queue),
+        )
+        process.start.assert_called_once_with()
+
     def test_export_model_dialog_supports_lp_and_mps(self):
         class DummyText:
             def __init__(self, value):

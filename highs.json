@@ -1,0 +1,11 @@
+{
+	"disp": false,
+	"dual_feasibility_tolerance": 1e-07,
+	"ipm_optimality_tolerance": 1e-08,
+	"maxiter": null,
+	"mip_rel_gap": 0.0001,
+	"presolve": true,
+	"primal_feasibility_tolerance": 1e-07,
+	"simplex_dual_edge_weight_strategy": null,
+	"time_limit": null
+}

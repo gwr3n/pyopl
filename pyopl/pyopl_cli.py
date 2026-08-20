@@ -43,9 +43,19 @@ def _write_text(path: Path, text: str) -> None:
         f.write(text)
 
 
-def _run_solve(model_path: Path, data_path: Optional[Path], solver_key: str):
+def _run_solve(
+    model_path: Path,
+    data_path: Optional[Path],
+    solver_key: str,
+    solver_settings: Optional[dict] = None,
+):
     try:
-        results = solve(str(model_path), str(data_path) if data_path else None, solver=solver_key)
+        results = solve(
+            str(model_path),
+            str(data_path) if data_path else None,
+            solver=solver_key,
+            solver_settings=solver_settings,
+        )
         return results
     except Exception:
         raise
@@ -109,6 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_solve.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
     p_solve.add_argument("--out", choices=["json", "py", "lp", "mps"], default="json", help="Output format")
     p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
+    p_solve.add_argument("--solver-settings", help="Path to a JSON object containing backend-native solver settings")
 
     # compare subcommand
     p_compare = subparsers.add_parser("compare", help="Compare two models for MILP equivalence")
@@ -177,9 +188,17 @@ def _handle_solve(args: argparse.Namespace) -> int:
 
     solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
     try:
+        solver_settings = None
+        if args.solver_settings:
+            settings_path = Path(args.solver_settings)
+            if not _validate_input_file(settings_path, "solver settings"):
+                return 2
+            solver_settings = json.loads(_read_text(settings_path))
+            if not isinstance(solver_settings, dict):
+                raise ValueError("solver settings JSON must contain an object at the top level")
         if args.out == "json":
             with redirect_stdout(sys.stderr):
-                results = _run_solve(model_path, data_path, solver_key)
+                results = _run_solve(model_path, data_path, solver_key, solver_settings)
             out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
             if args.out_file:
                 _write_text(Path(args.out_file), out_text)

@@ -101,6 +101,13 @@ class GurobiCodeGenerator:
         self._add_code_line("model = gp.Model('OPLModel')")
         self._add_code_line("model.Params.OutputFlag = 1")
         self._add_code_line("model.Params.LogToConsole = 1")
+        self._add_code_line("for _param_name, _param_value in globals().get('_pyopl_solver_settings', {}).items():")
+        self.indent_level += 1
+        self._add_code_line("if _param_value is not None:")
+        self.indent_level += 1
+        self._add_code_line("model.setParam(_param_name, _param_value)")
+        self.indent_level -= 1
+        self.indent_level -= 1
         self._add_code_line("")
         self._generate_declarations(self.ast["declarations"])
         self._generate_objective(self.ast["objective"])

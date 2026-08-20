@@ -239,7 +239,13 @@ class _FdLogRedirector:
             self._writer.write(text)
 
 
-def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multiprocessing.Queue) -> None:
+def _solve_wrapper(
+    model_file: str,
+    data_file: str,
+    solver_choice: str,
+    solver_settings: Optional[dict[str, Any]],
+    q: multiprocessing.Queue,
+) -> None:
     """Wrapper to run solve in a separate process."""
     old_stdout = sys.stdout
     old_stderr = sys.stderr
@@ -259,7 +265,13 @@ def _solve_wrapper(model_file: str, data_file: str, solver_choice: str, q: multi
                 pass
 
         with _FdLogRedirector(log_writer):
-            results = solve(model_file, data_file, solver=solver_choice, progress_callback=_progress)
+            results = solve(
+                model_file,
+                data_file,
+                solver=solver_choice,
+                progress_callback=_progress,
+                solver_settings=solver_settings,
+            )
         log_writer.flush()
         q.put(("success", results))
     except Exception as e:
@@ -4308,10 +4320,18 @@ class OPLIDE(tk.Tk):
         operation: _ForegroundOperation,
     ) -> bool:
         try:
+            settings_name = "gurobi.json" if solver_choice == "gurobi" else "highs.json"
+            settings_path = os.path.join(os.getcwd(), settings_name)
+            solver_settings = None
+            if os.path.isfile(settings_path):
+                with open(settings_path, "r", encoding="utf-8") as settings_file:
+                    solver_settings = json.load(settings_file)
+                if not isinstance(solver_settings, dict):
+                    raise ValueError(f"{settings_name} must contain a JSON object.")
             self._solver_queue = multiprocessing.Queue()
             self._solver_process = multiprocessing.Process(
                 target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, self._solver_queue),
+                args=(model_file, data_file, solver_choice, solver_settings, self._solver_queue),
             )
             self._solver_process.start()
         except Exception as exc:

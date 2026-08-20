@@ -124,6 +124,21 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
+    def test_generated_solvers_apply_injected_settings(self):
+        ast = {
+            "declarations": [{"type": "dvar", "var_type": "float+", "name": "x"}],
+            "objective": {"type": "minimize", "expression": _name("x")},
+            "constraints": [],
+        }
+
+        gurobi_code = GurobiCodeGenerator(ast).generate_code()
+        scipy_code = SciPyCSCCodeGenerator(ast).generate_code()
+
+        self.assertIn("globals().get('_pyopl_solver_settings', {})", gurobi_code)
+        self.assertIn("model.setParam(_param_name, _param_value)", gurobi_code)
+        self.assertIn("solver_options.update", scipy_code)
+        self.assertIn("options=solver_options", scipy_code)
+
     def test_scipy_codegen_factory_rejects_unknown_mode(self):
         ast = {
             "declarations": [],

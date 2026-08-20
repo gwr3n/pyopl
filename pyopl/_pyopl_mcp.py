@@ -25,7 +25,7 @@ from __future__ import annotations
 import tempfile
 from importlib.resources import files
 from pathlib import Path
-from typing import Optional, TypeVar, Union
+from typing import Any, Optional, TypeVar, Union
 
 from mcp.server.fastmcp import FastMCP
 
@@ -96,21 +96,22 @@ def solve_from_files(
     model_path: PathLike,
     data_path: Optional[PathLike] = None,
     solver: str = DEFAULT_SOLVER,
+    solver_settings: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Solve a model from filesystem paths."""
     model_p = Path(model_path)
     data_p = Path(data_path) if data_path else None
-    return solve(
-        str(model_p),
-        str(data_p) if data_p else None,
-        solver=_solve_backend(solver),
-    )
+    solve_args = (str(model_p), str(data_p) if data_p else None)
+    if solver_settings is None:
+        return solve(*solve_args, solver=_solve_backend(solver))
+    return solve(*solve_args, solver=_solve_backend(solver), solver_settings=solver_settings)
 
 
 def solve_from_strings(
     model_text: str,
     data_text: Optional[str] = None,
     solver: str = DEFAULT_SOLVER,
+    solver_settings: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Solve a model provided as strings."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -122,7 +123,9 @@ def solve_from_strings(
             data_file = Path(tmp_dir) / "data.dat"
             data_file.write_text(data_text, encoding="utf-8")
 
-        return solve_from_files(model_file, data_file, solver=solver)
+        if solver_settings is None:
+            return solve_from_files(model_file, data_file, solver=solver)
+        return solve_from_files(model_file, data_file, solver=solver, solver_settings=solver_settings)
 
 
 def export_py_from_files(
@@ -179,6 +182,7 @@ def solve_files_tool(
     model_path: str,
     data_path: Optional[str] = None,
     solver: str = DEFAULT_SOLVER,
+    solver_settings: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Solve an optimization model from `.mod` and optional `.dat` files.
 
@@ -192,7 +196,9 @@ def solve_files_tool(
         A dictionary containing solver outputs (status, objective value, variable
         assignments, and any solver metadata) as produced by :func:`solve`.
     """
-    return solve_from_files(model_path, data_path, solver)
+    if solver_settings is None:
+        return solve_from_files(model_path, data_path, solver)
+    return solve_from_files(model_path, data_path, solver, solver_settings)
 
 
 # @mcp.tool()
@@ -228,6 +234,7 @@ def solve_strings_tool(
     model_text: str,
     data_text: Optional[str] = None,
     solver: str = DEFAULT_SOLVER,
+    solver_settings: Optional[dict[str, Any]] = None,
 ) -> dict:
     """Solve an OPL model and optional data provided as strings.
 
@@ -236,13 +243,16 @@ def solve_strings_tool(
         data_text: Optional OPL data file contents as a string.
         solver: Solver name or alias. This maps to the internal solver
             backends (for example, ``highs`` -> SciPy/HiGHS or ``gurobi``).
+        solver_settings: Optional backend-native solver settings object.
 
     Returns:
         A dictionary containing solver outputs (status, objective value,
         variable assignments, and any solver metadata) as produced by
         :func:`solve`.
     """
-    return solve_from_strings(model_text, data_text, solver)
+    if solver_settings is None:
+        return solve_from_strings(model_text, data_text, solver)
+    return solve_from_strings(model_text, data_text, solver, solver_settings)
 
 
 @mcp.tool()

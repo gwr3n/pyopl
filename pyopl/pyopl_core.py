@@ -5554,6 +5554,7 @@ def solve(
     data_file: Optional[str] = None,
     solver: str = "gurobi",
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    solver_settings: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Solves an OPL model using the specified solver.
@@ -5562,20 +5563,33 @@ def solve(
         model_file (str): Path to the .mod or .opl model file.
         data_file (str, optional): Path to the .dat data file.
         solver (str): The solver to use ('gurobi' or 'scipy').
+        solver_settings (dict, optional): Backend-native solver parameter values.
 
     Returns:
         dict: A dictionary containing the optimization results if successful,
               or status/error information otherwise.
     """
+    if solver_settings is not None and not isinstance(solver_settings, dict):
+        raise TypeError("solver_settings must be a dictionary or None.")
     if solver == "gurobi":
-        return solve_with_gurobi(model_file, data_file, progress_callback=progress_callback)
+        return solve_with_gurobi(
+            model_file,
+            data_file,
+            progress_callback=progress_callback,
+            solver_settings=solver_settings,
+        )
     elif solver == "scipy":
-        return solve_with_scipy(model_file, data_file)
+        return solve_with_scipy(model_file, data_file, solver_settings=solver_settings)
     else:
         raise ValueError(f"Unsupported solver: {solver}")
 
 
-def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Callable[[dict[str, Any]], None]] = None):
+def solve_with_gurobi(
+    model_file,
+    data_file=None,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    solver_settings: Optional[dict[str, Any]] = None,
+):
     """
     Loads an OPL model and optional data from disk,
     generates GurobiPy code, and executes it to solve the model.
@@ -5655,6 +5669,7 @@ def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Ca
             "GRB": GRB,
             "results_container": {},  # This will hold the results from the executed code
             "_pyopl_progress_callback": _pyopl_progress_callback,
+            "_pyopl_solver_settings": dict(solver_settings or {}),
         }
 
         try:
@@ -5689,7 +5704,7 @@ def solve_with_gurobi(model_file, data_file=None, progress_callback: Optional[Ca
     return results
 
 
-def solve_with_scipy(model_file, data_file=None):
+def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[str, Any]] = None):
     """
     Loads an OPL model and optional data from disk,
     generates SciPy linprog code, and executes it to solve the model.
@@ -5740,6 +5755,7 @@ def solve_with_scipy(model_file, data_file=None):
                 "np": __import__("numpy"),
                 "linprog": __import__("scipy.optimize", fromlist=["linprog"]).linprog,
                 "results_container": {},
+                "_pyopl_solver_settings": dict(solver_settings or {}),
             }
             exec(loaded_scipy_code, exec_globals)  # nosec B102
             if "scipy_output" in exec_globals["results_container"]:

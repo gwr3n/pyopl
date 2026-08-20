@@ -2775,6 +2775,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("results_container = {}")
         self.indent_level -= 1
+        self._add_code_line(
+            f"solver_options = {{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
+            f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}}"
+        )
+        self._add_code_line(
+            "solver_options.update({key: value for key, value in globals().get('_pyopl_solver_settings', {}).items() "
+            "if value is not None})"
+        )
         # Emit sense variable for use in sign fix
         sense = self.ast.get("objective", {}).get("type", "minimize")
         self._add_code_line(f"sense = '{sense}'")
@@ -2822,16 +2830,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
                 "bounds=bounds, method='highs', integrality=integrality, "
-                f"options={{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
-                f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}})"
+                "options=solver_options)"
             )
         else:
             self._add_code_line(
                 "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
                 "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
                 "bounds=bounds, method='highs', "
-                f"options={{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
-                f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}})"
+                "options=solver_options)"
             )
         self._add_code_line("end_time = time.time()")
         self._add_code_line(

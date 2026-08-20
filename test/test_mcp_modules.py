@@ -87,6 +87,30 @@ class TestPyOPLMCP(unittest.TestCase):
         self.assertEqual(solve_files_mock.call_count, 1)
         self.assertEqual(captured, {"model_text": "model text", "data_text": "data text", "solver": "gurobi"})
 
+    def test_solve_from_strings_forwards_solver_settings(self):
+        settings = {"TimeLimit": 3.0}
+        captured = {}
+
+        def capture_solve(model_path, data_path, **kwargs):
+            captured["model_text"] = Path(model_path).read_text(encoding="utf-8")
+            captured["data_path"] = data_path
+            captured["kwargs"] = kwargs
+            return {"status": "OK"}
+
+        with patch.object(_pyopl_mcp, "solve_from_files", side_effect=capture_solve) as solve_mock:
+            result = _pyopl_mcp.solve_from_strings("model", solver="gurobi", solver_settings=settings)
+
+        self.assertEqual(result, {"status": "OK"})
+        self.assertEqual(solve_mock.call_count, 1)
+        self.assertEqual(
+            captured,
+            {
+                "model_text": "model",
+                "data_path": None,
+                "kwargs": {"solver": "gurobi", "solver_settings": settings},
+            },
+        )
+
     def test_pyopl_tools_and_public_wrapper_delegate(self):
         with patch.object(_pyopl_mcp, "solve_from_files", return_value={"status": "OK"}) as solve_mock:
             self.assertEqual(_pyopl_mcp.solve_files_tool("m.mod", "d.dat", "highs"), {"status": "OK"})
