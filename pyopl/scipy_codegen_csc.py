@@ -161,42 +161,7 @@ class ExpressionEvaluator:
         if handler:
             result = handler(expr, env)
             logger.debug(f"[EVAL] Handler for type '{t}' returned: {result} (type: {type(result)})")
-            # Accept tuple results for tuple_literal
-            if result is None:
-                logger.error(f"[EVAL] Handler for type '{t}' returned None. Expr: {expr}")
-                raise SemanticError(f"ExpressionEvaluator.eval: handler for type '{t}' returned None (expr={expr})")
-            if isinstance(result, tuple) and len(result) == 2:
-                coef, val = result
-                logger.debug(f"[EVAL] Handler for type '{t}' returned tuple: coef={coef}, val={val} (type(val): {type(val)})")
-                # Accept float/int/str/tuple for value
-                if isinstance(val, (float, int, str, tuple)):
-                    # Always cast int to float for type consistency
-                    if isinstance(val, int):
-                        return coef, float(val)
-                    return coef, val  # type: ignore[return-value]
-                # Dict is only allowed if parent is field_access or field_access_index
-                if isinstance(val, dict):
-                    import inspect
-
-                    # Walk the call stack to find the parent caller
-                    stack = inspect.stack()
-                    parent_types = set()
-                    for frame in stack:
-                        code = frame.function
-                        if code.startswith("_eval_field_access") or code.startswith("_eval_field_access_index"):
-                            parent_types.add(code)
-                    if not parent_types:
-                        logger.error(
-                            f"[EVAL] Handler for type '{t}' returned tuple with dict value: {result}, which is not allowed by type signature."
-                        )
-                        raise SemanticError(
-                            f"ExpressionEvaluator.eval: handler for type '{t}' returned tuple with dict value: {result}, which is not allowed by type signature."
-                        )
-                    # else: allow dict to be returned for field access
-                    return coef, val  # type: ignore[return-value]
-            # If result is not a tuple, raise error
-            logger.error(f"[EVAL] Handler for type '{t}' returned non-tuple result: {result}")
-            raise SemanticError(f"ExpressionEvaluator.eval: handler for type '{t}' returned non-tuple result: {result}")
+            return self._validate_handler_result(t, result)
         # Fallbacks for common literal types
         return self._handle_literal_fallback(t, expr, env)
 
@@ -227,6 +192,36 @@ class ExpressionEvaluator:
     def _get_handler(self, t: str) -> Any:
         """Return the handler method for a given expression type, or None if not found."""
         return getattr(self, f"_eval_{t}", None)
+
+    def _validate_handler_result(self, expression_type: str, result: Any) -> tuple:
+        if result is None:
+            raise SemanticError(f"ExpressionEvaluator.eval: handler for type '{expression_type}' returned None")
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise SemanticError(
+                f"ExpressionEvaluator.eval: handler for type '{expression_type}' returned non-tuple result: {result}"
+            )
+        coef, value = result
+        if isinstance(value, int) and not isinstance(value, bool):
+            value = float(value)
+        if isinstance(value, (float, str, tuple, bool)):
+            return coef, value
+        if isinstance(value, dict):
+            return self._validate_dict_handler_value(expression_type, result, coef, value)
+        raise SemanticError(
+            f"ExpressionEvaluator.eval: handler for type '{expression_type}' returned unsupported value: {result}"
+        )
+
+    def _validate_dict_handler_value(self, expression_type: str, result: tuple, coef: Any, value: dict) -> tuple:
+        import inspect
+
+        if any(
+            frame.function.startswith(("_eval_field_access", "_eval_field_access_index"))
+            for frame in inspect.stack()
+        ):
+            return coef, value
+        raise SemanticError(
+            f"ExpressionEvaluator.eval: handler for type '{expression_type}' returned tuple with dict value: {result}"
+        )
 
     def _eval_boolean_literal(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
         # Map boolean_literal to 1.0 (True) or 0.0 (False)
@@ -683,6 +678,22 @@ class ExpressionEvaluator:
             return out, f"({lconst}) - ({rconst})"
         return out, float(cast(Union[int, float], lconst)) - float(cast(Union[int, float], rconst))
 
+    def _multiply_symbolic(self, left_const, right_const):
+        if isinstance(left_const, (str, tuple)) or isinstance(right_const, (str, tuple)):
+            return {}, f"({left_const}) * ({right_const})"
+        return None
+
+    def _multiply_linear_terms(self, left_dict, right_dict, left_const, right_const):
+        if left_dict and right_dict:
+            raise self.parent._unsupported_type_error("nonlinear term", "variable * variable")
+        if left_dict:
+            factor = float(cast(Union[int, float], right_const))
+            return {key: value * factor for key, value in left_dict.items()}, float(left_const) * factor
+        if right_dict:
+            factor = float(cast(Union[int, float], left_const))
+            return {key: value * factor for key, value in right_dict.items()}, float(right_const) * factor
+        return {}, float(left_const) * float(right_const)
+
     def _handle_binop_mul(
         self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Union[float, str]]:
@@ -695,23 +706,10 @@ class ExpressionEvaluator:
             raise SemanticError(f"_handle_binop_mul: left or right did not return a tuple: left={l_result}, right={r_result}")
         ldict, lconst = l_result
         rdict, rconst = r_result
-        # Symbolic multiply (string or tuple-constant cases)
-        if isinstance(lconst, (str, tuple)) or isinstance(rconst, (str, tuple)):
-            return {}, f"({lconst}) * ({rconst})"
-        # Nonlinear error: variable * variable
-        if ldict and rdict:
-            raise self.parent._unsupported_type_error("nonlinear term", "variable * variable")
-        # variable * constant
-        if ldict and not rdict:
-            rc = float(cast(Union[int, float], rconst))
-            return {k: v * rc for k, v in ldict.items()}, float(cast(Union[int, float], lconst)) * rc
-        elif rdict and not ldict:
-            lc = float(cast(Union[int, float], lconst))
-            return {k: v * lc for k, v in rdict.items()}, float(cast(Union[int, float], rconst)) * lc
-        elif not ldict and not rdict:
-            return {}, float(cast(Union[int, float], lconst)) * float(cast(Union[int, float], rconst))
-        else:
-            raise self.parent._unsupported_type_error("nonlinear term", "variable * variable")
+        symbolic_result = self._multiply_symbolic(lconst, rconst)
+        if symbolic_result is not None:
+            return symbolic_result
+        return self._multiply_linear_terms(ldict, rdict, lconst, rconst)
 
     def _handle_binop_div(
         self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
@@ -1896,48 +1894,48 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             pass
         return 1
 
-    def _lookup_indexed_parameter(self, name: str, indices: list, env: dict, val: object, logger):
-        if isinstance(val, dict) and any(isinstance(key, tuple) for key in val):
-            evaluated_indices = [self._eval_index(index, env) for index in indices]
-            tuple_key = (
-                evaluated_indices[0]
-                if len(evaluated_indices) == 1 and isinstance(evaluated_indices[0], tuple)
-                else tuple(evaluated_indices)
+    def _lookup_composite_parameter(self, val: object, indices: list, env: dict, logger):
+        if not isinstance(val, dict) or not any(isinstance(key, tuple) for key in val):
+            return None
+        evaluated_indices = [self._eval_index(index, env) for index in indices]
+        tuple_key = (
+            evaluated_indices[0]
+            if len(evaluated_indices) == 1 and isinstance(evaluated_indices[0], tuple)
+            else tuple(evaluated_indices)
+        )
+        if tuple_key not in val:
+            return None
+        resolved = val[tuple_key]
+        logger.debug(f"[resolve_parameter] Found composite-key param: {resolved!r}")
+        if isinstance(resolved, (int, float)):
+            return False, float(resolved), False
+        return False, resolved, False
+
+    def _lookup_parameter_dimension(self, name: str, resolved: object, index: object, dimension_index: int, env: dict, logger):
+        evaluated_index = self._eval_index(index, env)
+        logger.debug(
+            f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}"
+        )
+        if isinstance(resolved, dict):
+            logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
+            return resolved[evaluated_index]
+        if isinstance(evaluated_index, float) and evaluated_index.is_integer():
+            evaluated_index = int(evaluated_index)
+        if not isinstance(evaluated_index, int):
+            raise ValueError(
+                f"Index '{index}' could not be resolved to int (got {evaluated_index!r}) "
+                f"for param '{name}' with env={env}"
             )
-            if tuple_key in val:
-                resolved = val[tuple_key]
-                logger.debug(f"[resolve_parameter] Found composite-key param: {resolved!r}")
-                if isinstance(resolved, (int, float)):
-                    return False, float(resolved), False
-                return False, resolved, False
+        if isinstance(resolved, list):
+            start_index = self._parameter_list_start_index(name, dimension_index)
+            offset = evaluated_index - start_index
+            logger.debug(f"[resolve_parameter] List lookup with start={start_index}: v[{offset}] (len={len(resolved)})")
+            return resolved[offset]
+        logger.debug(f"[resolve_parameter] List/dict lookup: v[{evaluated_index}] (type={type(resolved)})")
+        return cast(Any, resolved)[evaluated_index]
 
-        resolved = val
-        for dimension_index, index in enumerate(indices):
-            evaluated_index = self._eval_index(index, env)
-            logger.debug(
-                f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}"
-            )
-            if isinstance(resolved, dict):
-                logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
-                resolved = resolved[evaluated_index]
-                continue
-            if isinstance(evaluated_index, float) and evaluated_index.is_integer():
-                evaluated_index = int(evaluated_index)
-            if not isinstance(evaluated_index, int):
-                raise ValueError(
-                    f"Index '{index}' could not be resolved to int (got {evaluated_index!r}) "
-                    f"for param '{name}' with env={env}"
-                )
-
-            if isinstance(resolved, list):
-                start_index = self._parameter_list_start_index(name, dimension_index)
-                offset = evaluated_index - start_index
-                logger.debug(f"[resolve_parameter] List lookup with start={start_index}: v[{offset}] (len={len(resolved)})")
-                resolved = resolved[offset]
-            else:
-                logger.debug(f"[resolve_parameter] List/dict lookup: v[{evaluated_index}] (type={type(resolved)})")
-                resolved = cast(Any, resolved)[evaluated_index]
-
+    @staticmethod
+    def _normalize_indexed_parameter_result(resolved: object, logger):
         if isinstance(resolved, (int, float)):
             logger.debug(f"[resolve_parameter] Found numeric param: {resolved}")
             return False, float(resolved), False
@@ -1945,6 +1943,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             logger.debug(f"[resolve_parameter] Found indexed param: {resolved!r}")
             return False, resolved, False
         return None
+
+    def _lookup_indexed_parameter(self, name: str, indices: list, env: dict, val: object, logger):
+        composite_result = self._lookup_composite_parameter(val, indices, env, logger)
+        if composite_result is not None:
+            return composite_result
+
+        resolved = val
+        for dimension_index, index in enumerate(indices):
+            resolved = self._lookup_parameter_dimension(name, resolved, index, dimension_index, env, logger)
+        return self._normalize_indexed_parameter_result(resolved, logger)
 
     def _resolve_parameter(
         self,
@@ -3847,8 +3855,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _comparison_key(self, node, env):
         def _bound_key(part):
-            while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
-                part = part.get("expression")
+            part = self._unwrap_comparison_parentheses(part)
             if not isinstance(part, dict):
                 return ("lit", part)
             node_type = part.get("type")
@@ -3865,20 +3872,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if node_type == "binop":
                 return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
             if node_type == "sum":
-                local_iterators = {
-                    it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
-                }
-                env_snapshot = tuple(
-                    sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-                )
-                return (
-                    "sum",
-                    str(part.get("iterators")),
-                    env_snapshot,
-                    _bound_key(part.get("expression")),
-                    _bound_key(part.get("index_constraint")),
-                )
+                return _sum_key(part)
             return (node_type, str(part))
+
+        def _sum_key(part):
+            local_iterators = {
+                it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
+            }
+            env_snapshot = tuple(
+                sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+            )
+            return (
+                "sum",
+                str(part.get("iterators")),
+                env_snapshot,
+                _bound_key(part.get("expression")),
+                _bound_key(part.get("index_constraint")),
+            )
 
         op = node.get("op")
         left = node.get("left")
@@ -4093,20 +4103,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self._bool_bound_key(part.get("right"), env),
             )
         if node_type == "sum":
-            local_iterators = {
-                it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
-            }
-            env_snapshot = tuple(
-                sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-            )
-            return (
-                "sum",
-                str(part.get("iterators")),
-                env_snapshot,
-                self._bool_bound_key(part.get("expression"), env),
-                self._bool_bound_key(part.get("index_constraint"), env),
-            )
+            return self._bool_sum_bound_key(part, env)
         return (node_type, str(part))
+
+    def _bool_sum_bound_key(self, part, env):
+        local_iterators = {
+            it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
+        }
+        env_snapshot = tuple(
+            sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+        )
+        return (
+            "sum",
+            str(part.get("iterators")),
+            env_snapshot,
+            self._bool_bound_key(part.get("expression"), env),
+            self._bool_bound_key(part.get("index_constraint"), env),
+        )
 
     def _bool_atom_key(self, node, env):
         if not isinstance(node, dict) or node.get("type") != "constraint" or node.get("op") != "==":
@@ -4146,6 +4159,26 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return ("eq_link", self._bool_bound_key(right, env), self._bool_struct_key(left, env))
         return None
 
+    def _bool_composite_struct_key(self, node, env):
+        left_key = self._bool_struct_key(node["left"], env)
+        right_key = self._bool_struct_key(node["right"], env)
+        if isinstance(left_key, tuple) and len(left_key) >= 3 and left_key[0] == "eq_link":
+            left_key = left_key[2]
+        if isinstance(right_key, tuple) and len(right_key) >= 3 and right_key[0] == "eq_link":
+            right_key = right_key[2]
+        return (node.get("type"), tuple(sorted([left_key, right_key])))
+
+    def _bool_comparison_struct_key(self, node, env):
+        link_key = self._bool_equality_link_key(node, env)
+        if link_key is not None:
+            return link_key
+        return (
+            "cmp",
+            node.get("op"),
+            self._bool_bound_key(node.get("left"), env),
+            self._bool_bound_key(node.get("right"), env),
+        )
+
     def _bool_struct_key(self, node, env):
         while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
             node = node.get("expression")
@@ -4158,23 +4191,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if node_type == "not":
             return ("not", self._bool_struct_key(node["value"], env))
         if node_type in ("and", "or"):
-            left_key = self._bool_struct_key(node["left"], env)
-            right_key = self._bool_struct_key(node["right"], env)
-            if isinstance(left_key, tuple) and len(left_key) >= 3 and left_key[0] == "eq_link":
-                left_key = left_key[2]
-            if isinstance(right_key, tuple) and len(right_key) >= 3 and right_key[0] == "eq_link":
-                right_key = right_key[2]
-            return (node_type, tuple(sorted([left_key, right_key])))
+            return self._bool_composite_struct_key(node, env)
         if node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
-            link_key = self._bool_equality_link_key(node, env)
-            if link_key is not None:
-                return link_key
-            return (
-                "cmp",
-                node.get("op"),
-                self._bool_bound_key(node.get("left"), env),
-                self._bool_bound_key(node.get("right"), env),
-            )
+            return self._bool_comparison_struct_key(node, env)
         return ("unknown", id(node))
 
     def _new_bool_aux_var(self) -> str:
