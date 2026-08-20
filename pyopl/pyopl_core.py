@@ -2677,56 +2677,30 @@ class OPLParser(Parser):
     def primary(self, p):
         return self._parse_indexed_reference(p)
 
-    def _validate_indexed_dimension(self, declared_dim, used_index, dimension_number, name, lineno):
-        dim_type = declared_dim["type"]
-        if dim_type in ("range_index", "named_range_dimension"):
-            allowed_types = {
-                "number_literal_index",
-                "name_reference_index",
-                "binop",
-                "uminus",
-                "parenthesized_expression",
-                "field_access",
-                "field_access_index",
-            }
-            if used_index["type"] not in allowed_types:
-                raise SemanticError(
-                    f"Unsupported index type for integer/range dimension: {used_index['type']}",
-                    lineno=lineno,
-                )
-            if used_index["type"] == "number_literal_index" and dim_type == "range_index":
-                start_bound = declared_dim["start"]
-                end_bound = declared_dim["end"]
-                if (
-                    isinstance(start_bound, dict)
-                    and start_bound.get("type") == "number"
-                    and isinstance(end_bound, dict)
-                    and end_bound.get("type") == "number"
-                ):
-                    if not (start_bound["value"] <= used_index["value"] <= end_bound["value"]):
-                        raise SemanticError(
-                            f"Index {used_index['value']} for dimension {dimension_number} of '{name}' is out of declared range [{start_bound['value']}..{end_bound['value']}].",
-                            lineno=lineno,
-                        )
-                return used_index
-            index_type = used_index.get("sem_type")
-            if index_type not in ("int", "int+"):
-                logger.debug(
-                    f"[SEMANTIC] Rejecting index for dim {dimension_number} of '{name}': "
-                    f"type={used_index['type']}, sem_type={index_type}"
-                )
-                raise SemanticError(
-                    f"Index expression for dimension {dimension_number} of '{name}' must be integer-valued, got type '{index_type}'.",
-                    lineno=lineno,
-                )
+    def _validate_range_index(self, declared_dim, used_index, dimension_number, name, lineno):
+        allowed_types = {"number_literal_index", "name_reference_index", "binop", "uminus", "parenthesized_expression", "field_access", "field_access_index"}
+        if used_index["type"] not in allowed_types:
+            raise SemanticError(f"Unsupported index type for integer/range dimension: {used_index['type']}", lineno=lineno)
+        if used_index["type"] == "number_literal_index" and declared_dim["type"] == "range_index":
+            start_bound = declared_dim["start"]
+            end_bound = declared_dim["end"]
+            if isinstance(start_bound, dict) and start_bound.get("type") == "number" and isinstance(end_bound, dict) and end_bound.get("type") == "number":
+                if not (start_bound["value"] <= used_index["value"] <= end_bound["value"]):
+                    raise SemanticError(
+                        f"Index {used_index['value']} for dimension {dimension_number} of '{name}' is out of declared range [{start_bound['value']}..{end_bound['value']}].",
+                        lineno=lineno,
+                    )
             return used_index
-
-        if dim_type != "named_set_dimension":
+        index_type = used_index.get("sem_type")
+        if index_type not in ("int", "int+"):
+            logger.debug(f"[SEMANTIC] Rejecting index for dim {dimension_number} of '{name}': type={used_index['type']}, sem_type={index_type}")
             raise SemanticError(
-                f"Dimension {dimension_number} of '{name}' is not indexable. Declared as type: {dim_type}.",
+                f"Index expression for dimension {dimension_number} of '{name}' must be integer-valued, got type '{index_type}'.",
                 lineno=lineno,
             )
+        return used_index
 
+    def _validate_named_set_index(self, declared_dim, used_index, dimension_number, name, lineno):
         set_info = self.symbol_table.get_symbol(declared_dim["name"])
         set_value = set_info.get("value") or {}
         tuple_type = set_value.get("tuple_type") if isinstance(set_value, dict) else None
@@ -2753,6 +2727,17 @@ class OPLParser(Parser):
                 lineno=lineno,
             )
         return used_index
+
+    def _validate_indexed_dimension(self, declared_dim, used_index, dimension_number, name, lineno):
+        dim_type = declared_dim["type"]
+        if dim_type in ("range_index", "named_range_dimension"):
+            return self._validate_range_index(declared_dim, used_index, dimension_number, name, lineno)
+        if dim_type != "named_set_dimension":
+            raise SemanticError(
+                f"Dimension {dimension_number} of '{name}' is not indexable. Declared as type: {dim_type}.",
+                lineno=lineno,
+            )
+        return self._validate_named_set_index(declared_dim, used_index, dimension_number, name, lineno)
 
     def _parse_indexed_reference(self, p):
         # Look up the symbol and check dimensions
@@ -3396,31 +3381,22 @@ class OPLCompiler:
             raise SyntaxError("Syntax error") from None
         raise SyntaxError(f"Syntax error on line {lineno}") from None
 
-    def _prepare_model_ast_and_working_data(
-        self,
-        model_code: str,
-        data_code: Optional[str],
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _parse_model_inputs(self, model_code: str, data_code: Optional[str]) -> tuple[dict[str, Any], dict[str, Any]]:
         data_dict: dict[str, Any] = {}
         if data_code:
             data_tokens = self.data_lexer.tokenize(data_code)
             data_dict = self.data_parser.parse(data_tokens, lexer=self.data_lexer)
-
         model_tokens = list(self.model_lexer.tokenize(model_code))
         logger.debug("[TOKEN_STREAM] Model tokens:")
         for token in model_tokens:
             logger.debug(f"  type={token.type}, value={token.value}")
-        model_ast = self.model_parser.parse(iter(model_tokens))
+        return self.model_parser.parse(iter(model_tokens)), data_dict
 
-        declarations = model_ast.get("declarations") or []
+    @staticmethod
+    def _merge_declaration_data(declarations: list, data_dict: dict[str, Any]) -> dict[str, Any]:
         for decl in declarations:
             decl_type = decl.get("type", "")
-            if decl_type.startswith("parameter"):
-                name = decl.get("name")
-                value = decl.get("value")
-                if value is not None:
-                    data_dict[name] = value
-            if decl_type == "parameter_array":
+            if decl_type.startswith("parameter") or decl_type == "parameter_array":
                 name = decl.get("name")
                 value = decl.get("value")
                 if value is not None:
@@ -3439,22 +3415,15 @@ class OPLCompiler:
             if decl_type == "set_of_tuples" and decl.get("value") is not None:
                 elems = []
                 for value in decl["value"]:
-                    if isinstance(value, dict) and "elements" in value:
-                        elems.append(value["elements"])
-                    else:
-                        elems.append(value)
-                working_data[name] = {
-                    "elements": elems,
-                    "tuple_type": decl.get("tuple_type"),
-                }
+                    elems.append(value["elements"] if isinstance(value, dict) and "elements" in value else value)
+                working_data[name] = {"elements": elems, "tuple_type": decl.get("tuple_type")}
+        return working_data
 
-        declared_names: set[str] = set()
-        for decl in declarations:
-            if isinstance(decl, dict):
-                name = decl.get("name")
-                if isinstance(name, str):
-                    declared_names.add(name)
-        bad_decl: set[str] = declared_names & RESERVED_PY_IDENTIFIERS
+    def _validate_reserved_model_names(self, declarations: list, working_data: dict[str, Any]) -> None:
+        declared_names = {
+            decl.get("name") for decl in declarations if isinstance(decl, dict) and isinstance(decl.get("name"), str)
+        }
+        bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
         if bad_decl:
             bad = sorted(bad_decl)[0]
             raise SemanticError(
@@ -3471,6 +3440,15 @@ class OPLCompiler:
                 lineno=ln,
             )
 
+    def _prepare_model_ast_and_working_data(
+        self,
+        model_code: str,
+        data_code: Optional[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        model_ast, data_dict = self._parse_model_inputs(model_code, data_code)
+        declarations = model_ast.get("declarations") or []
+        working_data = self._merge_declaration_data(declarations, data_dict)
+        self._validate_reserved_model_names(declarations, working_data)
         return model_ast, working_data
 
     def _eval_bound_expr(self, expr: Any, working_data: dict[str, Any]) -> int:
@@ -4886,63 +4864,68 @@ class OPLCompiler:
             rewritten.append(constraint)
         ast["constraints"] = rewritten
 
+    def _expand_maxmin_constraint_body(self, node: dict) -> list[dict]:
+        operator = node.get("op")
+        left = node.get("left")
+        right = node.get("right")
+        label = node.get("label")
+
+        def labeled(constraint: dict) -> dict:
+            if label:
+                constraint = dict(constraint)
+                constraint["label"] = label
+            return constraint
+
+        patterns = {
+            ("<=", "left", "maxl"),
+            (">=", "right", "maxl"),
+            (">=", "left", "minl"),
+            ("<=", "right", "minl"),
+        }
+        for relation, side, aggregate_type in patterns:
+            aggregate = left if side == "left" else right
+            predicate = self._is_maxl_node if aggregate_type == "maxl" else self._is_minl_node
+            if operator == relation and isinstance(aggregate, dict) and predicate(aggregate):
+                args, _single = self._maxmin_args_or_error(aggregate)
+                return [
+                    labeled({
+                        "type": "constraint",
+                        "op": relation,
+                        "left": arg if side == "left" else left,
+                        "right": right if side == "left" else arg,
+                    })
+                    for arg in args
+                ]
+        if self._contains_maxmin(left) or self._contains_maxmin(right):
+            raise SemanticError("Non-convex or unsupported placement of maxl/minl in constraint.")
+        return [node]
+
+    def _expand_maxmin_forall(self, node: dict) -> list[dict]:
+        if isinstance(node.get("constraint"), dict):
+            expanded = self._expand_maxmin_constraint(node["constraint"])
+            if len(expanded) == 1:
+                return [dict(node, constraint=expanded[0])]
+            rewritten = dict(node)
+            rewritten.pop("constraint", None)
+            rewritten["constraints"] = expanded
+            return [rewritten]
+        if isinstance(node.get("constraints"), list):
+            children = [item for child in node["constraints"] for item in self._expand_maxmin_constraint(child)]
+            return [dict(node, constraints=children)]
+        return [node]
+
     def _expand_maxmin_constraint(self, node: Any) -> list[dict]:
         if not isinstance(node, dict):
             return [node]
         node_type = node.get("type")
         if node_type == "constraint":
-            operator = node.get("op")
-            left = node.get("left")
-            right = node.get("right")
-            label = node.get("label")
-
-            def labeled(constraint: dict) -> dict:
-                if label:
-                    constraint = dict(constraint)
-                    constraint["label"] = label
-                return constraint
-
-            patterns = {
-                ("<=", "left", "maxl"): ("left", "right"),
-                (">=", "right", "maxl"): ("left", "right"),
-                (">=", "left", "minl"): ("left", "right"),
-                ("<=", "right", "minl"): ("left", "right"),
-            }
-            for (relation, side, aggregate_type), pattern_shape in patterns.items():
-                aggregate = left if side == "left" else right
-                predicate = self._is_maxl_node if aggregate_type == "maxl" else self._is_minl_node
-                if operator == relation and isinstance(aggregate, dict) and predicate(aggregate):
-                    args, _single = self._maxmin_args_or_error(aggregate)
-                    return [
-                        labeled(
-                            {
-                                "type": "constraint",
-                                "op": relation,
-                                "left": arg if side == "left" else left,
-                                "right": right if side == "left" else arg,
-                            }
-                        )
-                        for arg in args
-                    ]
-            if self._contains_maxmin(left) or self._contains_maxmin(right):
-                raise SemanticError("Non-convex or unsupported placement of maxl/minl in constraint.")
-            return [node]
+            return self._expand_maxmin_constraint_body(node)
         if node_type == "implication_constraint":
             if self._contains_maxmin(node.get("antecedent")) or self._contains_maxmin(node.get("consequent")):
                 raise SemanticError("Non-convex: maxl/minl not supported inside implication constraints.")
             return [node]
         if node_type == "forall_constraint":
-            if isinstance(node.get("constraint"), dict):
-                expanded = self._expand_maxmin_constraint(node["constraint"])
-                if len(expanded) == 1:
-                    return [dict(node, constraint=expanded[0])]
-                rewritten = dict(node)
-                rewritten.pop("constraint", None)
-                rewritten["constraints"] = expanded
-                return [rewritten]
-            if isinstance(node.get("constraints"), list):
-                children = [item for child in node["constraints"] for item in self._expand_maxmin_constraint(child)]
-                return [dict(node, constraints=children)]
+            return self._expand_maxmin_forall(node)
         return [node]
 
     def _evaluate_and_splice_if_constraints(self, ast: dict, env: dict) -> None:
