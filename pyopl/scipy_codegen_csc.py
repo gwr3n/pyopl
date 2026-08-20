@@ -1393,63 +1393,64 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 elif op == "==":
                     lower_bounds[idx] = upper_bounds[idx] = val
 
-        def tighten_simple_constraint(constr, env) -> None:
-            left = constr["left"]
-            right = constr["right"]
-            rhs_val: Optional[float] = None
+        def constant_constraint_rhs(constr, env):
             try:
-                coef_dict, c = self._eval_expr(right, env)
-                # Only update bounds if right side is constant (no decision vars)
-                if not coef_dict and isinstance(c, (int, float)):
-                    rhs_val = float(c)
+                coef_dict, constant = self._eval_expr(constr["right"], env)
+                if not coef_dict and isinstance(constant, (int, float)):
+                    return float(constant)
             except Exception:
-                rhs_val = None
-            if rhs_val is not None:
-                try:
-                    left_coef, left_const = self._eval_expr(left, env)
-                except Exception:
-                    left_coef, left_const = {}, None
-                if len(left_coef) == 1 and isinstance(left_const, (int, float)):
-                    var_name, coefficient = next(iter(left_coef.items()))
-                    if var_name in var_indices and abs(float(coefficient)) > LINEAR_ZERO_TOLERANCE:
-                        bound_value = (rhs_val - float(left_const)) / float(coefficient)
-                        bound_op = constr["op"]
-                        if coefficient < 0:
-                            bound_op = {">=": "<=", "<=": ">=", "==": "=="}.get(bound_op, bound_op)
-                        update_bounds(var_indices[var_name], bound_op, bound_value)
-                        return
+                pass
+            return None
+
+        def update_affine_bound(constr, env, rhs_val):
+            try:
+                left_coef, left_const = self._eval_expr(constr["left"], env)
+            except Exception:
+                return False
+            if len(left_coef) != 1 or not isinstance(left_const, (int, float)):
+                return False
+            var_name, coefficient = next(iter(left_coef.items()))
+            if var_name not in var_indices or abs(float(coefficient)) <= LINEAR_ZERO_TOLERANCE:
+                return False
+            bound_value = (rhs_val - float(left_const)) / float(coefficient)
+            bound_op = constr["op"]
+            if coefficient < 0:
+                bound_op = {">=": "<=", "<=": ">=", "==": "=="}.get(bound_op, bound_op)
+            update_bounds(var_indices[var_name], bound_op, bound_value)
+            return True
+
+        def update_indexed_bound(constr, env, rhs_val):
+            left = constr["left"]
             if left["type"] == "name":
-                idx = var_indices.get(left["value"])
-                update_bounds(idx, constr["op"], rhs_val)
+                update_bounds(var_indices.get(left["value"]), constr["op"], rhs_val)
                 return
-            elif left["type"] == "indexed_name":
-                # First try canonical var name construction (handles tuple indices and mixed forms)
-                try:
-                    vname = self._multi_indexed_var_name(left, env, self._eval_index_expr)
-                    idx = var_indices.get(vname)
-                    update_bounds(idx, constr["op"], rhs_val)
-                    return
-                except Exception:
-                    pass
-                # Fallback: legacy remapping for simple numeric/string indices
-                dims = left["dimensions"]
-                remapped: list[Any] = []
-                for d in dims:
-                    if d["type"] == "name_reference_index":
-                        remapped.append(env.get(d["name"]))
-                    elif d["type"] == "number_literal_index":
-                        remapped.append(d["value"])
-                    else:
-                        # Evaluate generic index expr safely
-                        _, v_eval = self._eval_index_expr(d, env)
-                        remapped.append(v_eval)
-                # Normalize ints
-                remapped = [int(v) if isinstance(v, float) and v.is_integer() else v for v in remapped]
-                is_var, looked_up, is_symbolic = self._lookup_var_or_param(left["name"], indices=remapped, env=env)
-                if is_var and isinstance(looked_up, str):
-                    idx = var_indices.get(looked_up)
-                    update_bounds(idx, constr["op"], rhs_val)
+            if left["type"] != "indexed_name":
                 return
+            try:
+                vname = self._multi_indexed_var_name(left, env, self._eval_index_expr)
+                update_bounds(var_indices.get(vname), constr["op"], rhs_val)
+                return
+            except Exception:
+                pass
+            remapped = []
+            for dimension in left["dimensions"]:
+                if dimension["type"] == "name_reference_index":
+                    remapped.append(env.get(dimension["name"]))
+                elif dimension["type"] == "number_literal_index":
+                    remapped.append(dimension["value"])
+                else:
+                    _, value = self._eval_index_expr(dimension, env)
+                    remapped.append(value)
+            remapped = [int(value) if isinstance(value, float) and value.is_integer() else value for value in remapped]
+            is_var, looked_up, _is_symbolic = self._lookup_var_or_param(left["name"], indices=remapped, env=env)
+            if is_var and isinstance(looked_up, str):
+                update_bounds(var_indices.get(looked_up), constr["op"], rhs_val)
+
+        def tighten_simple_constraint(constr, env) -> None:
+            rhs_val = constant_constraint_rhs(constr, env)
+            if rhs_val is not None and update_affine_bound(constr, env, rhs_val):
+                return
+            update_indexed_bound(constr, env, rhs_val)
 
         def tighten_forall_constraint(constr, env=None):
             if env is None:
@@ -1593,22 +1594,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             bounds.append(bound)
             integrality.append(int_flag)
 
-    def _expand_indexed_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
-        name = decl["name"]
-        dims = decl["dimensions"]
-        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
-        dim_ranges = []
-        symbolic_dim_ranges = []
-        for dim in dims:
+    def _resolve_indexed_variable_dimension(self, dim):
             if dim["type"] == "range_index":
                 start_eval = self._eval_bound(dim["start"])
                 end_eval = self._eval_bound(dim["end"])
-                logger.debug(f"[SciPyCSCCodeGenerator] Range for {name}: start={start_eval}, end={end_eval}")
-                dim_ranges.append(list(range(int(start_eval), int(end_eval) + 1)))
-                symbolic_dim_ranges.append(
-                    f"range({self._emit_symbolic_expr(dim['start'])}, {self._emit_symbolic_expr(dim['end'])} + 1)"
+                return (
+                    list(range(int(start_eval), int(end_eval) + 1)),
+                    f"range({self._emit_symbolic_expr(dim['start'])}, {self._emit_symbolic_expr(dim['end'])} + 1)",
                 )
-            elif dim["type"] == "named_range_dimension":
+            if dim["type"] == "named_range_dimension":
                 range_decl = next(
                     (
                         declaration
@@ -1621,39 +1615,46 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     raise self._not_found_error("range", dim["name"])
                 start_eval = self._eval_bound(range_decl["start"])
                 end_eval = self._eval_bound(range_decl["end"])
-                logger.debug(f"[SciPyCSCCodeGenerator] Named range for {name}: start={start_eval}, end={end_eval}")
-                dim_ranges.append(list(range(int(start_eval), int(end_eval) + 1)))
-                symbolic_dim_ranges.append(
-                    f"range({self._emit_symbolic_expr(range_decl['start'])}, {self._emit_symbolic_expr(range_decl['end'])} + 1)"
+                return (
+                    list(range(int(start_eval), int(end_eval) + 1)),
+                    f"range({self._emit_symbolic_expr(range_decl['start'])}, {self._emit_symbolic_expr(range_decl['end'])} + 1)",
                 )
-            elif dim["type"] == "named_set_dimension":
-                set_name = dim["name"]
-                set_decl = self._find_decl(set_name)
-                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                    set_values = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
-                elif set_name in self.data_dict:
-                    set_values = self.data_dict[set_name]
-                elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
-                    set_values = set_decl.get("value")
-                    if set_decl.get("type") == "typed_set_external" and set_values is None:
-                        raise SemanticError(f"External set '{set_name}' has no data provided")
-                    set_values = set_values or []
-                else:
-                    raise SemanticError(f"Named set '{set_name}' is not declared")
-                logger.debug(f"[SciPyCSCCodeGenerator] Named set for {name}: {set_values}")
-                dim_ranges.append(set_values)
-                symbolic_dim_ranges.append(set_name)
+            set_name = dim["name"]
+            set_decl = self._find_decl(set_name)
+            if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                set_values = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+            elif set_name in self.data_dict:
+                set_values = self.data_dict[set_name]
+            elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+                set_values = set_decl.get("value")
+                if set_decl.get("type") == "typed_set_external" and set_values is None:
+                    raise SemanticError(f"External set '{set_name}' has no data provided")
+                set_values = set_values or []
+            else:
+                raise SemanticError(f"Named set '{set_name}' is not declared")
+            return set_values, set_name
+
+    def _emit_indexed_variable(self, decl, index_tuple, iterator_names, var_names, bounds, integrality):
+        name = decl["name"]
+        variable_name = name + "_" + "_".join(str(index) for index in index_tuple)
+        logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {variable_name}")
+        var_names.append(variable_name)
+        self.var_indices[variable_name] = len(var_names) - 1
+        env = {iterator_names[i]: value for i, value in enumerate(index_tuple) if i < len(iterator_names)}
+        bound, int_flag = self._indexed_variable_bounds(decl, env)
+        bounds.append(bound)
+        integrality.append(int_flag)
+
+    def _expand_indexed_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
+        name = decl["name"]
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+        dimensions = [self._resolve_indexed_variable_dimension(dim) for dim in decl["dimensions"]]
+        dim_ranges = [item[0] for item in dimensions]
+        symbolic_dim_ranges = [item[1] for item in dimensions]
 
         self._add_code_line(f"# OPL: dvar {decl.get('var_type')} {name}[{', '.join(symbolic_dim_ranges)}]")
         for index_tuple in itertools.product(*dim_ranges):
-            variable_name = name + "_" + "_".join(str(index) for index in index_tuple)
-            logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {variable_name}")
-            var_names.append(variable_name)
-            self.var_indices[variable_name] = len(var_names) - 1
-            env = {iterator_names[i]: value for i, value in enumerate(index_tuple) if i < len(iterator_names)}
-            bound, int_flag = self._indexed_variable_bounds(decl, env)
-            bounds.append(bound)
-            integrality.append(int_flag)
+            self._emit_indexed_variable(decl, index_tuple, iterator_names, var_names, bounds, integrality)
 
     # === Section: Index/Range/Iterator Utilities ===
     @staticmethod
@@ -1839,35 +1840,42 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return [tuple(item["elements"]) for item in set_declaration["value"]]
         return None
 
+    @staticmethod
+    def _normalize_parameter_key(key):
+        return tuple(key) if isinstance(key, (list, tuple)) else key
+
+    def _flat_parameter_list_to_dict(self, val: list) -> dict | None:
+        if len(val) % 2 == 0 and val:
+            keys = val[::2]
+            values = val[1::2]
+            if all(isinstance(key, (list, tuple, str)) for key in keys) and all(
+                isinstance(value, (int, float)) for value in values
+            ):
+                return {
+                    self._normalize_parameter_key(key): value
+                    for key, value in zip(keys, values)
+                }
+        if all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
+            pairs = [(entry[0], entry[1]) for entry in val]
+            if all(isinstance(key, (list, tuple, str)) and isinstance(value, (int, float)) for key, value in pairs):
+                return {
+                    self._normalize_parameter_key(key): value
+                    for key, value in pairs
+                }
+        return None
+
     def _normalize_parameter_lookup_value(self, name: str, val: object, indices: list | None, logger) -> object:
         if not isinstance(val, list) or indices is None:
             return val
-
         try:
-            converted = None
-            if len(val) % 2 == 0 and val:
-                keys = val[::2]
-                values = val[1::2]
-                if all(isinstance(key, (list, tuple, str)) for key in keys) and all(
-                    isinstance(value, (int, float)) for value in values
-                ):
-                    converted = {
-                        tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in zip(keys, values)
-                    }
-
-            if converted is None and all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
-                pairs = [(entry[0], entry[1]) for entry in val]
-                if all(isinstance(key, (list, tuple, str)) and isinstance(value, (int, float)) for key, value in pairs):
-                    converted = {tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in pairs}
-
-            if converted is not None:
-                self.data_dict[name] = converted
-                logger.debug(f"[resolve_parameter] Converted flat KV list to dict for param '{name}': {converted}")
-                return converted
+            converted = self._flat_parameter_list_to_dict(val)
         except Exception:
-            pass
-
-        return val
+            converted = None
+        if converted is None:
+            return val
+        self.data_dict[name] = converted
+        logger.debug(f"[resolve_parameter] Converted flat KV list to dict for param '{name}': {converted}")
+        return converted
 
     def _parameter_list_start_index(self, name: str, dimension_index: int) -> int:
         try:
