@@ -290,45 +290,50 @@ class ExpressionEvaluator:
             raise self.parent._not_found_error("tuple field", f"{field} in tuple types for value {base['value']}")
         return {}, f"{base['value']}[{field}]"
 
+    def _tuple_type_for_named_set(self, set_name: str) -> Optional[str]:
+        for declaration in self.parent.ast.get("declarations", []):
+            if declaration.get("type") == "set_of_tuples" and declaration.get("name") == set_name:
+                return declaration.get("tuple_type")
+        set_value = self.parent.data_dict.get(set_name)
+        if isinstance(set_value, dict) and "tuple_type" in set_value:
+            return set_value["tuple_type"]
+        return None
+
+    def _tuple_type_from_sum(self, expr: Dict[str, Any], iterator_name: str) -> Optional[str]:
+        if expr.get("type") != "sum":
+            return None
+        for iterator in expr.get("iterators", []):
+            if iterator["iterator"] == iterator_name and iterator["range"]["type"] == "named_range":
+                tuple_type = self._tuple_type_for_named_set(iterator["range"]["name"])
+                if tuple_type:
+                    return tuple_type
+        return None
+
+    def _find_tuple_type_in_expr(self, expr: Any, iterator_name: str) -> Optional[str]:
+        if isinstance(expr, dict):
+            tuple_type = self._tuple_type_from_sum(expr, iterator_name)
+            if tuple_type:
+                return tuple_type
+            children = expr.values()
+        elif isinstance(expr, list):
+            children = expr
+        else:
+            return None
+        for child in children:
+            tuple_type = self._find_tuple_type_in_expr(child, iterator_name)
+            if tuple_type:
+                return tuple_type
+        return None
+
     def _find_tuple_type_for_iterator(self, iterator_name: str) -> Optional[str]:
         if not hasattr(self.parent, "ast"):
             return None
-
-        def search_expr(expr):
-            if isinstance(expr, dict):
-                if expr.get("type") == "sum":
-                    for it in expr.get("iterators", []):
-                        if it["iterator"] == iterator_name:
-                            rng = it["range"]
-                            if rng["type"] == "named_range":
-                                set_name = rng["name"]
-                                for decl in self.parent.ast.get("declarations", []):
-                                    if decl.get("type") == "set_of_tuples" and decl.get("name") == set_name:
-                                        return decl.get("tuple_type")
-                                if set_name in self.parent.data_dict:
-                                    set_val = self.parent.data_dict[set_name]
-                                    if isinstance(set_val, dict) and "tuple_type" in set_val:
-                                        return set_val["tuple_type"]
-                for v in expr.values():
-                    res = search_expr(v)
-                    if res:
-                        return res
-            elif isinstance(expr, list):
-                for e in expr:
-                    res = search_expr(e)
-                    if res:
-                        return res
-            return None
-
         ast = self.parent.ast
-        if "objective" in ast:
-            res = search_expr(ast["objective"])
-            if res:
-                return res
-        if "constraints" in ast:
-            res = search_expr(ast["constraints"])
-            if res:
-                return res
+        for section in ("objective", "constraints"):
+            if section in ast:
+                tuple_type = self._find_tuple_type_in_expr(ast[section], iterator_name)
+                if tuple_type:
+                    return tuple_type
         return None
 
     def _eval_number(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:

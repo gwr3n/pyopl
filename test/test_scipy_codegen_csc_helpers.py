@@ -377,6 +377,30 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         )
         self.assertEqual(evaluator._resolve_tuple_field_access_by_index({"value": "a"}, "j", (10, 20)), ({}, 20))
 
+    def test_find_tuple_type_for_iterator(self) -> None:
+        gen = make_generator()
+        gen.ast = {
+            "declarations": [{"type": "set_of_tuples", "name": "ObjectiveArcs", "tuple_type": "ObjectiveArc"}],
+            "objective": {
+                "type": "sum",
+                "iterators": [{"iterator": "arc", "range": {"type": "named_range", "name": "ObjectiveArcs"}}],
+            },
+            "constraints": [
+                {
+                    "type": "sum",
+                    "iterators": [{"iterator": "arc", "range": {"type": "named_range", "name": "ConstraintArcs"}}],
+                }
+            ],
+        }
+        evaluator = ExpressionEvaluator(gen)
+
+        self.assertEqual(evaluator._find_tuple_type_for_iterator("arc"), "ObjectiveArc")
+
+        gen.ast["declarations"] = []
+        gen.data_dict["ObjectiveArcs"] = {"tuple_type": "DataArc"}
+        self.assertEqual(evaluator._find_tuple_type_for_iterator("arc"), "DataArc")
+        self.assertIsNone(evaluator._find_tuple_type_for_iterator("missing"))
+
 
 class TestScipyCSCGeneratorHelpers(unittest.TestCase):
     def test_aux_binary_and_flat_kv_helpers(self) -> None:
