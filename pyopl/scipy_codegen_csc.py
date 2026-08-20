@@ -350,65 +350,56 @@ class ExpressionEvaluator:
         else:
             raise SemanticError(f"Unresolved name '{vname}' in expression (missing parameter or variable)")
 
-    def _eval_indexed_name(
-        self, expr: Dict[str, Any], env: Dict[str, Any]
+    def _is_tuple_indexed_declaration(self, decl: Optional[Dict[str, Any]]) -> bool:
+        if decl is None:
+            return False
+        dimensions = decl.get("dimensions", [])
+        if len(dimensions) != 1 or dimensions[0].get("type") != "named_set_dimension":
+            return False
+        set_decl = self.parent._find_decl(dimensions[0].get("name"))
+        return bool(set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"))
+
+    def _remap_scalar_set_indices(
+        self, expr: Dict[str, Any], decl: Optional[Dict[str, Any]], indices: List[Any]
+    ) -> List[Any]:
+        if decl is None or not decl.get("type", "").startswith("parameter"):
+            return indices
+        dimensions = decl.get("dimensions", [])
+        param_data = self.parent.data_dict.get(f"{expr['name']}__map", self.parent.data_dict.get(expr["name"]))
+        if not isinstance(param_data, list) or len(dimensions) != len(indices):
+            return indices
+
+        remapped_any = False
+        remapped_indices = []
+        for index_value, dimension in zip(indices, dimensions):
+            if dimension.get("type") != "named_set_dimension" or not isinstance(index_value, str):
+                if isinstance(index_value, int):
+                    remapped_indices.append(index_value)
+                continue
+            set_decl = self.parent._find_decl(dimension.get("name"))
+            set_data = self.parent.data_dict.get(dimension.get("name"))
+            if set_data is None and set_decl and set_decl.get("type") in (
+                "typed_set",
+                "typed_set_external",
+                "set_declaration",
+            ):
+                set_data = set_decl.get("value") or []
+            if isinstance(set_data, list):
+                try:
+                    remapped_indices.append(set_data.index(index_value) + 1)
+                    remapped_any = True
+                except ValueError:
+                    if isinstance(index_value, int):
+                        remapped_indices.append(index_value)
+            elif isinstance(index_value, int):
+                remapped_indices.append(index_value)
+        return remapped_indices if remapped_any else indices
+
+    def _resolve_indexed_result(
+        self, expr: Dict[str, Any], env: Dict[str, Any], indices: List[Any]
     ) -> Tuple[Dict[str, Any], Union[float, str, dict[Any, Any]]]:
-        # Evaluate indices and coerce numeric-like to int
-        indices = [self._eval_index_expr(dim, env)[1] for dim in expr["dimensions"]]
-        remapped_indices = list(indices)
-        decl = self.parent._find_decl(expr["name"])
-        is_tuple_indexed = False
-        if decl is not None:
-            dims = decl.get("dimensions", [])
-            if len(dims) == 1 and dims[0].get("type") == "named_set_dimension":
-                set_name = dims[0].get("name")
-                set_decl = self.parent._find_decl(set_name)
-                if set_decl and set_decl.get("type") in (
-                    "set_of_tuples",
-                    "set_of_tuples_external",
-                ):
-                    is_tuple_indexed = True
-        if is_tuple_indexed:
-            return self._handle_tuple_indexed(expr, remapped_indices)
-        # For parameters indexed by a typed scalar set whose data is stored as a Python list, convert string label to position via <Set>_index
-        if decl is not None and decl.get("type", "").startswith("parameter"):
-            dims_decl = decl.get("dimensions", [])
-            # Prefer normalized mapping if present under '<name>__map'
-            param_data = self.parent.data_dict.get(f"{expr['name']}__map", self.parent.data_dict.get(expr["name"]))
-            if isinstance(param_data, list) and len(dims_decl) == len(remapped_indices):
-                remapped_any = False
-                remapped_indices_work = []
-                for idx_val, dim_decl in zip(remapped_indices, dims_decl):
-                    if dim_decl.get("type") == "named_set_dimension" and isinstance(idx_val, str):
-                        set_name = dim_decl.get("name")
-                        set_decl = self.parent._find_decl(set_name)
-                        # Prefer data_dict value; fallback to decl.value for typed sets
-                        set_data = self.parent.data_dict.get(set_name)
-                        if (
-                            set_data is None
-                            and set_decl
-                            and set_decl.get("type") in ("typed_set", "typed_set_external", "set_declaration")
-                        ):
-                            set_data = set_decl.get("value") or []
-                        if isinstance(set_data, list):
-                            try:
-                                pos = set_data.index(idx_val)  # 0-based
-                                remapped_indices_work.append(pos + 1)  # OPL is 1-based
-                                remapped_any = True
-                            except ValueError:
-                                if isinstance(idx_val, int):
-                                    remapped_indices_work.append(idx_val)
-                                # else skip or handle as needed
-                        else:
-                            if isinstance(idx_val, int):
-                                remapped_indices_work.append(idx_val)
-                    else:
-                        if isinstance(idx_val, int):
-                            remapped_indices_work.append(idx_val)
-                if remapped_any:
-                    remapped_indices = remapped_indices_work
-        is_var, val, is_symbolic = self.parent._lookup_var_or_param(expr["name"], indices=remapped_indices, env=env)
-        all_indices_are_int = all(isinstance(idx, int) for idx in remapped_indices)
+        is_var, val, is_symbolic = self.parent._lookup_var_or_param(expr["name"], indices=indices, env=env)
+        all_indices_are_int = all(isinstance(index, int) for index in indices)
         vname = self.parent._multi_indexed_var_name(expr, env, self._eval_index_expr)
         if is_var:
             return {str(val): 1.0}, 0.0
@@ -426,6 +417,16 @@ class ExpressionEvaluator:
             if all_indices_are_int:
                 raise self.parent._not_found_error("indexed variable or parameter", vname)
             return {vname: 1.0}, 0.0
+
+    def _eval_indexed_name(
+        self, expr: Dict[str, Any], env: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Union[float, str, dict[Any, Any]]]:
+        indices = [self._eval_index_expr(dim, env)[1] for dim in expr["dimensions"]]
+        decl = self.parent._find_decl(expr["name"])
+        if self._is_tuple_indexed_declaration(decl):
+            return self._handle_tuple_indexed(expr, indices)
+        remapped_indices = self._remap_scalar_set_indices(expr, decl, indices)
+        return self._resolve_indexed_result(expr, env, remapped_indices)
 
     @staticmethod
     def _normalize_index_scalar(value: Any) -> Any:
@@ -562,55 +563,67 @@ class ExpressionEvaluator:
             return {}, float(val)
         return {}, str(val)
 
+    @staticmethod
+    def _is_boolean_binop_operand(node: Any) -> bool:
+        return isinstance(node, dict) and (
+            node.get("type") == "boolean_literal" or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
+        )
+
+    def _eval_boolean_inequality(self) -> Tuple[Dict[str, Any], float]:
+        aux_name = self.parent._ensure_aux_binary("xor_flag")
+        return {"type": "aux_var", "name": aux_name, "sem_type": "boolean"}, 0.0
+
+    def _eval_binop_equality(
+        self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Union[float, str, bool]]:
+        left_result = self.eval(left, env)
+        right_result = self.eval(right, env)
+        if left_result is None or right_result is None:
+            raise SemanticError(f"_eval_binop: == failed, left or right is None: left={left_result}, right={right_result}")
+        left_coef, left_val = left_result
+        right_coef, right_val = right_result
+        left_key = left.get("value") if isinstance(left, dict) and left.get("type") == "name" else None
+        if isinstance(left_key, str) and left_key in env:
+            left_val = env[left_key]
+        right_key = right.get("value") if isinstance(right, dict) and right.get("type") == "name" else None
+        if isinstance(right_key, str) and right_key in env:
+            right_val = env[right_key]
+        if (
+            not left_coef
+            and not right_coef
+            and isinstance(left_val, (str, int, float, bool))
+            and isinstance(right_val, (str, int, float, bool))
+        ):
+            return {}, left_val == right_val
+        symbolic = bool(left_coef) or bool(right_coef) or isinstance(left_val, str) or isinstance(right_val, str)
+        if symbolic and not getattr(self.parent, "_allow_symbolic_bool", False):
+            raise SemanticError("Non-ground boolean == outside constraint build context")
+        return {}, str(left_val) == str(right_val)
+
+    def _dispatch_binop(
+        self, left: Dict[str, Any], right: Dict[str, Any], op: str, env: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Union[float, str]]:
+        if op == "+":
+            return self._handle_binop_add(left, right, env)
+        if op == "-":
+            return self._handle_binop_sub(left, right, env)
+        if op == "*":
+            return self._handle_binop_mul(left, right, env)
+        if op == "/":
+            return self._handle_binop_div(left, right, env)
+        if op in ("!=", "<", ">", "<=", ">="):
+            return self._handle_binop_cmp(left, right, op, env)
+        raise self.parent._unsupported_operator_error("binop", op)
+
     def _eval_binop(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
         """Evaluate binary operations, compacted and deduplicated."""
         left, right = expr["left"], expr["right"]
         op = expr["op"]
-
-        def _is_bool_expr(e):
-            return isinstance(e, dict) and (
-                e.get("type") == "boolean_literal" or (e.get("type") == "binop" and e.get("sem_type") == "boolean")
-            )
-
-        if op == "!=" and _is_bool_expr(left) and _is_bool_expr(right):
-            aux_name = self.parent._ensure_aux_binary("xor_flag")
-            return {"type": "aux_var", "name": aux_name, "sem_type": "boolean"}, 0.0
+        if op == "!=" and self._is_boolean_binop_operand(left) and self._is_boolean_binop_operand(right):
+            return self._eval_boolean_inequality()
         if op == "==":
-            left_result = self.eval(left, env)
-            right_result = self.eval(right, env)
-            if left_result is None or right_result is None:
-                raise SemanticError(f"_eval_binop: == failed, left or right is None: left={left_result}, right={right_result}")
-            left_coef, left_val = left_result
-            right_coef, right_val = right_result
-            left_key = left.get("value") if isinstance(left, dict) and left.get("type") == "name" else None
-            if isinstance(left_key, str) and left_key in env:
-                left_val = env[left_key]
-            right_key = right.get("value") if isinstance(right, dict) and right.get("type") == "name" else None
-            if isinstance(right_key, str) and right_key in env:
-                right_val = env[right_key]
-            if (
-                not left_coef
-                and not right_coef
-                and isinstance(left_val, (str, int, float, bool))
-                and isinstance(right_val, (str, int, float, bool))
-            ):
-                return {}, left_val == right_val
-            symbolic = bool(left_coef) or bool(right_coef) or isinstance(left_val, str) or isinstance(right_val, str)
-            if symbolic and not getattr(self.parent, "_allow_symbolic_bool", False):
-                raise SemanticError("Non-ground boolean == outside constraint build context")
-            return {}, str(left_val) == str(right_val)
-        if op == "+":
-            return self._handle_binop_add(left, right, env)
-        elif op == "-":
-            return self._handle_binop_sub(left, right, env)
-        elif op == "*":
-            return self._handle_binop_mul(left, right, env)
-        elif op == "/":
-            # Support (linear)/constant by scaling coefficients with reciprocal of constant
-            return self._handle_binop_div(left, right, env)
-        if op in ("!=", "<", ">", "<=", ">="):
-            return self._handle_binop_cmp(left, right, op, env)
-        raise self.parent._unsupported_operator_error("binop", expr["op"])
+            return self._eval_binop_equality(left, right, env)
+        return self._dispatch_binop(left, right, op, env)
 
     def _handle_binop_add(
         self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
@@ -2092,6 +2105,58 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         # If not found, raise with the actual name and indices for clarity
         raise SemanticError(f"AST parameter '{name}' with indices {indices} not found.")
 
+    def _iterator_declaration(self, name: str) -> dict | None:
+        for declaration in self.ast["declarations"]:
+            if declaration.get("name") == name and declaration.get("type") in (
+                "set_of_tuples",
+                "set_of_tuples_external",
+                "set_declaration",
+                "typed_set",
+                "typed_set_external",
+            ):
+                return declaration
+        return None
+
+    def _unroll_named_iterator(self, name: str) -> list:
+        range_decl = self._find_decl(name, "range_declaration_inline")
+        if range_decl is not None:
+            start = self._eval_bound(range_decl["start"])
+            end = self._eval_bound(range_decl["end"])
+            return list(range(int(start), int(end) + 1))
+
+        set_decl = self._iterator_declaration(name)
+        if set_decl is None:
+            raise self._not_found_error("range or set", name)
+
+        declaration_type = set_decl.get("type")
+        if declaration_type in ("set_of_tuples", "set_of_tuples_external"):
+            return TupleSetHelper.get_tuple_set(name, self.ast, self.data_dict)
+        if declaration_type == "set_declaration":
+            set_val = self.data_dict.get(name)
+            return set_decl.get("value", []) if set_val is None else set_val
+        if name in self.data_dict:
+            return self.data_dict[name]
+        set_val = set_decl.get("value")
+        if declaration_type == "typed_set_external" and set_val is None:
+            raise SemanticError(f"External set '{name}' has no data provided")
+        return set_val or []
+
+    def _unroll_indexed_iterator(self, rng: dict, env: dict) -> list:
+        set_val = self.data_dict.get(rng["name"], [])
+        for dimension in rng.get("dimensions", []):
+            if isinstance(dimension, dict):
+                _, index_value = self._eval_index_expr(dimension, env)
+                if isinstance(set_val, dict):
+                    set_val = set_val[index_value]
+                elif isinstance(set_val, (list, tuple)):
+                    if isinstance(index_value, float) and index_value.is_integer():
+                        index_value = int(index_value)
+                    set_val = set_val[int(index_value) - 1]
+                else:
+                    set_val = []
+                    break
+        return list(set_val or [])
+
     def _unroll_iterators(self, iterators: list, env: dict | None = None) -> tuple[list, list]:
         """
         Given a list of OPL-style iterators, return (loop_vars, loop_ranges).
@@ -2106,87 +2171,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for it in iterators:
             name = it["iterator"]
             rng = it["range"]
-            if rng["type"] == "range_specifier":
+            range_type = rng["type"]
+            if range_type == "range_specifier":
                 start = self._eval_bound(rng["start"])
                 end = self._eval_bound(rng["end"])
                 loop_ranges.append(list(range(int(start), int(end) + 1)))
-            elif rng["type"] in ("named_range", "named_set"):
-                decl = None
-                for d in self.ast["declarations"]:
-                    if d["type"] == "range_declaration_inline" and d["name"] == rng["name"]:
-                        decl = d
-                        break
-                if decl is not None:
-                    start = self._eval_bound(decl["start"])
-                    end = self._eval_bound(decl["end"])
-                    loop_ranges.append(list(range(int(start), int(end) + 1)))
-                else:
-                    # Fallback: check if it's a set-of-tuples, set_of_tuples_external, or set_declaration
-                    set_decl = None
-                    for d in self.ast["declarations"]:
-                        if d["type"] in ("set_of_tuples", "set_of_tuples_external") and d["name"] == rng["name"]:
-                            set_decl = d
-                            break
-                        if d["type"] == "set_declaration" and d["name"] == rng["name"]:
-                            set_decl = d
-                            break
-                        # Allow typed_set iteration (set of scalars with base_type info)
-                        if d.get("type") == "typed_set" and d.get("name") == rng["name"]:
-                            set_decl = d
-                            break
-                        # Allow external typed scalar set
-                        if d.get("type") == "typed_set_external" and d.get("name") == rng["name"]:
-                            set_decl = d
-                            break
-                    if set_decl is not None:
-                        # Always use TupleSetHelper for set_of_tuples and set_of_tuples_external
-                        if set_decl.get("type") in (
-                            "set_of_tuples",
-                            "set_of_tuples_external",
-                        ):
-                            set_val = TupleSetHelper.get_tuple_set(rng["name"], self.ast, self.data_dict)
-                        elif set_decl.get("type") == "set_declaration":
-                            set_val = self.data_dict.get(rng["name"])
-                            if set_val is None:
-                                set_val = set_decl.get("value", [])
-                        elif set_decl.get("type") in (
-                            "typed_set",
-                            "typed_set_external",
-                        ):
-                            # Prefer data_dict override
-                            if rng["name"] in self.data_dict:
-                                set_val = self.data_dict[rng["name"]]
-                            else:
-                                set_val = set_decl.get("value")
-                                if set_decl.get("type") == "typed_set_external" and set_val is None:
-                                    raise SemanticError(f"External set '{rng['name']}' has no data provided")
-                                set_val = set_val or []
-                        else:
-                            set_val = []
-                        loop_ranges.append(set_val)
-                    else:
-                        raise self._not_found_error("range or set", rng["name"])
-            elif rng["type"] == "indexed_set":
-                set_name = rng["name"]
-                indices = []
-                for dim in rng.get("dimensions", []):
-                    if isinstance(dim, dict):
-                        _, idx_val = self._eval_index_expr(dim, env)
-                        indices.append(idx_val)
-                set_val = self.data_dict.get(set_name, [])
-                for idx_val in indices:
-                    if isinstance(set_val, dict):
-                        set_val = set_val[idx_val]
-                    elif isinstance(set_val, (list, tuple)):
-                        if isinstance(idx_val, float) and idx_val.is_integer():
-                            idx_val = int(idx_val)
-                        set_val = set_val[int(idx_val) - 1]
-                    else:
-                        set_val = []
-                        break
-                loop_ranges.append(list(set_val or []))
+            elif range_type in ("named_range", "named_set"):
+                loop_ranges.append(self._unroll_named_iterator(rng["name"]))
+            elif range_type == "indexed_set":
+                loop_ranges.append(self._unroll_indexed_iterator(rng, env))
             else:
-                raise self._unsupported_type_error("iterator range type", rng["type"])
+                raise self._unsupported_type_error("iterator range type", range_type)
             loop_vars.append(name)
         return loop_vars, loop_ranges
 
@@ -3488,12 +3483,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if isinstance(const, (int, float)):
             self.obj_const_offset += float(const)
 
-    def _multi_indexed_var_name(self, expr, env, eval_index_expr=None):
-        if expr["type"] != "indexed_name":
-            return expr["name"]
-        if eval_index_expr is None:
-            eval_index_expr = self._eval_index_expr
-        base = expr["name"]
+    def _eval_multi_index_values(self, expr, env, eval_index_expr):
         index_values = []
         for dim in expr.get("dimensions", []):
             if dim.get("type") == "number_literal_index":
@@ -3505,35 +3495,39 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if isinstance(idx_val, tuple) and len(idx_val) == 2 and isinstance(idx_val[0], dict):
                 idx_val = idx_val[1]
             index_values.append(idx_val)
-        if len(index_values) == 1 and isinstance(index_values[0], tuple):
-            vname_tuple = f"{base}[{repr(index_values[0])}]"
-            if vname_tuple in self.var_indices or vname_tuple in self.data_dict:
-                return vname_tuple
+        return index_values
+
+    def _indexed_name_candidates(self, base, index_values):
         tuple_key = tuple(index_values)
-        vname = f"{base}[{repr(tuple_key)}]"
-        if vname in self.var_indices or vname in self.data_dict:
-            return vname
-        vname_alt = f"{base}[{tuple_key}]"
-        if vname_alt in self.var_indices or vname_alt in self.data_dict:
-            return vname_alt
-        vname_legacy = f"{base}[{str(tuple_key)}]"
-        if vname_legacy in self.var_indices or vname_legacy in self.data_dict:
-            return vname_legacy
-        if len(index_values) == 1:
-            vname_single = f"{base}_{index_values[0]}"
-            if vname_single in self.var_indices or vname_single in self.data_dict:
-                return vname_single
-        if len(index_values) > 1:
-            vname_multi = f"{base}_" + "_".join(str(i) for i in index_values)
-            if vname_multi in self.var_indices or vname_multi in self.data_dict:
-                return vname_multi
-        if "[" in base and "]" in base:
-            base_clean = (
-                base.replace("[", "_").replace("]", "").replace("(", "").replace(")", "").replace(",", "_").replace(" ", "")
+        candidates = []
+        if len(index_values) == 1 and isinstance(index_values[0], tuple):
+            candidates.append(f"{base}[{repr(index_values[0])}]")
+        candidates.extend(
+            (
+                f"{base}[{repr(tuple_key)}]",
+                f"{base}[{tuple_key}]",
+                f"{base}[{str(tuple_key)}]",
             )
-            vname_fallback = f"{base_clean}_{'_'.join(str(i) for i in index_values)}"
-            if vname_fallback in self.var_indices or vname_fallback in self.data_dict:
-                return vname_fallback
+        )
+        if len(index_values) == 1:
+            candidates.append(f"{base}_{index_values[0]}")
+        elif len(index_values) > 1:
+            candidates.append(f"{base}_" + "_".join(str(i) for i in index_values))
+        if "[" in base and "]" in base:
+            base_clean = base.replace("[", "_").replace("]", "").replace("(", "").replace(")", "").replace(",", "_").replace(" ", "")
+            candidates.append(f"{base_clean}_{'_'.join(str(i) for i in index_values)}")
+        return candidates
+
+    def _multi_indexed_var_name(self, expr, env, eval_index_expr=None):
+        if expr["type"] != "indexed_name":
+            return expr["name"]
+        if eval_index_expr is None:
+            eval_index_expr = self._eval_index_expr
+        base = expr["name"]
+        index_values = self._eval_multi_index_values(expr, env, eval_index_expr)
+        for candidate in self._indexed_name_candidates(base, index_values):
+            if candidate in self.var_indices or candidate in self.data_dict:
+                return candidate
         declaration = self._find_decl(base)
         if declaration and declaration.get("type") in ("dvar", "dvar_indexed"):
             raise SemanticError(f"Unable to resolve indexed variable '{base}' with indices {index_values}")
@@ -4050,62 +4044,77 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"# comparison truth var for {op}")
         return bname
 
-    def _bool_struct_key(self, node, env):
-        def _bound_key(part):
-            while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
-                part = part.get("expression")
-            if not isinstance(part, dict):
-                return ("lit", part)
-            node_type = part.get("type")
-            if node_type == "indexed_name":
-                try:
-                    return ("indexed", self._multi_indexed_var_name(part, env))
-                except Exception:
-                    return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
-            if node_type == "name":
-                name = part.get("value")
-                return ("name", env.get(name, name))
-            if node_type in ("number", "string_literal", "boolean_literal"):
-                return (node_type, part.get("value"))
-            if node_type == "binop":
-                return ("binop", part.get("op"), _bound_key(part.get("left")), _bound_key(part.get("right")))
-            if node_type == "sum":
-                local_iterators = {
-                    it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
-                }
-                env_snapshot = tuple(
-                    sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-                )
-                return (
-                    "sum",
-                    str(part.get("iterators")),
-                    env_snapshot,
-                    _bound_key(part.get("expression")),
-                    _bound_key(part.get("index_constraint")),
-                )
-            return (node_type, str(part))
+    def _bool_bound_key(self, part, env):
+        while isinstance(part, dict) and part.get("type") == "parenthesized_expression":
+            part = part.get("expression")
+        if not isinstance(part, dict):
+            return ("lit", part)
+        node_type = part.get("type")
+        if node_type == "indexed_name":
+            try:
+                return ("indexed", self._multi_indexed_var_name(part, env))
+            except Exception:
+                return ("indexed_raw", part.get("name"), str(part.get("dimensions")))
+        if node_type == "name":
+            name = part.get("value")
+            return ("name", env.get(name, name))
+        if node_type in ("number", "string_literal", "boolean_literal"):
+            return (node_type, part.get("value"))
+        if node_type == "binop":
+            return ("binop", part.get("op"), self._bool_bound_key(part.get("left"), env), self._bool_bound_key(part.get("right"), env))
+        if node_type == "sum":
+            local_iterators = {
+                it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
+            }
+            env_snapshot = tuple(
+                sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
+            )
+            return (
+                "sum",
+                str(part.get("iterators")),
+                env_snapshot,
+                self._bool_bound_key(part.get("expression"), env),
+                self._bool_bound_key(part.get("index_constraint"), env),
+            )
+        return (node_type, str(part))
 
+    def _bool_atom_key(self, node, env):
+        if not isinstance(node, dict) or node.get("type") != "constraint" or node.get("op") != "==":
+            return None
+        left = node["left"]
+        right = node["right"]
+        is_num01 = lambda value: isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
+        is_var = lambda value: isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+        if is_var(left) and is_num01(right):
+            vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
+            return ("atom", vname, right["value"])
+        if is_var(right) and is_num01(left):
+            vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
+            return ("atom", vname, left["value"])
+        return None
+
+    def _bool_equality_link_key(self, node, env):
+        if node.get("op") != "==" or not isinstance(node.get("left"), dict) or not isinstance(node.get("right"), dict):
+            return None
+        left = node["left"]
+        right = node["right"]
+        is_bool_var = lambda value: self._is_bool_var_node(value)
+        is_bool_composite = lambda value: self._is_bool_composite_node(value)
+        if is_bool_var(left) and is_bool_composite(right):
+            return ("eq_link", self._bool_bound_key(left, env), self._bool_struct_key(right, env))
+        if is_bool_var(right) and is_bool_composite(left):
+            return ("eq_link", self._bool_bound_key(right, env), self._bool_struct_key(left, env))
+        return None
+
+    def _bool_struct_key(self, node, env):
         while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
             node = node.get("expression")
         if not isinstance(node, dict):
             return ("lit", node)
         node_type = node.get("type")
-        if node_type == "constraint" and node.get("op") == "==":
-            left = node["left"]
-            right = node["right"]
-
-            def is_num01(value):
-                return isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
-
-            def is_var(value):
-                return isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
-
-            if is_var(left) and is_num01(right):
-                vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                return ("atom", vname, right["value"])
-            if is_var(right) and is_num01(left):
-                vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                return ("atom", vname, left["value"])
+        atom_key = self._bool_atom_key(node, env)
+        if atom_key is not None:
+            return atom_key
         if node_type == "not":
             return ("not", self._bool_struct_key(node["value"], env))
         if node_type in ("and", "or"):
@@ -4117,29 +4126,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 right_key = right_key[2]
             return (node_type, tuple(sorted([left_key, right_key])))
         if node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<=", ">=", "!=", "=="):
-            if node.get("op") == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
-                left = node["left"]
-                right = node["right"]
-
-                def _is_bool_var(value):
-                    return (
-                        isinstance(value, dict)
-                        and value.get("type") in ("name", "indexed_name")
-                        and value.get("sem_type") == "boolean"
-                    )
-
-                def _is_bool_composite(value):
-                    return (
-                        isinstance(value, dict)
-                        and value.get("sem_type") == "boolean"
-                        and value.get("type") in ("and", "or", "binop", "parenthesized_expression")
-                    )
-
-                if _is_bool_var(left) and _is_bool_composite(right):
-                    return ("eq_link", _bound_key(left), self._bool_struct_key(right, env))
-                if _is_bool_var(right) and _is_bool_composite(left):
-                    return ("eq_link", _bound_key(right), self._bool_struct_key(left, env))
-            return ("cmp", node.get("op"), _bound_key(node.get("left")), _bound_key(node.get("right")))
+            link_key = self._bool_equality_link_key(node, env)
+            if link_key is not None:
+                return link_key
+            return ("cmp", node.get("op"), self._bool_bound_key(node.get("left"), env), self._bool_bound_key(node.get("right"), env))
         return ("unknown", id(node))
 
     def _new_bool_aux_var(self) -> str:
