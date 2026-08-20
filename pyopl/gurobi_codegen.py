@@ -1263,48 +1263,23 @@ class GurobiCodeGenerator:
         cons_right_expr,
         constr_name_prefix,
     ):
-        def is_binary_var(node):
-            if node.get("type") == "name":
-                varname = node["value"]
-            elif node.get("type") == "indexed_name":
-                varname = node["name"]
-            else:
-                return False
-            decl = self._find_declaration_by_name(varname)
-            return bool(decl and decl.get("type") in ("dvar", "dvar_indexed") and decl.get("var_type") == "boolean")
+        if self._emit_true_consequent_indicator(
+            ant_left,
+            ant_right,
+            ant_op,
+            ant_left_expr,
+            ant_right_expr,
+            cons_left,
+            cons_left_expr,
+            cons_right,
+            cons_op,
+            constr_name_prefix,
+        ):
+            return True
 
-        consequent_is_true = cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True
-        consequent_is_one = cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0
-        if cons_op == "==" and is_binary_var(cons_left) and (consequent_is_one or consequent_is_true):
-            if ant_op == ">" and ant_right.get("type") == "number":
-                self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {ant_left_expr} <= {ant_right_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra')})"
-                )
-                return True
-            if ant_op == ">=" and ant_right.get("type") == "number":
-                try:
-                    adjusted = float(ant_right.get("value", 0)) - EPS
-                    consequent_expr = f"{ant_left_expr} <= {adjusted}"
-                except Exception:
-                    consequent_expr = f"{ant_left_expr} <= ({ant_right_expr} - {EPS})"
-                self._add_code_line(
-                    f"model.addGenConstrIndicator({cons_left_expr}, 0, {consequent_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator_contra_ge')})"
-                )
-                return True
-
-        if ant_op not in ("==", ">=", "<=") or not is_binary_var(ant_left):
+        if ant_op not in ("==", ">=", "<=") or not self._is_binary_dvar_node(ant_left):
             return False
-        try:
-            rhs_val = float(ant_right.get("value", 0))
-        except (TypeError, ValueError):
-            return False
-        indicator_value = None
-        if ant_op == "==" and rhs_val in (0, 1):
-            indicator_value = int(rhs_val)
-        elif ant_op == ">=" and rhs_val == 1:
-            indicator_value = 1
-        elif ant_op == "<=" and rhs_val == 0:
-            indicator_value = 0
+        indicator_value = self._indicator_value_for_binary_comparison(ant_op, ant_right)
         if indicator_value is None or cons_op not in ("==", ">=", "<=", ">", "<"):
             return False
         indicator_expr = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
@@ -1312,6 +1287,66 @@ class GurobiCodeGenerator:
             f"model.addGenConstrIndicator({ant_left_expr}, {indicator_value}, {indicator_expr}, name={self._format_name_expr(constr_name_prefix, '_indicator')})"
         )
         return True
+
+    def _is_binary_dvar_node(self, node):
+        if node.get("type") == "name":
+            varname = node["value"]
+        elif node.get("type") == "indexed_name":
+            varname = node["name"]
+        else:
+            return False
+        declaration = self._find_declaration_by_name(varname)
+        return bool(
+            declaration and declaration.get("type") in ("dvar", "dvar_indexed") and declaration.get("var_type") == "boolean"
+        )
+
+    def _emit_true_consequent_indicator(
+        self,
+        ant_left,
+        ant_right,
+        ant_op,
+        ant_left_expr,
+        ant_right_expr,
+        cons_left,
+        cons_left_expr,
+        cons_right,
+        cons_op,
+        constr_name_prefix,
+    ):
+        consequent_is_true = cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True
+        consequent_is_one = cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0
+        if cons_op != "==" or not self._is_binary_dvar_node(cons_left) or not (consequent_is_one or consequent_is_true):
+            return False
+        if ant_op == ">" and ant_right.get("type") == "number":
+            consequent_expr = f"{ant_left_expr} <= {ant_right_expr}"
+            suffix = "_indicator_contra"
+        elif ant_op == ">=" and ant_right.get("type") == "number":
+            try:
+                adjusted = float(ant_right.get("value", 0)) - EPS
+                consequent_expr = f"{ant_left_expr} <= {adjusted}"
+            except Exception:
+                consequent_expr = f"{ant_left_expr} <= ({ant_right_expr} - {EPS})"
+            suffix = "_indicator_contra_ge"
+        else:
+            return False
+        self._add_code_line(
+            f"model.addGenConstrIndicator({cons_left_expr}, 0, {consequent_expr}, name={self._format_name_expr(constr_name_prefix, suffix)})"
+        )
+        return True
+
+    @staticmethod
+    def _indicator_value_for_binary_comparison(operator, right_node):
+        try:
+            rhs_value = float(right_node.get("value", 0))
+        except (TypeError, ValueError):
+            return None
+        if operator == "==" and rhs_value in (0, 1):
+            return int(rhs_value)
+        if operator == ">=" and rhs_value == 1:
+            return 1
+        if operator == "<=" and rhs_value == 0:
+            return 0
+        return None
 
     @staticmethod
     def _normalize_boolean_aux_node(node):
@@ -1632,96 +1667,60 @@ class GurobiCodeGenerator:
         self.gurobi_var_map[name] = name
 
     def _decl_dvar_indexed(self, decl):
-        # Emit decision variables for multi-dimensional arrays using itertools.product
         name = decl["name"]
-        var_type = decl["var_type"]
-        dimensions = decl["dimensions"]
         bound_args = self._decl_dvar_bound_args(decl)
-        has_explicit_lb = "lower_bound" in decl
-        range_args = []
-        for dim in dimensions:
-            if dim["type"] == "range_index":
-                start_val = self._traverse_expression(dim["start"], {}, symbolic=True)
-                end_val = self._traverse_expression(dim["end"], {}, symbolic=True)
-                range_args.append(f"range({start_val}, {end_val} + 1)")
-            elif dim["type"] == "named_range_dimension":
-                # Use symbolic range name as the end bound: range(<start_expr>, <Name> + 1)
-                start_expr = (
-                    self._traverse_expression(
-                        dim.get("start", {"type": "number", "value": 1}),
-                        {},
-                        symbolic=True,
-                    )
-                    if "start" in dim
-                    else "1"
-                )
-                range_args.append(f"range({start_expr}, {dim['name']} + 1)")
-            elif dim["type"] == "named_set_dimension":
-                set_name = dim["name"]
-                tuple_keys = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
-                range_args.append(f"{set_name}")
-                if not hasattr(self, "_emitted_tuple_sets"):
-                    self._emitted_tuple_sets = set()
-                if set_name not in self._emitted_tuple_sets:
-                    self._add_code_line(f"{set_name} = {repr(tuple_keys)}")
-                    self._emitted_tuple_sets.add(set_name)
-            else:
-                raise ValueError(f"Unsupported dimension type in declaration for {name}: {dim['type']}")
-        # Use itertools.product for multi-indexed variables
+        range_args = self._decl_dvar_indexed_ranges(name, decl["dimensions"])
+        index_args = ", ".join(range_args)
         if len(range_args) > 1:
-            product_args = f"itertools.product({', '.join(map(str, range_args))})"
-            if var_type == "boolean":
-                self._add_code_line(f"{name} = model.addVars({product_args}, vtype=GRB.BINARY, name='{name}')")
-            elif var_type == "int+":
-                default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "int":
-                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
-                self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "float+":
-                default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "float":
-                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
-                self._add_code_line(
-                    f"{name} = model.addVars({product_args}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
-                )
-            else:
-                self._add_code_line(f"{name} = model.addVars({product_args}, name='{name}'{bound_args})")
-        else:
-            if var_type == "boolean":
-                self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.BINARY, name='{name}')"
-                )
-            elif var_type == "int+":
-                default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "int":
-                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
-                self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.INTEGER, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "float+":
-                default_lb = "" if has_explicit_lb else ", lb=0"
-                self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
-                )
-            elif var_type == "float":
-                default_lb = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
-                self._add_code_line(
-                    f"{name} = model.addVars({', '.join(map(str, range_args))}, vtype=GRB.CONTINUOUS, name='{name}'{default_lb}{bound_args})"
-                )
-            else:
-                self._add_code_line(f"{name} = model.addVars({', '.join(map(str, range_args))}, name='{name}'{bound_args})")
+            index_args = f"itertools.product({index_args})"
+        type_args = self._decl_dvar_type_args(decl["var_type"], "lower_bound" in decl)
+        self._add_code_line(f"{name} = model.addVars({index_args}{type_args}, name='{name}'{bound_args})")
         self.gurobi_var_map[name] = name
+
+    def _decl_dvar_indexed_ranges(self, name, dimensions):
+        range_args = []
+        for dimension in dimensions:
+            dimension_type = dimension["type"]
+            if dimension_type == "range_index":
+                start = self._traverse_expression(dimension["start"], {}, symbolic=True)
+                end = self._traverse_expression(dimension["end"], {}, symbolic=True)
+                range_args.append(f"range({start}, {end} + 1)")
+            elif dimension_type == "named_range_dimension":
+                start = self._traverse_expression(dimension.get("start", {"type": "number", "value": 1}), {}, symbolic=True)
+                range_args.append(f"range({start}, {dimension['name']} + 1)")
+            elif dimension_type == "named_set_dimension":
+                set_name = dimension["name"]
+                range_args.append(set_name)
+                self._emit_tuple_set_if_needed(set_name)
+            else:
+                raise ValueError(f"Unsupported dimension type in declaration for {name}: {dimension_type}")
+        return range_args
+
+    def _emit_tuple_set_if_needed(self, set_name):
+        tuple_keys = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+        if not hasattr(self, "_emitted_tuple_sets"):
+            self._emitted_tuple_sets = set()
+        if set_name not in self._emitted_tuple_sets:
+            self._add_code_line(f"{set_name} = {repr(tuple_keys)}")
+            self._emitted_tuple_sets.add(set_name)
+
+    @staticmethod
+    def _decl_dvar_type_args(var_type, has_explicit_lb):
+        type_info = {
+            "boolean": ("GRB.BINARY", ""),
+            "int+": ("GRB.INTEGER", ", lb=0"),
+            "int": ("GRB.INTEGER", ", lb=-GRB.INFINITY"),
+            "float+": ("GRB.CONTINUOUS", ", lb=0"),
+            "float": ("GRB.CONTINUOUS", ", lb=-GRB.INFINITY"),
+        }.get(var_type)
+        if type_info is None:
+            return ""
+        vtype, default_lb = type_info
+        if var_type == "boolean":
+            return f", vtype={vtype}"
+        if has_explicit_lb:
+            default_lb = ""
+        return f", vtype={vtype}{default_lb}"
 
     def _decl_dvar_bound_args(self, decl):
         iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
@@ -2512,75 +2511,48 @@ class GurobiCodeGenerator:
     def _expr_indexed_name(self, expr_node, current_iterators, symbolic):
         base_name = expr_node["name"]
 
-        decl = None
-        for d in self.ast.get("declarations", []):
-            if d.get("name") == base_name:
-                decl = d
-                break
+        decl = self._find_declaration_by_name(base_name)
 
         if self._is_tuple_indexed_declaration(decl):
-            idx = expr_node["dimensions"][0]
-            if idx.get("type") in ("name_reference_index", "name"):
-                return f"{base_name}[{idx['name']}]"
-            elif idx.get("type") == "tuple_literal":
-                # Build a Python tuple expression for the index, handling raw literals
-                parts = []
-                for el in idx.get("elements", []):
-                    if isinstance(el, dict):
-                        # Preserve boolean literals inside tuple indices
-                        if el.get("type") == "boolean_literal":
-                            parts.append("True" if el.get("value") else "False")
-                        else:
-                            parts.append(self._traverse_expression(el, current_iterators, symbolic))
-                    else:
-                        parts.append(repr(el))
-                # Ensure single-element tuples include the trailing comma
-                if len(parts) == 1:
-                    tuple_expr = f"({parts[0]},)"
-                else:
-                    tuple_expr = f"({', '.join(parts)})"
+            return self._expr_tuple_indexed_name(expr_node, current_iterators, symbolic)
+        if base_name in self.gurobi_var_map:
+            return self._expr_decision_indexed_name(expr_node, current_iterators, symbolic)
+        if decl is not None and decl.get("type") in ("tuple_array", "tuple_array_external"):
+            return self._expr_tuple_array_indexed_name(expr_node, current_iterators, symbolic)
+        return self._emit_parameter_indexed_name(base_name, expr_node, decl, current_iterators, symbolic)
 
-                # Emit tuple-key access when the data was emitted as a dict,
-                # but fallback to nested list indexing when the runtime object
-                # is a list-of-lists. For tuple-indexed declarations the
-                # corresponding list-style access uses the tuple elements as
-                # separate indices (adjusting 1-based ranges to 0-based).
-                list_index_parts = []
-                for el in idx.get("elements", []):
-                    if isinstance(el, dict):
-                        idx_code = self._traverse_expression(el, current_iterators, symbolic)
-                    else:
-                        idx_code = repr(el)
-                    # Conservatively adjust numeric/name indices to 0-based
-                    list_index_parts.append(f"(({idx_code}) - 1)")
-                list_access = base_name + "".join(f"[{p}]" for p in list_index_parts)
-                return f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) else {list_access})"
-        else:
-            # Decision variable case
-            if base_name in self.gurobi_var_map:
-                # Always emit direct bracket indexing for decision variables (no _safe_get)
-                if len(expr_node["dimensions"]) == 1:
-                    idx_expr = self._emit_index_expr(expr_node["dimensions"][0], current_iterators, symbolic)
-                    return f"{base_name}[{idx_expr}]"
-                idx_exprs = [
-                    self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in expr_node["dimensions"]
-                ]
-                if len(idx_exprs) == 1:
-                    return f"{base_name}[{idx_exprs[0]}]"
-                else:
-                    return f"{base_name}[({', '.join(idx_exprs)})]"
+    def _expr_tuple_indexed_name(self, expr_node, current_iterators, symbolic):
+        base_name = expr_node["name"]
+        index = expr_node["dimensions"][0]
+        if index.get("type") in ("name_reference_index", "name"):
+            return f"{base_name}[{index['name']}]"
+        if index.get("type") != "tuple_literal":
+            return self._emit_parameter_indexed_name(base_name, expr_node, None, current_iterators, symbolic)
+        elements = index.get("elements", [])
+        tuple_parts = [
+            self._traverse_expression(element, current_iterators, symbolic) if isinstance(element, dict) else repr(element)
+            for element in elements
+        ]
+        tuple_expr = f"({tuple_parts[0]},)" if len(tuple_parts) == 1 else f"({', '.join(tuple_parts)})"
+        list_index_parts = [
+            f"(({self._traverse_expression(element, current_iterators, symbolic) if isinstance(element, dict) else repr(element)}) - 1)"
+            for element in elements
+        ]
+        list_access = base_name + "".join(f"[{part}]" for part in list_index_parts)
+        return f"({base_name}[{tuple_expr}] if isinstance({base_name}, dict) else {list_access})"
 
-            # Tuple array case (data struct of records)
-            if decl is not None and decl.get("type") in ("tuple_array", "tuple_array_external"):
-                idx_exprs = [
-                    self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in expr_node["dimensions"]
-                ]
-                out = base_name
-                for ie in idx_exprs:
-                    out += f"[{ie}]"
-                return out
+    def _expr_decision_indexed_name(self, expr_node, current_iterators, symbolic):
+        base_name = expr_node["name"]
+        index_exprs = [self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in expr_node["dimensions"]]
+        if len(index_exprs) == 1:
+            return f"{base_name}[{index_exprs[0]}]"
+        return f"{base_name}[({', '.join(index_exprs)})]"
 
-            return self._emit_parameter_indexed_name(base_name, expr_node, decl, current_iterators, symbolic)
+    def _expr_tuple_array_indexed_name(self, expr_node, current_iterators, symbolic):
+        out = expr_node["name"]
+        for dimension in expr_node["dimensions"]:
+            out += f"[{self._emit_index_expr(dimension, current_iterators, symbolic)}]"
+        return out
 
     def _expr_binop(self, expr_node, current_iterators, symbolic):
         op = expr_node["op"]
