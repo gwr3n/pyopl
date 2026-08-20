@@ -214,10 +214,7 @@ class ExpressionEvaluator:
     def _validate_dict_handler_value(self, expression_type: str, result: tuple, coef: Any, value: dict) -> tuple:
         import inspect
 
-        if any(
-            frame.function.startswith(("_eval_field_access", "_eval_field_access_index"))
-            for frame in inspect.stack()
-        ):
+        if any(frame.function.startswith(("_eval_field_access", "_eval_field_access_index")) for frame in inspect.stack()):
             return coef, value
         raise SemanticError(
             f"ExpressionEvaluator.eval: handler for type '{expression_type}' returned tuple with dict value: {result}"
@@ -358,10 +355,15 @@ class ExpressionEvaluator:
     def _set_dimension_values(self, dimension: Dict[str, Any]) -> Optional[list]:
         set_decl = self.parent._find_decl(dimension.get("name"))
         set_data = self.parent.data_dict.get(dimension.get("name"))
-        if set_data is None and set_decl and set_decl.get("type") in (
-            "typed_set",
-            "typed_set_external",
-            "set_declaration",
+        if (
+            set_data is None
+            and set_decl
+            and set_decl.get("type")
+            in (
+                "typed_set",
+                "typed_set_external",
+                "set_declaration",
+            )
         ):
             set_data = set_decl.get("value") or []
         return set_data if isinstance(set_data, list) else None
@@ -528,9 +530,7 @@ class ExpressionEvaluator:
             dimensions = declaration.get("dimensions", [])
             if len(dimensions) != 1 or dimensions[0].get("type") != "named_set_dimension":
                 continue
-            tuple_keys = TupleSetHelper.get_tuple_set(
-                dimensions[0]["name"], self.parent.ast, self.parent.data_dict
-            ) or []
+            tuple_keys = TupleSetHelper.get_tuple_set(dimensions[0]["name"], self.parent.ast, self.parent.data_dict) or []
             normalized_keys = [key if isinstance(key, tuple) else (key,) for key in tuple_keys]
             try:
                 index = normalized_keys.index(tuple_key)
@@ -562,9 +562,7 @@ class ExpressionEvaluator:
         if inline_value is not None:
             return {}, inline_value
 
-        raise self.parent._not_found_error(
-            "tuple-indexed variable or parameter", f"{name}[{repr(tuple_key)}]"
-        )
+        raise self.parent._not_found_error("tuple-indexed variable or parameter", f"{name}[{repr(tuple_key)}]")
 
     def _eval_name_reference_index(
         self, expr: Dict[str, Any], env: Dict[str, Any]
@@ -775,14 +773,23 @@ class ExpressionEvaluator:
 
     def _handle_numeric_comparison(self, left, right, op):
         if op == "!=":
-            return {}, float(left != right) if self._comparison_is_numeric(left) and self._comparison_is_numeric(right) else float(bool(left) != bool(right))
+            return {}, (
+                float(left != right)
+                if self._comparison_is_numeric(left) and self._comparison_is_numeric(right)
+                else float(bool(left) != bool(right))
+            )
         if op not in ("<", ">", "<=", ">="):
             raise self.parent._unsupported_operator_error("binop", op)
         if not (self._comparison_is_numeric(left) and self._comparison_is_numeric(right)):
             if not getattr(self.parent, "_allow_symbolic_bool", False):
                 raise SemanticError("Non-numeric comparison outside constraint build context")
             return {}, f"({left}) {op} ({right})"
-        operations = {"<": lambda: left < right, ">": lambda: left > right, "<=": lambda: left <= right, ">=": lambda: left >= right}
+        operations = {
+            "<": lambda: left < right,
+            ">": lambda: left > right,
+            "<=": lambda: left <= right,
+            ">=": lambda: left >= right,
+        }
         return {}, float(operations[op]())
 
     def _handle_binop_cmp(self, left, right, op, env):
@@ -1585,44 +1592,44 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             integrality.append(int_flag)
 
     def _resolve_indexed_variable_dimension(self, dim):
-            if dim["type"] == "range_index":
-                start_eval = self._eval_bound(dim["start"])
-                end_eval = self._eval_bound(dim["end"])
-                return (
-                    list(range(int(start_eval), int(end_eval) + 1)),
-                    f"range({self._emit_symbolic_expr(dim['start'])}, {self._emit_symbolic_expr(dim['end'])} + 1)",
-                )
-            if dim["type"] == "named_range_dimension":
-                range_decl = next(
-                    (
-                        declaration
-                        for declaration in self.ast["declarations"]
-                        if declaration["type"] == "range_declaration_inline" and declaration["name"] == dim["name"]
-                    ),
-                    None,
-                )
-                if range_decl is None:
-                    raise self._not_found_error("range", dim["name"])
-                start_eval = self._eval_bound(range_decl["start"])
-                end_eval = self._eval_bound(range_decl["end"])
-                return (
-                    list(range(int(start_eval), int(end_eval) + 1)),
-                    f"range({self._emit_symbolic_expr(range_decl['start'])}, {self._emit_symbolic_expr(range_decl['end'])} + 1)",
-                )
-            set_name = dim["name"]
-            set_decl = self._find_decl(set_name)
-            if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                set_values = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
-            elif set_name in self.data_dict:
-                set_values = self.data_dict[set_name]
-            elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
-                set_values = set_decl.get("value")
-                if set_decl.get("type") == "typed_set_external" and set_values is None:
-                    raise SemanticError(f"External set '{set_name}' has no data provided")
-                set_values = set_values or []
-            else:
-                raise SemanticError(f"Named set '{set_name}' is not declared")
-            return set_values, set_name
+        if dim["type"] == "range_index":
+            start_eval = self._eval_bound(dim["start"])
+            end_eval = self._eval_bound(dim["end"])
+            return (
+                list(range(int(start_eval), int(end_eval) + 1)),
+                f"range({self._emit_symbolic_expr(dim['start'])}, {self._emit_symbolic_expr(dim['end'])} + 1)",
+            )
+        if dim["type"] == "named_range_dimension":
+            range_decl = next(
+                (
+                    declaration
+                    for declaration in self.ast["declarations"]
+                    if declaration["type"] == "range_declaration_inline" and declaration["name"] == dim["name"]
+                ),
+                None,
+            )
+            if range_decl is None:
+                raise self._not_found_error("range", dim["name"])
+            start_eval = self._eval_bound(range_decl["start"])
+            end_eval = self._eval_bound(range_decl["end"])
+            return (
+                list(range(int(start_eval), int(end_eval) + 1)),
+                f"range({self._emit_symbolic_expr(range_decl['start'])}, {self._emit_symbolic_expr(range_decl['end'])} + 1)",
+            )
+        set_name = dim["name"]
+        set_decl = self._find_decl(set_name)
+        if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+            set_values = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+        elif set_name in self.data_dict:
+            set_values = self.data_dict[set_name]
+        elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+            set_values = set_decl.get("value")
+            if set_decl.get("type") == "typed_set_external" and set_values is None:
+                raise SemanticError(f"External set '{set_name}' has no data provided")
+            set_values = set_values or []
+        else:
+            raise SemanticError(f"Named set '{set_name}' is not declared")
+        return set_values, set_name
 
     def _emit_indexed_variable(self, decl, index_tuple, iterator_names, var_names, bounds, integrality):
         name = decl["name"]
@@ -1911,9 +1918,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _lookup_parameter_dimension(self, name: str, resolved: object, index: object, dimension_index: int, env: dict, logger):
         evaluated_index = self._eval_index(index, env)
-        logger.debug(
-            f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}"
-        )
+        logger.debug(f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}")
         if isinstance(resolved, dict):
             logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
             return resolved[evaluated_index]
@@ -1921,8 +1926,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             evaluated_index = int(evaluated_index)
         if not isinstance(evaluated_index, int):
             raise ValueError(
-                f"Index '{index}' could not be resolved to int (got {evaluated_index!r}) "
-                f"for param '{name}' with env={env}"
+                f"Index '{index}' could not be resolved to int (got {evaluated_index!r}) " f"for param '{name}' with env={env}"
             )
         if isinstance(resolved, list):
             start_index = self._parameter_list_start_index(name, dimension_index)
@@ -3121,10 +3125,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         rows = self._tuple_set_parameter_rows(set_elements, data_dict[name], end - start + 1)
         if rows is None:
             return
-        data_dict[name] = {
-            key: {index: float(row[index - start]) for index in range(start, end + 1)}
-            for key, row in rows
-        }
+        data_dict[name] = {key: {index: float(row[index - start]) for index in range(start, end + 1)} for key, row in rows}
 
     def _emit_ast_data_declarations(self, data_dict):
         for declaration in self.ast.get("declarations", []):
@@ -4128,9 +4129,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         local_iterators = {
             it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
         }
-        env_snapshot = tuple(
-            sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators)
-        )
+        env_snapshot = tuple(sorted((name, repr(value)) for name, value in (env or {}).items() if name not in local_iterators))
         return (
             "sum",
             str(part.get("iterators")),
@@ -4973,9 +4972,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         base_name = node.get("value") if node.get("type") == "name" else node.get("name")
         declaration = self._find_decl(base_name)
         return bool(
-            declaration
-            and declaration.get("type") in ("dvar", "dvar_indexed")
-            and declaration.get("var_type") == "boolean"
+            declaration and declaration.get("type") in ("dvar", "dvar_indexed") and declaration.get("var_type") == "boolean"
         )
 
     def _implication_boolean_equality_variable(self, consequent, value):
@@ -5002,7 +4999,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         left = consequent.get("left")
         right = consequent.get("right")
         operators = (">=", "==") if value == 1 else ("<=", "==")
-        if consequent.get("op") in operators and self._is_boolean_decision_variable(left) and self._is_implication_number(right, value):
+        if (
+            consequent.get("op") in operators
+            and self._is_boolean_decision_variable(left)
+            and self._is_implication_number(right, value)
+        ):
             return left
         return None
 
@@ -5296,9 +5297,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         else:
             self._append_sparse_row(state, row, rhs_value, sense="eq")
 
-    def _try_handle_weighted_boolean_sum_constraint(
-        self, left, right, op_sym_top, env, bool_expr_var, state
-    ):
+    def _try_handle_weighted_boolean_sum_constraint(self, left, right, op_sym_top, env, bool_expr_var, state):
         weighted_operands = self._weighted_boolean_sum_operands(left)
         if weighted_operands is None:
             return False
@@ -5564,9 +5563,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         variable_weights, constant_offset = collected
         threshold = inequality["right"].get("value") - constant_offset
         boolean_name = (
-            boolean_node["value"]
-            if boolean_node.get("type") == "name"
-            else self._multi_indexed_var_name(boolean_node, env)
+            boolean_node["value"] if boolean_node.get("type") == "name" else self._multi_indexed_var_name(boolean_node, env)
         )
         return boolean_name, variable_weights, threshold
 
@@ -6057,7 +6054,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         right_is_boolean = self._is_declared_boolean_var_node(right)
         left_is_literal = isinstance(left, dict) and left.get("type") == "number" and left.get("value") in (0, 1)
         right_is_literal = isinstance(right, dict) and right.get("type") == "number" and right.get("value") in (0, 1)
-        if (left_is_boolean or right_is_boolean) and (left_is_boolean or left_is_literal) and (right_is_boolean or right_is_literal):
+        if (
+            (left_is_boolean or right_is_boolean)
+            and (left_is_boolean or left_is_literal)
+            and (right_is_boolean or right_is_literal)
+        ):
             return left_is_boolean, right_is_boolean
         return None
 

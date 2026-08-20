@@ -763,9 +763,7 @@ def _solve_farkas_multipliers(
     return result.x
 
 
-def _trivial_farkas_solution(
-    conclusion_coefficients: list[sp.Expr], conclusion_constant: sp.Expr
-) -> np.ndarray | None:
+def _trivial_farkas_solution(conclusion_coefficients: list[sp.Expr], conclusion_constant: sp.Expr) -> np.ndarray | None:
     if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients):
         return np.asarray([])
     return None
