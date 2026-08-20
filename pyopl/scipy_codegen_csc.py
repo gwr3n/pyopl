@@ -1104,93 +1104,76 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """Add each comparison as its own constraint. For '!=', add both < and > as separate constraints."""
         env_eval = env or {}
         for comp in comparisons:
-            op = comp.get("op")
-            if op == "!=":
-                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
-                rhs_dict, rhs_const = self._accumulate_sum_to_dict(comp["right"], env=env_eval, sign=1)
-                diff_coef = dict(lhs_dict)
-                for var_name, coefficient in rhs_dict.items():
-                    diff_coef[var_name] = diff_coef.get(var_name, 0.0) - coefficient
-                diff_const = lhs_const - rhs_const
-                diff_min, diff_max = self._finite_integer_affine_bounds(
-                    diff_coef,
-                    diff_const,
-                    "Integer not-equal conjunction term",
-                )
-                big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
-                if not hasattr(self, "_neq_counter"):
-                    self._neq_counter = 0
-                direction_name = f"neq_direction_c{self._neq_counter}"
-                self._neq_counter += 1
-                self.var_names.append(direction_name)
-                self.var_indices[direction_name] = len(self.var_names) - 1
-                self.bounds.append([0, 1])
-                self.integrality.append(1)
-                self.c.append(0.0)
-                for existing_row in self.A_eq:
-                    existing_row.append(0.0)
-                for existing_row in self.A_ub:
-                    existing_row.append(0.0)
-
-                negative_row = [0.0] * len(self.var_names)
-                positive_row = [0.0] * len(self.var_names)
-                for var_name, coefficient in diff_coef.items():
-                    negative_row[self.var_indices[var_name]] += coefficient
-                    positive_row[self.var_indices[var_name]] -= coefficient
-                negative_row[self.var_indices[direction_name]] = -big_m
-                positive_row[self.var_indices[direction_name]] = big_m
-                self.A_ub.append(negative_row)
-                self.b_ub.append(-1.0 - diff_const)
-                self.A_ub.append(positive_row)
-                self.b_ub.append(big_m - 1.0 + diff_const)
-                continue
+            if comp.get("op") == "!=":
+                self._append_not_equal_constraint(comp, env_eval)
             else:
-                lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env_eval, sign=1)
-                rhs_dict, rhs_const = (
-                    self._accumulate_sum_to_dict(comp["right"], env=env_eval, sign=1)
-                    if isinstance(comp["right"], dict)
-                    else ({}, (comp["right"] if isinstance(comp["right"], (int, float)) else 0.0))
-                )
-                expr_coef = dict(lhs_dict)
-                for v, c in rhs_dict.items():
-                    expr_coef[v] = expr_coef.get(v, 0.0) - c
-                expr_const = lhs_const - rhs_const
-            if comp["op"] == "==":
-                row = [0.0] * len(self.var_names)
-                for v, c in expr_coef.items():
-                    if isinstance(v, int):
-                        if v < len(row):
-                            row[v] += c
-                    else:
-                        idx = self.var_indices.get(v)
-                        if idx is not None:
-                            row[idx] += c
-                self.A_eq.append(row)
-                self.b_eq.append(-expr_const)
-            elif comp["op"] == "<=":
-                row = [0.0] * len(self.var_names)
-                for v, c in expr_coef.items():
-                    if isinstance(v, int):
-                        if v < len(row):
-                            row[v] += c
-                    else:
-                        idx = self.var_indices.get(v)
-                        if idx is not None:
-                            row[idx] += c
-                self.A_ub.append(row)
-                self.b_ub.append(-expr_const)
-            elif comp["op"] == ">=":
-                row = [0.0] * len(self.var_names)
-                for v, c in expr_coef.items():
-                    if isinstance(v, int):
-                        if v < len(row):
-                            row[v] -= c
-                    else:
-                        idx = self.var_indices.get(v)
-                        if idx is not None:
-                            row[idx] -= c
-                self.A_ub.append(row)
-                self.b_ub.append(expr_const)
+                self._append_linear_constraint(comp, env_eval)
+
+    def _append_not_equal_constraint(self, comp: Dict[str, Any], env: Dict[str, Any]) -> None:
+        lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env, sign=1)
+        rhs_dict, rhs_const = self._accumulate_sum_to_dict(comp["right"], env=env, sign=1)
+        diff_coef = dict(lhs_dict)
+        for var_name, coefficient in rhs_dict.items():
+            diff_coef[var_name] = diff_coef.get(var_name, 0.0) - coefficient
+        diff_const = lhs_const - rhs_const
+        diff_min, diff_max = self._finite_integer_affine_bounds(
+            diff_coef, diff_const, "Integer not-equal conjunction term"
+        )
+        big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
+        if not hasattr(self, "_neq_counter"):
+            self._neq_counter = 0
+        direction_name = f"neq_direction_c{self._neq_counter}"
+        self._neq_counter += 1
+        self.var_names.append(direction_name)
+        self.var_indices[direction_name] = len(self.var_names) - 1
+        self.bounds.append([0, 1])
+        self.integrality.append(1)
+        self.c.append(0.0)
+        for existing_row in self.A_eq:
+            existing_row.append(0.0)
+        for existing_row in self.A_ub:
+            existing_row.append(0.0)
+
+        negative_row = [0.0] * len(self.var_names)
+        positive_row = [0.0] * len(self.var_names)
+        for var_name, coefficient in diff_coef.items():
+            negative_row[self.var_indices[var_name]] += coefficient
+            positive_row[self.var_indices[var_name]] -= coefficient
+        negative_row[self.var_indices[direction_name]] = -big_m
+        positive_row[self.var_indices[direction_name]] = big_m
+        self.A_ub.extend([negative_row, positive_row])
+        self.b_ub.extend([-1.0 - diff_const, big_m - 1.0 + diff_const])
+
+    def _append_linear_constraint(self, comp: Dict[str, Any], env: Dict[str, Any]) -> None:
+        lhs_dict, lhs_const = self._accumulate_sum_to_dict(comp["left"], env=env, sign=1)
+        rhs_dict, rhs_const = (
+            self._accumulate_sum_to_dict(comp["right"], env=env, sign=1)
+            if isinstance(comp["right"], dict)
+            else ({}, comp["right"] if isinstance(comp["right"], (int, float)) else 0.0)
+        )
+        expr_coef = dict(lhs_dict)
+        for variable, coefficient in rhs_dict.items():
+            expr_coef[variable] = expr_coef.get(variable, 0.0) - coefficient
+        expr_const = lhs_const - rhs_const
+        row = [0.0] * len(self.var_names)
+        sign = -1 if comp["op"] == ">=" else 1
+        for variable, coefficient in expr_coef.items():
+            if isinstance(variable, int):
+                if variable < len(row):
+                    row[variable] += sign * coefficient
+            else:
+                index = self.var_indices.get(variable)
+                if index is not None:
+                    row[index] += sign * coefficient
+        if comp["op"] == "==":
+            self.A_eq.append(row)
+            self.b_eq.append(-expr_const)
+        elif comp["op"] == "<=":
+            self.A_ub.append(row)
+            self.b_ub.append(-expr_const)
+        elif comp["op"] == ">=":
+            self.A_ub.append(row)
+            self.b_ub.append(expr_const)
 
     # ---------------- Bounds / linear span helpers (mirrors Gurobi backend logic in a lightweight form) ----------------
     def _var_bounds_safe(self, node: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
@@ -2401,44 +2384,36 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         t = expr.get("type") if isinstance(expr, dict) else None
         if t == "number":
             return str(expr["value"])
-        elif t == "name":
+        if t == "name":
             return expr["value"]
-        elif t == "binop":
+        if t == "binop":
             left = self._emit_python_expr(expr["left"], env)
             right = self._emit_python_expr(expr["right"], env)
             return f"({left} {expr['op']} {right})"
-        elif t == "uminus":
-            val = self._emit_python_expr(expr["value"], env)
-            return f"-({val})"
-        elif t == "parenthesized_expression":
+        if t == "uminus":
+            return f"-({self._emit_python_expr(expr['value'], env)})"
+        if t == "parenthesized_expression":
             return f"({self._emit_python_expr(expr['expression'], env)})"
-        elif t == "conditional":
+        if t == "conditional":
             cond = self._emit_python_expr(expr["condition"], env)
             then_expr = self._emit_python_expr(expr["then"], env)
             else_expr = self._emit_python_expr(expr["else"], env)
             return f"({then_expr} if ({cond}) else {else_expr})"
-        elif t == "indexed_name":
-            name = expr["name"]
-            dims = expr["dimensions"]
-            idxs = [str(self._emit_python_expr(dim, env)) for dim in dims]
-            idx_str = ", ".join(idxs)
-            return f"{name}[{idx_str}]"
-        elif t == "field_access":
+        if t == "indexed_name":
+            idxs = [str(self._emit_python_expr(dim, env)) for dim in expr["dimensions"]]
+            return f"{expr['name']}[{', '.join(idxs)}]"
+        if t == "field_access":
             # --- Tuple field access ---
             base = self._emit_python_expr(expr["base"], env)
             field = expr["field"]
-            if hasattr(self, "tuple_types"):
-                sem_type = expr["base"].get("sem_type")
-                if sem_type and sem_type in self.tuple_types:
-                    fields = self.tuple_types[sem_type]
-                    for idx, f in enumerate(fields):
-                        if f["name"] == field:
-                            return f"{base}[{idx}]"
+            for idx, f in enumerate(getattr(self, "tuple_types", {}).get(expr["base"].get("sem_type"), [])):
+                if f["name"] == field:
+                    return f"{base}[{idx}]"
             return f"{base}['{field}']"
         # NEW: boolean literal for emitted Python expr
-        elif t == "boolean_literal":
+        if t == "boolean_literal":
             return "True" if expr.get("value") else "False"
-        elif t == "funcall":
+        if t == "funcall":
             name = expr.get("name")
             args = expr.get("args", [])
             if len(args) == 1:
@@ -2449,19 +2424,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     return f"{name}({arg})"
             return str(expr)
         # NEW: emit min/max for symbolic comments
-        elif t in ("minl", "maxl"):
+        if t in ("minl", "maxl"):
             args = expr.get("args", [])
             parts = [self._emit_python_expr(a, env) for a in args]
             fn = "min" if t == "minl" else "max"
             return f"{fn}({', '.join(parts)})"
-        elif t == "name_reference_index":
+        if t == "name_reference_index":
             return env.get(expr["name"], expr["name"])
-        elif t == "number_literal_index":
+        if t == "number_literal_index":
             return str(expr["value"])
-        elif t == "string_literal":
+        if t == "string_literal":
             return repr(expr["value"])
-        else:
-            return str(expr)
+        return str(expr)
 
     def _emit_symbolic_expr(self, expr: dict) -> str:
         """
@@ -3011,33 +2985,40 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         second_keys = self._resolve_data_set_elements(dimensions[1]["name"], data_dict)
         if not (first_keys and second_keys):
             return
-        nested = {}
-        if (
-            isinstance(value, list)
-            and len(value) == len(first_keys)
-            and all(isinstance(row, (list, tuple)) and len(row) == len(second_keys) for row in value)
-        ):
-            for first_key, row in zip(first_keys, value):
-                normalized_first = tuple(first_key) if isinstance(first_key, (list, tuple)) else first_key
-                nested[normalized_first] = {
-                    tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
-                    for second_key, item in zip(second_keys, row)
-                }
-        elif isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
-            for first_key, row in value.items():
-                normalized_first = tuple(first_key) if isinstance(first_key, (list, tuple)) else first_key
-                if isinstance(row, dict):
-                    nested[normalized_first] = {
-                        tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
-                        for second_key, item in row.items()
-                    }
-                elif len(row) == len(second_keys):
-                    nested[normalized_first] = {
-                        tuple(second_key) if isinstance(second_key, (list, tuple)) else second_key: float(item)
-                        for second_key, item in zip(second_keys, row)
-                    }
+        nested = self._normalize_set_set_rows(value, first_keys, second_keys)
         if nested:
             data_dict[name] = nested
+
+    @staticmethod
+    def _normalize_set_key(key):
+        return tuple(key) if isinstance(key, (list, tuple)) else key
+
+    def _normalize_set_set_row(self, row, second_keys):
+        if isinstance(row, dict):
+            return {self._normalize_set_key(key): float(item) for key, item in row.items()}
+        if len(row) != len(second_keys):
+            return None
+        return {
+            self._normalize_set_key(key): float(item)
+            for key, item in zip(second_keys, row)
+        }
+
+    def _normalize_set_set_rows(self, value, first_keys, second_keys):
+        if isinstance(value, list):
+            if len(value) != len(first_keys) or not all(isinstance(row, (list, tuple)) for row in value):
+                return {}
+            rows = zip(first_keys, value)
+        elif isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
+            rows = value.items()
+        else:
+            return {}
+
+        nested = {}
+        for first_key, row in rows:
+            normalized_row = self._normalize_set_set_row(row, second_keys)
+            if normalized_row is not None:
+                nested[self._normalize_set_key(first_key)] = normalized_row
+        return nested
 
     def _data_range_bounds(self, range_dimension, data_dict):
         start_node = range_dimension.get("start")
