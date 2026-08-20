@@ -1,24 +1,45 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Python build / distribution
 build/
 dist/
-gen_ai/
-misc/
-tmp/
-venv*
-.venv*
-.vscode/
 *.egg-info/
 *.egg
+
+# Local folders
+gen_ai/
+misc/
+docs/dev_notes.md
+tmp/
+
+# Virtual environments
+venv*
+.venv*
+
+# VS Code settings
+.vscode/
 .vscode/settings.json
 
-.DS_Store
-.coverage
-.pyopl_session
-docs/dev_notes.md
-pricing_table.md
-model_prices_and_context_window_backup.json
+# GitHub Copilot settings
 .github/copilot-instructions.md
 .github/skills/*
+
+# GitHub Copilot usage database
+.usage.db
+
+# OS generated files
+.DS_Store
+
+# Coverage / profiling
+.coverage
+
+# PyOPL session files
+.pyopl_session
+
+# PyOPL pricing table and model prices
+pricing_table.md
+model_prices_and_context_window_backup.json
