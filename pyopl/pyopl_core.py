@@ -3546,7 +3546,118 @@ class OPLCompiler:
 
         raise SemanticError(f"Named range '{rng_name}' not found for {context}.")
 
-    def _resolve_comprehension_name(self, name: Any, env: dict[str, Any], working_data: dict[str, Any], *, index: bool = False) -> Any:
+    def _computed_parameter_type_metadata(
+        self,
+        declarations: list[dict[str, Any]],
+    ) -> tuple[dict[str, list[str]], dict[str, str]]:
+        tuple_fields_by_type: dict[str, list[str]] = {}
+        set_tuple_type_by_name: dict[str, str] = {}
+        for decl in declarations:
+            if decl.get("type") == "tuple_type":
+                tuple_name = decl.get("name")
+                if isinstance(tuple_name, str):
+                    tuple_fields_by_type[tuple_name] = [
+                        field["name"]
+                        for field in (decl.get("fields") or [])
+                        if isinstance(field, dict) and isinstance(field.get("name"), str)
+                    ]
+            elif decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                name = decl.get("name")
+                tuple_type = decl.get("tuple_type")
+                if isinstance(name, str) and isinstance(tuple_type, str):
+                    set_tuple_type_by_name[name] = tuple_type
+        return tuple_fields_by_type, set_tuple_type_by_name
+
+    def _eval_computed_parameter_index(self, expr: dict[str, Any], env: dict[str, Any]) -> Any:
+        expr_type = expr.get("type")
+        if expr_type == "number_literal_index":
+            return expr.get("value")
+        if expr_type in ("name_reference_index", "name"):
+            key = "name" if expr_type == "name_reference_index" else "value"
+            name = expr.get(key)
+            if not isinstance(name, str):
+                raise SemanticError("Unsupported index expr: missing name.")
+            return env.get(name, name)
+        if expr_type in ("field_access_index", "field_access"):
+            raise SemanticError("Field access in computed parameter indices not supported.")
+        if expr_type == "binop":
+            left_expr = expr.get("left")
+            right_expr = expr.get("right")
+            if not isinstance(left_expr, dict) or not isinstance(right_expr, dict):
+                raise SemanticError("Unsupported index binop operands.")
+            left = self._eval_computed_parameter_index(left_expr, env)
+            right = self._eval_computed_parameter_index(right_expr, env)
+            operations = {"+": int.__add__, "-": int.__sub__, "*": int.__mul__}
+            operator = expr.get("op")
+            if not isinstance(operator, str):
+                raise SemanticError(f"Unsupported index binop: {operator}")
+            operation = operations.get(operator)
+            if operation is None:
+                raise SemanticError(f"Unsupported index binop: {expr.get('op')}")
+            return operation(int(left), int(right))
+        if expr_type == "uminus":
+            value_expr = expr.get("value")
+            if not isinstance(value_expr, dict):
+                raise SemanticError("Unsupported index expr: missing unary operand.")
+            return -int(self._eval_computed_parameter_index(value_expr, env))
+        if expr_type == "parenthesized_expression":
+            inner_expr = expr.get("expression")
+            if not isinstance(inner_expr, dict):
+                raise SemanticError("Unsupported index expr: missing parenthesized expression.")
+            return self._eval_computed_parameter_index(inner_expr, env)
+        if expr_type == "string_literal":
+            return expr.get("value")
+        raise SemanticError(f"Unsupported index expr: {expr_type}")
+
+    def _computed_parameter_iterator_domains(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        iterators: list[dict[str, Any]],
+        param_name: Optional[str] = None,
+    ) -> list[list[Any]]:
+        domains: list[list[Any]] = []
+        for iterator in iterators:
+            rng = iterator["range"]
+            if rng["type"] == "range_specifier":
+                start = self._eval_bound_expr(rng["start"], working_data)
+                end = self._eval_bound_expr(rng["end"], working_data)
+                domains.append(list(range(start, end + 1)))
+            elif rng["type"] == "named_range":
+                start, end = self._resolve_named_range(model_ast, working_data, rng["name"], context="computed parameter")
+                domains.append(list(range(start, end + 1)))
+            elif rng["type"] in ("named_set", "named_set_dimension"):
+                set_obj = working_data.get(rng["name"], [])
+                elements = set_obj.get("elements") if isinstance(set_obj, dict) else set_obj
+                domains.append(list(elements or []))
+            elif param_name is None:
+                raise SemanticError(f"Unsupported range in aggregate: {rng['type']}")
+            else:
+                raise SemanticError(f"Unsupported iterator range type '{rng['type']}' for computed parameter '{param_name}'.")
+        return domains
+
+    def _computed_parameter_iterator_metadata(
+        self,
+        iterators: list[dict[str, Any]],
+        set_tuple_type_by_name: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        metadata: dict[str, dict[str, Any]] = {}
+        for iterator in iterators:
+            iterator_name = iterator["iterator"]
+            rng = iterator["range"]
+            metadata[iterator_name] = (
+                {
+                    "set": rng["name"],
+                    "tuple_type": set_tuple_type_by_name.get(rng["name"]),
+                }
+                if rng.get("type") in ("named_set", "named_set_dimension")
+                else {}
+            )
+        return metadata
+
+    def _resolve_comprehension_name(
+        self, name: Any, env: dict[str, Any], working_data: dict[str, Any], *, index: bool = False
+    ) -> Any:
         if isinstance(name, str) and name in env:
             return env[name]
         if isinstance(name, str) and name in working_data:
@@ -3589,6 +3700,8 @@ class OPLCompiler:
             ">": lambda: left > right,
             ">=": lambda: left >= right,
         }
+        if not isinstance(op, str):
+            raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
         operation = operations.get(op)
         if operation is not None:
             return operation()
@@ -3796,117 +3909,7 @@ class OPLCompiler:
         if not isinstance(declarations, list):
             return
 
-        tuple_fields_by_type: dict[str, list[str]] = {}
-        set_tuple_type_by_name: dict[str, str] = {}
-        for decl in declarations:
-            if not isinstance(decl, dict):
-                continue
-            if decl.get("type") == "tuple_type":
-                tuple_name = decl.get("name")
-                if isinstance(tuple_name, str):
-                    raw_fields = decl.get("fields") or []
-                    fields: list[str] = []
-                    for field in raw_fields:
-                        if isinstance(field, dict):
-                            field_name = field.get("name")
-                            if isinstance(field_name, str):
-                                fields.append(field_name)
-                    tuple_fields_by_type[tuple_name] = fields
-            elif decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                name = decl.get("name")
-                tuple_type = decl.get("tuple_type")
-                if isinstance(name, str) and isinstance(tuple_type, str):
-                    set_tuple_type_by_name[name] = tuple_type
-
-        def eval_index(idx_expr: dict[str, Any], env: dict[str, Any]) -> Any:
-            expr_type = idx_expr.get("type")
-            if expr_type == "number_literal_index":
-                return idx_expr.get("value")
-            if expr_type == "name_reference_index":
-                name = idx_expr.get("name")
-                if not isinstance(name, str):
-                    raise SemanticError("Unsupported index expr: missing name reference.")
-                return env.get(name, name)
-            if expr_type == "name":
-                name = idx_expr.get("value")
-                if not isinstance(name, str):
-                    raise SemanticError("Unsupported index expr: missing name.")
-                return env.get(name, name)
-            if expr_type in ("field_access_index", "field_access"):
-                raise SemanticError("Field access in computed parameter indices not supported.")
-            if expr_type == "binop":
-                op = idx_expr.get("op")
-                left_expr = idx_expr.get("left")
-                right_expr = idx_expr.get("right")
-                if not isinstance(left_expr, dict) or not isinstance(right_expr, dict):
-                    raise SemanticError("Unsupported index binop operands.")
-                left = eval_index(left_expr, env)
-                right = eval_index(right_expr, env)
-                if op == "+":
-                    return int(left) + int(right)
-                if op == "-":
-                    return int(left) - int(right)
-                if op == "*":
-                    return int(left) * int(right)
-                raise SemanticError(f"Unsupported index binop: {op}")
-            if expr_type == "uminus":
-                value_expr = idx_expr.get("value")
-                if not isinstance(value_expr, dict):
-                    raise SemanticError("Unsupported index expr: missing unary operand.")
-                return -int(eval_index(value_expr, env))
-            if expr_type == "parenthesized_expression":
-                inner_expr = idx_expr.get("expression")
-                if not isinstance(inner_expr, dict):
-                    raise SemanticError("Unsupported index expr: missing parenthesized expression.")
-                return eval_index(inner_expr, env)
-            if expr_type == "string_literal":
-                return idx_expr.get("value")
-            raise SemanticError(f"Unsupported index expr: {expr_type}")
-
-        def iterator_domains(iterators: list[dict[str, Any]], param_name: Optional[str] = None) -> list[list[Any]]:
-            domains: list[list[Any]] = []
-            for iterator in iterators:
-                rng = iterator["range"]
-                if rng["type"] == "range_specifier":
-                    start = self._eval_bound_expr(rng["start"], working_data)
-                    end = self._eval_bound_expr(rng["end"], working_data)
-                    domains.append(list(range(start, end + 1)))
-                elif rng["type"] == "named_range":
-                    start, end = self._resolve_named_range(
-                        model_ast,
-                        working_data,
-                        rng["name"],
-                        context="computed parameter",
-                    )
-                    domains.append(list(range(start, end + 1)))
-                elif rng["type"] in ("named_set", "named_set_dimension"):
-                    set_name = rng["name"]
-                    set_obj = working_data.get(set_name, [])
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        elements = set_obj["elements"]
-                    else:
-                        elements = set_obj
-                    domains.append(list(elements or []))
-                else:
-                    if param_name is None:
-                        raise SemanticError(f"Unsupported range in aggregate: {rng['type']}")
-                    raise SemanticError(
-                        f"Unsupported iterator range type '{rng['type']}' for computed parameter '{param_name}'."
-                    )
-            return domains
-
-        def iterator_metadata(iterators: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-            metadata: dict[str, dict[str, Any]] = {}
-            for iterator in iterators:
-                iterator_name = iterator["iterator"]
-                rng = iterator["range"]
-                meta: dict[str, Any] = {}
-                if rng.get("type") in ("named_set", "named_set_dimension"):
-                    set_name = rng["name"]
-                    meta["set"] = set_name
-                    meta["tuple_type"] = set_tuple_type_by_name.get(set_name)
-                metadata[iterator_name] = meta
-            return metadata
+        tuple_fields_by_type, set_tuple_type_by_name = self._computed_parameter_type_metadata(declarations)
 
         def eval_simple_expr(
             expr: dict[str, Any],
@@ -3982,7 +3985,7 @@ class OPLCompiler:
             if current is None:
                 raise SemanticError(f"Parameter '{base}' not found for indexed access.")
             for dimension in expr.get("dimensions", []):
-                index_value = eval_index(dimension, env)
+                index_value = self._eval_computed_parameter_index(dimension, env)
                 if isinstance(index_value, float) and index_value.is_integer():
                     index_value = int(index_value)
                 if isinstance(current, list):
@@ -4013,8 +4016,8 @@ class OPLCompiler:
                 iterators,
                 expr.get("index_constraint"),
                 expr.get("expression"),
-                iterator_domains(iterators),
-                iterator_metadata(iterators),
+                self._computed_parameter_iterator_domains(model_ast, working_data, iterators),
+                self._computed_parameter_iterator_metadata(iterators, set_tuple_type_by_name),
             )
 
         def aggregate_item_allowed(
@@ -4167,6 +4170,21 @@ class OPLCompiler:
                 return eval_unary_or_function(expr, env)
             raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
 
+        model_ast["declarations"] = self._rewrite_computed_parameter_declarations(
+            declarations,
+            model_ast,
+            working_data,
+            eval_expr,
+        )
+        self._build_computed_parameter_maps(model_ast, working_data)
+
+    def _rewrite_computed_parameter_declarations(
+        self,
+        declarations: list[dict[str, Any]],
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        eval_expr: Callable[[dict[str, Any], dict[str, Any]], Any],
+    ) -> list[dict[str, Any]]:
         def cast_value(value: Any, var_type: Any) -> Any:
             if isinstance(var_type, str) and var_type.startswith("int"):
                 return int(round(float(value)))
@@ -4181,38 +4199,28 @@ class OPLCompiler:
                 rewritten_declarations.append(decl)
                 continue
 
-            if decl_type == "parameter_inline_expr":
-                name = decl["name"]
-                var_type = decl.get("var_type") or ""
-                value = cast_value(eval_expr(decl["expression"], {}), var_type)
-                working_data[name] = value
-                rewritten_declarations.append(
-                    {
-                        "type": "parameter_inline",
-                        "var_type": var_type,
-                        "name": name,
-                        "value": value,
-                    }
-                )
-                continue
-
             name = decl["name"]
             var_type = decl.get("var_type") or ""
+            if decl_type == "parameter_inline_expr":
+                value = cast_value(eval_expr(decl["expression"], {}), var_type)
+                working_data[name] = value
+                rewritten_declarations.append({"type": "parameter_inline", "var_type": var_type, "name": name, "value": value})
+                continue
+
             dimensions = decl.get("dimensions", [])
             iterators = decl.get("iterators", [])
             iterator_names = [iterator["iterator"] for iterator in iterators]
-            domains = iterator_domains(iterators, name)
+            domains = self._computed_parameter_iterator_domains(model_ast, working_data, iterators, name)
 
-            def build_nested(depth: int, env_map: dict[str, Any]) -> object:
+            def build_nested(depth: int, env: dict[str, Any]) -> object:
                 if depth == len(iterators):
-                    value = eval_expr(decl["expression"], env_map)
-                    return cast_value(value, var_type)
-                values = []
+                    return cast_value(eval_expr(decl["expression"], env), var_type)
                 iterator_name = iterator_names[depth]
+                values = []
                 for item in domains[depth]:
-                    env_map[iterator_name] = item
-                    values.append(build_nested(depth + 1, env_map))
-                env_map.pop(iterator_name, None)
+                    env[iterator_name] = item
+                    values.append(build_nested(depth + 1, env))
+                env.pop(iterator_name, None)
                 return values
 
             computed_value = build_nested(0, {})
@@ -4226,9 +4234,13 @@ class OPLCompiler:
                     "value": computed_value,
                 }
             )
+        return rewritten_declarations
 
-        model_ast["declarations"] = rewritten_declarations
-
+    def _build_computed_parameter_maps(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
         for decl in model_ast.get("declarations") or []:
             if decl.get("type") != "parameter_inline_indexed":
                 continue
@@ -4252,35 +4264,9 @@ class OPLCompiler:
                         domain_elements = list(set_obj or [])
                     domains.append(domain_elements)
                 elif dim_type in ("named_range", "named_range_dimension"):
-                    try:
-                        start, end = self._resolve_named_range(
-                            model_ast,
-                            working_data,
-                            dim["name"],
-                            context="computed parameter",
-                        )
-                        domains.append(list(range(int(start), int(end) + 1)))
-                    except Exception:
-                        rng_decl = next(
-                            (
-                                candidate
-                                for candidate in (model_ast.get("declarations") or [])
-                                if candidate.get("name") == dim.get("name")
-                                and candidate.get("type") == "range_declaration_inline"
-                            ),
-                            None,
-                        )
-                        if rng_decl:
-                            start_idx = self._eval_bound_expr(rng_decl["start"], working_data)
-                            end_idx = self._eval_bound_expr(rng_decl["end"], working_data)
-                            domains.append(list(range(int(start_idx), int(end_idx) + 1)))
-                        else:
-                            domains.append(list(range(1, len(value) + 1)))
+                    domains.append(self._computed_parameter_range_domain(model_ast, working_data, dim, value))
                 else:
-                    if isinstance(value, (list, tuple)):
-                        domains.append(list(range(1, len(value) + 1)))
-                    else:
-                        domains.append([])
+                    domains.append(list(range(1, len(value) + 1)) if isinstance(value, (list, tuple)) else [])
 
             mapping = {}
 
@@ -4311,6 +4297,181 @@ class OPLCompiler:
                 continue
 
             working_data[f"{name}__map"] = mapping
+
+    def _computed_parameter_range_domain(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        dimension: dict[str, Any],
+        value: list[Any] | tuple[Any, ...],
+    ) -> list[int]:
+        try:
+            start, end = self._resolve_named_range(
+                model_ast,
+                working_data,
+                dimension["name"],
+                context="computed parameter",
+            )
+            return list(range(int(start), int(end) + 1))
+        except Exception:
+            range_decl = next(
+                (
+                    candidate
+                    for candidate in (model_ast.get("declarations") or [])
+                    if candidate.get("name") == dimension.get("name") and candidate.get("type") == "range_declaration_inline"
+                ),
+                None,
+            )
+            if range_decl:
+                start = self._eval_bound_expr(range_decl["start"], working_data)
+                end = self._eval_bound_expr(range_decl["end"], working_data)
+                return list(range(int(start), int(end) + 1))
+            return list(range(1, len(value) + 1))
+
+    @staticmethod
+    def _is_int_value(value: Any) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    @staticmethod
+    def _is_numeric_value(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    def _validate_typed_sets(self, model_ast: dict[str, Any], data_dict: dict[str, Any]) -> None:
+        if not model_ast or "declarations" not in model_ast:
+            return
+        for decl in model_ast["declarations"]:
+            if decl.get("type") not in ("typed_set", "typed_set_external"):
+                continue
+            base = decl.get("base_type")
+            name = decl.get("name")
+            values = decl.get("value")
+            if values is None:
+                values = data_dict.get(name)
+            if values is None:
+                continue
+            if isinstance(values, dict) and "elements" in values:
+                values = values["elements"]
+            if not isinstance(values, list):
+                raise SemanticError(f"Set '{name}' must be assigned a list of values, got {type(values).__name__}.")
+            if base == "int" and not all(self._is_int_value(value) for value in values):
+                raise SemanticError(f"All elements of set '{name}' must be integers.")
+            if base == "float":
+                if not all(self._is_numeric_value(value) for value in values):
+                    raise SemanticError(f"All elements of set '{name}' must be numeric (int/float).")
+                data_dict[name] = [float(value) for value in values]
+            elif base == "boolean" and not all(isinstance(value, bool) for value in values):
+                raise SemanticError(f"All elements of set '{name}' must be booleans (true/false).")
+            elif base == "string" and not all(isinstance(value, str) for value in values):
+                raise SemanticError(f"All elements of set '{name}' must be strings.")
+
+    def _validate_named_ranges(self, ast: dict[str, Any], data_dict: dict[str, Any]) -> None:
+        declared_inline = {
+            name
+            for name in (
+                declaration.get("name")
+                for declaration in (ast.get("declarations") or [])
+                if isinstance(declaration, dict) and declaration.get("type") == "range_declaration_inline"
+            )
+            if isinstance(name, str)
+        }
+        used: set[str] = set()
+        for declaration in ast.get("declarations", []) or []:
+            if not isinstance(declaration, dict):
+                continue
+            for dimension in declaration.get("dimensions", []) or []:
+                if isinstance(dimension, dict) and dimension.get("type") == "named_range_dimension":
+                    name = dimension.get("name")
+                    if isinstance(name, str):
+                        used.add(name)
+
+        def walk(node: object) -> None:
+            if isinstance(node, dict):
+                if node.get("type") in ("forall_constraint", "sum"):
+                    for iterator in node.get("iterators", []) or []:
+                        if not isinstance(iterator, dict):
+                            continue
+                        rng = iterator.get("range") or {}
+                        name = rng.get("name") if isinstance(rng, dict) and rng.get("type") == "named_range" else None
+                        if isinstance(name, str):
+                            used.add(name)
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    walk(value)
+
+        walk(ast.get("objective", {}))
+        walk(ast.get("constraints", []))
+        for name in sorted(used):
+            if name in declared_inline:
+                continue
+            if isinstance(data_dict.get(name), dict) and data_dict[name].get("type") == "range_data":
+                raise SemanticError(
+                    f"Range '{name}' was supplied in the data file, but ranges used for indexing must be declared "
+                    "with explicit bounds in the model file. "
+                    f"Declare it in the model (e.g., 'range {name} = 1..N;') and remove it from the .dat."
+                )
+            raise SemanticError(f"Range '{name}' is used as an index but not declared in the model.")
+
+    def _validate_parameter_shape(
+        self,
+        param_data: Any,
+        dimensions: list[dict[str, Any]],
+        param_name: str,
+        model_ast: dict[str, Any],
+        data_dict: dict[str, Any],
+        dimension_index: int = 0,
+    ) -> None:
+        if not dimensions:
+            return
+        dimension = dimensions[0]
+        if (
+            len(dimensions) == 1
+            and isinstance(param_data, dict)
+            and dimension.get("type") in ("named_set_dimension", "named_range_dimension")
+        ):
+            for key, value in param_data.items():
+                if isinstance(value, (list, tuple, dict)):
+                    raise SemanticError(
+                        f"Parameter '{param_name}' is 1-D over '{dimension.get('name', '')}' but data value for key {key!r} "
+                        "is an array; expected a scalar (e.g., 2.0). Remove extra brackets like [2.0] -> 2.0."
+                    )
+            return
+
+        expected_length = None
+        if dimension.get("type") == "named_range":
+            range_decl = next(
+                (
+                    declaration
+                    for declaration in model_ast["declarations"]
+                    if declaration.get("name") == dimension["name"] and declaration.get("type") == "range_declaration_inline"
+                ),
+                None,
+            )
+            if range_decl:
+                start = self._eval_bound_expr(range_decl["start"], data_dict)
+                end = self._eval_bound_expr(range_decl["end"], data_dict)
+                expected_length = end - start + 1
+        elif dimension.get("type") == "named_set_dimension":
+            set_obj = data_dict.get(dimension["name"])
+            if set_obj is not None:
+                expected_length = (
+                    len(set_obj["elements"]) if isinstance(set_obj, dict) and "elements" in set_obj else len(set_obj)
+                )
+
+        if expected_length is None:
+            return
+        if not isinstance(param_data, (list, tuple)):
+            raise SemanticError(
+                f"Parameter '{param_name}' expected a {len(dimensions)}D array, got scalar at dimension {dimension_index + 1}."
+            )
+        if len(param_data) != expected_length:
+            raise SemanticError(
+                f"Parameter '{param_name}' data length {len(param_data)} does not match declared dimension '{dimension.get('name')}' "
+                f"of length {expected_length} at dimension {dimension_index + 1}."
+            )
+        for value in param_data:
+            self._validate_parameter_shape(value, dimensions[1:], param_name, model_ast, data_dict, dimension_index + 1)
 
     def _normalize_indexed_parameters_for_codegen(
         self,
@@ -4374,79 +4535,6 @@ class OPLCompiler:
         self._materialize_computed_parameters(model_ast, working_data)
         data_dict = dict(working_data)
 
-        def validate_shape(param_data, dims, param_name, data_dict, dim=0):
-            if not dims:
-                return
-            d = dims[0]
-            if (
-                len(dims) == 1
-                and isinstance(param_data, dict)
-                and d.get("type") in ("named_set_dimension", "named_range_dimension")
-            ):
-                for k, v in param_data.items():
-                    if isinstance(v, (list, tuple, dict)):
-                        raise SemanticError(
-                            f"Parameter '{param_name}' is 1-D over '{d.get('name', '')}' but data value for key {repr(k)} "
-                            f"is an array; expected a scalar (e.g., 2.0). Remove extra brackets like [2.0] -> 2.0."
-                        )
-                return
-            d = dims[0]
-            expected_len = None
-            if d.get("type") == "named_range":
-                range_decl = next(
-                    (
-                        x
-                        for x in model_ast["declarations"]
-                        if x.get("name") == d["name"] and x.get("type") == "range_declaration_inline"
-                    ),
-                    None,
-                )
-                if range_decl:
-
-                    def eval_expr(expr):
-                        if expr["type"] == "number":
-                            return int(expr["value"])
-                        elif expr["type"] == "name":
-                            if expr["value"] not in data_dict:
-                                raise SemanticError(f"Range bound refers to unknown name '{expr['value']}'")
-                            return int(data_dict[expr["value"]])
-                        elif expr["type"] == "binop":
-                            op = expr["op"]
-                            left = eval_expr(expr["left"])
-                            right = eval_expr(expr["right"])
-                            if op == "+":
-                                return left + right
-                            if op == "-":
-                                return left - right
-                            if op == "*":
-                                return left * right
-                            if op == "/":
-                                return left // right
-                        raise Exception(f"Unsupported range bound expr: {expr}")
-
-                    start = eval_expr(range_decl["start"])
-                    end = eval_expr(range_decl["end"])
-                    expected_len = end - start + 1
-            elif d.get("type") == "named_set_dimension":
-                set_obj = data_dict.get(d["name"])
-                if set_obj is not None:
-                    if isinstance(set_obj, dict) and "elements" in set_obj:
-                        expected_len = len(set_obj["elements"])
-                    else:
-                        expected_len = len(set_obj)
-            if expected_len is not None:
-                if not isinstance(param_data, (list, tuple)):
-                    raise SemanticError(
-                        f"Parameter '{param_name}' expected a {len(dims)}D array, got scalar at dimension {dim+1}."
-                    )
-                if len(param_data) != expected_len:
-                    raise SemanticError(
-                        f"Parameter '{param_name}' data length {len(param_data)} does not match declared dimension '{d.get('name')}' of length {expected_len} at dimension {dim+1}."
-                    )
-                if len(dims) > 1:
-                    for sub in param_data:
-                        validate_shape(sub, dims[1:], param_name, data_dict, dim + 1)
-
         if model_ast and "declarations" in model_ast:
             for decl in model_ast["declarations"]:
                 if decl.get("type") in (
@@ -4459,111 +4547,17 @@ class OPLCompiler:
                 ) and decl.get("dimensions"):
                     param_data = data_dict.get(decl["name"])
                     if param_data is not None and isinstance(param_data, (list, tuple)):
-                        validate_shape(param_data, decl["dimensions"], decl["name"], data_dict)
+                        self._validate_parameter_shape(
+                            param_data,
+                            decl["dimensions"],
+                            decl["name"],
+                            model_ast,
+                            data_dict,
+                        )
 
-        def _is_int(x):
-            return isinstance(x, int) and not isinstance(x, bool)
+        self._validate_typed_sets(model_ast, data_dict)
 
-        def _is_num(x):
-            return isinstance(x, (int, float)) and not isinstance(x, bool)
-
-        def _is_bool(x):
-            return isinstance(x, bool)
-
-        def _is_str(x):
-            return isinstance(x, str)
-
-        def validate_typed_sets(model_ast, data_dict):
-            if not model_ast or "declarations" not in model_ast:
-                return
-            for decl in model_ast["declarations"]:
-                if decl.get("type") not in ("typed_set", "typed_set_external"):
-                    continue
-                base = decl.get("base_type")
-                name = decl.get("name")
-                values = decl.get("value")
-                if values is None:
-                    values = data_dict.get(name)
-                if values is None:
-                    continue
-                if isinstance(values, dict) and "elements" in values:
-                    values = values["elements"]
-                if not isinstance(values, list):
-                    raise SemanticError(f"Set '{name}' must be assigned a list of values, got {type(values).__name__}.")
-                if base == "int":
-                    if not all(_is_int(v) for v in values):
-                        raise SemanticError(f"All elements of set '{name}' must be integers.")
-                elif base == "float":
-                    if not all(_is_num(v) for v in values):
-                        raise SemanticError(f"All elements of set '{name}' must be numeric (int/float).")
-                    data_dict[name] = [float(v) for v in values]
-                elif base == "boolean":
-                    if not all(_is_bool(v) for v in values):
-                        raise SemanticError(f"All elements of set '{name}' must be booleans (true/false).")
-                elif base == "string":
-                    if not all(_is_str(v) for v in values):
-                        raise SemanticError(f"All elements of set '{name}' must be strings.")
-
-        validate_typed_sets(model_ast, data_dict)
-
-        def validate_named_ranges(ast: dict, data_dict: dict) -> None:
-            declared_inline: set[str] = {
-                n
-                for n in (
-                    d.get("name")
-                    for d in (ast.get("declarations") or [])
-                    if isinstance(d, dict) and d.get("type") == "range_declaration_inline"
-                )
-                if isinstance(n, str)
-            }
-
-            used: set[str] = set()
-            for d in ast.get("declarations", []) or []:
-                if not isinstance(d, dict):
-                    continue
-                dims = d.get("dimensions", []) or []
-                for dim in dims:
-                    if isinstance(dim, dict) and dim.get("type") == "named_range_dimension":
-                        n = dim.get("name")
-                        if isinstance(n, str):
-                            used.add(n)
-
-            def walk(node: object) -> None:
-                if isinstance(node, dict):
-                    t = node.get("type")
-                    if t in ("forall_constraint", "sum"):
-                        iters = node.get("iterators", []) or []
-                        if isinstance(iters, list):
-                            for it in iters:
-                                if not isinstance(it, dict):
-                                    continue
-                                rng = it.get("range") or {}
-                                if isinstance(rng, dict) and rng.get("type") == "named_range":
-                                    n = rng.get("name")
-                                    if isinstance(n, str):
-                                        used.add(n)
-                    for v in list(node.values()):
-                        walk(v)
-                elif isinstance(node, list):
-                    for v in node:
-                        walk(v)
-
-            walk(ast.get("objective", {}))
-            walk(ast.get("constraints", []))
-
-            for name in sorted(used):
-                if name in declared_inline:
-                    continue
-                dv = data_dict.get(name)
-                if isinstance(dv, dict) and dv.get("type") == "range_data":
-                    raise SemanticError(
-                        f"Range '{name}' was supplied in the data file, but ranges used for indexing must be declared "
-                        f"with explicit bounds in the model file. Declare it in the model (e.g., 'range {name} = 1..N;') "
-                        f"and remove it from the .dat."
-                    )
-                raise SemanticError(f"Range '{name}' is used as an index but not declared in the model.")
-
-        validate_named_ranges(model_ast, data_dict)
+        self._validate_named_ranges(model_ast, data_dict)
 
         ast = model_ast
 
@@ -4598,6 +4592,122 @@ class OPLCompiler:
 
         return ast, code, data_dict
 
+    @staticmethod
+    def _boolean_literal(value: bool) -> dict[str, Any]:
+        return {"type": "boolean_literal", "value": bool(value), "sem_type": "boolean"}
+
+    @staticmethod
+    def _is_false_boolean_node(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "boolean_literal" and node.get("value") is False
+
+    def _simplify_boolean_node(self, node: Any, env: dict[str, Any], dvars: set[str]) -> Any:
+        if not isinstance(node, dict):
+            return node
+        node_type = node.get("type")
+        if node_type in ("and", "or"):
+            node = {
+                "type": node_type,
+                "left": self._simplify_boolean_node(node.get("left"), env, dvars),
+                "right": self._simplify_boolean_node(node.get("right"), env, dvars),
+                "sem_type": "boolean",
+            }
+        elif node_type == "not":
+            node = {"type": "not", "value": self._simplify_boolean_node(node.get("value"), env, dvars), "sem_type": "boolean"}
+        elif node_type == "parenthesized_expression":
+            inner = self._simplify_boolean_node(node.get("expression"), env, dvars)
+            node = {
+                "type": "parenthesized_expression",
+                "expression": inner,
+                "sem_type": inner.get("sem_type") if isinstance(inner, dict) else None,
+            }
+        elif (
+            node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!=")
+        ):
+            node = {
+                "type": "binop",
+                "op": node.get("op"),
+                "left": self._simplify_boolean_node(node.get("left"), env, dvars),
+                "right": self._simplify_boolean_node(node.get("right"), env, dvars),
+                "sem_type": "boolean",
+            }
+        is_boolean = node.get("sem_type") == "boolean" or node.get("type") in ("and", "or", "not")
+        if is_boolean and not self._expr_contains_dvar(node, dvars):
+            try:
+                return self._boolean_literal(self._eval_ground_condition(node, env))
+            except Exception:
+                pass
+        if node.get("type") in ("and", "or"):
+            left, right = node.get("left"), node.get("right")
+            if isinstance(left, dict) and left.get("type") == "boolean_literal":
+                if node["type"] == "or":
+                    return self._boolean_literal(True) if left.get("value") else right
+                return right if left.get("value") else self._boolean_literal(False)
+            if isinstance(right, dict) and right.get("type") == "boolean_literal":
+                if node["type"] == "or":
+                    return self._boolean_literal(True) if right.get("value") else left
+                return left if right.get("value") else self._boolean_literal(False)
+        if (
+            node.get("type") == "not"
+            and isinstance(node.get("value"), dict)
+            and node["value"].get("type") == "boolean_literal"
+        ):
+            return self._boolean_literal(not node["value"].get("value"))
+        return node
+
+    def _simplify_constraint_node(self, constraint: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> list[dict]:
+        if constraint.get("type") == "constraint" and constraint.get("op") == "==":
+            right = constraint.get("right")
+            if isinstance(right, dict) and right.get("type") == "boolean_literal":
+                left = self._simplify_boolean_node(constraint.get("left"), env, dvars)
+                while isinstance(left, dict) and left.get("type") == "parenthesized_expression":
+                    left = left.get("expression")
+                if isinstance(left, dict) and left.get("type") == "boolean_literal":
+                    if left.get("value") == right.get("value"):
+                        return []
+                    return [
+                        {
+                            "type": "constraint",
+                            "op": "==",
+                            "left": {"type": "number", "value": 0, "sem_type": "int"},
+                            "right": {"type": "number", "value": 1, "sem_type": "int"},
+                        }
+                    ]
+                if isinstance(left, dict) and left.get("type") == "binop" and left.get("sem_type") == "boolean":
+                    op = left.get("op")
+                    if isinstance(op, str) and right.get("value") is True:
+                        return [{"type": "constraint", "op": op, "left": left.get("left"), "right": left.get("right")}]
+                    if isinstance(op, str):
+                        negated = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}.get(op)
+                        if isinstance(negated, str):
+                            return [
+                                {"type": "constraint", "op": negated, "left": left.get("left"), "right": left.get("right")}
+                            ]
+                return [{"type": "constraint", "op": "==", "left": left, "right": right}]
+        if constraint.get("type") != "forall_constraint":
+            return [constraint]
+        index_constraint = constraint.get("index_constraint")
+        if isinstance(index_constraint, dict):
+            index_constraint = self._simplify_boolean_node(index_constraint, env, dvars)
+            if self._is_false_boolean_node(index_constraint):
+                return []
+            if self._is_true_boolean_node(index_constraint):
+                index_constraint = None
+        children = constraint.get("constraints")
+        if children is None and isinstance(constraint.get("constraint"), dict):
+            children = [constraint["constraint"]]
+        if not isinstance(children, list):
+            return [constraint]
+        simplified = [item for child in children for item in self._simplify_constraint_node(child, env, dvars)]
+        if not simplified:
+            return []
+        result = {
+            "type": "forall_constraint",
+            "iterators": constraint.get("iterators", []),
+            "index_constraint": index_constraint,
+        }
+        result["constraint" if len(simplified) == 1 else "constraints"] = simplified[0] if len(simplified) == 1 else simplified
+        return [result]
+
     def _simplify_ground_booleans(self, ast: dict, env: dict) -> None:
         """
         Constant-fold ground boolean expressions (no decision vars, no iterators) in constraints and forall
@@ -4612,207 +4722,26 @@ class OPLCompiler:
             return
 
         dvars = self._collect_dvar_names(ast.get("declarations", []))
-
-        def is_ground_bool(node: dict) -> bool:
-            if self._expr_contains_dvar(node, dvars):
-                return False
-            try:
-                _ = self._eval_ground_expr(node, env)
-                return True
-            except Exception:
-                return False
-
-        def as_bool_lit(v: bool) -> dict:
-            return {"type": "boolean_literal", "value": bool(v), "sem_type": "boolean"}
-
-        def simplify_bool(node: Any) -> Any:
-            if not isinstance(node, dict):
-                return node
-            t = node.get("type")
-
-            if t in ("and", "or"):
-                left = simplify_bool(node.get("left"))
-                right = simplify_bool(node.get("right"))
-                node = {"type": t, "left": left, "right": right, "sem_type": "boolean"}
-            elif t == "not":
-                val = simplify_bool(node.get("value"))
-                node = {"type": "not", "value": val, "sem_type": "boolean"}
-            elif t == "parenthesized_expression":
-                inner = simplify_bool(node.get("expression"))
-                node = {"type": "parenthesized_expression", "expression": inner, "sem_type": inner.get("sem_type", None)}
-            elif t == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!="):
-                left = simplify_bool(node.get("left"))
-                right = simplify_bool(node.get("right"))
-                node = {"type": "binop", "op": node.get("op"), "left": left, "right": right, "sem_type": "boolean"}
-
-            is_bool_node = isinstance(node, dict) and (
-                node.get("sem_type") == "boolean"
-                or node.get("type") in ("and", "or", "not")
-                or (node.get("type") == "binop" and node.get("sem_type") == "boolean")
-            )
-            if is_bool_node and is_ground_bool(node):
-                try:
-                    val = self._eval_ground_condition(node, env)
-                    return as_bool_lit(val)
-                except Exception:
-                    pass
-
-            if isinstance(node, dict) and node.get("type") in ("and", "or"):
-                left = node.get("left")
-                right = node.get("right")
-                if isinstance(left, dict) and left.get("type") == "boolean_literal":
-                    if node["type"] == "or":
-                        return as_bool_lit(True) if left.get("value") else right
-                    return right if left.get("value") else as_bool_lit(False)
-                if isinstance(right, dict) and right.get("type") == "boolean_literal":
-                    if node["type"] == "or":
-                        return as_bool_lit(True) if right.get("value") else left
-                    return left if right.get("value") else as_bool_lit(False)
-            if isinstance(node, dict) and node.get("type") == "not":
-                value = node.get("value")
-                if isinstance(value, dict) and value.get("type") == "boolean_literal":
-                    return as_bool_lit(not value.get("value"))
-            return node
-
-        def simplify_constraint(c: dict) -> list[dict]:
-            if c.get("type") == "constraint":
-                op = c.get("op")
-                left = c.get("left")
-                right = c.get("right")
-
-                if op == "==":
-                    if isinstance(right, dict) and right.get("type") == "boolean_literal":
-                        left_simplified = simplify_bool(left)
-                        while isinstance(left_simplified, dict) and left_simplified.get("type") == "parenthesized_expression":
-                            left_simplified = left_simplified.get("expression")
-
-                        if isinstance(left_simplified, dict) and left_simplified.get("type") == "boolean_literal":
-                            if left_simplified.get("value") == right.get("value"):
-                                return []
-                            return [
-                                {
-                                    "type": "constraint",
-                                    "op": "==",
-                                    "left": {"type": "number", "value": 0, "sem_type": "int"},
-                                    "right": {"type": "number", "value": 1, "sem_type": "int"},
-                                }
-                            ]
-
-                        if (
-                            isinstance(left_simplified, dict)
-                            and left_simplified.get("type") == "binop"
-                            and left_simplified.get("sem_type") == "boolean"
-                        ):
-                            op_any = left_simplified.get("op")
-                            if not isinstance(op_any, str):
-                                return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
-
-                            if right.get("value") is True:
-                                return [
-                                    {
-                                        "type": "constraint",
-                                        "op": op_any,
-                                        "left": left_simplified.get("left"),
-                                        "right": left_simplified.get("right"),
-                                    }
-                                ]
-
-                            neg: dict[str, str] = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}
-                            neg_op = neg.get(op_any)
-                            if neg_op is None:
-                                return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
-                            return [
-                                {
-                                    "type": "constraint",
-                                    "op": neg_op,
-                                    "left": left_simplified.get("left"),
-                                    "right": left_simplified.get("right"),
-                                }
-                            ]
-
-                        return [{"type": "constraint", "op": "==", "left": left_simplified, "right": right}]
-
-                return [c]
-
-            if c.get("type") == "forall_constraint":
-                new_ic = c.get("index_constraint")
-                if isinstance(new_ic, dict):
-                    new_ic = simplify_bool(new_ic)
-                    if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is False:
-                        return []
-                    if isinstance(new_ic, dict) and new_ic.get("type") == "boolean_literal" and new_ic.get("value") is True:
-                        new_ic = None
-
-                out = []
-                if "constraint" in c and isinstance(c["constraint"], dict):
-                    inner = simplify_constraint(c["constraint"])
-                    if inner:
-                        if len(inner) == 1:
-                            out.append(
-                                {
-                                    "type": "forall_constraint",
-                                    "iterators": c.get("iterators", []),
-                                    "index_constraint": new_ic,
-                                    "constraint": inner[0],
-                                }
-                            )
-                        else:
-                            out.append(
-                                {
-                                    "type": "forall_constraint",
-                                    "iterators": c.get("iterators", []),
-                                    "index_constraint": new_ic,
-                                    "constraints": inner,
-                                }
-                            )
-                    return out
-                if "constraints" in c and isinstance(c["constraints"], list):
-                    inner_all = []
-                    for child in c["constraints"]:
-                        inner_all.extend(simplify_constraint(child))
-                    if inner_all:
-                        if len(inner_all) == 1:
-                            out.append(
-                                {
-                                    "type": "forall_constraint",
-                                    "iterators": c.get("iterators", []),
-                                    "index_constraint": new_ic,
-                                    "constraint": inner_all[0],
-                                }
-                            )
-                        else:
-                            out.append(
-                                {
-                                    "type": "forall_constraint",
-                                    "iterators": c.get("iterators", []),
-                                    "index_constraint": new_ic,
-                                    "constraints": inner_all,
-                                }
-                            )
-                    return out
-                return [c]
-
-            return [c]
-
         if "constraints" in ast and isinstance(ast["constraints"], list):
-            new_list: list[dict] = []
-            for c in ast["constraints"]:
-                if isinstance(c, dict):
-                    new_list.extend(simplify_constraint(c))
-                else:
-                    new_list.append(c)
-            ast["constraints"] = new_list
+            ast["constraints"] = [
+                simplified
+                for constraint in ast["constraints"]
+                if isinstance(constraint, dict)
+                for simplified in self._simplify_constraint_node(constraint, env, dvars)
+            ]
+            return
+
+    @staticmethod
+    def _is_true_boolean_node(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "boolean_literal" and node.get("value") is True
+
+    def _flatten_boolean_and(self, node: Any) -> list[dict]:
+        if isinstance(node, dict) and node.get("type") == "and":
+            return self._flatten_boolean_and(node.get("left")) + self._flatten_boolean_and(node.get("right"))
+        return [node]
 
     # NEW: split (A && B && ...) == true into multiple constraints A==true; B==true; ...
     def _split_boolean_and_constraints(self, ast: dict) -> None:
-        def is_true(node: Any) -> bool:
-            return isinstance(node, dict) and node.get("type") == "boolean_literal" and node.get("value") is True
-
-        def flatten_and(node: Any) -> list[dict]:
-            if isinstance(node, dict) and node.get("type") == "and":
-                return flatten_and(node.get("left")) + flatten_and(node.get("right"))
-            return [node]
-
         if not isinstance(ast, dict) or "constraints" not in ast:
             return
 
@@ -4822,11 +4751,11 @@ class OPLCompiler:
                 isinstance(c, dict)
                 and c.get("type") == "constraint"
                 and c.get("op") == "=="
-                and is_true(c.get("right"))
+                and self._is_true_boolean_node(c.get("right"))
                 and isinstance(c.get("left"), dict)
                 and c["left"].get("type") == "and"
             ):
-                for part in flatten_and(c["left"]):
+                for part in self._flatten_boolean_and(c["left"]):
                     new_cons.append(
                         {
                             "type": "constraint",
@@ -4842,6 +4771,203 @@ class OPLCompiler:
 
     # ----------------- NEW: Conditional-constraint compile-time rewrite -----------------
 
+    @staticmethod
+    def _as_boolean_literal(value: bool) -> dict[str, Any]:
+        return {"type": "boolean_literal", "value": bool(value), "sem_type": "boolean"}
+
+    def _condition_to_boolean_expr(self, node: Any) -> dict:
+        while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
+            node = node.get("expression")
+        if isinstance(node, dict):
+            node_type = node.get("type")
+            if node_type in ("and", "or", "not", "boolean_literal", "binop"):
+                return cast(dict, node)
+            if node_type == "constraint":
+                left = node.get("left")
+                right = node.get("right")
+                if node.get("op") == "==" and isinstance(right, dict) and right.get("type") == "boolean_literal":
+                    return cast(dict, left) if right.get("value") else {"type": "not", "value": left, "sem_type": "boolean"}
+                if node.get("op") in ("<", "<=", ">", ">=", "==", "!="):
+                    return {"type": "binop", "op": node.get("op"), "left": left, "right": right, "sem_type": "boolean"}
+            return {"type": "binop", "op": "==", "left": node, "right": self._as_boolean_literal(True), "sem_type": "boolean"}
+        if isinstance(node, bool):
+            return self._as_boolean_literal(node)
+        return {
+            "type": "binop",
+            "op": "==",
+            "left": {"type": "number", "value": node, "sem_type": "int" if isinstance(node, int) else "float"},
+            "right": self._as_boolean_literal(True),
+            "sem_type": "boolean",
+        }
+
+    @staticmethod
+    def _combine_conditions(left: Optional[dict], right: Optional[dict]) -> Optional[dict]:
+        if left is None:
+            return right
+        if right is None:
+            return left
+        return {"type": "and", "left": left, "right": right, "sem_type": "boolean"}
+
+    def _rewrite_forall_conditions(self, node: dict, dvar_names: set[str]) -> list[dict]:
+        iterators = node.get("iterators", [])
+        base_constraint = node.get("index_constraint")
+        children = node.get("constraints")
+        if children is None and isinstance(node.get("constraint"), dict):
+            children = [node["constraint"]]
+        if not isinstance(children, list):
+            return [node]
+        regular: list[dict] = []
+        rewritten: list[dict] = []
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            if child.get("type") == "if_constraint":
+                condition = child.get("condition")
+                if not isinstance(condition, dict):
+                    raise SemanticError("Malformed if-constraint: missing condition.")
+                if self._expr_contains_dvar(condition, dvar_names):
+                    raise SemanticError("Condition of if-constraint inside forall must not reference decision variables.")
+                for branch, branch_condition in (
+                    ("then_constraints", condition),
+                    ("else_constraints", {"type": "not", "value": condition, "sem_type": "boolean"}),
+                ):
+                    branch_children = [item for item in (child.get(branch) or []) if isinstance(item, dict)]
+                    if branch_children:
+                        branch_node = {
+                            "type": "forall_constraint",
+                            "iterators": iterators,
+                            "index_constraint": self._combine_conditions(base_constraint, branch_condition),
+                            "constraints": branch_children,
+                        }
+                        rewritten.extend(self._rewrite_forall_conditions(branch_node, dvar_names))
+                continue
+            if child.get("type") == "implication_constraint":
+                antecedent = self._condition_to_boolean_expr(child.get("antecedent"))
+                if self._expr_contains_dvar(antecedent, dvar_names):
+                    regular.append(child)
+                elif isinstance(child.get("consequent"), dict):
+                    rewritten.append(
+                        {
+                            "type": "forall_constraint",
+                            "iterators": iterators,
+                            "index_constraint": self._combine_conditions(base_constraint, antecedent),
+                            "constraint": child["consequent"],
+                        }
+                    )
+                continue
+            regular.append(child)
+        if regular:
+            rewritten.append(
+                {
+                    "type": "forall_constraint",
+                    "iterators": iterators,
+                    "index_constraint": base_constraint,
+                    "constraint": regular[0],
+                }
+                if len(regular) == 1
+                else {
+                    "type": "forall_constraint",
+                    "iterators": iterators,
+                    "index_constraint": base_constraint,
+                    "constraints": regular,
+                }
+            )
+        return rewritten
+
+    def _rewrite_top_level_conditions(self, ast: dict, env: dict[str, Any], dvar_names: set[str]) -> None:
+        rewritten: list[dict] = []
+        for constraint in ast.get("constraints", []):
+            if not isinstance(constraint, dict):
+                continue
+            if constraint.get("type") == "forall_constraint":
+                rewritten.extend(self._rewrite_forall_conditions(constraint, dvar_names))
+                continue
+            if constraint.get("type") == "implication_constraint":
+                antecedent = self._condition_to_boolean_expr(constraint.get("antecedent"))
+                if self._expr_contains_dvar(antecedent, dvar_names):
+                    rewritten.append(constraint)
+                elif self._eval_ground_condition(antecedent, env) and isinstance(constraint.get("consequent"), dict):
+                    rewritten.append(constraint["consequent"])
+                continue
+            if constraint.get("type") == "if_constraint":
+                condition = constraint.get("condition")
+                if not isinstance(condition, dict):
+                    raise SemanticError("Malformed if-constraint: missing condition.")
+                if self._expr_contains_dvar(condition, dvar_names):
+                    raise SemanticError("Condition of if-constraint must be ground (must not reference decision variables).")
+                selected = (
+                    constraint.get("then_constraints")
+                    if self._eval_ground_condition(condition, env)
+                    else constraint.get("else_constraints")
+                )
+                for item in selected or []:
+                    if isinstance(item, dict) and item.get("type") == "forall_constraint":
+                        rewritten.extend(self._rewrite_forall_conditions(item, dvar_names))
+                    elif isinstance(item, dict):
+                        rewritten.append(item)
+                continue
+            rewritten.append(constraint)
+        ast["constraints"] = rewritten
+
+    def _expand_maxmin_constraint(self, node: Any) -> list[dict]:
+        if not isinstance(node, dict):
+            return [node]
+        node_type = node.get("type")
+        if node_type == "constraint":
+            operator = node.get("op")
+            left = node.get("left")
+            right = node.get("right")
+            label = node.get("label")
+
+            def labeled(constraint: dict) -> dict:
+                if label:
+                    constraint = dict(constraint)
+                    constraint["label"] = label
+                return constraint
+
+            patterns = {
+                ("<=", "left", "maxl"): ("left", "right"),
+                (">=", "right", "maxl"): ("left", "right"),
+                (">=", "left", "minl"): ("left", "right"),
+                ("<=", "right", "minl"): ("left", "right"),
+            }
+            for (relation, side, aggregate_type), pattern_shape in patterns.items():
+                aggregate = left if side == "left" else right
+                predicate = self._is_maxl_node if aggregate_type == "maxl" else self._is_minl_node
+                if operator == relation and isinstance(aggregate, dict) and predicate(aggregate):
+                    args, _single = self._maxmin_args_or_error(aggregate)
+                    return [
+                        labeled(
+                            {
+                                "type": "constraint",
+                                "op": relation,
+                                "left": arg if side == "left" else left,
+                                "right": right if side == "left" else arg,
+                            }
+                        )
+                        for arg in args
+                    ]
+            if self._contains_maxmin(left) or self._contains_maxmin(right):
+                raise SemanticError("Non-convex or unsupported placement of maxl/minl in constraint.")
+            return [node]
+        if node_type == "implication_constraint":
+            if self._contains_maxmin(node.get("antecedent")) or self._contains_maxmin(node.get("consequent")):
+                raise SemanticError("Non-convex: maxl/minl not supported inside implication constraints.")
+            return [node]
+        if node_type == "forall_constraint":
+            if isinstance(node.get("constraint"), dict):
+                expanded = self._expand_maxmin_constraint(node["constraint"])
+                if len(expanded) == 1:
+                    return [dict(node, constraint=expanded[0])]
+                rewritten = dict(node)
+                rewritten.pop("constraint", None)
+                rewritten["constraints"] = expanded
+                return [rewritten]
+            if isinstance(node.get("constraints"), list):
+                children = [item for child in node["constraints"] for item in self._expand_maxmin_constraint(child)]
+                return [dict(node, constraints=children)]
+        return [node]
+
     def _evaluate_and_splice_if_constraints(self, ast: dict, env: dict) -> None:
         """
         Validate groundness of all if-constraint conditions, evaluate them using env,
@@ -4856,196 +4982,9 @@ class OPLCompiler:
             return
 
         dvar_names = self._collect_dvar_names(ast.get("declarations", []))
-
-        def contains_dvar(expr: Any) -> bool:
-            return self._expr_contains_dvar(expr, dvar_names)
-
-        def is_ground(expr: Any) -> bool:
-            # Ground = contains no decision variables and no free iterators.
-            return not contains_dvar(expr)
-
-        def and_expr(a: Optional[dict], b: Optional[dict]) -> Optional[dict]:
-            if a is None:
-                return b
-            if b is None:
-                return a
-            return {"type": "and", "left": a, "right": b, "sem_type": "boolean"}
-
-        def not_expr(e: dict) -> dict:
-            return {"type": "not", "value": e, "sem_type": "boolean"}
-
-        def normalize_forall_body(fc: dict) -> list[dict]:
-            if "constraints" in fc and isinstance(fc["constraints"], list):
-                # Filter to dict items only to satisfy typing and avoid None
-                return [c for c in fc["constraints"] if isinstance(c, dict)]
-            if "constraint" in fc and isinstance(fc["constraint"], dict):
-                return [fc["constraint"]]
-            return []
-
-        def make_forall(iterators, index_constraint: Optional[dict], body_constraints: list[dict]) -> dict:
-            node: dict[str, Any] = {
-                "type": "forall_constraint",
-                "iterators": iterators,
-                "index_constraint": index_constraint,
-            }
-            if len(body_constraints) == 1:
-                node["constraint"] = body_constraints[0]
-            else:
-                node["constraints"] = body_constraints
-            return node
-
-        # Helper: normalized boolean literal
-        def _bool_lit(v: bool) -> dict:
-            return {"type": "boolean_literal", "value": bool(v), "sem_type": "boolean"}
-
-        # Convert any constraint/boolean-like node to a boolean expression dict.
-        # Guarantees a dict is returned.
-        def to_bool_expr(node_any: Any) -> dict:
-            n = node_any
-            # unwrap parentheses
-            while isinstance(n, dict) and n.get("type") == "parenthesized_expression":
-                n = n.get("expression")
-            # Already a boolean expression node
-            if isinstance(n, dict):
-                t = n.get("type")
-                if t in ("and", "or", "not", "boolean_literal"):
-                    return cast(dict, n)
-                if t == "binop":
-                    # binop is used both for arithmetic and comparisons; allow as boolean when used in conditions
-                    return cast(dict, n)
-                if t == "constraint":
-                    op = n.get("op")
-                    L = n.get("left")
-                    R = n.get("right")
-                    # constraint of form (expr == true/false)
-                    if op == "==" and isinstance(R, dict) and R.get("type") == "boolean_literal":
-                        return (
-                            cast(dict, L)
-                            if R.get("value") is True
-                            else {"type": "not", "value": cast(dict, L), "sem_type": "boolean"}
-                        )
-                    # General comparison -> boolean expression
-                    if op in ("<", "<=", ">", ">=", "==", "!="):
-                        return {"type": "binop", "op": op, "left": L, "right": R, "sem_type": "boolean"}
-                    # Fallback: equate to true
-                    return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
-                if t in ("name", "indexed_name", "funcall"):
-                    # Treat bare boolean-valued symbol/expression as == true
-                    return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
-                # Last resort: wrap unknown dict node as == true
-                return {"type": "binop", "op": "==", "left": n, "right": _bool_lit(True), "sem_type": "boolean"}
-            # Python literal fallback
-            if isinstance(n, bool):
-                return _bool_lit(n)
-            # Numbers/strings -> treat nonzero/nonempty as boolean at eval time; still force a node
-            return {
-                "type": "binop",
-                "op": "==",
-                "left": {"type": "number", "value": n, "sem_type": "int" if isinstance(n, int) else "float"},
-                "right": _bool_lit(True),
-                "sem_type": "boolean",
-            }
-
-        # Rewrite a single forall node: split inner if-constraints and ground-antecedent implications
-        def rewrite_forall_node(fc: dict) -> list[dict]:
-            iterators = fc.get("iterators", [])
-            base_ic: Optional[dict] = cast(Optional[dict], fc.get("index_constraint"))
-            body = normalize_forall_body(fc)
-
-            regular_constraints: list[dict] = []
-            new_foralls: list[dict] = []
-
-            for c in body:
-                # Handle if-constraints
-                if isinstance(c, dict) and c.get("type") == "if_constraint":
-                    cond_any = c.get("condition")
-                    if not isinstance(cond_any, dict):
-                        raise SemanticError("Malformed if-constraint: missing condition.")
-                    cond: dict = cond_any
-                    if contains_dvar(cond):
-                        raise SemanticError("Condition of if-constraint inside forall must not reference decision variables.")
-                    then_list = c.get("then_constraints") or []
-                    else_list = c.get("else_constraints") or []
-                    if then_list:
-                        then_fc = make_forall(
-                            iterators, and_expr(base_ic, cond), [cc for cc in then_list if isinstance(cc, dict)]
-                        )
-                        new_foralls.extend(rewrite_forall_node(then_fc))
-                    if else_list:
-                        else_fc = make_forall(
-                            iterators, and_expr(base_ic, not_expr(cond)), [cc for cc in else_list if isinstance(cc, dict)]
-                        )
-                        new_foralls.extend(rewrite_forall_node(else_fc))
-                    continue
-
-                # Implication with ground antecedent inside forall: push antecedent into index condition
-                if isinstance(c, dict) and c.get("type") == "implication_constraint":
-                    ant = c.get("antecedent")
-                    cons = c.get("consequent")
-                    ant_bool: dict = to_bool_expr(ant)
-                    if contains_dvar(ant_bool):
-                        regular_constraints.append(c)
-                    else:
-                        guarded_ic: Optional[dict] = and_expr(base_ic, ant_bool)
-                        if isinstance(cons, dict):
-                            new_foralls.append(make_forall(iterators, guarded_ic, [cons]))
-                    continue
-
-                # Keep others
-                if isinstance(c, dict):
-                    regular_constraints.append(c)
-
-            if regular_constraints:
-                new_foralls.append(make_forall(iterators, base_ic, regular_constraints))
-
-            return new_foralls
-
-        # Top-level pass
-        out_top: list[dict] = []
-
-        for c in ast.get("constraints", []):
-            # Top-level if-constraint
-            if isinstance(c, dict) and c.get("type") == "if_constraint":
-                cond_any = c.get("condition")
-                if not isinstance(cond_any, dict):
-                    raise SemanticError("Malformed if-constraint: missing condition.")
-                cond: dict = cond_any
-                if not is_ground(cond):
-                    if contains_dvar(cond):
-                        raise SemanticError(
-                            "Condition of if-constraint must be ground (must not reference decision variables)."
-                        )
-                    raise SemanticError("Condition of if-constraint at top level cannot reference iterators.")
-                val = self._eval_ground_condition(cond, env)
-                chosen_list = (c.get("then_constraints") or []) if val else (c.get("else_constraints") or [])
-                for cc in chosen_list:
-                    if isinstance(cc, dict) and cc.get("type") == "forall_constraint":
-                        out_top.extend(rewrite_forall_node(cc))
-                    elif isinstance(cc, dict):
-                        out_top.append(cc)
-                continue
-
-            # Top-level forall
-            if isinstance(c, dict) and c.get("type") == "forall_constraint":
-                out_top.extend(rewrite_forall_node(c))
-                continue
-
-            # Top-level implication with ground antecedent
-            if isinstance(c, dict) and c.get("type") == "implication_constraint":
-                ant = c.get("antecedent")
-                cons = c.get("consequent")
-                ant_bool: dict = to_bool_expr(ant)
-                if contains_dvar(ant_bool):
-                    out_top.append(c)
-                else:
-                    if self._eval_ground_condition(ant_bool, env) and isinstance(cons, dict):
-                        out_top.append(cons)
-                continue
-
-            if isinstance(c, dict):
-                out_top.append(c)
-
-        ast["constraints"] = out_top
+        if ast.get("constraints"):
+            self._rewrite_top_level_conditions(ast, env, dvar_names)
+            return
 
     def _lower_minmax_aggregates(self, ast: dict) -> None:
         if not isinstance(ast, dict):
@@ -5058,18 +4997,6 @@ class OPLCompiler:
             else:
                 node["constraint"] = cons
             return node
-
-        def agg_to_forall(agg, op_side: str, other):
-            # op_side: 'left' means agg on LHS, else RHS
-            iters = agg.get("iterators", [])
-            idxc = agg.get("index_constraint")
-            e = agg.get("expression")
-
-            def wrap(c):
-                return make_forall(iters, idxc, c)
-
-            # Builds a list of rewritten constraints per rule
-            return wrap if op_side == "wrap" else (iters, idxc, e)
 
         # Objective rewrite
         obj = ast.get("objective")
@@ -5120,66 +5047,10 @@ class OPLCompiler:
                 else:
                     raise SemanticError("Non-convex objective: supported only minimize max(...) or maximize min(...).")
 
-        # Constraint rewrite (walk all constraints)
-        def rewrite_constraint(c):
-            if not isinstance(c, dict):
-                return [c]
-            if c.get("type") == "constraint":
-                L, R, op = c.get("left"), c.get("right"), c.get("op")
-
-                # Helpers to build per-iterator constraints
-                def forall_from(agg_side, other_side, opLR):
-                    iters = agg_side["iterators"]
-                    idxc = agg_side.get("index_constraint")
-                    e = agg_side["expression"]
-                    cons = {
-                        "type": "constraint",
-                        "op": opLR,
-                        "left": e if opLR in ("<=", ">=") and agg_side is L else other_side,
-                        "right": other_side if opLR in ("<=", ">=") and agg_side is L else e,
-                    }
-                    return [make_forall(iters, idxc, cons)]
-
-                # max-agg convex forms
-                if isinstance(L, dict) and L.get("type") == "max_agg" and op == "<=":
-                    return forall_from(L, R, "<=")
-                if isinstance(R, dict) and R.get("type") == "max_agg" and op == ">=":
-                    return forall_from(R, L, ">=")
-                # min-agg convex forms
-                if isinstance(L, dict) and L.get("type") == "min_agg" and op == ">=":
-                    return forall_from(L, R, ">=")
-                if isinstance(R, dict) and R.get("type") == "min_agg" and op == "<=":
-                    return forall_from(R, L, "<=")
-
-                # Disallow other placements
-                if (isinstance(L, dict) and L.get("type") in ("min_agg", "max_agg")) or (
-                    isinstance(R, dict) and R.get("type") in ("min_agg", "max_agg")
-                ):
-                    raise SemanticError("Unsupported non-convex aggregate placement (==, >, <, or reversed forms).")
-                return [c]
-
-            if c.get("type") == "forall_constraint":
-                inner = []
-                if "constraint" in c:
-                    for cc in rewrite_constraint(c["constraint"]):
-                        inner.append(cc)
-                    return (
-                        [dict(c, **({"constraints": inner, "constraint": None}))]
-                        if len(inner) > 1
-                        else [dict(c, **({"constraint": inner[0]}))]
-                    )
-                elif "constraints" in c:
-                    for cc in c["constraints"]:
-                        inner.extend(rewrite_constraint(cc))
-                    return [dict(c, **({"constraints": inner}))]
-                return [c]
-            # Pass through others
-            return [c]
-
         if "constraints" in ast:
             newC = []
             for c in ast["constraints"]:
-                newC.extend(rewrite_constraint(c))
+                newC.extend(self._rewrite_minmax_constraint(c))
             ast["constraints"] = newC
 
     def _collect_dvar_names(self, declarations: list) -> set:
@@ -5310,6 +5181,86 @@ class OPLCompiler:
         # Unsupported in conditions
         raise SemanticError(f"Unsupported expression in ground condition: {t}")
 
+    @staticmethod
+    def _is_maxl_node(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "maxl"
+
+    @staticmethod
+    def _is_minl_node(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "minl"
+
+    @staticmethod
+    def _maxmin_args_or_error(node: dict[str, Any]) -> tuple[list[Any], bool]:
+        args = node.get("args") or []
+        if not args:
+            raise SemanticError("maxl/minl require at least one argument.")
+        return ([args[0]], True) if len(args) == 1 else (args, False)
+
+    @staticmethod
+    def _is_minmax_aggregate(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") in ("min_agg", "max_agg")
+
+    @staticmethod
+    def _is_max_aggregate(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "max_agg"
+
+    @staticmethod
+    def _is_min_aggregate(node: Any) -> bool:
+        return isinstance(node, dict) and node.get("type") == "min_agg"
+
+    def _rewrite_minmax_constraint(self, node: Any) -> list[dict]:
+        if not isinstance(node, dict):
+            return [node]
+        if node.get("type") == "constraint":
+            left = node.get("left")
+            right = node.get("right")
+            operator = node.get("op")
+
+            def forall_from(aggregate: dict, other: Any, relation: str, aggregate_on_left: bool) -> list[dict]:
+                expression = aggregate["expression"]
+                constraint = {
+                    "type": "constraint",
+                    "op": relation,
+                    "left": expression if aggregate_on_left else other,
+                    "right": other if aggregate_on_left else expression,
+                }
+                return [
+                    {
+                        "type": "forall_constraint",
+                        "iterators": aggregate["iterators"],
+                        "index_constraint": aggregate.get("index_constraint"),
+                        "constraint": constraint,
+                    }
+                ]
+
+            if self._is_max_aggregate(left) and operator == "<=" and isinstance(left, dict):
+                return forall_from(left, right, "<=", True)
+            if self._is_max_aggregate(right) and operator == ">=" and isinstance(right, dict):
+                return forall_from(right, left, ">=", False)
+            if self._is_min_aggregate(left) and operator == ">=" and isinstance(left, dict):
+                return forall_from(left, right, ">=", True)
+            if self._is_min_aggregate(right) and operator == "<=" and isinstance(right, dict):
+                return forall_from(right, left, "<=", False)
+            if self._is_minmax_aggregate(left) or self._is_minmax_aggregate(right):
+                raise SemanticError("Unsupported non-convex aggregate placement (==, >, <, or reversed forms).")
+            return [node]
+
+        if node.get("type") == "forall_constraint":
+            if "constraint" in node and isinstance(node["constraint"], dict):
+                expanded = self._rewrite_minmax_constraint(node["constraint"])
+                if len(expanded) == 1:
+                    return [dict(node, constraint=expanded[0])]
+                rewritten = dict(node)
+                rewritten.pop("constraint", None)
+                rewritten["constraints"] = expanded
+                return [rewritten]
+            if isinstance(node.get("constraints"), list):
+                children = []
+                for child in node["constraints"]:
+                    children.extend(self._rewrite_minmax_constraint(child))
+                return [dict(node, constraints=children)]
+        return [node]
+
     def _lower_maxmin_convex(self, ast: dict) -> None:
         """
         Convex lowering for maxl/minl:
@@ -5320,20 +5271,6 @@ class OPLCompiler:
         if not isinstance(ast, dict):
             return
 
-        def is_max(n):
-            return isinstance(n, dict) and n.get("type") == "maxl"
-
-        def is_min(n):
-            return isinstance(n, dict) and n.get("type") == "minl"
-
-        def args_or_err(node):
-            args = node.get("args") or []
-            if len(args) == 0:
-                raise SemanticError("maxl/minl require at least one argument.")
-            if len(args) == 1:
-                return [args[0]], True
-            return args, False
-
         # Objective
         if "objective" in ast and isinstance(ast["objective"], dict):
             obj = ast["objective"]
@@ -5342,8 +5279,8 @@ class OPLCompiler:
             if isinstance(expr, dict) and expr.get("type") == "parenthesized_expression":
                 expr = expr.get("expression")
 
-            if obj.get("type") == "minimize" and is_max(expr):
-                args, single = args_or_err(expr)
+            if obj.get("type") == "minimize" and isinstance(expr, dict) and self._is_maxl_node(expr):
+                args, single = self._maxmin_args_or_error(expr)
                 if single:
                     ast["objective"]["expression"] = args[0]
                 else:
@@ -5362,8 +5299,8 @@ class OPLCompiler:
                                 "right": ei,
                             }
                         )
-            elif obj.get("type") == "maximize" and is_min(expr):
-                args, single = args_or_err(expr)
+            elif obj.get("type") == "maximize" and isinstance(expr, dict) and self._is_minl_node(expr):
+                args, single = self._maxmin_args_or_error(expr)
                 if single:
                     ast["objective"]["expression"] = args[0]
                 else:
@@ -5387,91 +5324,11 @@ class OPLCompiler:
                         "Non-convex objective: maxl/minl allowed only as minimize maxl(...) or maximize minl(...)."
                     )
 
-        # Constraints
-        def expand_constraint(cnode: dict) -> list[dict]:
-            # Returns a list of linear constraints replacing cnode, or raises on non-convex use.
-            if not isinstance(cnode, dict):
-                return [cnode]
-            t = cnode.get("type")
-            if t == "constraint":
-                op = cnode.get("op")
-                L = cnode.get("left")
-                R = cnode.get("right")
-                label = cnode.get("label")
-
-                # Helper to attach label if present
-                def with_label(cons: dict) -> dict:
-                    if label:
-                        cons = dict(cons)
-                        cons["label"] = label
-                    return cons
-
-                # Allowed convex patterns (including reversed sides)
-                if op == "<=" and is_max(L):
-                    args, single = args_or_err(L)
-                    if single:
-                        return [with_label({"type": "constraint", "op": "<=", "left": args[0], "right": R})]
-                    return [with_label({"type": "constraint", "op": "<=", "left": ei, "right": R}) for ei in args]
-                if op == ">=" and is_max(R):
-                    args, single = args_or_err(R)
-                    if single:
-                        return [with_label({"type": "constraint", "op": ">=", "left": L, "right": args[0]})]
-                    return [with_label({"type": "constraint", "op": ">=", "left": L, "right": ei}) for ei in args]
-                if op == ">=" and is_min(L):
-                    args, single = args_or_err(L)
-                    if single:
-                        return [with_label({"type": "constraint", "op": ">=", "left": args[0], "right": R})]
-                    return [with_label({"type": "constraint", "op": ">=", "left": ei, "right": R}) for ei in args]
-                if op == "<=" and is_min(R):
-                    args, single = args_or_err(R)
-                    if single:
-                        return [with_label({"type": "constraint", "op": "<=", "left": L, "right": args[0]})]
-                    return [with_label({"type": "constraint", "op": "<=", "left": L, "right": ei}) for ei in args]
-
-                # If equality involves maxl/minl, reject
-                if op == "==" and (self._contains_maxmin(L) or self._contains_maxmin(R)):
-                    raise SemanticError("Non-convex: equality with maxl/minl is not supported.")
-                # If maxl/minl appear elsewhere (inside arithmetic), reject
-                if self._contains_maxmin(L) or self._contains_maxmin(R):
-                    raise SemanticError(
-                        "Non-convex or unsupported placement of maxl/minl in constraint. Allowed only in: maxl(...) <= rhs, lhs >= maxl(...), minl(...) >= rhs, lhs <= minl(...)."
-                    )
-                return [cnode]
-
-            if t == "implication_constraint":
-                # Do not allow maxl/minl under implication for now (non-convex in general)
-                if self._contains_maxmin(cnode.get("antecedent")) or self._contains_maxmin(cnode.get("consequent")):
-                    raise SemanticError("Non-convex: maxl/minl not supported inside implication constraints.")
-                return [cnode]
-
-            if t == "forall_constraint":
-                # Rewrite children and keep structure
-                iterators = cnode.get("iterators", [])
-                ic = cnode.get("index_constraint")
-                if "constraint" in cnode:
-                    expanded = expand_constraint(cnode["constraint"])
-                    if len(expanded) == 1:
-                        return [dict(cnode, **{"constraint": expanded[0]})]
-                    else:
-                        node = dict(cnode)
-                        node.pop("constraint", None)
-                        node["constraints"] = expanded
-                        return [node]
-                elif "constraints" in cnode and isinstance(cnode["constraints"], list):
-                    new_children: list[dict] = []
-                    for child in cnode["constraints"]:
-                        new_children.extend(expand_constraint(child))
-                    return [dict(cnode, **{"iterators": iterators, "index_constraint": ic, "constraints": new_children})]
-                return [cnode]
-
-            # Other nodes unchanged
-            return [cnode]
-
         if "constraints" in ast and isinstance(ast["constraints"], list):
             new_cons: list[dict] = []
             for c in ast["constraints"]:
                 if isinstance(c, dict):
-                    new_cons.extend(expand_constraint(c))
+                    new_cons.extend(self._expand_maxmin_constraint(c))
                 else:
                     new_cons.append(c)
             ast["constraints"] = new_cons
