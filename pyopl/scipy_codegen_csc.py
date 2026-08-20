@@ -6089,6 +6089,63 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         diff_coef, diff_const = self._not_equal_affine_difference(left, right, env)
         self._emit_integer_not_equal(diff_coef, diff_const, env, state)
 
+    def _handle_constraint_node(self, constr, env, state, bool_expr_var, comparison_truth_var, append_eq_row, append_ub_row):
+        self._ensure_constraint_parameters_bound(constr)
+        if self._try_enforce_bool_tree_literal_constraint(constr, env, bool_expr_var, append_eq_row):
+            return
+
+        logger.debug(f"[SciPyCSCCodeGenerator] handle_constraint: {constr}")
+        self._collect_passive_constraint_bounds(constr, env, bool_expr_var)
+        if self._try_enforce_reified_implication_literal(constr, env, bool_expr_var, append_eq_row):
+            return
+        if constr.get("type") == "implication_constraint":
+            self._handle_implication_constraint(
+                constr,
+                env,
+                bool_expr_var,
+                comparison_truth_var,
+                append_eq_row,
+                append_ub_row,
+            )
+            return
+        if constr["type"] == "constraint":
+            handled, left, right, operator = self._try_handle_constraint_special_forms(
+                constr,
+                env,
+                bool_expr_var,
+                comparison_truth_var,
+                append_ub_row,
+                state,
+            )
+            if handled:
+                return
+            self._handle_normalized_constraint(
+                constr,
+                left,
+                right,
+                operator,
+                env,
+                bool_expr_var,
+                state,
+                lambda child, env: self._handle_constraint_node(
+                    child, env, state, bool_expr_var, comparison_truth_var, append_eq_row, append_ub_row
+                ),
+                append_eq_row,
+                append_ub_row,
+            )
+            return
+        if constr["type"] == "forall_constraint":
+            self._handle_forall_constraint(
+                constr,
+                env,
+                lambda child, env: self._handle_constraint_node(
+                    child, env, state, bool_expr_var, comparison_truth_var, append_eq_row, append_ub_row
+                ),
+            )
+            return
+        if constr["type"] != "implication_constraint":
+            logger.debug(f"Unsupported constraint type: {constr['type']}")
+
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
         logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
@@ -6096,20 +6153,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         prev_sym = getattr(self, "_allow_symbolic_bool", False)
         self._allow_symbolic_bool = True
         state = _ConstraintBuildState()
-        eq_row_idx = 0
-        ub_row_idx = 0
 
         def append_eq_row(row, rhs):
-            nonlocal eq_row_idx
-            state.eq_row_idx = eq_row_idx
             self._append_sparse_row(state, row, rhs, sense="eq")
-            eq_row_idx = state.eq_row_idx
 
         def append_ub_row(row, rhs):
-            nonlocal ub_row_idx
-            state.ub_row_idx = ub_row_idx
             self._append_sparse_row(state, row, rhs, sense="ub")
-            ub_row_idx = state.ub_row_idx
 
         # Collected per-variable bounds from simple constraints (var >= c, var <= c, var == c)
         if not hasattr(self, "_collected_lbs"):
@@ -6125,99 +6174,28 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         )
 
         def _comparison_truth_var(node, env):
-            nonlocal eq_row_idx, ub_row_idx
-            ctx.state.eq_row_idx = eq_row_idx
-            ctx.state.ub_row_idx = ub_row_idx
             result = self._comparison_truth_var(node, env, ctx)
-            eq_row_idx = ctx.state.eq_row_idx
-            ub_row_idx = ctx.state.ub_row_idx
             return result
 
         def _bool_expr_var(node, env):
-            nonlocal eq_row_idx, ub_row_idx
-            ctx.state.eq_row_idx = eq_row_idx
-            ctx.state.ub_row_idx = ub_row_idx
             result = self._bool_expr_var(node, env, ctx)
-            eq_row_idx = ctx.state.eq_row_idx
-            ub_row_idx = ctx.state.ub_row_idx
             return result
-
-        def handle_constraint(constr, env):
-            nonlocal eq_row_idx, ub_row_idx
-
-            self._ensure_constraint_parameters_bound(constr)
-
-            # --- Patch: Always create auxiliary for non-trivial boolean expressions ---
-            # Only for constraints of the form (bool_expr) == True/1 or >=1 or <=1
-
-            if self._try_enforce_bool_tree_literal_constraint(constr, env, _bool_expr_var, append_eq_row):
-                return
-
-            # nonlocal already declared at top of handle_constraint
-            logger.debug(f"[SciPyCSCCodeGenerator] handle_constraint: {constr}")
-            self._collect_passive_constraint_bounds(constr, env, _bool_expr_var)
-            # Implication constraints: antecedent => consequent
-            # --- Patch: ensure auxiliary variables for nested implications ---
-            if self._try_enforce_reified_implication_literal(constr, env, _bool_expr_var, append_eq_row):
-                return
-            if constr.get("type") == "implication_constraint":
-                self._handle_implication_constraint(
-                    constr,
-                    env,
-                    _bool_expr_var,
-                    _comparison_truth_var,
-                    append_eq_row,
-                    append_ub_row,
-                )
-                return
-            if constr["type"] == "constraint":
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                handled, left, right, operator = self._try_handle_constraint_special_forms(
-                    constr,
-                    env,
-                    _bool_expr_var,
-                    _comparison_truth_var,
-                    append_ub_row,
-                    state,
-                )
-                eq_row_idx = state.eq_row_idx
-                ub_row_idx = state.ub_row_idx
-                if handled:
-                    return
-                state.eq_row_idx = eq_row_idx
-                state.ub_row_idx = ub_row_idx
-                self._handle_normalized_constraint(
-                    constr,
-                    left,
-                    right,
-                    operator,
-                    env,
-                    _bool_expr_var,
-                    state,
-                    handle_constraint,
-                    append_eq_row,
-                    append_ub_row,
-                )
-                eq_row_idx = state.eq_row_idx
-                ub_row_idx = state.ub_row_idx
-            elif constr["type"] == "forall_constraint":
-                self._handle_forall_constraint(constr, env, handle_constraint)
-            elif constr["type"] == "implication_constraint":
-                # Should have been handled by early branch; unreachable
-                return
-            else:
-                logger.debug(f"Unsupported constraint type: {constr['type']}")
 
         try:
             for constr in self.ast["constraints"]:
-                handle_constraint(constr, env={})
+                self._handle_constraint_node(
+                    constr,
+                    {},
+                    state,
+                    _bool_expr_var,
+                    _comparison_truth_var,
+                    append_eq_row,
+                    append_ub_row,
+                )
         finally:
             # Always restore symbolic flag even if constraint handling raises
             self._allow_symbolic_bool = prev_sym
 
-        state.eq_row_idx = eq_row_idx
-        state.ub_row_idx = ub_row_idx
         self._finalize_constraint_state(state)
         # Always reconcile metadata (objective c, var_names, bounds, integrality) in case
         for i, line in enumerate(self.scipy_code_lines):
