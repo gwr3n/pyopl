@@ -67,44 +67,45 @@ class FarkasCertificate:
     equality_multipliers: tuple[Fraction, ...]
 
 
-def _lower_declarations(
+def _register_declaration(
+    declaration: Mapping[str, Any],
+    parameter_declarations: list[Symbol],
+    variable_declarations: list[Symbol],
+    symbols: dict[str, sp.Symbol],
+    inferred_assumptions: list[sp.Expr],
+) -> None:
+    node_type = declaration.get("type")
+    name = declaration.get("name")
+    if node_type in {"range_declaration_inline", "range_declaration_external", "tuple_type"}:
+        return
+    if not isinstance(name, str):
+        raise UnsupportedAlgebra(f"unsupported declaration in algebraic backend: {node_type}")
+    if declaration.get("dimensions") or declaration.get("iterators") or "indexed" in str(node_type):
+        raise UnsupportedAlgebra("algebraic backend currently supports scalar declarations only")
+    value_type = str(declaration.get("var_type", "unknown"))
+    if node_type == "dvar":
+        variable_declarations.append(Symbol(name, "variable", value_type))
+        symbols[name] = sp.Symbol(name, real=True)
+        if value_type in {"int+", "float+", "boolean"}:
+            inferred_assumptions.append(symbols[name] >= 0)
+        if value_type == "boolean":
+            inferred_assumptions.append(symbols[name] <= 1)
+    elif str(node_type).startswith("parameter"):
+        parameter_declarations.append(Symbol(name, "parameter", value_type))
+        symbols[name] = sp.Symbol(name, real=True)
+        if value_type in {"int+", "float+"}:
+            inferred_assumptions.append(symbols[name] >= 0)
+    elif node_type in {"typed_set", "set_declaration", "set_of_tuples", "tuple_array"}:
+        raise UnsupportedAlgebra("algebraic backend does not lower set-valued declarations")
+    else:
+        raise UnsupportedAlgebra(f"unsupported declaration in algebraic backend: {node_type}")
+
+
+def _lower_inline_values(
     declarations: list[Any],
-) -> tuple[list[Symbol], list[Symbol], dict[str, sp.Symbol], dict[str, sp.Expr], list[sp.Expr]]:
-    parameter_declarations: list[Symbol] = []
-    variable_declarations: list[Symbol] = []
-    symbols: dict[str, sp.Symbol] = {}
+    symbols: Mapping[str, sp.Symbol],
+) -> dict[str, sp.Expr]:
     inline_values: dict[str, sp.Expr] = {}
-    inferred_assumptions: list[sp.Expr] = []
-
-    for declaration in declarations:
-        if not isinstance(declaration, Mapping):
-            raise UnsupportedAlgebra("abstract declaration must be an object")
-        node_type = declaration.get("type")
-        name = declaration.get("name")
-        if node_type in {"range_declaration_inline", "range_declaration_external", "tuple_type"}:
-            continue
-        if not isinstance(name, str):
-            raise UnsupportedAlgebra(f"unsupported declaration in algebraic backend: {node_type}")
-        if declaration.get("dimensions") or declaration.get("iterators") or "indexed" in str(node_type):
-            raise UnsupportedAlgebra("algebraic backend currently supports scalar declarations only")
-        value_type = str(declaration.get("var_type", "unknown"))
-        if node_type == "dvar":
-            variable_declarations.append(Symbol(name, "variable", value_type))
-            symbols[name] = sp.Symbol(name, real=True)
-            if value_type in {"int+", "float+", "boolean"}:
-                inferred_assumptions.append(symbols[name] >= 0)
-            if value_type == "boolean":
-                inferred_assumptions.append(symbols[name] <= 1)
-        elif str(node_type).startswith("parameter"):
-            parameter_declarations.append(Symbol(name, "parameter", value_type))
-            symbols[name] = sp.Symbol(name, real=True)
-            if value_type in {"int+", "float+"}:
-                inferred_assumptions.append(symbols[name] >= 0)
-        elif node_type in {"typed_set", "set_declaration", "set_of_tuples", "tuple_array"}:
-            raise UnsupportedAlgebra("algebraic backend does not lower set-valued declarations")
-        else:
-            raise UnsupportedAlgebra(f"unsupported declaration in algebraic backend: {node_type}")
-
     for declaration in declarations:
         if not isinstance(declaration, Mapping):
             continue
@@ -115,7 +116,29 @@ def _lower_declarations(
         value = declaration.get("expression", declaration.get("value"))
         if node_type in {"parameter_inline", "parameter_inline_expr"} and value is not None:
             inline_values[name] = _expression(value, symbols, inline_values, set())
+    return inline_values
 
+
+def _lower_declarations(
+    declarations: list[Any],
+) -> tuple[list[Symbol], list[Symbol], dict[str, sp.Symbol], dict[str, sp.Expr], list[sp.Expr]]:
+    parameter_declarations: list[Symbol] = []
+    variable_declarations: list[Symbol] = []
+    symbols: dict[str, sp.Symbol] = {}
+    inferred_assumptions: list[sp.Expr] = []
+
+    for declaration in declarations:
+        if not isinstance(declaration, Mapping):
+            raise UnsupportedAlgebra("abstract declaration must be an object")
+        _register_declaration(
+            declaration,
+            parameter_declarations,
+            variable_declarations,
+            symbols,
+            inferred_assumptions,
+        )
+
+    inline_values = _lower_inline_values(declarations, symbols)
     return parameter_declarations, variable_declarations, symbols, inline_values, inferred_assumptions
 
 
@@ -390,29 +413,50 @@ def _expression(
     if node_type == "uminus":
         return -_expression(node.get("value"), symbols, inline_values, resolving)
     if node_type == "name":
-        name = node.get("value")
-        if not isinstance(name, str) or name not in symbols:
-            raise UnsupportedAlgebra(f"unknown symbolic name: {name}")
-        if name in inline_values:
-            if name in resolving:
-                raise UnsupportedAlgebra(f"cyclic computed parameter: {name}")
-            return inline_values[name]
-        return symbols[name]
+        return _expression_name(node, symbols, inline_values, resolving)
     if node_type == "binop":
-        left = _expression(node.get("left"), symbols, inline_values, resolving)
-        right = _expression(node.get("right"), symbols, inline_values, resolving)
-        operator = node.get("op")
-        if operator == "+":
-            return left + right
-        if operator == "-":
-            return left - right
-        if operator == "*":
-            return left * right
-        if operator == "/":
-            if right.free_symbols & {symbol for symbol in symbols.values() if symbol.name in symbols}:
-                raise UnsupportedAlgebra("division by symbolic expressions requires side-condition proving")
-            return left / right
+        result = _expression_binop(node, symbols, inline_values, resolving)
+        if result is not None:
+            return result
     raise UnsupportedAlgebra(f"unsupported symbolic expression node: {node_type}")
+
+
+def _expression_name(
+    node: Mapping[str, Any],
+    symbols: Mapping[str, sp.Symbol],
+    inline_values: Mapping[str, sp.Expr],
+    resolving: set[str],
+) -> sp.Expr:
+    name = node.get("value")
+    if not isinstance(name, str) or name not in symbols:
+        raise UnsupportedAlgebra(f"unknown symbolic name: {name}")
+    if name in inline_values:
+        if name in resolving:
+            raise UnsupportedAlgebra(f"cyclic computed parameter: {name}")
+        return inline_values[name]
+    return symbols[name]
+
+
+def _expression_binop(
+    node: Mapping[str, Any],
+    symbols: Mapping[str, sp.Symbol],
+    inline_values: Mapping[str, sp.Expr],
+    resolving: set[str],
+) -> sp.Expr | None:
+    left = _expression(node.get("left"), symbols, inline_values, resolving)
+    right = _expression(node.get("right"), symbols, inline_values, resolving)
+    operator = node.get("op")
+    if operator == "+":
+        return left + right
+    if operator == "-":
+        return left - right
+    if operator == "*":
+        return left * right
+    if operator != "/":
+        return None
+    if right.free_symbols & set(symbols.values()):
+        raise UnsupportedAlgebra("division by symbolic expressions requires side-condition proving")
+    return left / right
 
 
 def _lower_constraint(
@@ -677,6 +721,56 @@ def _polyhedra_equal(left: SymbolicModel, right: SymbolicModel, variables: list[
     return True, certificates
 
 
+def _farkas_numeric_premises(
+    premises: Sequence[AffineConstraint],
+    variables: list[str],
+) -> tuple[list[tuple[list[sp.Expr], sp.Expr]], list[tuple[list[sp.Expr], sp.Expr]]]:
+    inequalities = [constraint for constraint in premises if constraint.sense == "<="]
+    equalities = [constraint for constraint in premises if constraint.sense == "="]
+    premise_vectors = [_numeric_row(constraint.expression, variables) for constraint in inequalities]
+    equality_vectors = [_numeric_row(constraint.expression, variables) for constraint in equalities]
+    return premise_vectors, equality_vectors
+
+
+def _solve_farkas_multipliers(
+    premise_vectors: list[tuple[list[sp.Expr], sp.Expr]],
+    equality_vectors: list[tuple[list[sp.Expr], sp.Expr]],
+    conclusion_coefficients: list[sp.Expr],
+    conclusion_constant: sp.Expr,
+    variables: list[str],
+) -> np.ndarray | None:
+    variable_count = len(premise_vectors) + 2 * len(equality_vectors)
+    if variable_count == 0:
+        if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients):
+            return np.asarray([])
+        return None
+
+    equality_matrix = [
+        [float(row[0][index]) for row in premise_vectors]
+        + [float(row[0][index]) for row in equality_vectors]
+        + [-float(row[0][index]) for row in equality_vectors]
+        for index in range(len(variables))
+    ]
+    equality_rhs = [float(conclusion_coefficients[index]) for index in range(len(variables))]
+    upper_matrix = [
+        [-float(row[1]) for row in premise_vectors]
+        + [-float(row[1]) for row in equality_vectors]
+        + [float(row[1]) for row in equality_vectors]
+    ]
+    result = linprog(
+        c=np.zeros(variable_count),
+        A_ub=np.asarray(upper_matrix),
+        b_ub=np.asarray([-float(conclusion_constant)]),
+        A_eq=np.asarray(equality_matrix) if equality_matrix else None,
+        b_eq=np.asarray(equality_rhs) if equality_rhs else None,
+        bounds=[(0, None)] * variable_count,
+        method="highs",
+    )
+    if result.status != 0 or result.x is None:
+        return None
+    return result.x
+
+
 def _farkas_certificate(
     premises: Sequence[AffineConstraint],
     conclusion: AffineConstraint,
@@ -686,45 +780,22 @@ def _farkas_certificate(
         positive = _farkas_certificate(premises, AffineConstraint(conclusion.expression, "<="), variables)
         negative = _farkas_certificate(premises, AffineConstraint(-conclusion.expression, "<="), variables)
         return positive if positive is not None and negative is not None else None
+    premise_vectors, equality_vectors = _farkas_numeric_premises(premises, variables)
+    conclusion_coefficients, conclusion_constant = _numeric_row(conclusion.expression, variables)
+    multipliers = _solve_farkas_multipliers(
+        premise_vectors,
+        equality_vectors,
+        conclusion_coefficients,
+        conclusion_constant,
+        variables,
+    )
+    if multipliers is None:
+        return None
+    if not premise_vectors and not equality_vectors:
+        return FarkasCertificate((), ())
     inequalities = [constraint for constraint in premises if constraint.sense == "<="]
     equalities = [constraint for constraint in premises if constraint.sense == "="]
-    premise_vectors = [_numeric_row(constraint.expression, variables) for constraint in inequalities]
-    equality_vectors = [_numeric_row(constraint.expression, variables) for constraint in equalities]
-    conclusion_coefficients, conclusion_constant = _numeric_row(conclusion.expression, variables)
-    variable_count = len(inequalities) + 2 * len(equalities)
-    if variable_count == 0:
-        return (
-            FarkasCertificate((), ())
-            if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients)
-            else None
-        )
-    equality_matrix: list[list[float]] = []
-    equality_rhs: list[float] = []
-    for index in range(len(variables)):
-        equality_matrix.append(
-            [float(row[0][index]) for row in premise_vectors]
-            + [float(row[0][index]) for row in equality_vectors]
-            + [-float(row[0][index]) for row in equality_vectors]
-        )
-        equality_rhs.append(float(conclusion_coefficients[index]))
-    upper_matrix = [
-        [-float(row[1]) for row in premise_vectors]
-        + [-float(row[1]) for row in equality_vectors]
-        + [float(row[1]) for row in equality_vectors]
-    ]
-    upper_rhs = [-float(conclusion_constant)]
-    result = linprog(
-        c=np.zeros(variable_count),
-        A_ub=np.asarray(upper_matrix),
-        b_ub=np.asarray(upper_rhs),
-        A_eq=np.asarray(equality_matrix) if equality_matrix else None,
-        b_eq=np.asarray(equality_rhs) if equality_rhs else None,
-        bounds=[(0, None)] * variable_count,
-        method="highs",
-    )
-    if result.status != 0 or result.x is None:
-        return None
-    fractions = [Fraction(float(value)).limit_denominator(1_000_000) for value in result.x]
+    fractions = [Fraction(float(value)).limit_denominator(1_000_000) for value in multipliers]
     inequality_multipliers = tuple(fractions[: len(inequalities)])
     positive_equalities = fractions[len(inequalities) : len(inequalities) + len(equalities)]
     negative_equalities = fractions[len(inequalities) + len(equalities) :]
