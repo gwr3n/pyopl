@@ -644,6 +644,8 @@ The repository provides `gurobi.json` and `highs.json` templates containing the 
 
 Settings are backend-specific. Invalid names or values are reported by Gurobi or SciPy/HiGHS; PyOPL does not translate parameter names between solvers. Do not store credentials or secrets in solver settings files.
 
+Backend time limits such as HiGHS `time_limit` and Gurobi `TimeLimit` apply to optimization after PyOPL has parsed, materialized, and compiled the OPL model. They are not whole-process limits. Large generic models with substantial indexed data may therefore spend significant time compiling before the solver timer starts. PyOPL reports the compilation and optimization phases separately in solver output.
+
 The `solve` function returns a dictionary with the following keys:
 - `status`: Optimization status (e.g., 'OPTIMAL', 'INFEASIBLE')
 - `solution`: Variable values (if optimal)

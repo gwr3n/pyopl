@@ -2845,6 +2845,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         )
         self._add_code_line("status_map = {0: 'OPTIMAL', 1: 'ITERATION_LIMIT', 2: 'INFEASIBLE', 3: 'UNBOUNDED'}")
         self._add_code_line("status_str = status_map.get(res.status, 'ERROR')")
+        self._add_code_line("if res.status == 1 and 'time limit' in str(res.message).lower():")
+        self.indent_level += 1
+        self._add_code_line("status_str = 'TIME_LIMIT'")
+        self.indent_level -= 1
+        self._add_code_line("stats = {}")
+        self._add_code_line("stats['status'] = res.status")
+        self._add_code_line("stats['message'] = res.message")
+        self._add_code_line("stats['nit'] = getattr(res, 'nit', None)")
+        self._add_code_line("stats['crossover_nit'] = getattr(res, 'crossover_nit', None)")
+        self._add_code_line("stats['time'] = end_time - start_time")
         self._add_code_line("if res.success and res.status == 0:")
         self.indent_level += 1
         self._add_code_line("print('Optimal solution found:')")
@@ -2870,12 +2880,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['solution'] = solution")
         self._add_code_line(f"{self.results_varname}['objective_value'] = objective_value")
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
-        self._add_code_line("stats = {}")
-        self._add_code_line("stats['status'] = res.status")
-        self._add_code_line("stats['message'] = res.message")
-        self._add_code_line("stats['nit'] = res.nit")
-        self._add_code_line("stats['crossover_nit'] = getattr(res, 'crossover_nit', None)")
-        self._add_code_line("stats['time'] = end_time - start_time")
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
         self.indent_level -= 1  # Dedent here so else is at the same level as if
         self._add_code_line("else:")
@@ -2884,6 +2888,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
         self._add_code_line(f"{self.results_varname}['message'] = res.message")
         self._add_code_line(f"{self.results_varname}['objective_value'] = None")
+        self._add_code_line(f"{self.results_varname}['stats'] = stats")
         self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("except Exception as e:")

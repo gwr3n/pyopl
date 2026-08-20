@@ -29,6 +29,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             old_cwd = os.getcwd()
             try:
                 os.chdir(tmpdir)
+                settings_path = Path(os.getcwd(), "highs.json")
                 with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=mock.Mock()):
                     with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process) as process_cls:
                         started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
@@ -41,6 +42,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
             args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_queue),
         )
         process.start.assert_called_once_with()
+        dummy._append_output.assert_called_once_with(
+            f"\nSolver settings: loaded {settings_path}.\n",
+            "session-1",
+        )
 
     def test_export_model_dialog_supports_lp_and_mps(self):
         class DummyText:

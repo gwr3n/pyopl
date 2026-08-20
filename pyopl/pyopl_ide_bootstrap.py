@@ -4328,6 +4328,7 @@ class OPLIDE(tk.Tk):
                     solver_settings = json.load(settings_file)
                 if not isinstance(solver_settings, dict):
                     raise ValueError(f"{settings_name} must contain a JSON object.")
+                self._append_output(f"\nSolver settings: loaded {settings_path}.\n", operation.session_id)
             self._solver_queue = multiprocessing.Queue()
             self._solver_process = multiprocessing.Process(
                 target=_solve_wrapper,

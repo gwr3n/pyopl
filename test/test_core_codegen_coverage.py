@@ -138,6 +138,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("model.setParam(_param_name, _param_value)", gurobi_code)
         self.assertIn("solver_options.update", scipy_code)
         self.assertIn("options=solver_options", scipy_code)
+        self.assertIn("status_str = 'TIME_LIMIT'", scipy_code)
+        self.assertIn("results['stats'] = stats", scipy_code)
 
     def test_scipy_codegen_factory_rejects_unknown_mode(self):
         ast = {
