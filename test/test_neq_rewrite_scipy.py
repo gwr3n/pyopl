@@ -53,32 +53,18 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
         # Determine M heuristically: look at absolute coefficient on delta (largest)
         M_candidates = [abs(row[delta_idx]) for row in gen.A_ub]
         M = max(M_candidates) if M_candidates else 1_000_000.0
-        found_forms = 0
-        for row, rhs in zip(gen.A_ub, gen.b_ub):
-            # Form 1: x - y - M*delta <= -1
-            if (
-                abs(row[x_idx] - 1.0) < 1e-9
-                and abs(row[y_idx] + 1.0) < 1e-9
-                and abs(row[delta_idx] + M) < 1e-6
-                and abs(rhs + 1.0) < 1e-6
-            ):
-                found_forms += 1
-            # Form 2: -x + y + M*delta <= M - 1 (generic unified encoding variant)
-            if (
-                abs(row[x_idx] + 1.0) < 1e-9
-                and abs(row[y_idx] - 1.0) < 1e-9
-                and abs(row[delta_idx] - M) < 1e-6
-                and abs(rhs - (M - 1.0)) < 1e-3
-            ):
-                found_forms += 1
-            # Alternative legacy: x - y + M*delta <= M - 1
-            if (
-                abs(row[x_idx] - 1.0) < 1e-9
-                and abs(row[y_idx] + 1.0) < 1e-9
-                and abs(row[delta_idx] - M) < 1e-6
-                and abs(rhs - (M - 1.0)) < 1e-3
-            ):
-                found_forms += 1
+        expected_forms = (
+            (((x_idx, 1.0, 1e-9), (y_idx, -1.0, 1e-9), (delta_idx, -M, 1e-6)), -1.0, 1e-6),
+            (((x_idx, -1.0, 1e-9), (y_idx, 1.0, 1e-9), (delta_idx, M, 1e-6)), M - 1.0, 1e-3),
+            (((x_idx, 1.0, 1e-9), (y_idx, -1.0, 1e-9), (delta_idx, M, 1e-6)), M - 1.0, 1e-3),
+        )
+        found_forms = sum(
+            any(
+                self._row_matches(row, rhs, coefficients, expected_rhs, rhs_tolerance)
+                for row, rhs in zip(gen.A_ub, gen.b_ub)
+            )
+            for coefficients, expected_rhs, rhs_tolerance in expected_forms
+        )
         self.assertGreaterEqual(
             found_forms,
             2,
@@ -96,6 +82,13 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
             self._rows_allow_assignment(gen, {"x": 1, "y": 1}),
             "x == y must be infeasible for x != y",
         )
+
+    @staticmethod
+    def _row_matches(row, rhs, coefficients, expected_rhs, rhs_tolerance):
+        return all(
+            abs(row[index] - expected) < tolerance
+            for index, expected, tolerance in coefficients
+        ) and abs(rhs - expected_rhs) < rhs_tolerance
 
     def test_float_neq_is_rejected_without_an_explicit_tolerance_policy(self):
         opl = """
