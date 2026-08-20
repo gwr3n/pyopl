@@ -421,119 +421,95 @@ class ExpressionEvaluator:
                 raise self.parent._not_found_error("indexed variable or parameter", vname)
             return {vname: 1.0}, 0.0
 
-    def _eval_index_expr(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
-        tt = dim_expr.get("type")
-        # All index expressions return (coef_dict, value)
-        if tt == "field_access_index" or tt == "field_access":
-            coef, val = self._eval_field_access(dim_expr, env)
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            return coef, val
-        if tt == "number_literal_index":
-            val = dim_expr["value"]
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            return {}, val
-        elif tt == "name_reference_index":
-            # Updated: also consult data_dict when the name is not in env
-            name = dim_expr.get("name")
-            if name in env:
-                val = env[name]
-            else:
-                # Pull scalar/range bound values from provided data (e.g., nbMachines)
-                val = self.parent.data_dict.get(name, name)
-            # Coerce float-int to int; also accept numeric strings
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            elif isinstance(val, str):
-                try:
-                    # Try int first (OPL indices are integers)
-                    val = int(val)
-                except Exception:
-                    pass
-            return {}, val
-        # NEW: resolve plain 'name' nodes used inside index arithmetic (e.g., t in s[t-1])
-        elif tt == "name":
-            # Previously only looked in env; also consult model data to resolve parameters like S, T
-            name = dim_expr.get("value")
-            if name in env:
-                val = env[name]
-            else:
-                val = self.parent.data_dict.get(name, name)
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            elif isinstance(val, str):
-                try:
-                    val = int(val)
-                except Exception:
-                    pass
-            return {}, val
-        elif tt == "indexed_name":
-            _, index_val = self._eval_indexed_name(dim_expr, env)
-            if isinstance(index_val, dict):
-                raise SemanticError("Indexed expression used as an index must resolve to a scalar value")
-            if isinstance(index_val, float) and float(index_val).is_integer():
-                index_val = int(index_val)
-            return {}, index_val
-        elif tt == "string_literal":  # <-- explicit support for string index literals
-            return {}, dim_expr.get("value")
-        elif tt == "binop":
-            lcoef, lval = self._eval_index_expr(dim_expr["left"], env)
-            rcoef, rval = self._eval_index_expr(dim_expr["right"], env)
-            # Propagate symbolic binop indices as strings if not both ints
-            if not (isinstance(lval, int) and isinstance(rval, int)):
-                symbolic = f"({lval} {dim_expr['op']} {rval})"
-                return {}, symbolic
-            if dim_expr["op"] == "+":
-                val = lval + rval
-            elif dim_expr["op"] == "-":
-                val = lval - rval
-            elif dim_expr["op"] == "*":
-                val = lval * rval
-            else:
-                raise self.parent._unsupported_operator_error("index", dim_expr["op"])
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            return {}, val
-        elif tt == "uminus":
-            _, val = self._eval_index_expr(dim_expr["value"], env)
-            if isinstance(val, str):
-                return {}, f"-({val})"
-            if isinstance(val, float) and float(val).is_integer():
-                val = int(val)
-            return {}, -val
-        elif tt == "parenthesized_expression":
-            return self._eval_index_expr(dim_expr["expression"], env)
-        # NEW: allow minl/maxl in index arithmetic if they appear
-        elif tt in ("minl", "maxl"):
-            _, v = self._eval_minl(dim_expr, env) if tt == "minl" else self._eval_maxl(dim_expr, env)
-            if isinstance(v, float) and v.is_integer():
-                v = int(v)
-            return {}, v
-        elif tt == "tuple_literal":
+    @staticmethod
+    def _normalize_index_scalar(value: Any) -> Any:
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(value)
+            except Exception:
+                pass
+        return value
 
-            def to_tuple_recursive(e):
-                if isinstance(e, dict) and e.get("type") == "tuple_literal":
-                    return tuple(to_tuple_recursive(ee) for ee in e["elements"])
-                elif isinstance(e, dict):
-                    _, val = self._eval_index_expr(e, env)
-                    return val
-                else:
-                    return e
+    def _eval_index_name(self, dim_expr: Dict[str, Any], env: Dict[str, Any], key: str) -> Tuple[Dict[str, Any], Any]:
+        name = dim_expr.get(key)
+        value = env[name] if name in env else self.parent.data_dict.get(name, name)
+        return {}, self._normalize_index_scalar(value)
 
-            return {}, tuple(to_tuple_recursive(e) for e in dim_expr["elements"])
+    def _eval_index_binop(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        _, left_value = self._eval_index_expr(dim_expr["left"], env)
+        _, right_value = self._eval_index_expr(dim_expr["right"], env)
+        if not (isinstance(left_value, int) and isinstance(right_value, int)):
+            return {}, f"({left_value} {dim_expr['op']} {right_value})"
+
+        operator = dim_expr["op"]
+        if operator == "+":
+            value = left_value + right_value
+        elif operator == "-":
+            value = left_value - right_value
+        elif operator == "*":
+            value = left_value * right_value
         else:
-            if "value" in dim_expr:
-                val = dim_expr["value"]
-                if isinstance(val, float) and float(val).is_integer():
-                    val = int(val)
-                return {}, val
-            elif "name" in dim_expr:
-                val = env.get(dim_expr["name"], dim_expr["name"])
-                if isinstance(val, float) and float(val).is_integer():
-                    val = int(val)
-                return {}, val
-            raise self.parent._unsupported_type_error("index expr", tt)
+            raise self.parent._unsupported_operator_error("index", operator)
+        return {}, self._normalize_index_scalar(value)
+
+    def _eval_index_minmax(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        evaluator = self._eval_minl if dim_expr.get("type") == "minl" else self._eval_maxl
+        _, value = evaluator(dim_expr, env)
+        return {}, self._normalize_index_scalar(value)
+
+    def _eval_index_tuple(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        def to_tuple_recursive(element: Any) -> Any:
+            if isinstance(element, dict) and element.get("type") == "tuple_literal":
+                return tuple(to_tuple_recursive(child) for child in element["elements"])
+            if isinstance(element, dict):
+                _, value = self._eval_index_expr(element, env)
+                return value
+            return element
+
+        return {}, tuple(to_tuple_recursive(element) for element in dim_expr["elements"])
+
+    def _eval_index_fallback(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        if "value" in dim_expr:
+            return {}, self._normalize_index_scalar(dim_expr["value"])
+        if "name" in dim_expr:
+            value = env.get(dim_expr["name"], dim_expr["name"])
+            return {}, self._normalize_index_scalar(value)
+        raise self.parent._unsupported_type_error("index expr", dim_expr.get("type"))
+
+    def _eval_index_expr(self, dim_expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
+        expression_type = dim_expr.get("type")
+        if expression_type in ("field_access_index", "field_access"):
+            coefficients, value = self._eval_field_access(dim_expr, env)
+            return coefficients, self._normalize_index_scalar(value)
+        if expression_type == "number_literal_index":
+            return {}, self._normalize_index_scalar(dim_expr["value"])
+        if expression_type == "name_reference_index":
+            return self._eval_index_name(dim_expr, env, "name")
+        if expression_type == "name":
+            return self._eval_index_name(dim_expr, env, "value")
+        if expression_type == "indexed_name":
+            _, value = self._eval_indexed_name(dim_expr, env)
+            if isinstance(value, dict):
+                raise SemanticError("Indexed expression used as an index must resolve to a scalar value")
+            return {}, self._normalize_index_scalar(value)
+        if expression_type == "string_literal":
+            return {}, dim_expr.get("value")
+        if expression_type == "binop":
+            return self._eval_index_binop(dim_expr, env)
+        if expression_type == "uminus":
+            _, value = self._eval_index_expr(dim_expr["value"], env)
+            if isinstance(value, str):
+                return {}, f"-({value})"
+            return {}, -self._normalize_index_scalar(value)
+        if expression_type == "parenthesized_expression":
+            return self._eval_index_expr(dim_expr["expression"], env)
+        if expression_type in ("minl", "maxl"):
+            return self._eval_index_minmax(dim_expr, env)
+        if expression_type == "tuple_literal":
+            return self._eval_index_tuple(dim_expr, env)
+        return self._eval_index_fallback(dim_expr, env)
 
     def _handle_tuple_indexed(self, expr: Dict[str, Any], indices: List[Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
         # If index is a tuple (coef_dict, value), extract value
