@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 
 from .semantic_error import SemanticError
 from .tuple_set_helper import TupleSetHelper
@@ -17,6 +18,29 @@ EPS = 1e-5  # strictness used to split >, < from >=, <=  (raised to exceed Feasi
 EQ_TOL = 1e-6  # two-sided tolerance for equality reification
 
 
+@dataclass
+class GurobiGenerationContext:
+    """Mutable state shared by the Gurobi code-generation helpers."""
+
+    ast: dict
+    data_dict: dict
+    gurobi_code_lines: list[str] = field(default_factory=list)
+    indent_level: int = 0
+    gurobi_var_map: dict = field(default_factory=dict)
+    dict_params: set = field(default_factory=set)
+    tuple_types: dict = field(default_factory=dict)
+    emitted_tuple_sets: set = field(default_factory=set)
+    active_label_name_expr: str | None = None
+    active_iterator_ranges: dict = field(default_factory=dict)
+    collected_lbs: dict = field(default_factory=dict)
+    collected_ubs: dict = field(default_factory=dict)
+    bool_aux_counter: int = 0
+    comparison_expr_counter: int = 0
+    sum_cmp_counter: int = 0
+    comparison_sum_meta: dict = field(default_factory=dict)
+    comparison_sum_key_map: dict = field(default_factory=dict)
+
+
 # === GurobiCodeGenerator ===
 class GurobiCodeGenerator:
     """
@@ -28,18 +52,28 @@ class GurobiCodeGenerator:
         """
         Initialize the code generator with AST and optional data dictionary.
         """
-        self.ast = ast
         # Merge inline literals (e.g., int D = 10;) so range bounds resolve during checks
-        self.data_dict = dict(data_dict) if data_dict is not None else {}
-        for decl in self.ast.get("declarations", []):
-            if decl.get("type") == "parameter_inline" and decl.get("name") not in self.data_dict:
-                self.data_dict[decl["name"]] = decl.get("value")
-        self.gurobi_code_lines = []
-        self.indent_level = 0
-        self.gurobi_var_map = {}  # Maps OPL decision variable names to Gurobi variable objects
+        normalized_data = dict(data_dict) if data_dict is not None else {}
+        for decl in ast.get("declarations", []):
+            if decl.get("type") == "parameter_inline" and decl.get("name") not in normalized_data:
+                normalized_data[decl["name"]] = decl.get("value")
+        self.context = GurobiGenerationContext(ast, normalized_data)
         self._add_code_line = self.__class__._add_code_line_impl.__get__(self)
-        # NEW: active label name expression inside forall (Python expression string or None)
-        self._active_label_name_expr = None
+
+    def __getattr__(self, name):
+        """Keep legacy helper attribute access backed by the generation context."""
+        context_name = name.removeprefix("_")
+        if context_name in GurobiGenerationContext.__dataclass_fields__:
+            return getattr(self.context, context_name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        context = self.__dict__.get("context")
+        context_name = name.removeprefix("_")
+        if context is not None and context_name in GurobiGenerationContext.__dataclass_fields__:
+            setattr(context, context_name, value)
+            return
+        object.__setattr__(self, name, value)
 
     # === Public API ===
     def generate_code(self) -> str:
@@ -687,7 +721,7 @@ class GurobiCodeGenerator:
         set_elements = self._matching_1d_set_elements(set_name, value, data_dict)
         if set_elements is None:
             return False
-        items = ", ".join(f"{json.dumps(key)}: {json.dumps(item)}" for key, item in zip(set_elements, value))
+        items = ", ".join(f"{repr(key)}: {repr(item)}" for key, item in zip(set_elements, value))
         self._add_code_line(f"{name} = {{{items}}}")
         self.dict_params.add(name)
         return True
