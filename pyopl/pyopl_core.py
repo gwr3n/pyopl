@@ -4373,6 +4373,43 @@ class OPLCompiler:
                 )
             raise SemanticError(f"Range '{name}' is used as an index but not declared in the model.")
 
+    def _validate_parameter_mapping_values(self, param_data: dict, dimension: dict[str, Any], param_name: str) -> bool:
+        if dimension.get("type") not in ("named_set_dimension", "named_range_dimension"):
+            return False
+        for key, value in param_data.items():
+            if isinstance(value, (list, tuple, dict)):
+                raise SemanticError(
+                    f"Parameter '{param_name}' is 1-D over '{dimension.get('name', '')}' but data value for key {key!r} "
+                    "is an array; expected a scalar (e.g., 2.0). Remove extra brackets like [2.0] -> 2.0."
+                )
+        return True
+
+    def _parameter_dimension_length(
+        self,
+        dimension: dict[str, Any],
+        model_ast: dict[str, Any],
+        data_dict: dict[str, Any],
+    ) -> Optional[int]:
+        dimension_type = dimension.get("type")
+        if dimension_type == "named_range":
+            range_decl = next(
+                (
+                    declaration
+                    for declaration in model_ast["declarations"]
+                    if declaration.get("name") == dimension["name"] and declaration.get("type") == "range_declaration_inline"
+                ),
+                None,
+            )
+            if range_decl:
+                start = self._eval_bound_expr(range_decl["start"], data_dict)
+                end = self._eval_bound_expr(range_decl["end"], data_dict)
+                return end - start + 1
+        if dimension_type == "named_set_dimension":
+            set_obj = data_dict.get(dimension["name"])
+            if set_obj is not None:
+                return len(set_obj["elements"]) if isinstance(set_obj, dict) and "elements" in set_obj else len(set_obj)
+        return None
+
     def _validate_parameter_shape(
         self,
         param_data: Any,
@@ -4390,35 +4427,10 @@ class OPLCompiler:
             and isinstance(param_data, dict)
             and dimension.get("type") in ("named_set_dimension", "named_range_dimension")
         ):
-            for key, value in param_data.items():
-                if isinstance(value, (list, tuple, dict)):
-                    raise SemanticError(
-                        f"Parameter '{param_name}' is 1-D over '{dimension.get('name', '')}' but data value for key {key!r} "
-                        "is an array; expected a scalar (e.g., 2.0). Remove extra brackets like [2.0] -> 2.0."
-                    )
+            self._validate_parameter_mapping_values(param_data, dimension, param_name)
             return
 
-        expected_length = None
-        if dimension.get("type") == "named_range":
-            range_decl = next(
-                (
-                    declaration
-                    for declaration in model_ast["declarations"]
-                    if declaration.get("name") == dimension["name"] and declaration.get("type") == "range_declaration_inline"
-                ),
-                None,
-            )
-            if range_decl:
-                start = self._eval_bound_expr(range_decl["start"], data_dict)
-                end = self._eval_bound_expr(range_decl["end"], data_dict)
-                expected_length = end - start + 1
-        elif dimension.get("type") == "named_set_dimension":
-            set_obj = data_dict.get(dimension["name"])
-            if set_obj is not None:
-                expected_length = (
-                    len(set_obj["elements"]) if isinstance(set_obj, dict) and "elements" in set_obj else len(set_obj)
-                )
-
+        expected_length = self._parameter_dimension_length(dimension, model_ast, data_dict)
         if expected_length is None:
             return
         if not isinstance(param_data, (list, tuple)):
