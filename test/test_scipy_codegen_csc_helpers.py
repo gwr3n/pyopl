@@ -14,6 +14,13 @@ def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> Sci
 
 
 class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+    def test_safe_index_arithmetic_uses_constant_numeric_values(self) -> None:
+        generator = make_generator()
+
+        self.assertEqual(generator._safe_eval_index_arithmetic("2", {}), 2)
+        self.assertEqual(generator._safe_eval_index_arithmetic("2.0", {}), 2)
+        self.assertEqual(generator._safe_eval_index_arithmetic("2.9", {}), 2.9)
+
     def test_index_extraction_helpers(self) -> None:
         generator = make_generator()
         generator.tuple_types = {"Arc": [{"name": "from"}, {"name": "to"}]}

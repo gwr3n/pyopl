@@ -1978,8 +1978,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return value
 
     def _eval_safe_index_number(self, node, env):
-        if isinstance(node, ast.Num):
-            return int(node.n)
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (int, float, bool)):
                 return self._normalize_safe_index_number(node.value)
@@ -2007,7 +2005,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise ValueError("Disallowed expression in index")
         if isinstance(node, ast.Expression):
             return self._eval_safe_index_ast(node.body, env, allowed_nodes, allowed_ops)
-        if isinstance(node, (ast.Num, ast.Constant, ast.Name)):
+        if isinstance(node, (ast.Constant, ast.Name)):
             return self._eval_safe_index_number(node, env)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             return -self._eval_safe_index_ast(node.operand, env, allowed_nodes, allowed_ops)
@@ -2023,7 +2021,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             ast.Expression,
             ast.BinOp,
             ast.UnaryOp,
-            ast.Num,
             ast.Constant,
             ast.Name,
             ast.Tuple,
