@@ -390,9 +390,7 @@ def _handle_genai_insight(args: argparse.Namespace) -> int:
         return 4
 
     markdown = (
-        "# GenAI Insight\n\n"
-        f"## Problem Description\n\n{args.prompt}\n\n"
-        f"## Insight\n\n{_insight_summary(feedback)}\n"
+        "# GenAI Insight\n\n" f"## Problem Description\n\n{args.prompt}\n\n" f"## Insight\n\n{_insight_summary(feedback)}\n"
     )
     _emit_output(markdown, getattr(args, "out_file", None))
     return 0
@@ -406,7 +404,8 @@ def _handle_genai(args: argparse.Namespace) -> int:
         "generate": _handle_genai_generate,
         "ask": _handle_genai_ask,
     }
-    handler = handlers.get(getattr(args, "genai_cmd", None))
+    command = getattr(args, "genai_cmd", None)
+    handler = handlers.get(command) if isinstance(command, str) else None
     if handler is None:
         print("Unknown command", file=sys.stderr)
         return 2

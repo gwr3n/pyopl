@@ -280,9 +280,7 @@ class GurobiCodeGenerator:
 
     def _expected_dimension_length(self, dimension, data_dict):
         if dimension.get("type") == "named_range_dimension":
-            range_decl = self._find_declaration_by_name(
-                dimension["name"], types=["range_declaration_inline"]
-            )
+            range_decl = self._find_declaration_by_name(dimension["name"], types=["range_declaration_inline"])
             if range_decl:
                 start_idx = self._eval_data_bound(range_decl["start"], data_dict)
                 end_idx = self._eval_data_bound(range_decl["end"], data_dict)
@@ -338,9 +336,7 @@ class GurobiCodeGenerator:
             )
         if len(dimensions) > 1:
             for sub_data in param_data:
-                self._check_parameter_shape(
-                    sub_data, dimensions[1:], data_dict, param_name, dim + 1
-                )
+                self._check_parameter_shape(sub_data, dimensions[1:], data_dict, param_name, dim + 1)
 
     def _normalize_data_declaration_inputs(self, data_dict):
         declarations = self.ast.get("declarations", []) if hasattr(self, "ast") else []
@@ -371,20 +367,16 @@ class GurobiCodeGenerator:
                 )
             if isinstance(param_data, list) and param_data and len(param_data) % 2 == 0:
                 is_flat_kv = all(
-                    isinstance(param_data[index], str)
-                    and isinstance(param_data[index + 1], (int, float))
+                    isinstance(param_data[index], str) and isinstance(param_data[index + 1], (int, float))
                     for index in range(0, len(param_data), 2)
                 )
                 if is_flat_kv:
                     data_dict[param_name] = {
-                        param_data[index]: param_data[index + 1]
-                        for index in range(0, len(param_data), 2)
+                        param_data[index]: param_data[index + 1] for index in range(0, len(param_data), 2)
                     }
                     continue
             if isinstance(param_data, (list, tuple)):
-                self._check_parameter_shape(
-                    param_data, declaration["dimensions"], data_dict, param_name
-                )
+                self._check_parameter_shape(param_data, declaration["dimensions"], data_dict, param_name)
 
     def _tuple_array_records(self, data_value, field_names, index_values=None):
         if isinstance(data_value, dict):
@@ -398,11 +390,7 @@ class GurobiCodeGenerator:
             if isinstance(record, dict):
                 records[key] = {field: record.get(field) for field in field_names if field in record}
                 continue
-            records[key] = {
-                field: record[index]
-                for index, field in enumerate(field_names)
-                if index < len(record)
-            }
+            records[key] = {field: record[index] for index, field in enumerate(field_names) if index < len(record)}
         return records
 
     def _tuple_set_array_records(self, data_value, index_values=None):
@@ -520,9 +508,7 @@ class GurobiCodeGenerator:
                 self._eval_data_bound(end_node, working_data),
             )
         range_name = range_dimension.get("name")
-        declaration = self._find_declaration_by_name(
-            range_name, types=["range_declaration_inline"]
-        )
+        declaration = self._find_declaration_by_name(range_name, types=["range_declaration_inline"])
         if isinstance(declaration, dict):
             return (
                 self._eval_data_bound(declaration["start"], working_data),
@@ -556,9 +542,7 @@ class GurobiCodeGenerator:
         flattened = {}
         for key, row in value.items():
             if len(row) != expected_len:
-                raise SemanticError(
-                    f"Parameter '{name}' row for key {key} has length {len(row)}; expected {expected_len}."
-                )
+                raise SemanticError(f"Parameter '{name}' row for key {key} has length {len(row)}; expected {expected_len}.")
             key_object = tuple(key) if isinstance(key, (list, tuple)) else key
             for position in range(start, end + 1):
                 flattened[(key_object, position)] = row[position - start]
@@ -567,19 +551,12 @@ class GurobiCodeGenerator:
         return True
 
     def _emit_tuple_range_list_rows(self, name, value, declaration, working_data):
-        if not (
-            self._is_tuple_range_parameter(declaration)
-            and isinstance(value, list)
-            and value
-        ):
+        if not (self._is_tuple_range_parameter(declaration) and isinstance(value, list) and value):
             return False
         set_name = declaration["dimensions"][0]["name"]
         range_dimension = declaration["dimensions"][1]
         set_elements = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
-        set_elements = [
-            tuple(element) if isinstance(element, (list, tuple)) else (element,)
-            for element in set_elements
-        ]
+        set_elements = [tuple(element) if isinstance(element, (list, tuple)) else (element,) for element in set_elements]
         start, end = self._named_range_bounds(range_dimension, working_data)
         expected_len = end - start + 1
         if all(isinstance(item, (list, tuple)) and len(item) == 2 for item in value):
@@ -620,9 +597,7 @@ class GurobiCodeGenerator:
         return True
 
     def _emit_typed_set_data(self, name, value):
-        declaration = self._find_declaration_by_name(
-            name, types=["typed_set", "typed_set_external"]
-        )
+        declaration = self._find_declaration_by_name(name, types=["typed_set", "typed_set_external"])
         if declaration is None:
             return False
         elements = ", ".join(repr(element) for element in value)
@@ -633,32 +608,22 @@ class GurobiCodeGenerator:
     def _emit_1d_range_parameter(self, name, value, declaration, data_dict, working_data):
         dimensions = declaration.get("dimensions", []) if declaration is not None else []
         if not (
-            isinstance(value, list)
-            and value
-            and len(dimensions) == 1
-            and dimensions[0].get("type") == "named_range_dimension"
+            isinstance(value, list) and value and len(dimensions) == 1 and dimensions[0].get("type") == "named_range_dimension"
         ):
             return False
         range_name = dimensions[0]["name"]
-        set_declaration = self._find_declaration_by_name(
-            range_name, types=["typed_set", "typed_set_external"]
-        )
+        set_declaration = self._find_declaration_by_name(range_name, types=["typed_set", "typed_set_external"])
         if set_declaration and range_name in data_dict:
             set_elements = data_dict[range_name]
             if len(set_elements) != len(value):
                 raise SemanticError(
                     f"Parameter '{name}' has {len(value)} items but declared set '{range_name}' has {len(set_elements)} elements."
                 )
-            items = ", ".join(
-                f"{json.dumps(key)}: {json.dumps(item)}"
-                for key, item in zip(set_elements, value)
-            )
+            items = ", ".join(f"{json.dumps(key)}: {json.dumps(item)}" for key, item in zip(set_elements, value))
             self._add_code_line(f"{name} = {{{items}}}")
             self.dict_params.add(name)
             return True
-        range_declaration = self._find_declaration_by_name(
-            range_name, types=["range_declaration_inline"]
-        )
+        range_declaration = self._find_declaration_by_name(range_name, types=["range_declaration_inline"])
         if range_declaration is None:
             return False
         start = self._eval_data_bound(range_declaration["start"], working_data)
@@ -668,10 +633,7 @@ class GurobiCodeGenerator:
             raise SemanticError(
                 f"Parameter '{name}' has {len(value)} items but declared range '{range_name}' expects {expected_len}."
             )
-        items = ", ".join(
-            f"{index}: {json.dumps(value[index - start])}"
-            for index in range(start, end + 1)
-        )
+        items = ", ".join(f"{index}: {json.dumps(value[index - start])}" for index in range(start, end + 1))
         self._add_code_line(f"{name} = {{{items}}}")
         self.dict_params.add(name)
         return True
@@ -679,10 +641,7 @@ class GurobiCodeGenerator:
     def _emit_1d_set_parameter(self, name, value, declaration, data_dict):
         dimensions = declaration.get("dimensions", []) if declaration is not None else []
         if not (
-            isinstance(value, list)
-            and value
-            and len(dimensions) == 1
-            and dimensions[0].get("type") == "named_set_dimension"
+            isinstance(value, list) and value and len(dimensions) == 1 and dimensions[0].get("type") == "named_set_dimension"
         ):
             return False
         set_name = dimensions[0]["name"]
@@ -715,10 +674,7 @@ class GurobiCodeGenerator:
             set_elements = set_elements["elements"]
         if len(set_elements) != len(value):
             return False
-        items = ", ".join(
-            f"{json.dumps(key)}: {json.dumps(item)}"
-            for key, item in zip(set_elements, value)
-        )
+        items = ", ".join(f"{json.dumps(key)}: {json.dumps(item)}" for key, item in zip(set_elements, value))
         self._add_code_line(f"{name} = {{{items}}}")
         self.dict_params.add(name)
         return True
@@ -753,9 +709,7 @@ class GurobiCodeGenerator:
         return keys_by_dimension
 
     def _flatten_data_positions(self, value, position=()):
-        if isinstance(value, (list, tuple)) and value and any(
-            isinstance(element, (list, tuple)) for element in value
-        ):
+        if isinstance(value, (list, tuple)) and value and any(isinstance(element, (list, tuple)) for element in value):
             for index, element in enumerate(value):
                 yield from self._flatten_data_positions(element, position + (index,))
             return
@@ -773,15 +727,9 @@ class GurobiCodeGenerator:
                     raise SemanticError(
                         f"Parameter '{name}' dimensionality mismatch: data depth {len(positions)} vs declared {len(keys_by_dimension)}."
                     )
-                if any(
-                    position < 0 or position >= len(keys_by_dimension[index])
-                    for index, position in enumerate(positions)
-                ):
+                if any(position < 0 or position >= len(keys_by_dimension[index]) for index, position in enumerate(positions)):
                     raise SemanticError(f"Parameter '{name}' positional index is out of bounds.")
-                key = tuple(
-                    keys_by_dimension[index][position]
-                    for index, position in enumerate(positions)
-                )
+                key = tuple(keys_by_dimension[index][position] for index, position in enumerate(positions))
                 flattened[key] = item
         except SemanticError:
             return None
@@ -825,9 +773,7 @@ class GurobiCodeGenerator:
         return True
 
     def _expand_two_set_rows(self, value, dimensions, working_data):
-        if len(dimensions) != 2 or any(
-            dimension.get("type") != "named_set_dimension" for dimension in dimensions
-        ):
+        if len(dimensions) != 2 or any(dimension.get("type") != "named_set_dimension" for dimension in dimensions):
             return None
         second_set = dimensions[1]["name"]
         try:
@@ -836,9 +782,7 @@ class GurobiCodeGenerator:
             return None
         if not labels:
             return None
-        normalized_labels = [
-            tuple(label) if isinstance(label, (list, tuple)) else label for label in labels
-        ]
+        normalized_labels = [tuple(label) if isinstance(label, (list, tuple)) else label for label in labels]
         flattened = {}
         for key, row in value.items():
             if not isinstance(row, (list, tuple)) or len(row) != len(normalized_labels):
@@ -849,32 +793,21 @@ class GurobiCodeGenerator:
         return flattened or None
 
     def _has_full_length_keys(self, value, dimension_count):
-        if not isinstance(value, dict) or not any(
-            isinstance(key, (list, tuple)) for key in value
-        ):
+        if not isinstance(value, dict) or not any(isinstance(key, (list, tuple)) for key in value):
             return False
-        key_lengths = {
-            len(key) if isinstance(key, (list, tuple)) else 1 for key in value
-        }
+        key_lengths = {len(key) if isinstance(key, (list, tuple)) else 1 for key in value}
         return len(key_lengths) == 1 and next(iter(key_lengths)) == dimension_count
 
     def _normalize_full_key_mapping(self, value, dimensions, working_data):
         if not self._has_full_length_keys(value, len(dimensions)):
             return None
-        has_sequence_values = any(
-            isinstance(item, (list, tuple)) for item in value.values()
-        )
-        all_keys_match = all(
-            self._key_matches_dimensions(key, dimensions) for key in value
-        )
+        has_sequence_values = any(isinstance(item, (list, tuple)) for item in value.values())
+        all_keys_match = all(self._key_matches_dimensions(key, dimensions) for key in value)
         if has_sequence_values and not all_keys_match:
             expanded = self._expand_two_set_rows(value, dimensions, working_data)
             if expanded is not None:
                 return expanded
-        return {
-            tuple(key) if isinstance(key, (list, tuple)) else (key,): item
-            for key, item in value.items()
-        }
+        return {tuple(key) if isinstance(key, (list, tuple)) else (key,): item for key, item in value.items()}
 
     def _resolve_set_elements(self, set_name, working_data):
         set_value = working_data.get(set_name)
@@ -919,34 +852,24 @@ class GurobiCodeGenerator:
                 return
             values = node if isinstance(node, (list, tuple)) else [node]
             for position, value in enumerate(values):
-                label = self._position_label(
-                    labels[dimension_index], starts[dimension_index], position, len(values)
-                )
+                label = self._position_label(labels[dimension_index], starts[dimension_index], position, len(values))
                 output[prefix + (label,)] = value
             return
-        children = node.items() if isinstance(node, dict) else enumerate(
-            node if isinstance(node, (list, tuple)) else [node]
-        )
+        children = node.items() if isinstance(node, dict) else enumerate(node if isinstance(node, (list, tuple)) else [node])
         child_count = len(node) if isinstance(node, (dict, list, tuple)) else 1
         for position, child in children:
             if isinstance(node, dict):
                 label = self._normalize_data_key(position)
             else:
-                label = self._position_label(
-                    labels[dimension_index], starts[dimension_index], position, child_count
-                )
-            self._flatten_labeled_data(
-                child, dimension_index + 1, prefix + (label,), labels, starts, output
-            )
+                label = self._position_label(labels[dimension_index], starts[dimension_index], position, child_count)
+            self._flatten_labeled_data(child, dimension_index + 1, prefix + (label,), labels, starts, output)
 
     def _flatten_nested_parameter(self, value, dimensions, working_data):
         labels = []
         starts = []
         try:
             for dimension in dimensions:
-                dimension_labels, start = self._dimension_labels_and_start(
-                    dimension, working_data
-                )
+                dimension_labels, start = self._dimension_labels_and_start(dimension, working_data)
                 labels.append(dimension_labels)
                 starts.append(start)
             flattened = {}
@@ -955,9 +878,7 @@ class GurobiCodeGenerator:
         except Exception:
             return None
 
-    def _emit_mapping_nd_parameters(
-        self, working_data, parameter_declarations, already_emitted
-    ):
+    def _emit_mapping_nd_parameters(self, working_data, parameter_declarations, already_emitted):
         emitted = set()
         for name, value in working_data.items():
             if name in already_emitted:
@@ -1013,15 +934,9 @@ class GurobiCodeGenerator:
                         return left // right
             raise Exception(f"Unsupported range bound expr: {expr}")
 
-        already_emitted = self._emit_positional_nd_parameters(
-            working_data_pref, param_decl_map
-        )
+        already_emitted = self._emit_positional_nd_parameters(working_data_pref, param_decl_map)
 
-        already_emitted.update(
-            self._emit_mapping_nd_parameters(
-                working_data_pref, param_decl_map, already_emitted
-            )
-        )
+        already_emitted.update(self._emit_mapping_nd_parameters(working_data_pref, param_decl_map, already_emitted))
 
         self.dict_params = set(self.dict_params)
         self._emit_structured_data_declarations(data_dict)
@@ -1043,9 +958,7 @@ class GurobiCodeGenerator:
                 )
             if self._emit_typed_set_data(name, value):
                 continue
-            if self._emit_1d_range_parameter(
-                name, value, declaration, data_dict, working_data
-            ):
+            if self._emit_1d_range_parameter(name, value, declaration, data_dict, working_data):
                 continue
             if self._emit_1d_set_parameter(name, value, declaration, data_dict):
                 continue
@@ -1322,9 +1235,7 @@ class GurobiCodeGenerator:
         res = _lb_rec(node)
         return res
 
-    def _emit_implication_consequent(
-        self, cons_op, cons_left_expr, cons_right_expr, bigM_cons, flag_var, constr_name_prefix
-    ):
+    def _emit_implication_consequent(self, cons_op, cons_left_expr, cons_right_expr, bigM_cons, flag_var, constr_name_prefix):
         if cons_op == "==":
             constraints = (
                 f"{cons_left_expr} - {cons_right_expr} <= {EQ_TOL} + {bigM_cons} * (1 - {flag_var})",
@@ -1349,9 +1260,7 @@ class GurobiCodeGenerator:
             raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")
 
         for constraint, suffix in zip(constraints, suffixes):
-            self._add_code_line(
-                f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})"
-            )
+            self._add_code_line(f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})")
 
     def _emit_specialized_implication_indicator(
         self,
@@ -1508,12 +1417,8 @@ class GurobiCodeGenerator:
         right_expression = self._traverse_expression(right, current_iterators)
         return left, right, operator, left_expression, right_expression
 
-    def _bind_implication_comparison_to_binary(
-        self, binary, comparison, iterators, constr_name_prefix
-    ):
-        left, right, operator, left_expression, right_expression = (
-            self._extract_implication_constraint(comparison, iterators)
-        )
+    def _bind_implication_comparison_to_binary(self, binary, comparison, iterators, constr_name_prefix):
+        left, right, operator, left_expression, right_expression = self._extract_implication_constraint(comparison, iterators)
         estimated_big_m = self._estimate_big_m_for_difference(left, right)
         big_m = estimated_big_m if estimated_big_m is not None else 1e6
         epsilon = 0
@@ -1545,13 +1450,9 @@ class GurobiCodeGenerator:
                 (f"{right_expression} - {left_expression} >= -{epsilon} - {big_m} * (1 - {binary})", f"_aux_eq4_{binary}"),
             )
         else:
-            raise ValueError(
-                f"Unsupported comparison operator in boolean linearization: {operator}"
-            )
+            raise ValueError(f"Unsupported comparison operator in boolean linearization: {operator}")
         for constraint, suffix in constraints:
-            self._add_code_line(
-                f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})"
-            )
+            self._add_code_line(f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})")
 
     def _new_implication_boolean_aux(self, prefix, constr_name_prefix):
         self._bool_aux_counter = getattr(self, "_bool_aux_counter", 0) + 1
@@ -1567,27 +1468,19 @@ class GurobiCodeGenerator:
             and node.get("type") not in ("and", "or", "not")
         ):
             binary = self._new_implication_boolean_aux("cmp", constr_name_prefix)
-            self._bind_implication_comparison_to_binary(
-                binary, node, iterators, constr_name_prefix
-            )
+            self._bind_implication_comparison_to_binary(binary, node, iterators, constr_name_prefix)
             return binary
         node_type = node.get("type")
         if node_type == "not":
-            inner = self._boolean_expr_to_binary(
-                node["value"], iterators, constr_name_prefix
-            )
+            inner = self._boolean_expr_to_binary(node["value"], iterators, constr_name_prefix)
             binary = self._new_implication_boolean_aux("not", constr_name_prefix)
             self._add_code_line(
                 f"model.addConstr({binary} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{binary}')} )"
             )
             return binary
         if node_type in ("and", "or"):
-            left = self._boolean_expr_to_binary(
-                node["left"], iterators, constr_name_prefix
-            )
-            right = self._boolean_expr_to_binary(
-                node["right"], iterators, constr_name_prefix
-            )
+            left = self._boolean_expr_to_binary(node["left"], iterators, constr_name_prefix)
+            right = self._boolean_expr_to_binary(node["right"], iterators, constr_name_prefix)
             binary = self._new_implication_boolean_aux(node_type, constr_name_prefix)
             if node_type == "and":
                 bounds = (f"{binary} <= {left}", f"{binary} <= {right}", f"{binary} >= {left} + {right} - 1")
@@ -1613,15 +1506,11 @@ class GurobiCodeGenerator:
         Uses Gurobi indicator constraints when possible, otherwise falls back to big-M encoding.
         """
 
-        if self._is_composite_boolean(
-            constraint_node["antecedent"]
-        ) or self._is_composite_boolean(constraint_node["consequent"]):
-            ant_bin = self._boolean_expr_to_binary(
-                constraint_node["antecedent"], current_iterators, constr_name_prefix
-            )
-            cons_bin = self._boolean_expr_to_binary(
-                constraint_node["consequent"], current_iterators, constr_name_prefix
-            )
+        if self._is_composite_boolean(constraint_node["antecedent"]) or self._is_composite_boolean(
+            constraint_node["consequent"]
+        ):
+            ant_bin = self._boolean_expr_to_binary(constraint_node["antecedent"], current_iterators, constr_name_prefix)
+            cons_bin = self._boolean_expr_to_binary(constraint_node["consequent"], current_iterators, constr_name_prefix)
             # PATCH: ensure name honors label (if any)
             self._add_code_line(
                 f"model.addConstr({ant_bin} <= {cons_bin}, name={self._format_name_expr(constr_name_prefix, '_impl_bin')})"
@@ -1629,22 +1518,18 @@ class GurobiCodeGenerator:
             return
 
         # Remaining processing (linear antecedent/consequent case)
-        antecedent = self._wrap_boolean_literal_as_constraint(
-            constraint_node["antecedent"]
-        )
-        consequent = self._wrap_boolean_literal_as_constraint(
-            constraint_node["consequent"]
-        )
+        antecedent = self._wrap_boolean_literal_as_constraint(constraint_node["antecedent"])
+        consequent = self._wrap_boolean_literal_as_constraint(constraint_node["consequent"])
 
         # Derive big-M for implication (use max of antecedent & consequent diff bounds) else fallback
         bigM_default = 1e6
 
         # Extract both raw nodes and string expressions
-        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = (
-            self._extract_implication_constraint(antecedent, current_iterators)
+        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = self._extract_implication_constraint(
+            antecedent, current_iterators
         )
-        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = (
-            self._extract_implication_constraint(consequent, current_iterators)
+        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
+            consequent, current_iterators
         )
         # Compute separate big-M values for antecedent and consequent
         M_ant = self._estimate_big_m_for_difference(ant_left, ant_right)
@@ -2003,9 +1888,7 @@ class GurobiCodeGenerator:
         if current_iterators:
             self._add_code_line(f"{flag_name} = model.addVar(vtype=GRB.BINARY)")
         else:
-            self._add_code_line(
-                f"{flag_name} = model.addVar(vtype=GRB.BINARY, name='{flag_name}')"
-            )
+            self._add_code_line(f"{flag_name} = model.addVar(vtype=GRB.BINARY, name='{flag_name}')")
         big_m = self._not_equal_big_m(left_node, right_node)
         self._add_code_line(
             f"model.addConstr({left_expression} - {right_expression} + {big_m} * {flag_name} >= 1, name={self._format_name_expr(constr_name_prefix, '_neq1')})"
@@ -2029,11 +1912,7 @@ class GurobiCodeGenerator:
 
     def _is_comparison_sum(self, node):
         node = self._unwrap_parenthesized(node)
-        return (
-            isinstance(node, dict)
-            and node.get("type") == "sum"
-            and self._is_comparison_node(node.get("expression"))
-        )
+        return isinstance(node, dict) and node.get("type") == "sum" and self._is_comparison_node(node.get("expression"))
 
     def _comparison_sum_metadata(self, sum_node, current_iterators):
         if not hasattr(self, "_comparison_sum_meta"):
@@ -2106,14 +1985,10 @@ class GurobiCodeGenerator:
         metadata = self._comparison_sum_metadata(sum_node, current_iterators)
         if not metadata:
             return False
-        list_name, length_expression = self._comparison_sum_accessors(
-            metadata, current_iterators
-        )
+        list_name, length_expression = self._comparison_sum_accessors(metadata, current_iterators)
         boolean_variable = self._traverse_expression(left_node, current_iterators)
         label = "Reified cardinality (binop)" if node_type == "binop" else "Reified cardinality"
-        self._add_code_line(
-            f"# {label}: {boolean_variable} == (sum(comparisons) >= {threshold})"
-        )
+        self._add_code_line(f"# {label}: {boolean_variable} == (sum(comparisons) >= {threshold})")
         length_expression = length_expression or f"len({list_name})"
         self._add_code_line(
             f"model.addConstr({threshold} * {boolean_variable} - gp.quicksum({list_name}) <= 0, name={self._format_name_expr(constr_name_prefix, '_reif_card1')})"
@@ -2164,9 +2039,7 @@ class GurobiCodeGenerator:
             return False
         if not self._is_boolean_expr_node(expression_node):
             return False
-        boolean_expression = self._boolean_expr_to_binary_expr(
-            expression_node, current_iterators, constr_name_prefix
-        )
+        boolean_expression = self._boolean_expr_to_binary_expr(expression_node, current_iterators, constr_name_prefix)
         target = 1 if literal_node.get("value") else 0
         self._add_code_line(
             f"model.addConstr({boolean_expression} == {target}, name={self._format_name_expr(constr_name_prefix)})"
@@ -2187,16 +2060,10 @@ class GurobiCodeGenerator:
         right_is_boolean = self._is_boolean_decision_variable(right_node)
         if left_is_boolean and self._is_comparison_node(right_node):
             left_expression = self._traverse_expression(left_node, current_iterators)
-            right_expression = self._reify_scoped_comparison(
-                right_node, current_iterators
-            )
+            right_expression = self._reify_scoped_comparison(right_node, current_iterators)
         elif right_is_boolean and self._is_comparison_node(left_node):
-            left_expression = self._reify_scoped_comparison(
-                left_node, current_iterators
-            )
-            right_expression = self._traverse_expression(
-                right_node, current_iterators
-            )
+            left_expression = self._reify_scoped_comparison(left_node, current_iterators)
+            right_expression = self._traverse_expression(right_node, current_iterators)
         else:
             return False
         self._add_code_line(
@@ -2214,12 +2081,8 @@ class GurobiCodeGenerator:
     ):
         left_expression = self._traverse_expression(left_node, current_iterators)
         right_expression = self._traverse_expression(right_node, current_iterators)
-        comparison = self._gurobi_comparison_expr(
-            left_expression, operator, right_expression
-        )
-        self._add_code_line(
-            f"model.addConstr({comparison}, name={self._format_name_expr(constr_name_prefix)})"
-        )
+        comparison = self._gurobi_comparison_expr(left_expression, operator, right_expression)
+        self._add_code_line(f"model.addConstr({comparison}, name={self._format_name_expr(constr_name_prefix)})")
 
     def _constraint_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         # Defer expression string generation until after pattern-specific rewrites to avoid
@@ -2593,8 +2456,10 @@ class GurobiCodeGenerator:
     def _emit_dict_parameter_indexed_name(
         self, base_name, dims_decl, dims_for_indexing, raw_idx_exprs, current_iterators, symbolic
     ):
-        if len(raw_idx_exprs) > 1 or isinstance(self.data_dict.get(base_name), dict) and any(
-            isinstance(key, tuple) for key in self.data_dict[base_name].keys()
+        if (
+            len(raw_idx_exprs) > 1
+            or isinstance(self.data_dict.get(base_name), dict)
+            and any(isinstance(key, tuple) for key in self.data_dict[base_name].keys())
         ):
             tuple_expr = f"({', '.join(raw_idx_exprs)})"
             list_index_parts = []
@@ -2636,10 +2501,7 @@ class GurobiCodeGenerator:
 
         container_val = self.data_dict.get(base_name)
         is_dict_param = (hasattr(self, "dict_params") and base_name in self.dict_params) or isinstance(container_val, dict)
-        raw_idx_exprs = [
-            self._emit_index_expr(dim_expr, current_iterators, symbolic)
-            for dim_expr in dims_for_indexing
-        ]
+        raw_idx_exprs = [self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in dims_for_indexing]
 
         if is_dict_param:
             return self._emit_dict_parameter_indexed_name(
@@ -2714,8 +2576,7 @@ class GurobiCodeGenerator:
                     idx_expr = self._emit_index_expr(expr_node["dimensions"][0], current_iterators, symbolic)
                     return f"{base_name}[{idx_expr}]"
                 idx_exprs = [
-                    self._emit_index_expr(dim_expr, current_iterators, symbolic)
-                    for dim_expr in expr_node["dimensions"]
+                    self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in expr_node["dimensions"]
                 ]
                 if len(idx_exprs) == 1:
                     return f"{base_name}[{idx_exprs[0]}]"
@@ -2725,17 +2586,14 @@ class GurobiCodeGenerator:
             # Tuple array case (data struct of records)
             if decl is not None and decl.get("type") in ("tuple_array", "tuple_array_external"):
                 idx_exprs = [
-                    self._emit_index_expr(dim_expr, current_iterators, symbolic)
-                    for dim_expr in expr_node["dimensions"]
+                    self._emit_index_expr(dim_expr, current_iterators, symbolic) for dim_expr in expr_node["dimensions"]
                 ]
                 out = base_name
                 for ie in idx_exprs:
                     out += f"[{ie}]"
                 return out
 
-            return self._emit_parameter_indexed_name(
-                base_name, expr_node, decl, current_iterators, symbolic
-            )
+            return self._emit_parameter_indexed_name(base_name, expr_node, decl, current_iterators, symbolic)
 
     def _expr_binop(self, expr_node, current_iterators, symbolic):
         op = expr_node["op"]
@@ -2969,10 +2827,7 @@ class GurobiCodeGenerator:
                 index_text = self._traverse_expression(index_constraint, iterator_map, symbolic=True)
             except Exception:
                 index_text = "IC_ERR"
-        return (
-            f"cmp_sum|{tuple(iterator_names)}|{inner_expression['op']}|"
-            f"{left_text}|{right_text}|{index_text}"
-        )
+        return f"cmp_sum|{tuple(iterator_names)}|{inner_expression['op']}|" f"{left_text}|{right_text}|{index_text}"
 
     def _sum_iterator_range(self, iterator_range, iterator_map):
         range_type = iterator_range["type"]
@@ -3102,8 +2957,7 @@ class GurobiCodeGenerator:
         right_expression = self._traverse_expression(right_node, new_iterators)
         auxiliary = f"cmp_aux_{self._sum_cmp_counter}_" + "_".join(loop_vars)
         self._add_code_line(
-            f"{auxiliary} = model.addVar(vtype=GRB.BINARY)  # reified "
-            f"({left_expression} {operator} {right_expression})"
+            f"{auxiliary} = model.addVar(vtype=GRB.BINARY)  # reified " f"({left_expression} {operator} {right_expression})"
         )
         reification = self._emit_reify_comparison(
             left_node, right_node, left_expression, right_expression, operator, auxiliary
@@ -3117,8 +2971,7 @@ class GurobiCodeGenerator:
         self.indent_level -= 1
         if scope_vars:
             self._add_code_line(
-                f"{length_name}[{scope_key_expression}] = len({list_append_target})  "
-                "# cardinality of comparison terms"
+                f"{length_name}[{scope_key_expression}] = len({list_append_target})  " "# cardinality of comparison terms"
             )
             self.indent_level -= 1
         else:
@@ -3179,9 +3032,7 @@ class GurobiCodeGenerator:
                     structural_key,
                 )
 
-            return self._emit_ordinary_sum(
-                inner_expression, index_constraint, new_iterators, loop_vars, loop_ranges
-            )
+            return self._emit_ordinary_sum(inner_expression, index_constraint, new_iterators, loop_vars, loop_ranges)
         finally:
             self._active_iterator_ranges = previous_active_ranges
 

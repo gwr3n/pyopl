@@ -4,7 +4,7 @@ import logging
 import re
 from collections import defaultdict  # Needed for coefficient accumulation helpers
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 # === Local imports ===
 from .linear_problem import LinearProblem, ObjectiveSense
@@ -310,6 +310,7 @@ class ExpressionEvaluator:
         return None
 
     def _find_tuple_type_in_expr(self, expr: Any, iterator_name: str) -> Optional[str]:
+        children: Iterable[Any]
         if isinstance(expr, dict):
             tuple_type = self._tuple_type_from_sum(expr, iterator_name)
             if tuple_type:
@@ -495,10 +496,10 @@ class ExpressionEvaluator:
         if expression_type == "name":
             return self._eval_index_name(dim_expr, env, "value")
         if expression_type == "indexed_name":
-            _, value = self._eval_indexed_name(dim_expr, env)
-            if isinstance(value, dict):
+            _, indexed_value = self._eval_indexed_name(dim_expr, env)
+            if isinstance(indexed_value, dict):
                 raise SemanticError("Indexed expression used as an index must resolve to a scalar value")
-            return {}, self._normalize_index_scalar(value)
+            return {}, self._normalize_index_scalar(indexed_value)
         if expression_type == "string_literal":
             return {}, dim_expr.get("value")
         if expression_type == "binop":
@@ -1841,19 +1842,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                     isinstance(value, (int, float)) for value in values
                 ):
                     converted = {
-                        tuple(key) if isinstance(key, (list, tuple)) else key: value
-                        for key, value in zip(keys, values)
+                        tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in zip(keys, values)
                     }
 
             if converted is None and all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
                 pairs = [(entry[0], entry[1]) for entry in val]
-                if all(
-                    isinstance(key, (list, tuple, str)) and isinstance(value, (int, float))
-                    for key, value in pairs
-                ):
-                    converted = {
-                        tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in pairs
-                    }
+                if all(isinstance(key, (list, tuple, str)) and isinstance(value, (int, float)) for key, value in pairs):
+                    converted = {tuple(key) if isinstance(key, (list, tuple)) else key: value for key, value in pairs}
 
             if converted is not None:
                 self.data_dict[name] = converted
@@ -1901,8 +1896,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for dimension_index, index in enumerate(indices):
             evaluated_index = self._eval_index(index, env)
             logger.debug(
-                f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, "
-                f"v={resolved}, env={env}"
+                f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}"
             )
             if isinstance(resolved, dict):
                 logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
@@ -1919,15 +1913,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if isinstance(resolved, list):
                 start_index = self._parameter_list_start_index(name, dimension_index)
                 offset = evaluated_index - start_index
-                logger.debug(
-                    f"[resolve_parameter] List lookup with start={start_index}: v[{offset}] (len={len(resolved)})"
-                )
+                logger.debug(f"[resolve_parameter] List lookup with start={start_index}: v[{offset}] (len={len(resolved)})")
                 resolved = resolved[offset]
             else:
-                logger.debug(
-                    f"[resolve_parameter] List/dict lookup: v[{evaluated_index}] (type={type(resolved)})"
-                )
-                resolved = resolved[evaluated_index]
+                logger.debug(f"[resolve_parameter] List/dict lookup: v[{evaluated_index}] (type={type(resolved)})")
+                resolved = cast(Any, resolved)[evaluated_index]
 
         if isinstance(resolved, (int, float)):
             logger.debug(f"[resolve_parameter] Found numeric param: {resolved}")
@@ -2998,10 +2988,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _normalize_set_set_parameter(self, declaration, data_dict):
         dimensions = declaration.get("dimensions", [])
-        if not (
-            len(dimensions) == 2
-            and all(dimension.get("type") == "named_set_dimension" for dimension in dimensions)
-        ):
+        if not (len(dimensions) == 2 and all(dimension.get("type") == "named_set_dimension" for dimension in dimensions)):
             return
         name = declaration["name"]
         value = data_dict.get(name)
@@ -3067,9 +3054,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         ):
             return
         set_name = dimensions[0]["name"]
-        set_declaration = self._find_decl(set_name, "set_of_tuples") or self._find_decl(
-            set_name, "set_of_tuples_external"
-        )
+        set_declaration = self._find_decl(set_name, "set_of_tuples") or self._find_decl(set_name, "set_of_tuples_external")
         if set_name in data_dict:
             raw_set = data_dict[set_name]
             set_values = raw_set["elements"] if isinstance(raw_set, dict) and "elements" in raw_set else raw_set
@@ -3251,8 +3236,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         structured_names = {
             declaration["name"]
             for declaration in self.ast.get("declarations", [])
-            if declaration.get("type")
-            in ("tuple_array", "tuple_array_external", "set_of_tuples", "set_of_tuples_external")
+            if declaration.get("type") in ("tuple_array", "tuple_array_external", "set_of_tuples", "set_of_tuples_external")
         }
         for name, value in data_dict.items():
             self._validate_runtime_parameter_length(name, value, parameter_declarations.get(name), data_dict)
@@ -4275,9 +4259,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _tie_boolean_vars(self, var_nodes, target_var, env, ctx):
         for var_node in var_nodes:
             vname = (
-                self._multi_indexed_var_name(var_node, env)
-                if var_node.get("type") == "indexed_name"
-                else var_node["value"]
+                self._multi_indexed_var_name(var_node, env) if var_node.get("type") == "indexed_name" else var_node["value"]
             )
             if vname in self.var_indices and target_var in self.var_indices:
                 row = [0.0] * len(self.var_names)
@@ -4342,9 +4324,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _try_encode_constraint_comparison(self, node, env, ctx, struct_key, env_memo_key):
         if node.get("type") != "constraint" or node.get("op") not in ("<=", "<", ">=", ">", "!=", "=="):
             return None
-        if node.get("op") == "!=" and self._is_boolean_expression_node(
-            node.get("left")
-        ) and self._is_boolean_expression_node(node.get("right")):
+        if (
+            node.get("op") == "!="
+            and self._is_boolean_expression_node(node.get("left"))
+            and self._is_boolean_expression_node(node.get("right"))
+        ):
             return None
 
         if node.get("op") == "==":
@@ -4395,11 +4379,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return self._memoize_boolean_var(ctx, struct_key, env_memo_key, result_var)
 
     def _try_encode_boolean_binop(self, node, env, ctx, struct_key, env_memo_key):
-        if (
-            node.get("type") != "binop"
-            or node.get("sem_type") != "boolean"
-            or node.get("op") not in ("<=", ">=", "!=", "==")
-        ):
+        if node.get("type") != "binop" or node.get("sem_type") != "boolean" or node.get("op") not in ("<=", ">=", "!=", "=="):
             return None
 
         if node.get("op") == "==" and isinstance(node.get("left"), dict) and isinstance(node.get("right"), dict):
@@ -4421,9 +4401,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if var_name in self.var_indices and expr_var in self.var_indices:
                     var_idx = self.var_indices[var_name]
                     expr_idx = self.var_indices[expr_var]
-                    already_tied = any(
-                        abs(row[var_idx]) == 1 and abs(row[expr_idx]) == 1 for row in getattr(self, "A_eq", ())
-                    )
+                    already_tied = any(abs(row[var_idx]) == 1 and abs(row[expr_idx]) == 1 for row in getattr(self, "A_eq", ()))
                     if not already_tied:
                         row = [0.0] * len(self.var_names)
                         row[var_idx] = 1.0
@@ -4945,9 +4923,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         consequent_var_one = extract_var_eq_value(1)
         if (consequent_var_one and is_boolean_decision_var(consequent_var_one)) or (
-            consequent_op in (">=", "==")
-            and is_boolean_decision_var(left)
-            and is_number_value(right, 1)
+            consequent_op in (">=", "==") and is_boolean_decision_var(left) and is_number_value(right, 1)
         ):
             variable_node = consequent_var_one if consequent_var_one else left
             variable_name = (
@@ -4963,9 +4939,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         consequent_var_zero = extract_var_eq_value(0)
         if (consequent_var_zero and is_boolean_decision_var(consequent_var_zero)) or (
-            consequent_op in ("<=", "==")
-            and is_boolean_decision_var(left)
-            and is_number_value(right, 0)
+            consequent_op in ("<=", "==") and is_boolean_decision_var(left) and is_number_value(right, 0)
         ):
             variable_node = consequent_var_zero if consequent_var_zero else left
             variable_name = (
@@ -5291,11 +5265,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if op_sym_top != "==" or not isinstance(left, dict) or left.get("type") != "name":
             return None
         comparison = self._unwrap_parenthesized_node(right)
-        if not (
-            isinstance(comparison, dict)
-            and comparison.get("type") == "binop"
-            and comparison.get("op") in (">=", ">")
-        ):
+        if not (isinstance(comparison, dict) and comparison.get("type") == "binop" and comparison.get("op") in (">=", ">")):
             return None
         sum_node = self._unwrap_parenthesized_node(comparison.get("left"))
         threshold_node = comparison.get("right")
@@ -5440,10 +5410,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 and (
                     unwrapped.get("sem_type") == "boolean"
                     or unwrapped.get("type") in ("and", "or", "not", "implies", "boolean_literal")
-                    or (
-                        unwrapped.get("type") == "constraint"
-                        and unwrapped.get("op") in ("==", "!=", "<=", ">=", "<", ">")
-                    )
+                    or (unwrapped.get("type") == "constraint" and unwrapped.get("op") in ("==", "!=", "<=", ">=", "<", ">"))
                 )
             ):
                 continue
@@ -5580,9 +5547,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         except SemanticError:
             return False
         variable_name = (
-            variable_node["value"]
-            if variable_node.get("type") == "name"
-            else self._multi_indexed_var_name(variable_node, env)
+            variable_node["value"] if variable_node.get("type") == "name" else self._multi_indexed_var_name(variable_node, env)
         )
         if left_is_boolean:
             left_var, right_var = variable_name, expression_var
@@ -5650,8 +5615,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         target_value = bool(right.get("value", True))
         try:
             literals = [
-                self._resolve_atomic_boolean_literal(atom, env)
-                for atom in self._flatten_boolean_operator(left, operator)
+                self._resolve_atomic_boolean_literal(atom, env) for atom in self._flatten_boolean_operator(left, operator)
             ]
         except SemanticError:
             literals = None
@@ -5840,12 +5804,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             and left.get("sem_type") == "boolean"
             and left.get("op") in ("<=", ">=", "==", "!=")
         )
-        if not (
-            operator == "=="
-            and is_comparison
-            and isinstance(right, dict)
-            and right.get("type") == "boolean_literal"
-        ):
+        if not (operator == "==" and is_comparison and isinstance(right, dict) and right.get("type") == "boolean_literal"):
             return left, right, operator
         if right.get("value") is True:
             constraint["op"] = left["op"]
@@ -5950,13 +5909,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         left_is_literal = isinstance(left, dict) and left.get("type") == "number" and left.get("value") in (0, 1)
         right_is_literal = isinstance(right, dict) and right.get("type") == "number" and right.get("value") in (0, 1)
 
-        if (left_is_boolean and right_is_boolean) or (left_is_boolean and right_is_literal) or (
-            right_is_boolean and left_is_literal
+        if (
+            (left_is_boolean and right_is_boolean)
+            or (left_is_boolean and right_is_literal)
+            or (right_is_boolean and left_is_literal)
         ):
             if left_is_boolean and right_is_boolean:
-                left_name = (
-                    self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                )
+                left_name = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
                 right_name = (
                     self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
                 )
@@ -6017,8 +5976,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         prev_sym = getattr(self, "_allow_symbolic_bool", False)
         self._allow_symbolic_bool = True
         state = _ConstraintBuildState()
-        A_eq_rows, A_eq_cols, A_eq_data, b_eq = state.A_eq_rows, state.A_eq_cols, state.A_eq_data, state.b_eq
-        A_ub_rows, A_ub_cols, A_ub_data, b_ub = state.A_ub_rows, state.A_ub_cols, state.A_ub_data, state.b_ub
         eq_row_idx = 0
         ub_row_idx = 0
 

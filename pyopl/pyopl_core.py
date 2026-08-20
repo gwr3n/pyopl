@@ -3917,9 +3917,7 @@ class OPLCompiler:
             if expr_type == "number":
                 value = expr.get("value")
                 if value is None:
-                    raise SemanticError(
-                        "Numeric literal missing value in computed parameter expression."
-                    )
+                    raise SemanticError("Numeric literal missing value in computed parameter expression.")
                 return float(value)
             if expr_type == "boolean_literal":
                 return 1.0 if expr.get("value") else 0.0
@@ -3934,26 +3932,17 @@ class OPLCompiler:
                     return float(value) if isinstance(value, (int, float)) else value
                 if name in working_data:
                     return working_data[name]
-                raise SemanticError(
-                    f"Unknown name '{name}' in computed parameter expression."
-                )
+                raise SemanticError(f"Unknown name '{name}' in computed parameter expression.")
             if expr_type == "conditional":
                 condition = expr.get("condition")
                 then_branch = expr.get("then")
                 else_branch = expr.get("else")
-                if not all(
-                    isinstance(node, dict)
-                    for node in (condition, then_branch, else_branch)
-                ):
-                    raise SemanticError(
-                        "Conditional expression must contain expression nodes."
-                    )
+                if not isinstance(condition, dict) or not isinstance(then_branch, dict) or not isinstance(else_branch, dict):
+                    raise SemanticError("Conditional expression must contain expression nodes.")
                 cond_value = eval_expr(condition, env, iter_meta)
                 branch = then_branch if bool(cond_value) else else_branch
                 return eval_expr(branch, env, iter_meta)
-            raise SemanticError(
-                f"Unsupported node in computed parameter expression: {expr_type}"
-            )
+            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
 
         def eval_field_access(
             expr: dict[str, Any],
@@ -3963,33 +3952,22 @@ class OPLCompiler:
             base = expr.get("base")
             field = expr.get("field")
             if not isinstance(base, dict) or not isinstance(field, str):
-                raise SemanticError(
-                    "Cannot resolve tuple field name in computed parameter."
-                )
+                raise SemanticError("Cannot resolve tuple field name in computed parameter.")
             base_value = eval_expr(base, env, iter_meta)
             base_sem_type = base.get("sem_type")
-            tuple_type = (
-                base_sem_type
-                if isinstance(base_sem_type, str)
-                and base_sem_type in tuple_fields_by_type
-                else None
-            )
+            tuple_type = base_sem_type if isinstance(base_sem_type, str) and base_sem_type in tuple_fields_by_type else None
             if tuple_type is None and base.get("type") == "name" and iter_meta:
                 iterator_name = base.get("value")
                 meta = iter_meta.get(iterator_name) if iterator_name else None
                 if isinstance(meta, dict):
                     tuple_type = meta.get("tuple_type")
             if tuple_type is None:
-                raise SemanticError(
-                    "Cannot resolve tuple type for field access in computed parameter."
-                )
+                raise SemanticError("Cannot resolve tuple type for field access in computed parameter.")
             fields = tuple_fields_by_type.get(tuple_type) or []
             try:
                 field_index = fields.index(field)
             except ValueError as exc:
-                raise SemanticError(
-                    f"Unknown field '{field}' for tuple type '{tuple_type}'."
-                ) from exc
+                raise SemanticError(f"Unknown field '{field}' for tuple type '{tuple_type}'.") from exc
             try:
                 value = base_value[field_index]
             except Exception as exc:
@@ -4016,24 +3994,20 @@ class OPLCompiler:
                     try:
                         current = current[int(index_value) - 1]
                     except Exception as exc:
-                        raise SemanticError(
-                            f"Index out of bounds for '{base}' at {index_value}: {exc}"
-                        ) from exc
+                        raise SemanticError(f"Index out of bounds for '{base}' at {index_value}: {exc}") from exc
                     continue
                 if isinstance(current, dict):
                     try:
                         current = current[index_value]
                     except Exception as exc:
-                        raise SemanticError(
-                            f"Key '{index_value!r}' not found in parameter '{base}': {exc}"
-                        ) from exc
+                        raise SemanticError(f"Key '{index_value!r}' not found in parameter '{base}': {exc}") from exc
                     continue
-                raise SemanticError(
-                    f"Cannot index into value of type {type(current).__name__} for '{base}'."
-                )
+                raise SemanticError(f"Cannot index into value of type {type(current).__name__} for '{base}'.")
             return float(current) if isinstance(current, (int, float)) else current
 
-        def aggregate_parts(expr: dict[str, Any]) -> tuple[list[dict[str, Any]], Any, Any, list[list[Any]], dict[str, dict[str, Any]]]:
+        def aggregate_parts(
+            expr: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], Any, Any, list[list[Any]], dict[str, dict[str, Any]]]:
             iterators = expr.get("iterators", [])
             return (
                 iterators,
@@ -4060,9 +4034,7 @@ class OPLCompiler:
                     if not aggregate_item_allowed(index_constraint, local_env, local_meta):
                         return 0.0
                     if not isinstance(body, dict):
-                        raise SemanticError(
-                            "Aggregate expression must be an expression node."
-                        )
+                        raise SemanticError("Aggregate expression must be an expression node.")
                     return float(eval_expr(body, local_env, local_meta))
                 iterator_name = iterators[depth]["iterator"]
                 total = 0.0
@@ -4083,9 +4055,7 @@ class OPLCompiler:
                     if not aggregate_item_allowed(index_constraint, local_env, local_meta):
                         return
                     if not isinstance(body, dict):
-                        raise SemanticError(
-                            "Aggregate expression must be an expression node."
-                        )
+                        raise SemanticError("Aggregate expression must be an expression node.")
                     values.append(float(eval_expr(body, local_env, local_meta)))
                     return
                 iterator_name = iterators[depth]["iterator"]
@@ -4096,9 +4066,7 @@ class OPLCompiler:
 
             recurse(0, dict(env))
             if not values:
-                raise SemanticError(
-                    "Aggregate domain is empty in computed parameter expression."
-                )
+                raise SemanticError("Aggregate domain is empty in computed parameter expression.")
             return max(values) if expr.get("type") == "max_agg" else min(values)
 
         def eval_logical(expr: dict[str, Any], env: dict[str, Any]) -> bool:
@@ -4106,16 +4074,12 @@ class OPLCompiler:
             if expr_type == "not":
                 value = expr.get("value")
                 if not isinstance(value, dict):
-                    raise SemanticError(
-                        "Logical 'not' operand must be an expression node."
-                    )
+                    raise SemanticError("Logical 'not' operand must be an expression node.")
                 return not bool(eval_expr(value, env))
             left = expr.get("left")
             right = expr.get("right")
             if not isinstance(left, dict) or not isinstance(right, dict):
-                raise SemanticError(
-                    f"Logical '{expr_type}' operands must be expression nodes."
-                )
+                raise SemanticError(f"Logical '{expr_type}' operands must be expression nodes.")
             if expr_type == "and":
                 return bool(eval_expr(left, env)) and bool(eval_expr(right, env))
             return bool(eval_expr(left, env)) or bool(eval_expr(right, env))
@@ -4147,9 +4111,7 @@ class OPLCompiler:
                 return arithmetic[operator]()
             if operator in comparisons:
                 return 1.0 if comparisons[operator]() else 0.0
-            raise SemanticError(
-                f"Unsupported operator in computed parameter expression: {operator}"
-            )
+            raise SemanticError(f"Unsupported operator in computed parameter expression: {operator}")
 
         def eval_unary_or_function(expr: dict[str, Any], env: dict[str, Any]) -> Any:
             expr_type = expr.get("type")
@@ -4167,22 +4129,16 @@ class OPLCompiler:
                 if func_name in UNARY_MATH_FUNCTIONS and len(args) == 1:
                     argument = args[0]
                     if not isinstance(argument, dict):
-                        raise SemanticError(
-                            "Unsupported function argument in computed parameter expression."
-                        )
+                        raise SemanticError("Unsupported function argument in computed parameter expression.")
                     function, result_type = UNARY_MATH_FUNCTIONS[func_name]
                     value = function(float(eval_expr(argument, env)))
                     return int(value) if result_type == "int" else value
-                raise SemanticError(
-                    f"Unsupported function '{func_name}' in computed parameter expression."
-                )
+                raise SemanticError(f"Unsupported function '{func_name}' in computed parameter expression.")
             values = [eval_expr(arg, env) for arg in (expr.get("args") or [])]
             try:
                 numbers = [float(value) for value in values]
             except Exception as exc:
-                raise SemanticError(
-                    f"{expr_type} in parameter must be numeric and ground."
-                ) from exc
+                raise SemanticError(f"{expr_type} in parameter must be numeric and ground.") from exc
             if not numbers:
                 raise SemanticError(f"{expr_type} requires at least one argument.")
             return max(numbers) if expr_type == "maxl" else min(numbers)
@@ -4209,9 +4165,7 @@ class OPLCompiler:
                 return eval_binary(expr, env)
             if expr_type in {"uminus", "parenthesized_expression", "funcall", "maxl", "minl"}:
                 return eval_unary_or_function(expr, env)
-            raise SemanticError(
-                f"Unsupported node in computed parameter expression: {expr_type}"
-            )
+            raise SemanticError(f"Unsupported node in computed parameter expression: {expr_type}")
 
         def cast_value(value: Any, var_type: Any) -> Any:
             if isinstance(var_type, str) and var_type.startswith("int"):
