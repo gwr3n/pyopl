@@ -881,6 +881,30 @@ class GurobiCodeGenerator:
                 self._check_parameter_shape(value, dimensions, working_data, name)
         return emitted
 
+    def _emit_remaining_data_declarations(self, working_data, parameter_declarations, data_dict, already_emitted):
+        for name, value in working_data.items():
+            if name in already_emitted:
+                continue
+            declaration = parameter_declarations.get(name)
+            if self._emit_tuple_range_dict_rows(name, value, declaration, working_data):
+                continue
+            if self._emit_tuple_range_list_rows(name, value, declaration, working_data):
+                continue
+            if name in parameter_declarations:
+                logger.debug(
+                    "_generate_data_declarations: Emitting parameter %s type=%s dims=%s",
+                    name,
+                    parameter_declarations[name].get("type"),
+                    parameter_declarations[name].get("dimensions"),
+                )
+            if self._emit_typed_set_data(name, value):
+                continue
+            if self._emit_1d_range_parameter(name, value, declaration, data_dict, working_data):
+                continue
+            if self._emit_1d_set_parameter(name, value, declaration, data_dict):
+                continue
+            self._add_code_line("")
+
     def _generate_data_declarations(self, data_dict):
         """Generate Python code for data declarations and AST tuple/set declarations."""
         logger.debug("Entering _generate_data_declarations")
@@ -896,124 +920,85 @@ class GurobiCodeGenerator:
         param_decl_map = self._parameter_declaration_map()
         self._validate_1d_mapping_values(param_decl_map, working_data_pref)
 
-        # --- helpers for evaluating bounds and normalizing set elements ---
-        def _eval_expr_bound(expr):
-            if isinstance(expr, dict):
-                t = expr.get("type")
-                if t == "number":
-                    return int(expr["value"])
-                if t == "name":
-                    return int(working_data[expr["value"]])
-                if t == "binop":
-                    op = expr["op"]
-                    left = _eval_expr_bound(expr["left"])
-                    right = _eval_expr_bound(expr["right"])
-                    if op == "+":
-                        return left + right
-                    if op == "-":
-                        return left - right
-                    if op == "*":
-                        return left * right
-                    if op == "/":
-                        return left // right
-            raise Exception(f"Unsupported range bound expr: {expr}")
-
         already_emitted = self._emit_positional_nd_parameters(working_data_pref, param_decl_map)
 
         already_emitted.update(self._emit_mapping_nd_parameters(working_data_pref, param_decl_map, already_emitted))
 
         self.dict_params = set(self.dict_params)
         self._emit_structured_data_declarations(data_dict)
+        self._emit_remaining_data_declarations(
+            working_data_pref, param_decl_map, data_dict, already_emitted
+        )
 
-        for name, value in working_data_pref.items():
-            if name in already_emitted:
-                continue
-            declaration = param_decl_map.get(name)
-            if self._emit_tuple_range_dict_rows(name, value, declaration, working_data):
-                continue
-            if self._emit_tuple_range_list_rows(name, value, declaration, working_data):
-                continue
-            if name in param_decl_map:
-                logger.debug(
-                    "_generate_data_declarations: Emitting parameter %s type=%s dims=%s",
-                    name,
-                    param_decl_map[name].get("type"),
-                    param_decl_map[name].get("dimensions"),
-                )
-            if self._emit_typed_set_data(name, value):
-                continue
-            if self._emit_1d_range_parameter(name, value, declaration, data_dict, working_data):
-                continue
-            if self._emit_1d_set_parameter(name, value, declaration, data_dict):
-                continue
-            self._add_code_line("")
+    def _emit_tuple_indexed_dvar(self, decl):
+        dimensions = decl.get("dimensions", [])
+        if decl.get("type") != "dvar_indexed" or len(dimensions) != 1:
+            return False
+        dimension = dimensions[0]
+        if dimension.get("type") != "named_set_dimension":
+            return False
+
+        var_type = decl.get("var_type")
+        grb_var_type = {
+            "boolean": "GRB.BINARY",
+            "int": "GRB.INTEGER",
+            "int+": "GRB.INTEGER",
+        }.get(var_type, "GRB.CONTINUOUS")
+        if var_type == "boolean" or "lower_bound" in decl:
+            lower_bound = ""
+        elif var_type in ("int+", "float+"):
+            lower_bound = ", lb=0"
+        else:
+            lower_bound = ", lb=-GRB.INFINITY"
+        bound_args = self._decl_dvar_bound_args(decl)
+        self._add_code_line(
+            f"{decl['name']} = model.addVars({dimension['name']}, vtype={grb_var_type}, "
+            f"name='{decl['name']}'{lower_bound}{bound_args})"
+        )
+        self.gurobi_var_map[decl["name"]] = decl["name"]
+        return True
+
+    def _emit_special_declaration(self, decl):
+        decl_type = decl.get("type")
+        if decl_type in ("set_of_tuples", "set_of_tuples_external", "set_of_tuples_array_external"):
+            self._decl_set_of_tuples(decl)
+            return True
+        if decl_type in ("tuple_array", "tuple_array_external"):
+            return True
+        if decl_type in ("typed_set", "typed_set_external"):
+            self._decl_typed_set(decl)
+            return True
+        return self._emit_tuple_indexed_dvar(decl)
+
+    def _emit_declaration(self, decl):
+        decl_type = decl.get("type")
+        if decl_type.startswith("parameter_"):
+            logger.debug(
+                "_generate_declarations: Emitting parameter '%s' type=%s inline=%s external=%s",
+                decl.get("name"),
+                decl_type,
+                decl.get("inline", None),
+                decl.get("external", None),
+            )
+        if self._emit_special_declaration(decl):
+            return
+        if decl_type.startswith("parameter_") and decl.get("name") in getattr(self, "dict_params", set()):
+            return
+        method = getattr(self, f"_decl_{decl_type}", None)
+        if method is None:
+            raise NotImplementedError(
+                f"Declaration type '{decl_type}' is not supported by the Gurobi code generator."
+            )
+        method(decl)
 
     def _generate_declarations(self, declarations):
         """Generates Python code for decision variables, ranges, and parameters declared in the .mod file."""
         self._add_code_line("# Decision Variables and Parameters")
         self.tuple_types = {}
         logger.debug("Entering _generate_declarations")
-        for decl in declarations:
-            # Skip dexpr declarations (expanded in parser on use)
-            if decl.get("type") in ("dexpr", "dexpr_indexed"):
-                continue
-            if decl.get("type", "").startswith("parameter_"):
-                logger.debug(
-                    "_generate_declarations: Emitting parameter '%s' type=%s inline=%s external=%s",
-                    decl.get("name"),
-                    decl.get("type"),
-                    decl.get("inline", None),
-                    decl.get("external", None),
-                )
-            decl_type = decl.get("type")
-            # Treat set_of_tuples_external as set_of_tuples for codegen
-            if decl_type in ("set_of_tuples", "set_of_tuples_external", "set_of_tuples_array_external"):
-                # Both handled by _decl_set_of_tuples (which is a no-op)
-                self._decl_set_of_tuples(decl)
-                continue
-            if decl_type in ("tuple_array", "tuple_array_external"):
-                # Data emission handled earlier; nothing to declare as decision var
-                continue
-            if decl_type in ("typed_set", "typed_set_external"):
-                self._decl_typed_set(decl)
-                continue
-            # --- PATCH: Handle dvar_indexed with tuple set index ---
-            if decl_type == "dvar_indexed" and len(decl.get("dimensions", [])) == 1:
-                dim = decl["dimensions"][0]
-                if dim.get("type") == "named_set_dimension":
-                    set_name = dim["name"]
-                    vtype = decl.get("var_type")
-                    grb_vtype = (
-                        "GRB.BINARY"
-                        if vtype == "boolean"
-                        else ("GRB.INTEGER" if vtype.startswith("int") else "GRB.CONTINUOUS")
-                    )
-                    bound_args = self._decl_dvar_bound_args(decl)
-                    has_explicit_lb = "lower_bound" in decl
-                    # Ensure lower bounds match domain semantics for tuple-indexed variables
-                    if vtype == "boolean":
-                        lb_arg = ""  # binaries are [0,1] by default
-                    elif vtype in ("int+", "float+"):
-                        lb_arg = "" if has_explicit_lb else ", lb=0"
-                    else:
-                        # plain int/float: allow negative domain
-                        lb_arg = "" if has_explicit_lb else ", lb=-GRB.INFINITY"
-                    self._add_code_line(
-                        f"{decl['name']} = model.addVars({set_name}, vtype={grb_vtype}, name='{decl['name']}'{lb_arg}{bound_args})"
-                    )
-                    # Register decision variable name so expression emission treats it as a variable
-                    self.gurobi_var_map[decl["name"]] = decl["name"]
-                    continue
-            # Skip emitting parameter again if already transformed to dict form in data section
-            if decl_type.startswith("parameter_") and decl.get("name") in getattr(self, "dict_params", set()):
-                continue
-            method = getattr(self, f"_decl_{decl_type}", None)
-            if method:
-                method(decl)
-            else:
-                raise NotImplementedError(
-                    f"Declaration type '{decl.get('type')}' is not supported by the Gurobi code generator."
-                )
+        for declaration in declarations:
+            if declaration.get("type") not in ("dexpr", "dexpr_indexed"):
+                self._emit_declaration(declaration)
         self._add_code_line("")
         self._add_code_line("model.update()")
         self._add_code_line("")
