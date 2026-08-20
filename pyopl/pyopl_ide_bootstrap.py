@@ -423,68 +423,7 @@ class OPLIDE(tk.Tk):
         self._viewing_output_session_id: Optional[str] = None
         self._active_operation: Optional[_ForegroundOperation] = None
 
-        # Settings
-        self._init_settings_storage()
-        loaded_settings = self._load_settings()
-        desired_theme = None
-        try:
-            if isinstance(loaded_settings, dict):
-                self.current_font_size = int(loaded_settings.get("font-size", self.current_font_size))
-                desired_theme = loaded_settings.get("theme")
-                saved_solver = loaded_settings.get("solver")
-                if saved_solver in ("gurobi", "scipy"):
-                    self.solver.set(saved_solver)
-                    self._current_solver_choice = saved_solver
-        except Exception:
-            pass
-        # LLM progress logs in Output (off by default unless launched with debug)
-        default_verbose = bool(loaded_settings.get("verbose-llm-logs", False))
-        if self.debug:
-            # If launched with debug, honor saved value but default to True for convenience
-            default_verbose = bool(loaded_settings.get("verbose-llm-logs", True))
-        self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
-        display_solver_progress = loaded_settings.get("display-solver-progress", True)
-        if not isinstance(display_solver_progress, bool):
-            display_solver_progress = True
-        self.display_solver_progress_var = tk.BooleanVar(value=display_solver_progress)
-        # Track font size selection for menu state
-        self.font_size_var = tk.IntVar(value=self.current_font_size)
-
-        # GenAI method selection (persisted)
-        self._genai_methods: list[tuple[str, str]] = [
-            ("SyntAGM", "pyopl_generative"),
-            ("Standard", "pyopl_standard"),
-            ("Chain of Thought", "pyopl_chain_of_thought"),
-            ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
-            ("CAFA", "pyopl_cafa"),
-            ("Chain of Experts", "pyopl_chain_of_experts"),
-            ("Reflexion", "pyopl_reflexion"),
-        ]
-        saved_method = loaded_settings.get("genai-method") if isinstance(loaded_settings, dict) else None
-        if not isinstance(saved_method, str) or not saved_method:
-            saved_method = "pyopl_generative"
-        self.genai_method_var = tk.StringVar(value=saved_method)
-
-        # Desired GenAI selection from settings (applied after model discovery)
-        self._desired_genai_provider: Optional[str] = None
-        self._desired_genai_model: Optional[str] = None
-        try:
-            saved_sel = loaded_settings.get("genai-selection")
-            if isinstance(saved_sel, str) and "|" in saved_sel:
-                p_str, m_str = saved_sel.split("|", 1)
-                if p_str and m_str:
-                    self._desired_genai_provider = p_str
-                    self._desired_genai_model = m_str
-                    self.genai_selection_var.set(saved_sel)
-            elif isinstance(saved_sel, dict):
-                p_dict = saved_sel.get("provider")
-                m_dict = saved_sel.get("model")
-                if p_dict and m_dict:
-                    self._desired_genai_provider = str(p_dict)
-                    self._desired_genai_model = str(m_dict)
-                    self.genai_selection_var.set(f"{p_dict}|{m_dict}")
-        except Exception:
-            pass
+        desired_theme, loaded_settings = self._initialize_preferences()
 
         # Styling (ttkbootstrap 'flatly' theme by default)
         self.style = tb.Style(theme="flatly")
@@ -521,6 +460,67 @@ class OPLIDE(tk.Tk):
         self._register_macos_quit_handler()
         self.after(0, self._stabilize_initial_side_panel_width)
         self.bind("<Configure>", self._on_window_resize, add="+")
+
+    def _initialize_preferences(self) -> tuple[Any, dict[str, Any]]:
+        self._init_settings_storage()
+        loaded_settings = self._load_settings()
+        if not isinstance(loaded_settings, dict):
+            loaded_settings = {}
+
+        desired_theme: Optional[str] = None
+        try:
+            self.current_font_size = int(loaded_settings.get("font-size", self.current_font_size))
+            desired_theme = loaded_settings.get("theme")
+            saved_solver = loaded_settings.get("solver")
+            if saved_solver in ("gurobi", "scipy"):
+                self.solver.set(saved_solver)
+                self._current_solver_choice = saved_solver
+        except Exception:
+            pass
+
+        default_verbose = bool(loaded_settings.get("verbose-llm-logs", self.debug))
+        self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
+        display_solver_progress = loaded_settings.get("display-solver-progress", True)
+        if not isinstance(display_solver_progress, bool):
+            display_solver_progress = True
+        self.display_solver_progress_var = tk.BooleanVar(value=display_solver_progress)
+        self.font_size_var = tk.IntVar(value=self.current_font_size)
+
+        self._genai_methods = [
+            ("SyntAGM", "pyopl_generative"),
+            ("Standard", "pyopl_standard"),
+            ("Chain of Thought", "pyopl_chain_of_thought"),
+            ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+            ("CAFA", "pyopl_cafa"),
+            ("Chain of Experts", "pyopl_chain_of_experts"),
+            ("Reflexion", "pyopl_reflexion"),
+        ]
+        saved_method = loaded_settings.get("genai-method")
+        if not isinstance(saved_method, str) or not saved_method:
+            saved_method = "pyopl_generative"
+        self.genai_method_var = tk.StringVar(value=saved_method)
+        self._desired_genai_provider: Optional[str] = None
+        self._desired_genai_model: Optional[str] = None
+        self._restore_genai_selection(loaded_settings.get("genai-selection"))
+        return desired_theme, loaded_settings
+
+    def _restore_genai_selection(self, saved_selection: Any) -> None:
+        try:
+            if isinstance(saved_selection, str) and "|" in saved_selection:
+                provider, model = saved_selection.split("|", 1)
+                if provider and model:
+                    self._desired_genai_provider = provider
+                    self._desired_genai_model = model
+                    self.genai_selection_var.set(saved_selection)
+            elif isinstance(saved_selection, dict):
+                provider_value = saved_selection.get("provider")
+                model_value = saved_selection.get("model")
+                if provider_value and model_value:
+                    self._desired_genai_provider = str(provider_value)
+                    self._desired_genai_model = str(model_value)
+                    self.genai_selection_var.set(f"{provider_value}|{model_value}")
+        except Exception:
+            pass
 
     def _register_macos_quit_handler(self) -> None:
         """Route macOS app-menu Quit through the IDE close handler."""
@@ -2284,26 +2284,7 @@ class OPLIDE(tk.Tk):
         if not pending:
             return
         try:
-            if self._genai_diff_preview_window is None or not self._genai_diff_preview_window.winfo_exists():
-                window = tk.Toplevel(self)
-                window.title("Review Changes")
-                window.geometry("980x700")
-                window.transient(self)
-                window.rowconfigure(0, weight=1)
-                window.columnconfigure(0, weight=1)
-                notebook = ttk.Notebook(window)
-                notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
-                footer = ttk.Frame(window)
-                footer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
-                footer.columnconfigure(0, weight=1)
-                ttk.Button(footer, text="Close", command=window.withdraw).grid(row=0, column=1)
-                ttk.Button(footer, text="Apply revisions", command=self._apply_pending_genai_revisions).grid(
-                    row=0, column=2, padx=(6, 0)
-                )
-                window.protocol("WM_DELETE_WINDOW", window.withdraw)
-                self._genai_diff_preview_window = window
-                self._genai_diff_preview_notebook = notebook
-                self._genai_diff_preview_texts = {}
+            self._ensure_pending_genai_diff_preview_window()
             window = self._genai_diff_preview_window
             preview_notebook = self._genai_diff_preview_notebook
             if window is None or preview_notebook is None:
@@ -2311,23 +2292,7 @@ class OPLIDE(tk.Tk):
             notebook = cast(ttk.Notebook, preview_notebook)
             for tab_id in notebook.tabs():
                 notebook.forget(tab_id)
-            self._genai_diff_preview_texts = {}
-
-            tabs: list[tuple[str, str, str]] = []
-            revised_model = str(pending.get("revised_model") or "")
-            revised_data = str(pending.get("revised_data") or "")
-            current_model = str(pending.get("current_model") or "")
-            current_data = str(pending.get("current_data") or "")
-            if revised_model:
-                tabs.append(("Model", current_model, revised_model))
-            if revised_data:
-                tabs.append(("Data", current_data, revised_data))
-            for label, original, revised in tabs:
-                frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
-                text_widget = self._create_diff_preview_text(frame)
-                self._populate_diff_preview_text(text_widget, original, revised)
-                notebook.add(frame, text=label)
-                self._genai_diff_preview_texts[label.lower()] = text_widget
+            OPLIDE._populate_pending_genai_diff_tabs(self, notebook, pending)
             try:
                 window.deiconify()
                 window.lift()
@@ -2336,6 +2301,47 @@ class OPLIDE(tk.Tk):
                 pass
         except Exception:
             pass
+
+    def _ensure_pending_genai_diff_preview_window(self) -> None:
+        if self._genai_diff_preview_window is not None and self._genai_diff_preview_window.winfo_exists():
+            return
+        window = tk.Toplevel(self)
+        window.title("Review Changes")
+        window.geometry("980x700")
+        window.transient(self)
+        window.rowconfigure(0, weight=1)
+        window.columnconfigure(0, weight=1)
+        notebook = ttk.Notebook(window)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+        footer = ttk.Frame(window)
+        footer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
+        footer.columnconfigure(0, weight=1)
+        ttk.Button(footer, text="Close", command=window.withdraw).grid(row=0, column=1)
+        ttk.Button(footer, text="Apply revisions", command=self._apply_pending_genai_revisions).grid(
+            row=0, column=2, padx=(6, 0)
+        )
+        window.protocol("WM_DELETE_WINDOW", window.withdraw)
+        self._genai_diff_preview_window = window
+        self._genai_diff_preview_notebook = notebook
+        self._genai_diff_preview_texts = {}
+
+    def _populate_pending_genai_diff_tabs(self, notebook: ttk.Notebook, pending: dict[str, Any]) -> None:
+        tabs: list[tuple[str, str, str]] = []
+        revised_model = str(pending.get("revised_model") or "")
+        revised_data = str(pending.get("revised_data") or "")
+        current_model = str(pending.get("current_model") or "")
+        current_data = str(pending.get("current_data") or "")
+        if revised_model:
+            tabs.append(("Model", current_model, revised_model))
+        if revised_data:
+            tabs.append(("Data", current_data, revised_data))
+        self._genai_diff_preview_texts = {}
+        for label, original, revised in tabs:
+            frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
+            text_widget = self._create_diff_preview_text(frame)
+            self._populate_diff_preview_text(text_widget, original, revised)
+            notebook.add(frame, text=label)
+            self._genai_diff_preview_texts[label.lower()] = text_widget
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
@@ -2569,15 +2575,11 @@ class OPLIDE(tk.Tk):
             return "break"
 
         def _find_prev(ev: Optional[tk.Event] = None) -> str:
-            # For simplicity, search from top up to current insert and pick last match
             pattern = find_entry.get()
             if not pattern:
                 return "break"
             w = self._get_active_editor()
             text = w.get("1.0", "end-1c")
-            # Determine the boundary offset.
-            # Prefer the highlighted match start, then a selection start,
-            # then the widget insert (if focused), else start of buffer.
             ranges = w.tag_ranges("find_match")
             if ranges:
                 start_idx = str(ranges[0])
@@ -2590,40 +2592,11 @@ class OPLIDE(tk.Tk):
                     start_idx = "1.0"
             sc = w.count("1.0", start_idx, "chars")
             boundary_off = sc[0] if sc else 0
-
-            matches: list[tuple[int, int]] = []
-            if regex_var.get():
-                flags = 0 if case_var.get() else re.IGNORECASE
-                try:
-                    for m in re.finditer(pattern, text, flags):
-                        matches.append((m.start(), m.end()))
-                except re.error:
-                    messagebox.showerror("Regex error", "Invalid regular expression")
-                    return "break"
-            else:
-                # Literal search; use re for case-insensitive, otherwise simple find loop
-                if case_var.get():
-                    start_pos = 0
-                    while True:
-                        idx = text.find(pattern, start_pos)
-                        if idx == -1:
-                            break
-                        matches.append((idx, idx + len(pattern)))
-                        start_pos = idx + max(1, len(pattern))
-                else:
-                    esc = re.escape(pattern)
-                    for m in re.finditer(esc, text, re.IGNORECASE):
-                        matches.append((m.start(), m.end()))
-
-            # Pick the last match strictly before boundary_off; wrap to last match if none
-            prev_match: Optional[tuple[int, int]] = None
-            for s_off, e_off in matches:
-                if s_off < boundary_off:
-                    prev_match = (s_off, e_off)
-                else:
-                    break
-            if prev_match is None and matches:
-                prev_match = matches[-1]
+            try:
+                prev_match = OPLIDE._find_previous_match(text, pattern, boundary_off, regex_var.get(), case_var.get())
+            except re.error:
+                messagebox.showerror("Regex error", "Invalid regular expression")
+                return "break"
 
             if prev_match:
                 s_idx = w.index(f"1.0 + {prev_match[0]} chars")
@@ -2715,6 +2688,34 @@ class OPLIDE(tk.Tk):
         dlg.bind("<Shift-Return>", _find_prev)
         find_entry.focus_set()
 
+    @staticmethod
+    def _find_previous_match(
+        text: str, pattern: str, boundary_off: int, use_regex: bool, case_sensitive: bool
+    ) -> Optional[tuple[int, int]]:
+        matches: list[tuple[int, int]] = []
+        if use_regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            matches = [(match.start(), match.end()) for match in re.finditer(pattern, text, flags)]
+        elif case_sensitive:
+            start_pos = 0
+            while True:
+                index = text.find(pattern, start_pos)
+                if index == -1:
+                    break
+                matches.append((index, index + len(pattern)))
+                start_pos = index + max(1, len(pattern))
+        else:
+            escaped_pattern = re.escape(pattern)
+            matches = [(match.start(), match.end()) for match in re.finditer(escaped_pattern, text, re.IGNORECASE)]
+
+        previous_match: Optional[tuple[int, int]] = None
+        for start, end in matches:
+            if start < boundary_off:
+                previous_match = (start, end)
+            else:
+                break
+        return previous_match or (matches[-1] if matches else None)
+
     # --- Event Handlers and Core Logic ---
     def _on_request_right_click(self, event: Optional[tk.Event]) -> None:
         """Show context menu at right-click position and select the item."""
@@ -2740,69 +2741,75 @@ class OPLIDE(tk.Tk):
     def _delete_selected_request(self) -> None:
         """Delete the currently selected output session."""
         try:
-            sel = self.request_listbox.curselection()
-            index = None
-            if sel:
-                index = int(sel[0])
-            else:
-                index = getattr(self, "_last_request_popup_index", None)
+            index = self._selected_request_index()
             if index is None or index < 0 or index >= len(self._output_session_ids):
                 return
 
             sid = self._output_session_ids[index]
             active = getattr(self, "_active_operation", None)
             if active is not None and active.session_id == sid:
-                try:
-                    messagebox.showinfo(
-                        "Delete Session",
-                        "The active output session cannot be deleted while its operation is running.",
-                    )
-                except Exception:
-                    pass
+                self._show_active_session_delete_warning()
                 return
             if not messagebox.askyesno("Delete Session", "Delete the selected session?"):
                 return
 
-            # Remove data
-            self._output_session_ids.pop(index)
-            self._output_sessions.pop(sid, None)
-            self._output_session_display.pop(sid, None)
-            self._output_session_label.pop(sid, None)
-            self._output_session_timestamp.pop(sid, None)
-            self._output_session_artifacts.pop(sid, None)
-
-            # Update pointers
-            if self._current_output_session_id == sid:
-                self._current_output_session_id = None
-            if self._viewing_output_session_id == sid:
-                self._viewing_output_session_id = None
-
-            # Update UI list
-            try:
-                self.request_listbox.delete(index)
-            except Exception:
-                pass
-
-            # Select next available session and show it
-            count = self.request_listbox.size()
-            if count > 0:
-                new_index = min(index, count - 1)
-                self.request_listbox.selection_clear(0, tk.END)
-                self.request_listbox.selection_set(new_index)
-                self.request_listbox.activate(new_index)
-                new_sid = self._output_session_ids[new_index]
-                self._viewing_output_session_id = new_sid
-                self._show_output_session(new_sid)
-            else:
-                self._viewing_output_session_id = None
-                if hasattr(self, "output_text") and self.output_text.winfo_exists():
-                    self.output_text.config(state="normal")
-                    self.output_text.delete("1.0", tk.END)
-                    self.output_text.config(state="disabled")
-
+            self._remove_output_session(sid, index)
+            self._select_session_after_delete(index)
             self.status_var.set("Session deleted.")
         except Exception:
             pass
+
+    def _selected_request_index(self) -> Optional[int]:
+        selection = self.request_listbox.curselection()
+        if selection:
+            return int(selection[0])
+        return getattr(self, "_last_request_popup_index", None)
+
+    @staticmethod
+    def _show_active_session_delete_warning() -> None:
+        try:
+            messagebox.showinfo(
+                "Delete Session",
+                "The active output session cannot be deleted while its operation is running.",
+            )
+        except Exception:
+            pass
+
+    def _remove_output_session(self, session_id: str, index: int) -> None:
+        self._output_session_ids.pop(index)
+        self._output_sessions.pop(session_id, None)
+        self._output_session_display.pop(session_id, None)
+        self._output_session_label.pop(session_id, None)
+        self._output_session_timestamp.pop(session_id, None)
+        self._output_session_artifacts.pop(session_id, None)
+        if self._current_output_session_id == session_id:
+            self._current_output_session_id = None
+        if self._viewing_output_session_id == session_id:
+            self._viewing_output_session_id = None
+
+    def _select_session_after_delete(self, deleted_index: int) -> None:
+        try:
+            self.request_listbox.delete(deleted_index)
+        except Exception:
+            pass
+        count = self.request_listbox.size()
+        if count <= 0:
+            self._viewing_output_session_id = None
+            self._clear_output_widget_after_delete()
+            return
+        new_index = min(deleted_index, count - 1)
+        self.request_listbox.selection_clear(0, tk.END)
+        self.request_listbox.selection_set(new_index)
+        self.request_listbox.activate(new_index)
+        new_sid = self._output_session_ids[new_index]
+        self._viewing_output_session_id = new_sid
+        self._show_output_session(new_sid)
+
+    def _clear_output_widget_after_delete(self) -> None:
+        if hasattr(self, "output_text") and self.output_text.winfo_exists():
+            self.output_text.config(state="normal")
+            self.output_text.delete("1.0", tk.END)
+            self.output_text.config(state="disabled")
 
     def _rename_selected_request(self) -> None:
         """Rename the currently selected output session."""
@@ -3650,15 +3657,7 @@ class OPLIDE(tk.Tk):
                     self.status_syntax_var.set("Syntax validation disabled for large text")
                     return
 
-                # Collect all error lines
-                error_lines = []
-                if text_widget.tag_ranges("ERROR"):
-                    tag_ranges = list(text_widget.tag_ranges("ERROR"))
-                    for tag_start, tag_end in zip(tag_ranges[0::2], tag_ranges[1::2]):
-                        tag_start_line = int(str(tag_start).split(".")[0])
-                        tag_end_line = int(str(tag_end).split(".")[0])
-                        for err_line in range(tag_start_line, tag_end_line + 1):
-                            error_lines.append(err_line)
+                error_lines = OPLIDE._error_lines(text_widget)
 
                 # Use per-widget last error message if available
                 last_error = None
@@ -3667,20 +3666,7 @@ class OPLIDE(tk.Tk):
                 except Exception:
                     last_error = getattr(self, "_last_syntax_error", None)
 
-                error_msg = None
-                if error_lines and caret_line in error_lines:
-                    if last_error and f"line {caret_line}" in last_error:
-                        error_msg = _strip_hint(last_error)
-                    else:
-                        error_msg = f"Syntax Error on line {caret_line}"
-                elif error_lines:
-                    first_err_line = error_lines[0]
-                    if last_error and f"line {first_err_line}" in last_error:
-                        error_msg = _strip_hint(last_error)
-                    else:
-                        error_msg = f"Syntax Error on line {first_err_line}"
-                elif last_error:
-                    error_msg = _strip_hint(last_error)
+                error_msg = OPLIDE._caret_error_message(error_lines, caret_line, last_error, _strip_hint)
 
                 if error_msg:
                     self.status_syntax_var.set(error_msg)
@@ -3697,6 +3683,30 @@ class OPLIDE(tk.Tk):
         else:
             self.status_syntax_var.set("Syntax OK")
             self.status_caret_var.set("Ln 1, Col 0")
+
+    @staticmethod
+    def _error_lines(text_widget: tk.Text) -> list[int]:
+        tag_ranges = list(text_widget.tag_ranges("ERROR"))
+        error_lines: list[int] = []
+        for tag_start, tag_end in zip(tag_ranges[0::2], tag_ranges[1::2]):
+            start_line = int(str(tag_start).split(".")[0])
+            end_line = int(str(tag_end).split(".")[0])
+            error_lines.extend(range(start_line, end_line + 1))
+        return error_lines
+
+    @staticmethod
+    def _caret_error_message(
+        error_lines: list[int],
+        caret_line: int,
+        last_error: Optional[str],
+        strip_hint: Callable[[Optional[str]], Optional[str]],
+    ) -> Optional[str]:
+        error_line = caret_line if caret_line in error_lines else (error_lines[0] if error_lines else None)
+        if error_line is None:
+            return strip_hint(last_error) if last_error else None
+        if last_error and f"line {error_line}" in last_error:
+            return strip_hint(last_error)
+        return f"Syntax Error on line {error_line}"
 
     # --- Editor Shortcuts ---
     def _select_all_model(self, event: Optional[tk.Event] = None) -> str:
@@ -3835,47 +3845,67 @@ class OPLIDE(tk.Tk):
         if not self._display_solver_progress_enabled():
             self._hide_solver_progress_window()
             return
+        OPLIDE._cancel_solver_progress_update(self)
+        self._solver_progress_update_after_id = None
+        self._solver_progress_samples = []
+        self._solver_progress_pending_sample = None
+        if self._solver_progress_window is None or not self._solver_progress_window.winfo_exists():
+            OPLIDE._create_solver_progress_window(self)
+
+        chart_visible = self._solver_tracks_progress(solver_choice)
+        OPLIDE._configure_solver_progress_display(self, chart_visible)
+
+        self._set_solver_progress_status(f"{solver_choice}: solving...")
+        if chart_visible:
+            self._redraw_solver_progress_chart()
+        try:
+            window = self._solver_progress_window
+            if window is not None:
+                window.deiconify()
+                window.lift()
+        except Exception:
+            pass
+
+    def _cancel_solver_progress_update(self) -> None:
         if self._solver_progress_update_after_id:
             try:
                 self.after_cancel(self._solver_progress_update_after_id)
             except Exception:
                 pass
-        self._solver_progress_update_after_id = None
-        self._solver_progress_samples = []
-        self._solver_progress_pending_sample = None
-        if self._solver_progress_window is None or not self._solver_progress_window.winfo_exists():
-            window = tk.Toplevel(self)
-            window.title("Solve Progress")
-            window.geometry("760x460")
-            window.transient(self)
-            window.rowconfigure(1, weight=1)
-            window.columnconfigure(0, weight=1)
-            window.protocol("WM_DELETE_WINDOW", window.withdraw)
 
-            header = ttk.Frame(window, padding=(12, 10, 12, 4))
-            header.grid(row=0, column=0, sticky="ew")
-            header.columnconfigure(0, weight=1)
-            status_var = tk.StringVar(value="Waiting for solver progress...")
-            ttk.Label(header, text="Solve Progress", font=(self.interface_font_family, 13, "bold")).grid(
-                row=0, column=0, sticky="w"
-            )
-            ttk.Label(header, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(2, 0))
+    def _create_solver_progress_window(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("Solve Progress")
+        window.geometry("760x460")
+        window.transient(self)
+        window.rowconfigure(1, weight=1)
+        window.columnconfigure(0, weight=1)
+        window.protocol("WM_DELETE_WINDOW", window.withdraw)
 
-            canvas = tk.Canvas(window, height=260, highlightthickness=1, highlightbackground="#d6d8dc", bg="#ffffff")
-            canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 8))
-            canvas.bind("<Configure>", lambda _event: self._redraw_solver_progress_chart())
+        header = ttk.Frame(window, padding=(12, 10, 12, 4))
+        header.grid(row=0, column=0, sticky="ew")
+        header.columnconfigure(0, weight=1)
+        status_var = tk.StringVar(value="Waiting for solver progress...")
+        ttk.Label(header, text="Solve Progress", font=(self.interface_font_family, 13, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(header, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-            stats_frame = ttk.Frame(window, padding=(12, 0, 12, 12))
-            stats_frame.grid(row=2, column=0, sticky="ew")
-            for col in range(4):
-                stats_frame.columnconfigure(col, weight=1)
+        canvas = tk.Canvas(window, height=260, highlightthickness=1, highlightbackground="#d6d8dc", bg="#ffffff")
+        canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 8))
+        canvas.bind("<Configure>", lambda _event: self._redraw_solver_progress_chart())
 
-            self._solver_progress_window = window
-            self._solver_progress_canvas = canvas
-            self._solver_progress_stats_frame = stats_frame
-            self._solver_progress_status_var = status_var
+        stats_frame = ttk.Frame(window, padding=(12, 0, 12, 12))
+        stats_frame.grid(row=2, column=0, sticky="ew")
+        for col in range(4):
+            stats_frame.columnconfigure(col, weight=1)
 
-        chart_visible = self._solver_tracks_progress(solver_choice)
+        self._solver_progress_window = window
+        self._solver_progress_canvas = canvas
+        self._solver_progress_stats_frame = stats_frame
+        self._solver_progress_status_var = status_var
+
+    def _configure_solver_progress_display(self, chart_visible: bool) -> None:
         if self._solver_progress_window is not None:
             try:
                 self._solver_progress_window.geometry("760x460" if chart_visible else "520x220")
@@ -3890,20 +3920,10 @@ class OPLIDE(tk.Tk):
                     self._solver_progress_canvas.grid_remove()
             except Exception:
                 pass
-
         self._solver_progress_stat_vars = {}
         if self._solver_progress_stats_frame is not None:
             for child in self._solver_progress_stats_frame.winfo_children():
                 child.destroy()
-
-        self._set_solver_progress_status(f"{solver_choice}: solving...")
-        if chart_visible:
-            self._redraw_solver_progress_chart()
-        try:
-            self._solver_progress_window.deiconify()
-            self._solver_progress_window.lift()
-        except Exception:
-            pass
 
     def _set_solver_progress_status(self, text: str) -> None:
         if self._solver_progress_status_var is not None:
@@ -4095,29 +4115,12 @@ class OPLIDE(tk.Tk):
             fill="#374151",
         )
 
-        samples = [
-            s for s in self._solver_progress_samples if s.get("lower_bound") is not None and s.get("upper_bound") is not None
-        ]
-        values: list[float] = []
-        clean_samples: list[tuple[float, float]] = []
-        for sample in samples:
-            try:
-                lower_bound = sample.get("lower_bound")
-                upper_bound = sample.get("upper_bound")
-                if lower_bound is None or upper_bound is None:
-                    continue
-                lb = float(lower_bound)
-                ub = float(upper_bound)
-            except Exception:
-                continue
-            if not (math.isfinite(lb) and math.isfinite(ub)):
-                continue
-            clean_samples.append((lb, ub))
-            values.extend([lb, ub])
+        clean_samples = OPLIDE._clean_solver_progress_samples(self._solver_progress_samples)
         if not clean_samples:
             canvas.create_text(width / 2, height / 2, text="Waiting for LB/UB samples...", fill="#6b7280")
             return
 
+        values = [value for sample in clean_samples for value in sample]
         min_y = min(values)
         max_y = max(values)
         if min_y == max_y:
@@ -4125,16 +4128,7 @@ class OPLIDE(tk.Tk):
             max_y += 1.0
         span = max_y - min_y
 
-        def point(index: int, value: float) -> tuple[float, float]:
-            x = pad_left + (plot_w * index / max(1, len(clean_samples) - 1))
-            y = pad_top + plot_h - ((value - min_y) / span * plot_h)
-            return x, y
-
-        lb_points: list[float] = []
-        ub_points: list[float] = []
-        for index, (lb, ub) in enumerate(clean_samples):
-            lb_points.extend(point(index, lb))
-            ub_points.extend(point(index, ub))
+        lb_points, ub_points = OPLIDE._solver_progress_points(clean_samples, pad_left, pad_top, plot_w, plot_h, min_y, span)
         if len(lb_points) >= 4:
             canvas.create_line(*lb_points, fill="#2563eb", width=2, smooth=True)
             canvas.create_line(*ub_points, fill="#dc2626", width=2, smooth=True)
@@ -4147,6 +4141,43 @@ class OPLIDE(tk.Tk):
         canvas.create_line(width - 115, 18, width - 94, 18, fill="#2563eb", width=2)
         canvas.create_text(width - 44, 18, text="UB", fill="#dc2626", anchor="w")
         canvas.create_line(width - 71, 18, width - 50, 18, fill="#dc2626", width=2)
+
+    @staticmethod
+    def _clean_solver_progress_samples(samples: list[dict[str, Any]]) -> list[tuple[float, float]]:
+        clean_samples: list[tuple[float, float]] = []
+        for sample in samples:
+            try:
+                lower_bound = sample.get("lower_bound")
+                upper_bound = sample.get("upper_bound")
+                if lower_bound is None or upper_bound is None:
+                    continue
+                lower_value = float(lower_bound)
+                upper_value = float(upper_bound)
+            except Exception:
+                continue
+            if math.isfinite(lower_value) and math.isfinite(upper_value):
+                clean_samples.append((lower_value, upper_value))
+        return clean_samples
+
+    @staticmethod
+    def _solver_progress_points(
+        samples: list[tuple[float, float]],
+        pad_left: int,
+        pad_top: int,
+        plot_width: int,
+        plot_height: int,
+        min_value: float,
+        value_span: float,
+    ) -> tuple[list[float], list[float]]:
+        lb_points: list[float] = []
+        ub_points: list[float] = []
+        for index, (lower_bound, upper_bound) in enumerate(samples):
+            x = pad_left + (plot_width * index / max(1, len(samples) - 1))
+            lower_y = pad_top + plot_height - ((lower_bound - min_value) / value_span * plot_height)
+            upper_y = pad_top + plot_height - ((upper_bound - min_value) / value_span * plot_height)
+            lb_points.extend((x, lower_y))
+            ub_points.extend((x, upper_y))
+        return lb_points, ub_points
 
     # --- Model Execution ---
     def run_model(
@@ -4789,19 +4820,25 @@ class OPLIDE(tk.Tk):
 
         for sid in self._output_session_ids:
             display = self._output_session_display.get(sid, sid)
-            timestamp = self._output_session_timestamp.setdefault(
-                sid, display.split(" • ", 1)[0] if " • " in display else display
-            )
-            if sid not in self._output_session_label:
-                prefix = f"{timestamp} • "
-                if timestamp and display.startswith(prefix):
-                    self._output_session_label[sid] = display[len(prefix) :]
-                elif " • " in display:
-                    self._output_session_label[sid] = display.split(" • ", 1)[-1]
-                else:
-                    self._output_session_label[sid] = str(display)
+            timestamp = self._output_session_timestamp.setdefault(sid, OPLIDE._session_timestamp(display))
+            self._output_session_label.setdefault(sid, OPLIDE._session_label(display, timestamp))
 
         OPLIDE._restore_session_history_widgets(self)
+
+    @staticmethod
+    def _session_timestamp(display: Any) -> str:
+        display_text = str(display)
+        return display_text.split(" • ", 1)[0] if " • " in display_text else display_text
+
+    @staticmethod
+    def _session_label(display: Any, timestamp: str) -> str:
+        display_text = str(display)
+        prefix = f"{timestamp} • "
+        if timestamp and display_text.startswith(prefix):
+            return display_text[len(prefix) :]
+        if " • " in display_text:
+            return display_text.split(" • ", 1)[-1]
+        return display_text
 
     def _restore_session_history_widgets(self) -> None:
         if hasattr(self, "request_listbox"):
@@ -5778,6 +5815,13 @@ class OPLIDE(tk.Tk):
 
     @staticmethod
     def _apply_theme_optional_widgets(self: Any, colors: dict[str, str]) -> None:
+        OPLIDE._apply_optional_widget_styles(self, colors)
+        OPLIDE._apply_theme_lists_and_surface(self, colors)
+        OPLIDE._apply_theme_scrollbars(self, colors)
+        OPLIDE._apply_theme_error_tags(self, colors)
+
+    @staticmethod
+    def _apply_optional_widget_styles(self: Any, colors: dict[str, str]) -> None:
         for widget_name, style_name in (("status_bar", "StatusBar.TFrame"), ("editor_notebook", "TNotebook")):
             widget = getattr(self, widget_name, None)
             if widget is not None:
@@ -5802,6 +5846,9 @@ class OPLIDE(tk.Tk):
         prompt = getattr(self, "genai_prompt_text", None)
         if prompt is not None:
             prompt.config(**editor_config)
+
+    @staticmethod
+    def _apply_theme_lists_and_surface(self: Any, colors: dict[str, str]) -> None:
         for widget_name in ("genai_attachment_listbox", "request_listbox"):
             widget = getattr(self, widget_name, None)
             if widget is not None:
@@ -5819,6 +5866,10 @@ class OPLIDE(tk.Tk):
             surface.config(
                 bg=colors["inset_border"], highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"]
             )
+
+    @staticmethod
+    def _apply_theme_scrollbars(self: Any, colors: dict[str, str]) -> None:
+        prompt = getattr(self, "genai_prompt_text", None)
         for widget in (
             getattr(self, "model_text", None),
             getattr(self, "data_text", None),
@@ -5833,6 +5884,9 @@ class OPLIDE(tk.Tk):
                     trough_bg=colors["scrollbar_trough_bg"],
                     border_color=colors["inset_border"],
                 )
+
+    @staticmethod
+    def _apply_theme_error_tags(self: Any, colors: dict[str, str]) -> None:
         for widget_name in ("model_text", "data_text"):
             widget = getattr(self, widget_name, None)
             if widget is not None:
