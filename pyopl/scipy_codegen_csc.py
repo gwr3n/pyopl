@@ -1,4 +1,5 @@
 # === Standard library imports ===
+import ast
 import itertools
 import logging
 import re
@@ -359,9 +360,7 @@ class ExpressionEvaluator:
         set_decl = self.parent._find_decl(dimensions[0].get("name"))
         return bool(set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"))
 
-    def _remap_scalar_set_indices(
-        self, expr: Dict[str, Any], decl: Optional[Dict[str, Any]], indices: List[Any]
-    ) -> List[Any]:
+    def _remap_scalar_set_indices(self, expr: Dict[str, Any], decl: Optional[Dict[str, Any]], indices: List[Any]) -> List[Any]:
         if decl is None or not decl.get("type", "").startswith("parameter"):
             return indices
         dimensions = decl.get("dimensions", [])
@@ -378,10 +377,15 @@ class ExpressionEvaluator:
                 continue
             set_decl = self.parent._find_decl(dimension.get("name"))
             set_data = self.parent.data_dict.get(dimension.get("name"))
-            if set_data is None and set_decl and set_decl.get("type") in (
-                "typed_set",
-                "typed_set_external",
-                "set_declaration",
+            if (
+                set_data is None
+                and set_decl
+                and set_decl.get("type")
+                in (
+                    "typed_set",
+                    "typed_set_external",
+                    "set_declaration",
+                )
             ):
                 set_data = set_decl.get("value") or []
             if isinstance(set_data, list):
@@ -1116,9 +1120,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for var_name, coefficient in rhs_dict.items():
             diff_coef[var_name] = diff_coef.get(var_name, 0.0) - coefficient
         diff_const = lhs_const - rhs_const
-        diff_min, diff_max = self._finite_integer_affine_bounds(
-            diff_coef, diff_const, "Integer not-equal conjunction term"
-        )
+        diff_min, diff_max = self._finite_integer_affine_bounds(diff_coef, diff_const, "Integer not-equal conjunction term")
         big_m = max(1.0, diff_max + 1.0, 1.0 - diff_min)
         if not hasattr(self, "_neq_counter"):
             self._neq_counter = 0
@@ -1969,14 +1971,69 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return False, 0.0, False
         raise SemanticError(f"Parameter or variable '{name}' with indices {indices} not found in environment.")
 
+    def _eval_safe_index_ast(self, node, env, allowed_nodes, allowed_ops):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError("Disallowed expression in index")
+        if isinstance(node, ast.Expression):
+            return self._eval_safe_index_ast(node.body, env, allowed_nodes, allowed_ops)
+        if isinstance(node, ast.Num):
+            return int(node.n)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float, bool)):
+                return (
+                    int(node.value)
+                    if isinstance(node.value, bool) or (isinstance(node.value, float) and node.value.is_integer())
+                    else node.value
+                )
+            raise ValueError("Non-numeric constant in index")
+        if isinstance(node, ast.Name):
+            value = env.get(node.id, self.data_dict.get(node.id, node.id))
+            if isinstance(value, (int, float, bool)):
+                return int(value) if isinstance(value, bool) or (isinstance(value, float) and value.is_integer()) else value
+            raise ValueError(f"Name '{node.id}' not numeric for index")
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            return -self._eval_safe_index_ast(node.operand, env, allowed_nodes, allowed_ops)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, allowed_ops):
+            left = self._eval_safe_index_ast(node.left, env, allowed_nodes, allowed_ops)
+            right = self._eval_safe_index_ast(node.right, env, allowed_nodes, allowed_ops)
+            if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
+                raise ValueError("Non-numeric operands in index arithmetic")
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            return left // right
+        if isinstance(node, ast.Tuple):
+            return tuple(self._eval_safe_index_ast(element, env, allowed_nodes, allowed_ops) for element in node.elts)
+        raise ValueError("Unsupported node in index")
+
+    def _safe_eval_index_arithmetic(self, expression, env):
+        allowed_ops = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
+        allowed_nodes = (
+            ast.Expression,
+            ast.BinOp,
+            ast.UnaryOp,
+            ast.Num,
+            ast.Constant,
+            ast.Name,
+            ast.Tuple,
+            ast.Load,
+            ast.USub,
+            ast.Add,
+            ast.Sub,
+            ast.Mult,
+            ast.FloorDiv,
+        )
+        return self._eval_safe_index_ast(ast.parse(expression, mode="eval"), env, allowed_nodes, allowed_ops)
+
     def _eval_index(self, idx: object, env: dict) -> object:
         """
         Helper to evaluate an index expression in env/data_dict context.
         Tries to evaluate as safe Python literal/arith, then as int, else returns as is.
         """
         if isinstance(idx, str):
-            import ast
-
             # 1) Try tuple/number literal safely
             try:
                 lit = ast.literal_eval(idx)
@@ -1984,74 +2041,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             except Exception:
                 pass
 
-            # 2) Safe arithmetic: only (+, -, *, //, parentheses) and names from env/data_dict
-            def _safe_eval_arith(expr: str) -> object:
-                node = ast.parse(expr, mode="eval")
-
-                allowed_ops = (ast.Add, ast.Sub, ast.Mult, ast.FloorDiv)
-                allowed_nodes = (
-                    ast.Expression,
-                    ast.BinOp,
-                    ast.UnaryOp,
-                    ast.Num,
-                    ast.Constant,
-                    ast.Name,
-                    ast.Tuple,
-                    ast.Load,
-                    ast.USub,
-                    ast.Add,
-                    ast.Sub,
-                    ast.Mult,
-                    ast.FloorDiv,
-                )
-
-                def _eval(n):
-                    if not isinstance(n, allowed_nodes):
-                        raise ValueError("Disallowed expression in index")
-                    if isinstance(n, ast.Expression):
-                        return _eval(n.body)
-                    if isinstance(n, ast.Num):
-                        return int(n.n)
-                    if isinstance(n, ast.Constant):
-                        if isinstance(n.value, (int, float, bool)):
-                            return (
-                                int(n.value)
-                                if isinstance(n.value, bool) or (isinstance(n.value, float) and n.value.is_integer())
-                                else n.value
-                            )
-                        raise ValueError("Non-numeric constant in index")
-                    if isinstance(n, ast.Name):
-                        name = n.id
-                        if name in env:
-                            v = env[name]
-                        else:
-                            v = self.data_dict.get(name, name)
-                        if isinstance(v, (int, float, bool)):
-                            return int(v) if isinstance(v, bool) or (isinstance(v, float) and v.is_integer()) else v
-                        raise ValueError(f"Name '{name}' not numeric for index")
-                    if isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.USub):
-                        return -_eval(n.operand)
-                    if isinstance(n, ast.BinOp) and isinstance(n.op, allowed_ops):
-                        left = _eval(n.left)
-                        right = _eval(n.right)
-                        if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
-                            raise ValueError("Non-numeric operands in index arithmetic")
-                        if isinstance(n.op, ast.Add):
-                            return left + right
-                        if isinstance(n.op, ast.Sub):
-                            return left - right
-                        if isinstance(n.op, ast.Mult):
-                            return left * right
-                        if isinstance(n.op, ast.FloorDiv):
-                            return left // right
-                    if isinstance(n, ast.Tuple):
-                        return tuple(_eval(e) for e in n.elts)
-                    raise ValueError("Unsupported node in index")
-
-                return _eval(node)
-
             try:
-                v = _safe_eval_arith(idx)
+                v = self._safe_eval_index_arithmetic(idx, env)
                 # Normalize float-integral to int
                 if isinstance(v, float) and v.is_integer():
                     return int(v)
@@ -2374,6 +2365,36 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 included.append((env, idx_tuple))
         return included
 
+    def _emit_python_call(self, expr: dict, env: dict) -> str:
+        name = expr.get("name")
+        args = expr.get("args", [])
+        if len(args) != 1:
+            return str(expr)
+        arg = self._emit_python_expr(args[0], env)
+        if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
+            return f"math.{name}({arg})"
+        if name in {"abs", "round"}:
+            return f"{name}({arg})"
+        return str(expr)
+
+    def _emit_python_field_access(self, expr: dict, env: dict) -> str:
+        base_expr = expr["base"]
+        base = self._emit_python_expr(base_expr, env)
+        field = expr["field"]
+        for index, field_info in enumerate(getattr(self, "tuple_types", {}).get(base_expr.get("sem_type"), [])):
+            if field_info["name"] == field:
+                return f"{base}[{index}]"
+        return f"{base}['{field}']"
+
+    def _emit_python_aggregate(self, expr: dict, env: dict) -> str:
+        parts = [self._emit_python_expr(arg, env) for arg in expr.get("args", [])]
+        function_name = "min" if expr.get("type") == "minl" else "max"
+        return f"{function_name}({', '.join(parts)})"
+
+    def _emit_python_indexed_name(self, expr: dict, env: dict) -> str:
+        indices = [self._emit_python_expr(dim, env) for dim in expr["dimensions"]]
+        return f"{expr['name']}[{', '.join(indices)}]"
+
     def _emit_python_expr(self, expr: dict, env: dict | None = None) -> str:
         """
         Emit a valid Python expression from an AST node, using env for index variables.
@@ -2400,35 +2421,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             else_expr = self._emit_python_expr(expr["else"], env)
             return f"({then_expr} if ({cond}) else {else_expr})"
         if t == "indexed_name":
-            idxs = [str(self._emit_python_expr(dim, env)) for dim in expr["dimensions"]]
-            return f"{expr['name']}[{', '.join(idxs)}]"
+            return self._emit_python_indexed_name(expr, env)
         if t == "field_access":
-            # --- Tuple field access ---
-            base = self._emit_python_expr(expr["base"], env)
-            field = expr["field"]
-            for idx, f in enumerate(getattr(self, "tuple_types", {}).get(expr["base"].get("sem_type"), [])):
-                if f["name"] == field:
-                    return f"{base}[{idx}]"
-            return f"{base}['{field}']"
+            return self._emit_python_field_access(expr, env)
         # NEW: boolean literal for emitted Python expr
         if t == "boolean_literal":
             return "True" if expr.get("value") else "False"
         if t == "funcall":
-            name = expr.get("name")
-            args = expr.get("args", [])
-            if len(args) == 1:
-                arg = self._emit_python_expr(args[0], env)
-                if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
-                    return f"math.{name}({arg})"
-                if name in {"abs", "round"}:
-                    return f"{name}({arg})"
-            return str(expr)
+            return self._emit_python_call(expr, env)
         # NEW: emit min/max for symbolic comments
         if t in ("minl", "maxl"):
-            args = expr.get("args", [])
-            parts = [self._emit_python_expr(a, env) for a in args]
-            fn = "min" if t == "minl" else "max"
-            return f"{fn}({', '.join(parts)})"
+            return self._emit_python_aggregate(expr, env)
         if t == "name_reference_index":
             return env.get(expr["name"], expr["name"])
         if t == "number_literal_index":
@@ -2998,10 +3001,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return {self._normalize_set_key(key): float(item) for key, item in row.items()}
         if len(row) != len(second_keys):
             return None
-        return {
-            self._normalize_set_key(key): float(item)
-            for key, item in zip(second_keys, row)
-        }
+        return {self._normalize_set_key(key): float(item) for key, item in zip(second_keys, row)}
 
     def _normalize_set_set_rows(self, value, first_keys, second_keys):
         if isinstance(value, list):
@@ -3495,7 +3495,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         elif len(index_values) > 1:
             candidates.append(f"{base}_" + "_".join(str(i) for i in index_values))
         if "[" in base and "]" in base:
-            base_clean = base.replace("[", "_").replace("]", "").replace("(", "").replace(")", "").replace(",", "_").replace(" ", "")
+            base_clean = (
+                base.replace("[", "_").replace("]", "").replace("(", "").replace(")", "").replace(",", "_").replace(" ", "")
+            )
             candidates.append(f"{base_clean}_{'_'.join(str(i) for i in index_values)}")
         return candidates
 
@@ -3842,6 +3844,76 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return ("cmp", op, left_key, right_key) if left_key <= right_key else ("cmp", op, right_key, left_key)
         return ("cmp", op, _bound_key(left), _bound_key(right))
 
+    @staticmethod
+    def _unwrap_comparison_parentheses(expr_node):
+        while isinstance(expr_node, dict) and expr_node.get("type") == "parenthesized_expression":
+            expr_node = expr_node.get("expression")
+        return expr_node
+
+    @staticmethod
+    def _is_simple_comparison_node(expr_node):
+        return (
+            isinstance(expr_node, dict)
+            and expr_node.get("type") == "binop"
+            and expr_node.get("op") in (">=", "<=", "==", ">", "<")
+            and expr_node.get("sem_type") == "boolean"
+        )
+
+    def _ground_numeric_comparison_value(self, expr_node, env):
+        coef_dict, const_value = self._eval_expr(expr_node, dict(env))
+        if coef_dict:
+            return None
+        if isinstance(const_value, bool):
+            return 1.0 if const_value else 0.0
+        if isinstance(const_value, (int, float)):
+            return float(const_value)
+        return None
+
+    def _sum_comparison_truth_names(self, sum_node, env, ctx):
+        sum_node = self._unwrap_comparison_parentheses(sum_node)
+        if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
+            return None
+        inner_comparison = self._unwrap_comparison_parentheses(sum_node.get("expression"))
+        if not self._is_simple_comparison_node(inner_comparison):
+            return None
+
+        truth_names = []
+        for env2, _idx_tuple in self._iter_filtered_environments(
+            sum_node.get("iterators", []),
+            env,
+            sum_node.get("index_constraint"),
+        ):
+            comparison = {
+                "type": "binop",
+                "op": inner_comparison.get("op"),
+                "left": inner_comparison.get("left"),
+                "right": inner_comparison.get("right"),
+                "sem_type": "boolean",
+            }
+            truth_names.append(self._comparison_truth_var(comparison, env2, ctx))
+        return truth_names
+
+    def _add_comparison_binary(self, name):
+        self.var_names.append(name)
+        self.var_indices[name] = len(self.var_names) - 1
+        self.bounds.append([0, 1])
+        self.integrality.append(1)
+        if hasattr(self, "c") and len(self.c) < len(self.var_names):
+            self.c.append(0.0)
+
+    @staticmethod
+    def _coerce_comparison_numeric(value):
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                raise SemanticError(f"Non-numeric term '{value}' in linear comparison; cannot linearize")
+        raise SemanticError(f"Unsupported constant type {type(value)} in linear comparison")
+
     def _comparison_truth_var(self, node, env, ctx: _ConstraintBuildContext):
         """Return a binary var name representing truth of a supported linear comparison."""
         if not (
@@ -3857,71 +3929,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return comparison_truth_cache[key]
         op = node.get("op")
 
-        def _local_unwrap_paren(expr_node):
-            while isinstance(expr_node, dict) and expr_node.get("type") == "parenthesized_expression":
-                expr_node = expr_node.get("expression")
-            return expr_node
-
-        def _local_is_simple_comparison(expr_node):
-            return (
-                isinstance(expr_node, dict)
-                and expr_node.get("type") == "binop"
-                and expr_node.get("op") in (">=", "<=", "==", ">", "<")
-                and expr_node.get("sem_type") == "boolean"
-            )
-
-        def _ground_numeric_value(expr_node, env_local):
-            coef_dict, const_val = self._eval_expr(expr_node, dict(env_local))
-            if coef_dict:
-                return None
-            if isinstance(const_val, bool):
-                return 1.0 if const_val else 0.0
-            if isinstance(const_val, (int, float)):
-                return float(const_val)
-            return None
-
-        def _sum_comparison_truth_vars(sum_node, env_local):
-            sum_node = _local_unwrap_paren(sum_node)
-            if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
-                return None
-            inner_cmp = _local_unwrap_paren(sum_node.get("expression"))
-            if not _local_is_simple_comparison(inner_cmp):
-                return None
-            iterators = sum_node.get("iterators", [])
-            z_names = []
-            for env2, _idx_tuple in self._iter_filtered_environments(
-                iterators,
-                env_local,
-                sum_node.get("index_constraint"),
-            ):
-                comp_inst = {
-                    "type": "binop",
-                    "op": inner_cmp.get("op"),
-                    "left": inner_cmp.get("left"),
-                    "right": inner_cmp.get("right"),
-                    "sem_type": "boolean",
-                }
-                z_names.append(self._comparison_truth_var(comp_inst, env2, ctx))
-            return z_names
-
         if op == "==":
-            left_truths = _sum_comparison_truth_vars(node.get("left"), env)
-            right_truths = _sum_comparison_truth_vars(node.get("right"), env)
+            left_truths = self._sum_comparison_truth_names(node.get("left"), env, ctx)
+            right_truths = self._sum_comparison_truth_names(node.get("right"), env, ctx)
             if left_truths is not None or right_truths is not None:
                 z_names = left_truths if left_truths is not None else right_truths
                 other_side = node.get("right") if left_truths is not None else node.get("left")
-                k_value = _ground_numeric_value(other_side, env)
+                k_value = self._ground_numeric_comparison_value(other_side, env)
                 if k_value is not None and abs(k_value - len(z_names)) < LINEAR_ZERO_TOLERANCE:
                     bname = f"cmp_flag_{len(comparison_truth_cache)}"
-                    self.var_names.append(bname)
-                    self.var_indices[bname] = len(self.var_names) - 1
-                    self.bounds.append([0, 1])
-                    if hasattr(self, "integrality"):
-                        self.integrality.append(1)
-                    else:
-                        self.integrality = [1]
-                    if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                        self.c.append(0.0)
+                    self._add_comparison_binary(bname)
 
                     for z_name in z_names:
                         row = [0.0] * len(self.var_names)
@@ -3942,35 +3959,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
         rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
 
-        def _coerce_numeric(value):
-            if isinstance(value, (int, float)):
-                return float(value)
-            if isinstance(value, bool):
-                return 1.0 if value else 0.0
-            if isinstance(value, str):
-                try:
-                    return float(value)
-                except ValueError:
-                    raise SemanticError(f"Non-numeric term '{value}' in linear comparison; cannot linearize")
-            raise SemanticError(f"Unsupported constant type {type(value)} in linear comparison")
-
-        lhs_const = _coerce_numeric(lhs_const)
-        rhs_const = _coerce_numeric(rhs_const)
+        lhs_const = self._coerce_comparison_numeric(lhs_const)
+        rhs_const = self._coerce_comparison_numeric(rhs_const)
         expr_coef = dict(lhs_dict)
         for var_name, coef in rhs_dict.items():
             expr_coef[var_name] = expr_coef.get(var_name, 0.0) - coef
         expr_const = lhs_const - rhs_const
         bname = f"cmp_flag_{len(comparison_truth_cache)}"
 
-        def add_binary(name):
-            self.var_names.append(name)
-            self.var_indices[name] = len(self.var_names) - 1
-            self.bounds.append([0, 1])
-            self.integrality.append(1)
-            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                self.c.append(0.0)
-
-        add_binary(bname)
+        self._add_comparison_binary(bname)
 
         def add_ub(row_coef_dict, rhs):
             self._append_sparse_coef_row(ctx.state, row_coef_dict, rhs, sense="ub")
@@ -4002,8 +3999,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             )
             negative_name = f"{bname}_negative"
             positive_name = f"{bname}_positive"
-            add_binary(negative_name)
-            add_binary(positive_name)
+            self._add_comparison_binary(negative_name)
+            self._add_comparison_binary(positive_name)
 
             relation = {negative_name: 1.0, positive_name: 1.0}
             if op == "==":
@@ -4042,7 +4039,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if node_type in ("number", "string_literal", "boolean_literal"):
             return (node_type, part.get("value"))
         if node_type == "binop":
-            return ("binop", part.get("op"), self._bool_bound_key(part.get("left"), env), self._bool_bound_key(part.get("right"), env))
+            return (
+                "binop",
+                part.get("op"),
+                self._bool_bound_key(part.get("left"), env),
+                self._bool_bound_key(part.get("right"), env),
+            )
         if node_type == "sum":
             local_iterators = {
                 it.get("iterator") for it in (part.get("iterators") or []) if isinstance(it, dict) and it.get("iterator")
@@ -4064,8 +4066,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return None
         left = node["left"]
         right = node["right"]
-        is_num01 = lambda value: isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
-        is_var = lambda value: isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+
+        def is_num01(value):
+            return isinstance(value, dict) and value.get("type") == "number" and value.get("value") in (0, 1)
+
+        def is_var(value):
+            return isinstance(value, dict) and value.get("type") in ("name", "indexed_name")
+
         if is_var(left) and is_num01(right):
             vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
             return ("atom", vname, right["value"])
@@ -4079,8 +4086,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return None
         left = node["left"]
         right = node["right"]
-        is_bool_var = lambda value: self._is_bool_var_node(value)
-        is_bool_composite = lambda value: self._is_bool_composite_node(value)
+
+        def is_bool_var(value):
+            return self._is_bool_var_node(value)
+
+        def is_bool_composite(value):
+            return self._is_bool_composite_node(value)
+
         if is_bool_var(left) and is_bool_composite(right):
             return ("eq_link", self._bool_bound_key(left, env), self._bool_struct_key(right, env))
         if is_bool_var(right) and is_bool_composite(left):
@@ -4110,7 +4122,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             link_key = self._bool_equality_link_key(node, env)
             if link_key is not None:
                 return link_key
-            return ("cmp", node.get("op"), self._bool_bound_key(node.get("left"), env), self._bool_bound_key(node.get("right"), env))
+            return (
+                "cmp",
+                node.get("op"),
+                self._bool_bound_key(node.get("left"), env),
+                self._bool_bound_key(node.get("right"), env),
+            )
         return ("unknown", id(node))
 
     def _new_bool_aux_var(self) -> str:
