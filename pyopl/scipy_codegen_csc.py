@@ -4942,6 +4942,100 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return
         raise SemanticError("Unsupported implication consequent form")
 
+    def _handle_equality_antecedent_implication(
+        self,
+        antecedent,
+        consequent,
+        env,
+        append_eq_row,
+        append_ub_row,
+    ):
+        def linear_expression(expr):
+            if not isinstance(expr, dict):
+                raise SemanticError("Unsupported expression in implication linearization")
+            try:
+                coef, const = self._eval_expr(expr, dict(env or {}))
+            except Exception as exc:
+                raise SemanticError("Unsupported linear expression form in implication") from exc
+            if not isinstance(const, (int, float)):
+                raise SemanticError("Unsupported linear expression form in implication")
+            return dict(coef), float(const)
+
+        def expression_difference(left, right):
+            left_coef, left_const = linear_expression(left)
+            right_coef, right_const = linear_expression(right)
+            coef = left_coef.copy()
+            for name, value in right_coef.items():
+                coef[name] = coef.get(name, 0.0) - value
+            return coef, left_const - right_const
+
+        ant_coef, ant_const = expression_difference(
+            antecedent.get("left"),
+            antecedent.get("right"),
+        )
+        diff_min, diff_max = self._finite_integer_affine_bounds(
+            ant_coef,
+            ant_const,
+            "Equality implication antecedent",
+        )
+        if not hasattr(self, "_impl_counter"):
+            self._impl_counter = 0
+        flag_name = f"implication_flag_c{self._impl_counter}"
+        self._impl_counter += 1
+        negative_flag = f"{flag_name}_negative"
+        positive_flag = f"{flag_name}_positive"
+        for name in (flag_name, negative_flag, positive_flag):
+            self.var_names.append(name)
+            self.var_indices[name] = len(self.var_names) - 1
+            self.bounds.append([0, 1])
+            self.integrality.append(1)
+            if hasattr(self, "c") and len(self.c) < len(self.var_names):
+                self.c.append(0.0)
+
+        partition_row = [0.0] * len(self.var_names)
+        for name in (flag_name, negative_flag, positive_flag):
+            partition_row[self.var_indices[name]] = 1.0
+        append_eq_row(partition_row, 1.0)
+
+        lower_row = [0.0] * len(self.var_names)
+        upper_row = [0.0] * len(self.var_names)
+        for name, coef in ant_coef.items():
+            lower_row[self.var_indices[name]] -= coef
+            upper_row[self.var_indices[name]] += coef
+        lower_row[self.var_indices[negative_flag]] += diff_min
+        lower_row[self.var_indices[positive_flag]] += 1.0
+        upper_row[self.var_indices[negative_flag]] += 1.0
+        upper_row[self.var_indices[positive_flag]] -= diff_max
+        append_ub_row(lower_row, ant_const)
+        append_ub_row(upper_row, -ant_const)
+
+        consequent_op = consequent.get("op")
+        if consequent_op == "==":
+            raise SemanticError("Equality consequent not yet supported")
+        if consequent_op in ("<=", "<"):
+            cons_coef, cons_const = expression_difference(
+                consequent.get("left"),
+                consequent.get("right"),
+            )
+        elif consequent_op in (">=", ">"):
+            cons_coef, cons_const = expression_difference(
+                consequent.get("right"),
+                consequent.get("left"),
+            )
+        else:
+            raise SemanticError("Unsupported consequent operator")
+        _cons_min, cons_max = self._finite_affine_bounds(
+            cons_coef,
+            cons_const,
+            "Equality implication consequent",
+        )
+        big_m = max(0.0, cons_max)
+        row = [0.0] * len(self.var_names)
+        for name, coef in cons_coef.items():
+            row[self.var_indices[name]] += coef
+        row[self.var_indices[flag_name]] += big_m
+        append_ub_row(row, big_m - cons_const)
+
     def _handle_implication_constraint(
         self,
         constr,
@@ -5038,91 +5132,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 append_ub_row,
             )
             return
-
-        def linear_expression(expr):
-            if not isinstance(expr, dict):
-                raise SemanticError("Unsupported expression in implication linearization")
-            try:
-                coef, const = self._eval_expr(expr, dict(env or {}))
-            except Exception as exc:
-                raise SemanticError("Unsupported linear expression form in implication") from exc
-            if not isinstance(const, (int, float)):
-                raise SemanticError("Unsupported linear expression form in implication")
-            return dict(coef), float(const)
-
-        def expression_difference(left, right):
-            left_coef, left_const = linear_expression(left)
-            right_coef, right_const = linear_expression(right)
-            coef = left_coef.copy()
-            for name, value in right_coef.items():
-                coef[name] = coef.get(name, 0.0) - value
-            return coef, left_const - right_const
-
-        ant_coef, ant_const = expression_difference(
-            ant_unwrapped.get("left"),
-            ant_unwrapped.get("right"),
+        self._handle_equality_antecedent_implication(
+            ant_unwrapped,
+            cons_unwrapped,
+            env,
+            append_eq_row,
+            append_ub_row,
         )
-        diff_min, diff_max = self._finite_integer_affine_bounds(
-            ant_coef,
-            ant_const,
-            "Equality implication antecedent",
-        )
-        if not hasattr(self, "_impl_counter"):
-            self._impl_counter = 0
-        flag_name = f"implication_flag_c{self._impl_counter}"
-        self._impl_counter += 1
-        negative_flag = f"{flag_name}_negative"
-        positive_flag = f"{flag_name}_positive"
-        for name in (flag_name, negative_flag, positive_flag):
-            self.var_names.append(name)
-            self.var_indices[name] = len(self.var_names) - 1
-            self.bounds.append([0, 1])
-            self.integrality.append(1)
-            if hasattr(self, "c") and len(self.c) < len(self.var_names):
-                self.c.append(0.0)
-
-        partition_row = [0.0] * len(self.var_names)
-        for name in (flag_name, negative_flag, positive_flag):
-            partition_row[self.var_indices[name]] = 1.0
-        append_eq_row(partition_row, 1.0)
-
-        lower_row = [0.0] * len(self.var_names)
-        upper_row = [0.0] * len(self.var_names)
-        for name, coef in ant_coef.items():
-            lower_row[self.var_indices[name]] -= coef
-            upper_row[self.var_indices[name]] += coef
-        lower_row[self.var_indices[negative_flag]] += diff_min
-        lower_row[self.var_indices[positive_flag]] += 1.0
-        upper_row[self.var_indices[negative_flag]] += 1.0
-        upper_row[self.var_indices[positive_flag]] -= diff_max
-        append_ub_row(lower_row, ant_const)
-        append_ub_row(upper_row, -ant_const)
-
-        if cons_op == "==":
-            raise SemanticError("Equality consequent not yet supported")
-        if cons_op in ("<=", "<"):
-            cons_coef, cons_const = expression_difference(
-                cons_unwrapped.get("left"),
-                cons_unwrapped.get("right"),
-            )
-        elif cons_op in (">=", ">"):
-            cons_coef, cons_const = expression_difference(
-                cons_unwrapped.get("right"),
-                cons_unwrapped.get("left"),
-            )
-        else:
-            raise SemanticError("Unsupported consequent operator")
-        _cons_min, cons_max = self._finite_affine_bounds(
-            cons_coef,
-            cons_const,
-            "Equality implication consequent",
-        )
-        big_m = max(0.0, cons_max)
-        row = [0.0] * len(self.var_names)
-        for name, coef in cons_coef.items():
-            row[self.var_indices[name]] += coef
-        row[self.var_indices[flag_name]] += big_m
-        append_ub_row(row, big_m - cons_const)
 
     def _try_handle_weighted_boolean_sum_constraint(
         self,
