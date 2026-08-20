@@ -1219,33 +1219,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return (None, None)
         t = node.get("type")
         if t in ("name", "indexed_name", "number"):
-            # First consult collected per-variable instance bounds (from processed constraints)
-            if t in ("name", "indexed_name"):
-                if t == "name":
-                    vname = node.get("value")
-                else:
-                    # Attempt to build name; if field access indices not evaluable (due to env), fall back to base var aggregate bounds
-                    try:
-                        vname = self._multi_indexed_var_name(node, {})
-                    except Exception:
-                        vname = node.get("name")
-                if hasattr(self, "_collected_lbs"):
-                    lb = self._collected_lbs.get(vname)
-                    ub = self._collected_ubs.get(vname)
-                    # If no direct match and this is an indexed_name with field access, try base symbol aggregate
-                    if lb is None and ub is None and t == "indexed_name":
-                        base_sym = node.get("name")
-                        lb = self._collected_lbs.get(base_sym)
-                        ub = self._collected_ubs.get(base_sym)
-                    if lb is not None or ub is not None:
-                        # Merge with static type-derived bounds
-                        tlb, tub = self._var_bounds_safe(node)
-                        if tlb is not None:
-                            lb = max(lb, tlb) if lb is not None else tlb
-                        if tub is not None:
-                            ub = min(ub, tub) if ub is not None else tub
-                        return (lb, ub)
-            return self._var_bounds_safe(node)
+            return self._linear_leaf_bounds(node)
         if t == "unaryop" and node.get("op") == "-":
             value = node.get("value")
             if not isinstance(value, dict):
@@ -1255,49 +1229,81 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return (None, None)
             return (-ub, -lb)
         if t == "binop":
-            op = node.get("op")
-            left = node.get("left")
-            right = node.get("right")
-            if not (isinstance(left, dict) and isinstance(right, dict)):
+            return self._linear_binop_bounds(node)
+        return (None, None)
+
+    def _linear_leaf_bounds(self, node: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        """Return collected and static bounds for a linear-expression leaf."""
+        node_type = node.get("type")
+        if node_type not in ("name", "indexed_name"):
+            return self._var_bounds_safe(node)
+
+        if node_type == "name":
+            variable_name = node.get("value")
+        else:
+            try:
+                variable_name = self._multi_indexed_var_name(node, {})
+            except Exception:
+                variable_name = node.get("name")
+
+        if not hasattr(self, "_collected_lbs"):
+            return self._var_bounds_safe(node)
+
+        lower_bound = self._collected_lbs.get(variable_name)
+        upper_bound = self._collected_ubs.get(variable_name)
+        if lower_bound is None and upper_bound is None and node_type == "indexed_name":
+            base_symbol = node.get("name")
+            lower_bound = self._collected_lbs.get(base_symbol)
+            upper_bound = self._collected_ubs.get(base_symbol)
+        if lower_bound is None and upper_bound is None:
+            return self._var_bounds_safe(node)
+
+        type_lower, type_upper = self._var_bounds_safe(node)
+        if type_lower is not None:
+            lower_bound = max(lower_bound, type_lower) if lower_bound is not None else type_lower
+        if type_upper is not None:
+            upper_bound = min(upper_bound, type_upper) if upper_bound is not None else type_upper
+        return (lower_bound, upper_bound)
+
+    def _linear_binop_bounds(self, node: Dict[str, Any]) -> Tuple[Optional[float], Optional[float]]:
+        """Return bounds for a supported binary linear operation."""
+        left = node.get("left")
+        right = node.get("right")
+        if not (isinstance(left, dict) and isinstance(right, dict)):
+            return (None, None)
+
+        op = node.get("op")
+        if op in ("+", "-"):
+            left_lower, left_upper = self._linear_bounds_safe(left)
+            right_lower, right_upper = self._linear_bounds_safe(right)
+            if None in (left_lower, left_upper, right_lower, right_upper):
                 return (None, None)
             if op == "+":
-                lL, lU = self._linear_bounds_safe(left)
-                rL, rU = self._linear_bounds_safe(right)
-                if lL is None or rL is None or lU is None or rU is None:
-                    return (None, None)
-                return (lL + rL, lU + rU)
-            if op == "-":
-                lL, lU = self._linear_bounds_safe(left)
-                rL, rU = self._linear_bounds_safe(right)
-                if lL is None or rU is None or lU is None or rL is None:
-                    return (None, None)
-                return (lL - rU, lU - rL)
-            if op == "*":
-                # Only support scalar * var or var * scalar
-                if left.get("type") == "number" and right.get("type") in (
-                    "name",
-                    "indexed_name",
-                ):
-                    c = float(left.get("value", 0))
-                    vL, vU = self._linear_bounds_safe(right)
-                elif right.get("type") == "number" and left.get("type") in (
-                    "name",
-                    "indexed_name",
-                ):
-                    c = float(right.get("value", 0))
-                    vL, vU = self._linear_bounds_safe(left)
-                else:
-                    return (None, None)
-                if vL is None or vU is None:
-                    return (None, None)
-                if c >= 0:
-                    return (c * vL, c * vU if vU is not None else None)
-                else:
-                    # negative scalar flips
-                    if vU is None:
-                        return (None, None)
-                    return (c * vU, c * vL)
+                return (left_lower + right_lower, left_upper + right_upper)
+            return (left_lower - right_upper, left_upper - right_lower)
+
+        if op == "*":
+            return self._linear_scalar_product_bounds(left, right)
         return (None, None)
+
+    def _linear_scalar_product_bounds(
+        self, left: Dict[str, Any], right: Dict[str, Any]
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Return bounds for a scalar multiplied by a variable."""
+        if left.get("type") == "number" and right.get("type") in ("name", "indexed_name"):
+            coefficient = float(left.get("value", 0))
+            variable_lower, variable_upper = self._linear_bounds_safe(right)
+        elif right.get("type") == "number" and left.get("type") in ("name", "indexed_name"):
+            coefficient = float(right.get("value", 0))
+            variable_lower, variable_upper = self._linear_bounds_safe(left)
+        else:
+            return (None, None)
+
+        if variable_lower is None or variable_upper is None:
+            return (None, None)
+        if coefficient >= 0:
+            return (coefficient * variable_lower, coefficient * variable_upper)
+        return (coefficient * variable_upper, coefficient * variable_lower)
 
     def _resolve_coefficient_index(self, variable: Any) -> int:
         if isinstance(variable, int):
@@ -1519,141 +1525,139 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         dims = decl["dimensions"]
         logger.debug(f"[SciPyCSCCodeGenerator] _handle_indexed_variable_declaration: name={name}, dims={dims}")
 
-        def default_bounds_for_type(vtype: object) -> tuple[object, object, int]:
-            if vtype == "boolean":
-                return 0, 1, 1
-            if vtype == "int+":
-                return 0, None, 1
-            if vtype == "int":
-                return None, None, 1
-            if vtype == "float+":
-                return 0, None, 0
-            if vtype == "float":
-                return None, None, 0
+        if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
+            self._expand_named_set_variable_declaration(decl, var_names, bounds, integrality)
+            return
+
+        self._expand_indexed_variable_declaration(decl, var_names, bounds, integrality)
+
+    @staticmethod
+    def _default_indexed_variable_bounds(vtype: object) -> tuple[object, object, int]:
+        if vtype == "boolean":
+            return 0, 1, 1
+        if vtype == "int+":
+            return 0, None, 1
+        if vtype == "int":
+            return None, None, 1
+        if vtype == "float+":
+            return 0, None, 0
+        if vtype == "float":
             return None, None, 0
+        return None, None, 0
 
-        def eval_decl_bound(expr: object, env: dict) -> object:
-            if expr is None:
-                return None
-            if not isinstance(expr, dict):
-                return expr
-            coef, value = self._eval_expr(expr, env)
-            if coef:
-                raise SemanticError("Decision variables are not supported in dvar declaration bounds.")
-            return value
+    def _indexed_variable_bounds(self, decl: dict, env: dict) -> tuple[list, int]:
+        lower, upper, int_flag = self._default_indexed_variable_bounds(decl.get("var_type"))
+        for bound_name in ("lower_bound", "upper_bound"):
+            if bound_name not in decl:
+                continue
+            expression = decl.get(bound_name)
+            if expression is None:
+                value = None
+            elif not isinstance(expression, dict):
+                value = expression
+            else:
+                coef, value = self._eval_expr(expression, env)
+                if coef:
+                    raise SemanticError("Decision variables are not supported in dvar declaration bounds.")
+            if bound_name == "lower_bound":
+                lower = value
+            else:
+                upper = value
+        return [lower, upper], int_flag
 
-        def bounds_for_index(vtype: object, env: dict) -> tuple[list, int]:
-            lower, upper, int_flag = default_bounds_for_type(vtype)
-            if "lower_bound" in decl:
-                lower = eval_decl_bound(decl.get("lower_bound"), env)
-            if "upper_bound" in decl:
-                upper = eval_decl_bound(decl.get("upper_bound"), env)
-            return [lower, upper], int_flag
+    def _expand_named_set_variable_declaration(
+        self, decl: dict, var_names: list, bounds: list, integrality: list
+    ) -> None:
+        name = decl["name"]
+        set_name = decl["dimensions"][0]["name"]
+        set_decl = self._find_decl(set_name)
+        if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+            elements = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+        elif set_name in self.data_dict:
+            elements = self.data_dict[set_name]
+        elif set_decl:
+            elements = set_decl.get("value")
+            if set_decl.get("type") == "typed_set_external" and elements is None:
+                raise SemanticError(f"External set '{set_name}' has no data provided")
+            elements = elements or []
+        else:
+            raise SemanticError(f"Named set '{set_name}' is not declared")
 
         iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
-        # If indexed over a set_of_tuples, flatten as tuple keys
-        if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
-            set_name = dims[0]["name"]
-            # Determine if underlying set is tuple-valued or scalar typed_set
-            set_decl = self._find_decl(set_name)
-            if set_decl and set_decl.get("type") in (
-                "set_of_tuples",
-                "set_of_tuples_external",
-            ):
-                elements = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+        logger.debug(f"[SciPyCSCCodeGenerator] Elements for {name} over {set_name}: {elements}")
+        for key in elements:
+            if isinstance(key, tuple):
+                variable_name = f"{name}[{repr(key)}]"
             else:
-                # typed_set or plain set of scalars
-                if set_name in self.data_dict:
-                    elements = self.data_dict[set_name]
-                elif set_decl:
-                    elements = set_decl.get("value")
-                    if set_decl.get("type") == "typed_set_external" and elements is None:
-                        raise SemanticError(f"External set '{set_name}' has no data provided")
-                    elements = elements or []
-                else:
-                    raise SemanticError(f"Named set '{set_name}' is not declared")
-            logger.debug(f"[SciPyCSCCodeGenerator] Elements for {name} over {set_name}: {elements}")
-            for k in elements:
-                # For scalar string indices use underscore style (name_value) to avoid quote issues elsewhere.
-                if isinstance(k, tuple):
-                    key_part = repr(k)
-                    vname = f"{name}[{key_part}]"  # tuple-indexed keep bracket form
-                else:
-                    vname = f"{name}_{k}"
-                var_names.append(vname)
-                self.var_indices[vname] = len(var_names) - 1
-                vtype = decl.get("var_type")
-                env = {iterator_names[0]: k} if iterator_names else {}
-                bound, int_flag = bounds_for_index(vtype, env)
-                bounds.append(bound)
-                integrality.append(int_flag)
-            return
-        # Fallback: treat as before (should not happen for tuple-indexed)
-        logger.debug(f"[SciPyCSCCodeGenerator] Fallback for {name}, dims={dims}")
-        vtype = decl.get("var_type")
+                variable_name = f"{name}_{key}"
+            var_names.append(variable_name)
+            self.var_indices[variable_name] = len(var_names) - 1
+            env = {iterator_names[0]: key} if iterator_names else {}
+            bound, int_flag = self._indexed_variable_bounds(decl, env)
+            bounds.append(bound)
+            integrality.append(int_flag)
+
+    def _expand_indexed_variable_declaration(
+        self, decl: dict, var_names: list, bounds: list, integrality: list
+    ) -> None:
+        name = decl["name"]
+        dims = decl["dimensions"]
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
         dim_ranges = []
         symbolic_dim_ranges = []
         for dim in dims:
-            # Evaluate the actual integer range for this dimension
             if dim["type"] == "range_index":
-                # Always use _eval_bound, which handles numbers, names, and binops
                 start_eval = self._eval_bound(dim["start"])
                 end_eval = self._eval_bound(dim["end"])
                 logger.debug(f"[SciPyCSCCodeGenerator] Range for {name}: start={start_eval}, end={end_eval}")
                 dim_ranges.append(list(range(int(start_eval), int(end_eval) + 1)))
-                start_val = self._emit_symbolic_expr(dim["start"])
-                end_val = self._emit_symbolic_expr(dim["end"])
-                symbolic_dim_ranges.append(f"range({start_val}, {end_val} + 1)")
+                symbolic_dim_ranges.append(
+                    f"range({self._emit_symbolic_expr(dim['start'])}, {self._emit_symbolic_expr(dim['end'])} + 1)"
+                )
             elif dim["type"] == "named_range_dimension":
-                rng = None
-                for d in self.ast["declarations"]:
-                    if d["type"] == "range_declaration_inline" and d["name"] == dim["name"]:
-                        rng = d
-                        break
-                if rng is None:
+                range_decl = next(
+                    (
+                        declaration
+                        for declaration in self.ast["declarations"]
+                        if declaration["type"] == "range_declaration_inline" and declaration["name"] == dim["name"]
+                    ),
+                    None,
+                )
+                if range_decl is None:
                     raise self._not_found_error("range", dim["name"])
-                start_eval = self._eval_bound(rng["start"])
-                end_eval = self._eval_bound(rng["end"])
+                start_eval = self._eval_bound(range_decl["start"])
+                end_eval = self._eval_bound(range_decl["end"])
                 logger.debug(f"[SciPyCSCCodeGenerator] Named range for {name}: start={start_eval}, end={end_eval}")
                 dim_ranges.append(list(range(int(start_eval), int(end_eval) + 1)))
-                start_val = self._emit_symbolic_expr(rng["start"])
-                end_val = self._emit_symbolic_expr(rng["end"])
-                symbolic_dim_ranges.append(f"range({start_val}, {end_val} + 1)")
+                symbolic_dim_ranges.append(
+                    f"range({self._emit_symbolic_expr(range_decl['start'])}, {self._emit_symbolic_expr(range_decl['end'])} + 1)"
+                )
             elif dim["type"] == "named_set_dimension":
-                # Support both scalar typed sets and set_of_tuples
                 set_name = dim["name"]
-                set_vals = None
                 set_decl = self._find_decl(set_name)
-                if set_decl and set_decl.get("type") in (
-                    "set_of_tuples",
-                    "set_of_tuples_external",
-                ):
-                    set_vals = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+                if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+                    set_values = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
+                elif set_name in self.data_dict:
+                    set_values = self.data_dict[set_name]
+                elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+                    set_values = set_decl.get("value")
+                    if set_decl.get("type") == "typed_set_external" and set_values is None:
+                        raise SemanticError(f"External set '{set_name}' has no data provided")
+                    set_values = set_values or []
                 else:
-                    if set_name in self.data_dict:
-                        set_vals = self.data_dict[set_name]
-                    elif set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
-                        set_vals = set_decl.get("value")
-                        if set_decl.get("type") == "typed_set_external" and set_vals is None:
-                            raise SemanticError(f"External set '{set_name}' has no data provided")
-                        set_vals = set_vals or []
-                    else:
-                        raise SemanticError(f"Named set '{set_name}' is not declared")
-                logger.debug(f"[SciPyCSCCodeGenerator] Named set for {name}: {set_vals}")
-                dim_ranges.append(set_vals)
+                    raise SemanticError(f"Named set '{set_name}' is not declared")
+                logger.debug(f"[SciPyCSCCodeGenerator] Named set for {name}: {set_values}")
+                dim_ranges.append(set_values)
                 symbolic_dim_ranges.append(set_name)
-        # Emit the symbolic range for the variable declaration in the generated code
-        self._add_code_line(f"# OPL: dvar {vtype} {name}[{', '.join(symbolic_dim_ranges)}]")
-        # Continue with variable name generation and bounds
-        for idx_tuple in itertools.product(*dim_ranges):
-            # Generate variable name as x_1, y_2, etc. (for test compatibility)
-            vname = name + "_" + "_".join(str(i) for i in idx_tuple)
-            # FIX: correct f-string interpolation in debug
-            logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {vname}")
-            var_names.append(vname)
-            self.var_indices[vname] = len(var_names) - 1
-            env = {iterator_names[i]: value for i, value in enumerate(idx_tuple) if i < len(iterator_names)}
-            bound, int_flag = bounds_for_index(vtype, env)
+
+        self._add_code_line(f"# OPL: dvar {decl.get('var_type')} {name}[{', '.join(symbolic_dim_ranges)}]")
+        for index_tuple in itertools.product(*dim_ranges):
+            variable_name = name + "_" + "_".join(str(index) for index in index_tuple)
+            logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {variable_name}")
+            var_names.append(variable_name)
+            self.var_indices[variable_name] = len(var_names) - 1
+            env = {iterator_names[i]: value for i, value in enumerate(index_tuple) if i < len(iterator_names)}
+            bound, int_flag = self._indexed_variable_bounds(decl, env)
             bounds.append(bound)
             integrality.append(int_flag)
 
@@ -1738,95 +1742,105 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if name in self.var_indices:
                 logger.debug(f"[resolve_variable] Found scalar variable: {name}")
                 return True, name, False
+            logger.debug(f"[resolve_variable] Scalar variable not found: {name}")
+            return None
+
+        norm_indices = self._normalize_variable_indices(indices)
+        variable_name = self._indexed_variable_name(name, norm_indices)
+        logger.debug(f"[resolve_variable] Trying indexed variable: {variable_name} (indices={norm_indices})")
+        if variable_name in self.var_indices:
+            logger.debug(f"[resolve_variable] Found indexed variable: {variable_name}")
+            return True, variable_name, False
+
+        symbolic_name = self._find_symbolic_variable_name(name, variable_name)
+        if symbolic_name is not None:
+            logger.debug(f"[resolve_variable] Found symbolic indexed variable: {symbolic_name}")
+            return True, symbolic_name, False
+
+        self._raise_if_variable_index_out_of_domain(name, norm_indices)
+        logger.debug(f"[resolve_variable] Indexed variable not found: {variable_name} (indices={indices})")
+        return None
+
+    @staticmethod
+    def _normalize_variable_indices(indices: list) -> list:
+        normalized = []
+        for index in indices:
+            if isinstance(index, float) and index.is_integer():
+                normalized.append(int(index))
+            elif isinstance(index, (bool, int)):
+                normalized.append(int(index))
             else:
-                logger.debug(f"[resolve_variable] Scalar variable not found: {name}")
-        else:
-            # Normalize indices: coerce float integers to int
-            norm_indices = []
-            for i in indices:
-                if isinstance(i, float) and i.is_integer():
-                    norm_indices.append(int(i))
-                elif isinstance(i, (bool, int)):
-                    norm_indices.append(int(i))
-                else:
-                    norm_indices.append(i)
-            vname = name + "_" + "_".join(str(i) for i in norm_indices)
-            logger.debug(f"[resolve_variable] Trying indexed variable: {vname} (indices={norm_indices})")
-            if vname in self.var_indices:
-                logger.debug(f"[resolve_variable] Found indexed variable: {vname}")
-                return True, vname, False
-            # Try to resolve as a variable with symbolic index (e.g., s[(t-1)])
-            for k in self.var_indices:
-                if k.startswith(name + "_") and vname.replace("(", "").replace(")", "") == k.replace("(", "").replace(")", ""):
-                    logger.debug(f"[resolve_variable] Found symbolic indexed variable: {k}")
-                    return True, k, False
+                normalized.append(index)
+        return normalized
 
-            # Strict handling for out-of-domain indices -> raise SemanticError
-            try:
-                decl = self._find_decl(name)
-                if decl and decl.get("type") in ("dvar_indexed",):
-                    dims = decl.get("dimensions", [])
-                    # Only attempt if arity matches
-                    if len(dims) == len(norm_indices):
-                        out_of_domain = False
-                        details: list[str] = []
-                        for dim_decl, idx_val in zip(dims, norm_indices):
-                            dtyp = dim_decl.get("type")
-                            if dtyp == "range_index":
-                                # Evaluate bounds
-                                s = self._eval_bound(dim_decl["start"])
-                                e = self._eval_bound(dim_decl["end"])
-                                if not isinstance(idx_val, int) or idx_val < int(s) or idx_val > int(e):
-                                    out_of_domain = True
-                                    details.append(f"{idx_val} not in [{int(s)}..{int(e)}]")
-                            elif dtyp == "named_range_dimension":
-                                rng_name = dim_decl.get("name")
-                                rng_decl = self._find_decl(rng_name, "range_declaration_inline")
-                                if rng_decl:
-                                    s = self._eval_bound(rng_decl["start"])
-                                    e = self._eval_bound(rng_decl["end"])
-                                    if not isinstance(idx_val, int) or idx_val < int(s) or idx_val > int(e):
-                                        out_of_domain = True
-                                        details.append(f"{idx_val} not in [{int(s)}..{int(e)}]")
-                            elif dtyp == "named_set_dimension":
-                                set_name = dim_decl.get("name")
-                                # Get set elements from data or AST
-                                set_vals = None
-                                set_decl = self._find_decl(set_name)
-                                if set_name in self.data_dict:
-                                    raw = self.data_dict[set_name]
-                                    set_vals = raw["elements"] if isinstance(raw, dict) and "elements" in raw else raw
-                                elif set_decl:
-                                    # typed_set stores list in 'value'; set_of_tuples value is list of dicts with elements
-                                    if set_decl.get("type") == "typed_set":
-                                        set_vals = set_decl.get("value") or []
-                                    elif set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external") and set_decl.get(
-                                        "value"
-                                    ):
-                                        set_vals = [tuple(t["elements"]) for t in set_decl["value"]]
-                                if set_vals is not None:
-                                    # For tuple-valued sets keep tuple keys; else compare directly
-                                    if idx_val not in set_vals:
-                                        out_of_domain = True
-                                        details.append(f"{idx_val} not in {set_name}")
-                            # Other dimension types are not expected here
+    @staticmethod
+    def _indexed_variable_name(name: str, indices: list) -> str:
+        return name + "_" + "_".join(str(index) for index in indices)
 
-                        if out_of_domain:
-                            msg = f"Index {norm_indices} for '{name}' is out of declared domain"
-                            if details:
-                                msg += f" ({'; '.join(details)})"
-                            logger.debug(f"[resolve_variable] {msg}")
-                            from .semantic_error import SemanticError
+    def _find_symbolic_variable_name(self, name: str, variable_name: str) -> str | None:
+        normalized_name = variable_name.replace("(", "").replace(")", "")
+        for candidate in self.var_indices:
+            normalized_candidate = candidate.replace("(", "").replace(")", "")
+            if candidate.startswith(name + "_") and normalized_name == normalized_candidate:
+                return candidate
+        return None
 
-                            raise SemanticError(msg)
-            except Exception as ex:
-                # If we purposely raised our SemanticError, propagate it. Otherwise, fall through.
-                from .semantic_error import SemanticError
+    def _raise_if_variable_index_out_of_domain(self, name: str, indices: list) -> None:
+        declaration = self._find_decl(name)
+        if not declaration or declaration.get("type") != "dvar_indexed":
+            return
+        dimensions = declaration.get("dimensions", [])
+        if len(dimensions) != len(indices):
+            return
 
-                if isinstance(ex, SemanticError):
-                    raise
+        details = []
+        for dimension, index in zip(dimensions, indices):
+            detail = self._variable_domain_detail(dimension, index)
+            if detail is not None:
+                details.append(detail)
+        if not details:
+            return
 
-            logger.debug(f"[resolve_variable] Indexed variable not found: {vname} (indices={indices})")
+        message = f"Index {indices} for '{name}' is out of declared domain ({'; '.join(details)})"
+        logging.getLogger("pyopl.scipy_codegen_csc").debug(f"[resolve_variable] {message}")
+        from .semantic_error import SemanticError
+
+        raise SemanticError(message)
+
+    def _variable_domain_detail(self, dimension: dict, index: object) -> str | None:
+        dimension_type = dimension.get("type")
+        if dimension_type == "range_index":
+            start = self._eval_bound(dimension["start"])
+            end = self._eval_bound(dimension["end"])
+            if not isinstance(index, int) or index < int(start) or index > int(end):
+                return f"{index} not in [{int(start)}..{int(end)}]"
+            return None
+        if dimension_type == "named_range_dimension":
+            range_declaration = self._find_decl(dimension.get("name"), "range_declaration_inline")
+            if range_declaration:
+                start = self._eval_bound(range_declaration["start"])
+                end = self._eval_bound(range_declaration["end"])
+                if not isinstance(index, int) or index < int(start) or index > int(end):
+                    return f"{index} not in [{int(start)}..{int(end)}]"
+            return None
+        if dimension_type == "named_set_dimension":
+            set_name = dimension.get("name")
+            values = self._variable_domain_set_values(set_name)
+            if values is not None and index not in values:
+                return f"{index} not in {set_name}"
+        return None
+
+    def _variable_domain_set_values(self, set_name: str) -> object:
+        set_declaration = self._find_decl(set_name)
+        if set_name in self.data_dict:
+            raw_values = self.data_dict[set_name]
+            return raw_values.get("elements") if isinstance(raw_values, dict) and "elements" in raw_values else raw_values
+        if not set_declaration:
+            return None
+        if set_declaration.get("type") == "typed_set":
+            return set_declaration.get("value") or []
+        if set_declaration.get("type") in ("set_of_tuples", "set_of_tuples_external") and set_declaration.get("value"):
+            return [tuple(item["elements"]) for item in set_declaration["value"]]
         return None
 
     def _normalize_parameter_lookup_value(self, name: str, val: object, indices: list | None, logger) -> object:
@@ -2482,45 +2496,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             val = expr.get("value")
             return str(val) if val is not None else ""
         if t == "binop":
-            left_expr = expr.get("left")
-            right_expr = expr.get("right")
-            left = self._traverse_expression(left_expr) if isinstance(left_expr, dict) else str(left_expr)
-            right = self._traverse_expression(right_expr) if isinstance(right_expr, dict) else str(right_expr)
+            left = self._traverse_expression_value(expr.get("left"))
+            right = self._traverse_expression_value(expr.get("right"))
             return f"({left} {expr.get('op')} {right})"
         if t == "uminus":
-            val_expr = expr.get("value")
-            val = self._traverse_expression(val_expr) if isinstance(val_expr, dict) else str(val_expr)
-            return f"-({val})"
+            return f"-({self._traverse_expression_value(expr.get('value'))})"
         if t == "parenthesized_expression":
-            expr_expr = expr.get("expression")
-            return f"({self._traverse_expression(expr_expr) if isinstance(expr_expr, dict) else str(expr_expr)})"
+            return f"({self._traverse_expression_value(expr.get('expression'))})"
         if t == "conditional":
-            cond_expr = expr.get("condition")
-            then_expr = expr.get("then")
-            else_expr = expr.get("else")
-            cond = self._traverse_expression(cond_expr) if isinstance(cond_expr, dict) else str(cond_expr)
-            then = self._traverse_expression(then_expr) if isinstance(then_expr, dict) else str(then_expr)
-            els = self._traverse_expression(else_expr) if isinstance(else_expr, dict) else str(else_expr)
+            cond = self._traverse_expression_value(expr.get("condition"))
+            then = self._traverse_expression_value(expr.get("then"))
+            els = self._traverse_expression_value(expr.get("else"))
             return f"({then} if ({cond}) else {els})"
         if t == "indexed_name":
-            base = expr.get("name")
-            dims = expr.get("dimensions") or []
-            parts = [self._traverse_expression(d) if isinstance(d, dict) else str(d) for d in dims]
-            if len(parts) == 1:
-                return f"{base}[{parts[0]}]"
-            return f"{base}[{', '.join(parts)}]"
+            return self._traverse_indexed_name(expr)
         if t == "field_access":
-            base_expr = expr.get("base")
-            base = self._traverse_expression(base_expr) if isinstance(base_expr, dict) else str(base_expr)
-            field = expr.get("field")
-            if hasattr(self, "tuple_types"):
-                sem_type = expr.get("base", {}).get("sem_type") if isinstance(expr.get("base"), dict) else None
-                if sem_type and sem_type in self.tuple_types:
-                    fields = self.tuple_types[sem_type]
-                    for idx, f in enumerate(fields):
-                        if f["name"] == field:
-                            return f"{base}[{idx}]"
-            return f"{base}['{field}']"
+            return self._traverse_field_access(expr)
         if t in ("name_reference_index", "number_literal_index"):
             if "value" in expr:
                 return str(expr["value"])
@@ -2529,33 +2520,62 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return str(expr)
 
         if t == "tuple_literal":
-            elements = expr.get("elements", [])
-            parts = [self._traverse_expression(e) for e in elements]
-            return f"({', '.join(parts)})"
+            return self._traverse_tuple_literal(expr)
 
         if t == "string_literal":  # <-- support in symbolic traversal
             return repr(expr.get("value"))
 
         if t == "funcall":
-            name = expr.get("name")
-            args = expr.get("args", [])
-            if len(args) == 1:
-                arg = self._traverse_expression(args[0])
-                if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
-                    return f"math.{name}({arg})"
-                if name in {"abs", "round"}:
-                    return f"{name}({arg})"
-            return ""
+            return self._traverse_function_call(expr)
 
         # NEW: symbolic minl/maxl
         if t in ("minl", "maxl"):
-            args = expr.get("args", [])
-            parts = [self._traverse_expression(a) for a in args]
-            fn = "min" if t == "minl" else "max"
-            return f"{fn}({', '.join(parts)})"
+            return self._traverse_aggregate(expr)
 
         # Default: return empty string if no known type matched
         return ""
+
+    def _traverse_expression_value(self, value: Any) -> str:
+        """Traverse a child AST value while preserving scalar fallback formatting."""
+        return self._traverse_expression(value) if isinstance(value, dict) else str(value)
+
+    def _traverse_indexed_name(self, expr: dict) -> str:
+        base = expr.get("name")
+        parts = [self._traverse_expression_value(d) for d in (expr.get("dimensions") or [])]
+        return f"{base}[{', '.join(parts)}]"
+
+    def _traverse_field_access(self, expr: dict) -> str:
+        base_expr = expr.get("base")
+        base = self._traverse_expression_value(base_expr)
+        field = expr.get("field")
+        if hasattr(self, "tuple_types") and isinstance(base_expr, dict):
+            sem_type = base_expr.get("sem_type")
+            fields = self.tuple_types.get(sem_type, []) if sem_type else []
+            for index, field_info in enumerate(fields):
+                if field_info["name"] == field:
+                    return f"{base}[{index}]"
+        return f"{base}['{field}']"
+
+    def _traverse_tuple_literal(self, expr: dict) -> str:
+        parts = [self._traverse_expression_value(element) for element in expr.get("elements", [])]
+        return f"({', '.join(parts)})"
+
+    def _traverse_function_call(self, expr: dict) -> str:
+        name = expr.get("name")
+        args = expr.get("args", [])
+        if len(args) != 1:
+            return ""
+        arg = self._traverse_expression_value(args[0])
+        if name in {"sqrt", "exp", "log", "sin", "cos", "tan", "floor", "ceil"}:
+            return f"math.{name}({arg})"
+        if name in {"abs", "round"}:
+            return f"{name}({arg})"
+        return ""
+
+    def _traverse_aggregate(self, expr: dict) -> str:
+        parts = [self._traverse_expression_value(arg) for arg in expr.get("args", [])]
+        function_name = "min" if expr.get("type") == "minl" else "max"
+        return f"{function_name}({', '.join(parts)})"
 
     def __init__(self, ast: dict, data_dict: dict | None = None, logger=None) -> None:
         import logging
