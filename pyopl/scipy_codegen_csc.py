@@ -3194,28 +3194,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.data_dict[name] = declaration["value"]
         return False
 
-    def _prepare_parameter_data(self, data_dict):
-        parameter_declarations = self._get_param_decl_map()
-        for name, declaration in parameter_declarations.items():
-            dimensions = declaration.get("dimensions", []) or []
-            if len(dimensions) == 1 and dimensions[0].get("type") in (
-                "named_set_dimension",
-                "named_range_dimension",
-            ):
-                value = data_dict.get(name)
-                if isinstance(value, dict):
-                    bad_key = next(
-                        (key for key, item in value.items() if isinstance(item, (list, tuple, dict))),
-                        None,
-                    )
-                    if bad_key is not None:
-                        raise SemanticError(
-                            f"Parameter '{name}' declared as 1-D over '{dimensions[0].get('name', '')}' expects "
-                            f"scalar values per key, but data provides an array for key {repr(bad_key)}. "
-                            "Use scalar values (e.g., 2.0), not [2.0]."
-                        )
-
-        parameter_types = (
+    @staticmethod
+    def _parameter_declaration_types():
+        return (
             "parameter_external",
             "parameter_external_indexed",
             "parameter_external_explicit",
@@ -3223,6 +3204,31 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             "parameter_inline",
             "parameter_inline_indexed",
         )
+
+    def _validate_scalar_parameter_mappings(self, parameter_declarations, data_dict):
+        for name, declaration in parameter_declarations.items():
+            dimensions = declaration.get("dimensions", []) or []
+            if len(dimensions) != 1 or dimensions[0].get("type") not in (
+                "named_set_dimension",
+                "named_range_dimension",
+            ):
+                continue
+            value = data_dict.get(name)
+            if not isinstance(value, dict):
+                continue
+            bad_key = next(
+                (key for key, item in value.items() if isinstance(item, (list, tuple, dict))),
+                None,
+            )
+            if bad_key is not None:
+                raise SemanticError(
+                    f"Parameter '{name}' declared as 1-D over '{dimensions[0].get('name', '')}' expects "
+                    f"scalar values per key, but data provides an array for key {repr(bad_key)}. "
+                    "Use scalar values (e.g., 2.0), not [2.0]."
+                )
+
+    def _prepare_indexed_parameter_values(self, data_dict):
+        parameter_types = self._parameter_declaration_types()
         for declaration in self.ast.get("declarations", []):
             if declaration.get("type") not in parameter_types or not declaration.get("dimensions"):
                 continue
@@ -3234,12 +3240,20 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             elif isinstance(parameter_data, (list, tuple)):
                 self._validate_parameter_shape(parameter_data, declaration["dimensions"], data_dict, name)
 
+    def _normalize_indexed_parameter_values(self, data_dict):
+        parameter_types = self._parameter_declaration_types()
         for declaration in self.ast.get("declarations", []):
             if declaration.get("type") not in parameter_types:
                 continue
             self._normalize_set_range_parameter(declaration, data_dict)
             self._normalize_set_set_parameter(declaration, data_dict)
             self._normalize_tuple_set_range_parameter(declaration, data_dict)
+
+    def _prepare_parameter_data(self, data_dict):
+        parameter_declarations = self._get_param_decl_map()
+        self._validate_scalar_parameter_mappings(parameter_declarations, data_dict)
+        self._prepare_indexed_parameter_values(data_dict)
+        self._normalize_indexed_parameter_values(data_dict)
         return parameter_declarations
 
     def _validate_runtime_parameter_length(self, name, value, declaration, data_dict):
@@ -3276,37 +3290,46 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                         f"'{set_name}' has {set_length} elements."
                     )
 
+    def _runtime_data_names(self):
+        tuple_array_names = set()
+        structured_names = set()
+        for declaration in self.ast.get("declarations", []):
+            declaration_type = declaration.get("type")
+            name = declaration["name"]
+            if declaration_type in ("tuple_array", "tuple_array_external"):
+                tuple_array_names.add(name)
+            if declaration_type in (
+                "tuple_array",
+                "tuple_array_external",
+                "set_of_tuples",
+                "set_of_tuples_external",
+            ):
+                structured_names.add(name)
+        return tuple_array_names, structured_names
+
+    def _emit_runtime_data_value(self, name, value, structured_names):
+        if isinstance(value, (list, dict)):
+            self._add_code_line(f"{name} = {repr(value)}")
+            if (
+                name not in structured_names
+                and isinstance(value, list)
+                and value
+                and all(isinstance(element, (str, int)) for element in value)
+            ):
+                self._add_code_line(f"{name}_index = {{v: i for i, v in enumerate({name})}}")
+        elif isinstance(value, str):
+            self._add_code_line(f"{name} = {repr(value)}")
+        else:
+            self._add_code_line(f"{name} = {value}")
+
     def _emit_runtime_data(self, data_dict, parameter_declarations):
         self._add_code_line("# Data from .dat file")
-        tuple_array_names = {
-            declaration["name"]
-            for declaration in self.ast.get("declarations", [])
-            if declaration.get("type") in ("tuple_array", "tuple_array_external")
-        }
-        structured_names = {
-            declaration["name"]
-            for declaration in self.ast.get("declarations", [])
-            if declaration.get("type") in ("tuple_array", "tuple_array_external", "set_of_tuples", "set_of_tuples_external")
-        }
+        tuple_array_names, structured_names = self._runtime_data_names()
         for name, value in data_dict.items():
             self._validate_runtime_parameter_length(name, value, parameter_declarations.get(name), data_dict)
-            if name in tuple_array_names:
+            if name in tuple_array_names or (isinstance(value, dict) and value.get("type") == "range_data"):
                 continue
-            if isinstance(value, dict) and value.get("type") == "range_data":
-                continue
-            if isinstance(value, (list, dict)):
-                self._add_code_line(f"{name} = {repr(value)}")
-                if (
-                    name not in structured_names
-                    and isinstance(value, list)
-                    and value
-                    and all(isinstance(element, (str, int)) for element in value)
-                ):
-                    self._add_code_line(f"{name}_index = {{v: i for i, v in enumerate({name})}}")
-            elif isinstance(value, str):
-                self._add_code_line(f"{name} = {repr(value)}")
-            else:
-                self._add_code_line(f"{name} = {value}")
+            self._emit_runtime_data_value(name, value, structured_names)
         self._add_code_line("")
 
     def _generate_data_declarations(self, data_dict):
@@ -3330,70 +3353,69 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         pass
 
+    def _handle_variable_declaration(self, decl, var_names, bounds, integrality):
+        declaration_type = decl["type"]
+        if declaration_type in ("dexpr", "dexpr_indexed"):
+            return
+        if declaration_type == "tuple_type":
+            self._handle_tuple_type_declaration(decl)
+            return
+        if declaration_type in (
+            "set_of_tuples",
+            "set_of_tuples_external",
+            "set_of_tuples_array_external",
+            "typed_set",
+            "typed_set_external",
+            "tuple_array",
+            "tuple_array_external",
+        ):
+            self._handle_set_of_tuples_declaration(decl, self.data_dict)
+            return
+        if declaration_type == "dvar":
+            self._handle_scalar_variable_declaration(decl, var_names, bounds, integrality)
+            return
+        if declaration_type == "dvar_indexed":
+            self._handle_indexed_variable_declaration(decl, var_names, bounds, integrality)
+            return
+        if declaration_type in (
+            "range_declaration_inline",
+            "range_declaration_external",
+            "set_declaration",
+            "parameter_inline",
+            "parameter_inline_indexed",
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+        ):
+            return
+        raise SemanticError(f"Unsupported declaration type: {declaration_type}")
+
+    def _emit_variable_metadata(self, var_names, bounds, integrality):
+        bounds_py = "[" + ", ".join(f'[{bound[0]}, {bound[1] if bound[1] is not None else "None"}]' for bound in bounds) + "]"
+        self._add_code_line(f"var_names = {repr(var_names)}")
+        for variable_name in var_names:
+            if "_" in variable_name and "[" not in variable_name:
+                base, rest = variable_name.split("_", 1)
+                if rest and base and rest.replace("_", "").isalnum():
+                    self._add_code_line(f"# Alias: {base}['{rest}']")
+        self._add_code_line(f"bounds = {bounds_py}")
+        self._add_code_line(f"integrality = {integrality}")
+
     def _build_variables(self):
         # Supports scalar, indexed continuous, integer, and boolean variables
         self._add_code_line("# Variable definitions")
         var_names = []
         bounds = []
         integrality = []
-        decls = self.ast["declarations"]
         self.tuple_types = {}
-        for decl in decls:
-            # Skip dexpr declarations (expanded in parser on use)
-            if decl.get("type") in ("dexpr", "dexpr_indexed"):
-                continue
-            if decl["type"] == "tuple_type":
-                self._handle_tuple_type_declaration(decl)
-                continue
-            if decl["type"] in (
-                "set_of_tuples",
-                "set_of_tuples_external",
-                "set_of_tuples_array_external",
-                "typed_set",
-                "typed_set_external",
-                "tuple_array",
-                "tuple_array_external",
-            ):
-                # Skip pure data declarations (including external typed string sets & tuple arrays)
-                self._handle_set_of_tuples_declaration(decl, self.data_dict)
-                continue
-            if decl["type"] == "dvar":
-                self._handle_scalar_variable_declaration(decl, var_names, bounds, integrality)
-            elif decl["type"] == "dvar_indexed":
-                self._handle_indexed_variable_declaration(decl, var_names, bounds, integrality)
-            elif decl["type"] in (
-                "range_declaration_inline",
-                "range_declaration_external",
-                "set_declaration",
-                "parameter_inline",
-                "parameter_inline_indexed",
-                "parameter_external",
-                "parameter_external_indexed",
-                "parameter_external_explicit",
-                "parameter_external_explicit_indexed",
-            ):
-                # These are handled elsewhere or not needed here
-                continue
-            else:
-                raise SemanticError(f"Unsupported declaration type: {decl['type']}")  # type: ignore
-        # --- Patch: Update bounds based on constraints ---
+        for declaration in self.ast["declarations"]:
+            self._handle_variable_declaration(declaration, var_names, bounds, integrality)
         self._tighten_bounds_from_constraints(bounds, var_names, self.var_indices, self.ast.get("constraints", []))
         self.var_names = var_names
         self.bounds = bounds
         self.integrality = integrality
-        # Output Python syntax for bounds (not JSON)
-        bounds_py = "[" + ", ".join(f'[{b[0]}, {b[1] if b[1] is not None else "None"}]' for b in bounds) + "]"
-        self._add_code_line(f"var_names = {repr(var_names)}")
-        # Emit alias comments for original bracket notation for string-indexed 1D variables (e.g., y['G1']) to satisfy tests
-        for vn in var_names:
-            if "_" in vn and "[" not in vn:
-                base, rest = vn.split("_", 1)
-                # Only single underscore parts (avoid multi-dim) and rest without further underscores means original was base[rest]
-                if rest and base and rest.replace("_", "").isalnum():
-                    # Heuristic: emit comment reproducing bracket style used in tests
-                    self._add_code_line(f"# Alias: {base}['{rest}']")
-        self._add_code_line(f"bounds = {bounds_py}")
-        self._add_code_line(f"integrality = {integrality}")
+        self._emit_variable_metadata(var_names, bounds, integrality)
 
     def _eval_expr(self, expr, env=None):
         if not hasattr(self, "_expr_evaluator"):
@@ -3470,55 +3492,48 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if isinstance(const, (int, float)):
                 self.obj_const_offset += sign * float(const)
 
-    def _accumulate_objective_binop(self, expr, c):
-        """
-        Helper to accumulate coefficients for the objective vector c for a binop expression.
-        Handles sum/binop combinations and applies the operator elementwise, including constants.
-        """
+    def _accumulate_objective_sum_binop(self, expr, c):
         left = expr["left"]
         right = expr["right"]
-        left_type = left.get("type") if isinstance(left, dict) else None
-        right_type = right.get("type") if isinstance(right, dict) else None
+        if expr["op"] not in ("+", "-"):
+            raise self._unsupported_operator_error("objective binop", expr["op"])
+        self._accumulate_objective_sum(left, c, sign=1.0)
+        self._accumulate_objective_sum(right, c, sign=1.0 if expr["op"] == "+" else -1.0)
 
-        if left_type == "sum" and right_type == "sum":
-            if expr["op"] == "+":
-                self._accumulate_objective_sum(left, c, sign=1.0)
-                self._accumulate_objective_sum(right, c, sign=1.0)
-            elif expr["op"] == "-":
-                self._accumulate_objective_sum(left, c, sign=1.0)
-                self._accumulate_objective_sum(right, c, sign=-1.0)
-            else:
-                raise self._unsupported_operator_error("objective binop", expr["op"])
-            return
+    def _accumulate_objective_sum_operand(self, sum_node, other_node, operator, c):
+        self._accumulate_objective_sum(sum_node, c, sign=1.0)
+        coef_dict, const = self._eval_expr(other_node)
+        self._update_vector_from_coef_dict(coef_dict, c, op="+" if operator == "+" else "-")
+        if isinstance(const, (int, float)):
+            self.obj_const_offset += (1.0 if operator == "+" else -1.0) * float(const)
 
-        if left_type == "sum":
-            self._accumulate_objective_sum(left, c, sign=1.0)
-            coef_dict, const = self._eval_expr(right)
-            if expr["op"] == "+":
-                self._update_vector_from_coef_dict(coef_dict, c, op="+")
-                if isinstance(const, (int, float)):
-                    self.obj_const_offset += float(const)
-            elif expr["op"] == "-":
-                self._update_vector_from_coef_dict(coef_dict, c, op="-")
-                if isinstance(const, (int, float)):
-                    self.obj_const_offset -= float(const)
-            else:
-                raise self._unsupported_operator_error("objective binop", expr["op"])
-            return
-
-        if right_type == "sum":
-            self._accumulate_objective_sum(right, c, sign=(1.0 if expr["op"] == "+" else -1.0))
-            coef_dict, const = self._eval_expr(left)
-            self._update_vector_from_coef_dict(coef_dict, c, op="+")
-            if isinstance(const, (int, float)):
-                self.obj_const_offset += float(const)
-            return
-
-        # Neither side is a sum
+    def _accumulate_objective_plain_binop(self, expr, c):
         coef_dict, const = self._eval_expr(expr)
         self._update_vector_from_coef_dict(coef_dict, c)
         if isinstance(const, (int, float)):
             self.obj_const_offset += float(const)
+
+    def _accumulate_objective_operand(self, operand, c):
+        coef_dict, const = self._eval_expr(operand)
+        self._update_vector_from_coef_dict(coef_dict, c, op="+")
+        if isinstance(const, (int, float)):
+            self.obj_const_offset += float(const)
+
+    def _accumulate_objective_binop(self, expr, c):
+        """Accumulate objective coefficients for binops containing zero, one, or two sums."""
+        left = expr["left"]
+        right = expr["right"]
+        left_is_sum = isinstance(left, dict) and left.get("type") == "sum"
+        right_is_sum = isinstance(right, dict) and right.get("type") == "sum"
+        if left_is_sum and right_is_sum:
+            self._accumulate_objective_sum_binop(expr, c)
+        elif left_is_sum:
+            self._accumulate_objective_sum_operand(left, right, expr["op"], c)
+        elif right_is_sum:
+            self._accumulate_objective_sum(right, c, sign=1.0 if expr["op"] == "+" else -1.0)
+            self._accumulate_objective_operand(left, c)
+        else:
+            self._accumulate_objective_plain_binop(expr, c)
 
     def _eval_multi_index_values(self, expr, env, eval_index_expr):
         index_values = []
@@ -4980,48 +4995,38 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         row[self.var_indices[variable_name]] = -1.0 if value == 1 else 1.0
         append_ub_row(row, 0.0 if value == 1 else 1.0)
 
+    def _implication_boolean_target(self, consequent, value):
+        variable = self._implication_boolean_equality_variable(consequent, value)
+        if variable is not None and self._is_boolean_decision_variable(variable):
+            return variable
+        left = consequent.get("left")
+        right = consequent.get("right")
+        operators = (">=", "==") if value == 1 else ("<=", "==")
+        if consequent.get("op") in operators and self._is_boolean_decision_variable(left) and self._is_implication_number(right, value):
+            return left
+        return None
+
+    def _handle_boolean_antecedent_target(self, antecedent_name, consequent, value, env, append_ub_row):
+        variable_node = self._implication_boolean_target(consequent, value)
+        if variable_node is None:
+            return False
+        self._emit_boolean_implication_row(
+            antecedent_name,
+            self._implication_variable_name(variable_node, env),
+            value,
+            append_ub_row,
+        )
+        return True
+
     def _handle_boolean_antecedent_implication(self, antecedent_node, consequent_node, env, append_ub_row):
         antecedent_name = self._implication_variable_name(antecedent_node, env)
         if not (isinstance(consequent_node, dict) and consequent_node.get("type") == "constraint"):
             raise SemanticError("Implication consequent must be a constraint")
-        consequent_op = consequent_node.get("op")
-        left = consequent_node.get("left")
-        right = consequent_node.get("right")
-        consequent_var_one = self._implication_boolean_equality_variable(consequent_node, 1)
-        force_one = consequent_var_one and self._is_boolean_decision_variable(consequent_var_one)
-        force_one = force_one or (
-            consequent_op in (">=", "==")
-            and self._is_boolean_decision_variable(left)
-            and self._is_implication_number(right, 1)
-        )
-        if force_one:
-            variable_node = consequent_var_one if consequent_var_one else left
-            self._emit_boolean_implication_row(
-                antecedent_name,
-                self._implication_variable_name(variable_node, env),
-                1,
-                append_ub_row,
-            )
+        if self._handle_boolean_antecedent_target(antecedent_name, consequent_node, 1, env, append_ub_row):
             return
-
-        consequent_var_zero = self._implication_boolean_equality_variable(consequent_node, 0)
-        force_zero = consequent_var_zero and self._is_boolean_decision_variable(consequent_var_zero)
-        force_zero = force_zero or (
-            consequent_op in ("<=", "==")
-            and self._is_boolean_decision_variable(left)
-            and self._is_implication_number(right, 0)
-        )
-        if force_zero:
-            variable_node = consequent_var_zero if consequent_var_zero else left
-            self._emit_boolean_implication_row(
-                antecedent_name,
-                self._implication_variable_name(variable_node, env),
-                0,
-                append_ub_row,
-            )
+        if self._handle_boolean_antecedent_target(antecedent_name, consequent_node, 0, env, append_ub_row):
             return
-
-        if consequent_op in ("<=", "<", ">=", ">", "=="):
+        if consequent_node.get("op") in ("<=", "<", ">=", ">", "=="):
             self._gate_affine_implication_consequent(
                 antecedent_node,
                 1,
@@ -5542,49 +5547,58 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             weights[variable_name] = weights.get(variable_name, 0.0) + weight
         return weights, left_sum[1] + right_sum[1]
 
+    def _reified_boolean_sum_parts(self, boolean_node, inequality, env):
+        if not self._is_declared_boolean_var_node(boolean_node):
+            return None
+        if not (
+            isinstance(inequality, dict)
+            and inequality.get("type") == "constraint"
+            and inequality.get("op") == ">="
+            and isinstance(inequality.get("right"), dict)
+            and inequality["right"].get("type") == "number"
+        ):
+            return None
+        collected = self._collect_boolean_sum(inequality.get("left"))
+        if collected is None:
+            return None
+        variable_weights, constant_offset = collected
+        threshold = inequality["right"].get("value") - constant_offset
+        boolean_name = (
+            boolean_node["value"]
+            if boolean_node.get("type") == "name"
+            else self._multi_indexed_var_name(boolean_node, env)
+        )
+        return boolean_name, variable_weights, threshold
+
+    def _emit_reified_boolean_sum_rows(self, boolean_name, variable_weights, threshold, state):
+        maximum_sum = sum(variable_weights.values())
+        if threshold <= 0 or threshold > maximum_sum:
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[boolean_name]] = 1.0
+            self._append_sparse_row(state, row, 1.0 if threshold <= 0 else 0.0, sense="eq")
+            return
+
+        lower_row = [0.0] * len(self.var_names)
+        lower_row[self.var_indices[boolean_name]] = threshold
+        for variable_name, weight in variable_weights.items():
+            lower_row[self.var_indices[variable_name]] -= weight
+        self._append_sparse_row(state, lower_row, 0.0, sense="ub")
+
+        upper_row = [0.0] * len(self.var_names)
+        for variable_name, weight in variable_weights.items():
+            upper_row[self.var_indices[variable_name]] += weight
+        upper_row[self.var_indices[boolean_name]] = -(maximum_sum - threshold + 1)
+        self._append_sparse_row(state, upper_row, threshold - 1, sense="ub")
+
     def _try_handle_reified_boolean_sum(self, left, right, op_sym_top, env, state):
         if op_sym_top != "==":
             return False
-        orientations = ((left, right), (right, left))
-        for boolean_node, inequality in orientations:
-            if not self._is_declared_boolean_var_node(boolean_node):
+        for boolean_node, inequality in ((left, right), (right, left)):
+            parts = self._reified_boolean_sum_parts(boolean_node, inequality, env)
+            if parts is None:
                 continue
-            if not (
-                isinstance(inequality, dict)
-                and inequality.get("type") == "constraint"
-                and inequality.get("op") == ">="
-                and isinstance(inequality.get("right"), dict)
-                and inequality["right"].get("type") == "number"
-            ):
-                continue
-            collected = self._collect_boolean_sum(inequality.get("left"))
-            if collected is None:
-                continue
-            variable_weights, constant_offset = collected
-            threshold = inequality["right"].get("value") - constant_offset
-            maximum_sum = sum(variable_weights.values())
-            boolean_name = (
-                boolean_node["value"]
-                if boolean_node.get("type") == "name"
-                else self._multi_indexed_var_name(boolean_node, env)
-            )
-            if threshold <= 0 or threshold > maximum_sum:
-                row = [0.0] * len(self.var_names)
-                row[self.var_indices[boolean_name]] = 1.0
-                self._append_sparse_row(state, row, 1.0 if threshold <= 0 else 0.0, sense="eq")
-                return True
-
-            lower_row = [0.0] * len(self.var_names)
-            lower_row[self.var_indices[boolean_name]] = threshold
-            for variable_name, weight in variable_weights.items():
-                lower_row[self.var_indices[variable_name]] -= weight
-            self._append_sparse_row(state, lower_row, 0.0, sense="ub")
-
-            upper_row = [0.0] * len(self.var_names)
-            for variable_name, weight in variable_weights.items():
-                upper_row[self.var_indices[variable_name]] += weight
-            upper_row[self.var_indices[boolean_name]] = -(maximum_sum - threshold + 1)
-            self._append_sparse_row(state, upper_row, threshold - 1, sense="ub")
+            boolean_name, variable_weights, threshold = parts
+            self._emit_reified_boolean_sum_rows(boolean_name, variable_weights, threshold, state)
             return True
         return False
 
@@ -5961,6 +5975,55 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         left, right, operator = self._normalize_comparison_literal_constraint(constraint)
         return False, left, right, operator
 
+    def _handle_normalized_boolean_constraint(
+        self,
+        left,
+        right,
+        operator,
+        env,
+        bool_expr_var,
+        state,
+        handle_constraint,
+    ):
+        rewritten_not = self._rewrite_not_literal_constraint(left, right, operator)
+        if rewritten_not is not None:
+            new_constraint, marks_not_of_equality = rewritten_not
+            if marks_not_of_equality:
+                self._add_code_line("# encoded != (NOT of ==)")
+            handle_constraint(new_constraint, env=env)
+            return True
+        if self._try_tie_boolean_variable_expression(left, right, operator, env, bool_expr_var, state):
+            return True
+        if self._try_handle_reified_boolean_sum(left, right, operator, env, state):
+            return True
+        literal_result = self._try_handle_bool_tree_literal_comparison(
+            left,
+            right,
+            operator,
+            env,
+            bool_expr_var,
+            state,
+        )
+        if literal_result is not None:
+            handled, left, right = literal_result
+            if handled:
+                return True
+        if self._try_handle_boolean_variable_relation(left, right, operator, env, bool_expr_var, state):
+            return True
+        left = self._unwrap_parenthesized_node(left)
+        right = self._unwrap_parenthesized_node(right)
+        if self._try_handle_and_or_literal_fast_path(left, right, operator, env, bool_expr_var, state):
+            return True
+        if isinstance(left, dict) and left.get("type") in ("and", "or") and operator == "==":
+            if not (self._is_boolean_literal_node(right) and right.get("value") is True):
+                return True
+            if left.get("type") == "and":
+                self._try_handle_asserted_and(left, right, operator, env, handle_constraint)
+            else:
+                self._try_handle_asserted_or(left, right, operator, env, state)
+            return True
+        return False
+
     def _handle_normalized_constraint(
         self,
         constraint,
@@ -5977,42 +6040,15 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if operator == "!=":
             self._handle_not_equal_constraint(left, right, env, state)
             return
-        rewritten_not = self._rewrite_not_literal_constraint(left, right, operator)
-        if rewritten_not is not None:
-            new_constraint, marks_not_of_equality = rewritten_not
-            if marks_not_of_equality:
-                self._add_code_line("# encoded != (NOT of ==)")
-            handle_constraint(new_constraint, env=env)
-            return
-        if self._try_tie_boolean_variable_expression(left, right, operator, env, bool_expr_var, state):
-            return
-        if self._try_handle_reified_boolean_sum(left, right, operator, env, state):
-            return
-        literal_result = self._try_handle_bool_tree_literal_comparison(
+        if self._handle_normalized_boolean_constraint(
             left,
             right,
             operator,
             env,
             bool_expr_var,
             state,
-        )
-        if literal_result is not None:
-            handled, left, right = literal_result
-            if handled:
-                return
-        if self._try_handle_boolean_variable_relation(left, right, operator, env, bool_expr_var, state):
-            return
-        left = self._unwrap_parenthesized_node(left)
-        right = self._unwrap_parenthesized_node(right)
-        if self._try_handle_and_or_literal_fast_path(left, right, operator, env, bool_expr_var, state):
-            return
-        if isinstance(left, dict) and left.get("type") in ("and", "or") and operator == "==":
-            if not (self._is_boolean_literal_node(right) and right.get("value") is True):
-                return
-            if left.get("type") == "and":
-                self._try_handle_asserted_and(left, right, operator, env, handle_constraint)
-            else:
-                self._try_handle_asserted_or(left, right, operator, env, state)
+            handle_constraint,
+        ):
             return
         self._emit_plain_linear_constraint(constraint, env, append_eq_row, append_ub_row)
 
