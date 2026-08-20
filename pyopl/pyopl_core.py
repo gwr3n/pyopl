@@ -3546,6 +3546,54 @@ class OPLCompiler:
 
         raise SemanticError(f"Named range '{rng_name}' not found for {context}.")
 
+    def _resolve_comprehension_name(self, name: Any, env: dict[str, Any], working_data: dict[str, Any], *, index: bool = False) -> Any:
+        if isinstance(name, str) and name in env:
+            return env[name]
+        if isinstance(name, str) and name in working_data:
+            return working_data[name]
+        kind = "index name" if index else "name"
+        raise SemanticError(f"Unknown {kind} '{name}' in set comprehension.")
+
+    def _eval_comprehension_indexed_name(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+        name = expr.get("name")
+        if not isinstance(name, str):
+            raise SemanticError("Indexed name in set comprehension is missing a name.")
+        value = working_data.get(name)
+        indices = [self._eval_comprehension_expr(index, env, working_data) for index in expr.get("dimensions", [])]
+        for index in indices:
+            if isinstance(value, dict):
+                value = value[index]
+            elif isinstance(value, (list, tuple)):
+                if isinstance(index, float) and index.is_integer():
+                    index = int(index)
+                if not isinstance(index, int):
+                    raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
+                value = value[index - 1]
+            else:
+                raise SemanticError(f"Cannot index '{name}' in set comprehension.")
+        return value
+
+    def _eval_comprehension_binop(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+        op = expr.get("op")
+        left = self._eval_comprehension_expr(expr.get("left"), env, working_data)
+        right = self._eval_comprehension_expr(expr.get("right"), env, working_data)
+        operations = {
+            "+": lambda: left + right,
+            "-": lambda: left - right,
+            "*": lambda: left * right,
+            "/": lambda: left / right,
+            "==": lambda: left == right,
+            "!=": lambda: left != right,
+            "<": lambda: left < right,
+            "<=": lambda: left <= right,
+            ">": lambda: left > right,
+            ">=": lambda: left >= right,
+        }
+        operation = operations.get(op)
+        if operation is not None:
+            return operation()
+        raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
+
     def _eval_comprehension_expr(self, expr: Any, env: dict[str, Any], working_data: dict[str, Any]) -> Any:
         if not isinstance(expr, dict):
             return expr
@@ -3557,39 +3605,13 @@ class OPLCompiler:
         if expr_type == "string_literal":
             return expr.get("value")
         if expr_type == "name":
-            name = expr.get("value")
-            if isinstance(name, str) and name in env:
-                return env[name]
-            if isinstance(name, str) and name in working_data:
-                return working_data[name]
-            raise SemanticError(f"Unknown name '{name}' in set comprehension.")
+            return self._resolve_comprehension_name(expr.get("value"), env, working_data)
         if expr_type == "name_reference_index":
-            name = expr.get("name")
-            if isinstance(name, str) and name in env:
-                return env[name]
-            if isinstance(name, str) and name in working_data:
-                return working_data[name]
-            raise SemanticError(f"Unknown index name '{name}' in set comprehension.")
+            return self._resolve_comprehension_name(expr.get("name"), env, working_data, index=True)
         if expr_type == "number_literal_index":
             return expr.get("value")
         if expr_type == "indexed_name":
-            name = expr.get("name")
-            if not isinstance(name, str):
-                raise SemanticError("Indexed name in set comprehension is missing a name.")
-            value = working_data.get(name)
-            indices = [self._eval_comprehension_expr(index, env, working_data) for index in expr.get("dimensions", [])]
-            for index in indices:
-                if isinstance(value, dict):
-                    value = value[index]
-                elif isinstance(value, (list, tuple)):
-                    if isinstance(index, float) and index.is_integer():
-                        index = int(index)
-                    if not isinstance(index, int):
-                        raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
-                    value = value[index - 1]
-                else:
-                    raise SemanticError(f"Cannot index '{name}' in set comprehension.")
-            return value
+            return self._eval_comprehension_indexed_name(expr, env, working_data)
         if expr_type == "parenthesized_expression":
             return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
         if expr_type == "not":
@@ -3599,29 +3621,7 @@ class OPLCompiler:
             right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
             return left and right if expr_type == "and" else left or right
         if expr_type == "binop":
-            op = expr.get("op")
-            left = self._eval_comprehension_expr(expr.get("left"), env, working_data)
-            right = self._eval_comprehension_expr(expr.get("right"), env, working_data)
-            if op == "+":
-                return left + right
-            if op == "-":
-                return left - right
-            if op == "*":
-                return left * right
-            if op == "/":
-                return left / right
-            if op == "==":
-                return left == right
-            if op == "!=":
-                return left != right
-            if op == "<":
-                return left < right
-            if op == "<=":
-                return left <= right
-            if op == ">":
-                return left > right
-            if op == ">=":
-                return left >= right
+            return self._eval_comprehension_binop(expr, env, working_data)
         raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
 
     def _materialize_set_of_tuples_comprehensions(
