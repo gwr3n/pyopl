@@ -2596,28 +2596,34 @@ class OPLParser(Parser):
         func = p.NAME
         args = p.arg_list
         if func in UNARY_MATH_FUNCTIONS:
-            if len(args) != 1:
-                raise SemanticError(f"{func}(...) takes exactly one argument.", lineno=p.lineno)
-            arg_type = args[0].get("sem_type")
-            if arg_type not in ("int", "int+", "float", "float+"):
-                raise SemanticError(f"{func}(...) expects a numeric argument.", lineno=p.lineno)
-            result_type = UNARY_MATH_FUNCTIONS[func][1]
-            if result_type == "same":
-                result_type = "float" if arg_type in ("float", "float+") else "int"
-            return {"type": "funcall", "name": func, "args": [args[0]], "sem_type": result_type}
+            return self._parse_unary_math_call(func, args, p.lineno)
         if func in ("maxl", "minl"):
-            if len(args) == 0:
-                raise SemanticError(f"{func}(...) requires at least one argument.", lineno=p.lineno)
-            # Enforce numeric args at parse-time to catch obvious mistakes early
-            for a in args:
-                at = a.get("sem_type")
-                if at not in ("int", "int+", "float", "float+"):
-                    raise SemanticError(f"{func}(...) expects numeric arguments.", lineno=p.lineno)
-            sem = "float" if any(a.get("sem_type") in ("float", "float+") for a in args) else "int"
-            return {"type": func, "args": args, "sem_type": sem}
+            return self._parse_extremum_call(func, args, p.lineno)
         raise SemanticError(
             f"Unsupported function '{func}'. Supported functions: {_supported_function_names_message()}.", lineno=p.lineno
         )
+
+    @staticmethod
+    def _parse_unary_math_call(func, args, lineno):
+        if len(args) != 1:
+            raise SemanticError(f"{func}(...) takes exactly one argument.", lineno=lineno)
+        arg_type = args[0].get("sem_type")
+        if arg_type not in ("int", "int+", "float", "float+"):
+            raise SemanticError(f"{func}(...) expects a numeric argument.", lineno=lineno)
+        result_type = UNARY_MATH_FUNCTIONS[func][1]
+        if result_type == "same":
+            result_type = "float" if arg_type in ("float", "float+") else "int"
+        return {"type": "funcall", "name": func, "args": [args[0]], "sem_type": result_type}
+
+    @staticmethod
+    def _parse_extremum_call(func, args, lineno):
+        if not args:
+            raise SemanticError(f"{func}(...) requires at least one argument.", lineno=lineno)
+        for arg in args:
+            if arg.get("sem_type") not in ("int", "int+", "float", "float+"):
+                raise SemanticError(f"{func}(...) expects numeric arguments.", lineno=lineno)
+        result_type = "float" if any(arg.get("sem_type") in ("float", "float+") for arg in args) else "int"
+        return {"type": func, "args": args, "sem_type": result_type}
 
     # min(i in I : cond) expr   — juxtaposition
     @_("AGG_MIN sum_index_header nonparen_expression")
@@ -2669,6 +2675,86 @@ class OPLParser(Parser):
     # Indexed variable reference: x[i], x[i,j], etc.
     @_("NAME indexed_dimensions")  # type: ignore
     def primary(self, p):
+        return self._parse_indexed_reference(p)
+
+    def _validate_indexed_dimension(self, declared_dim, used_index, dimension_number, name, lineno):
+        dim_type = declared_dim["type"]
+        if dim_type in ("range_index", "named_range_dimension"):
+            allowed_types = {
+                "number_literal_index",
+                "name_reference_index",
+                "binop",
+                "uminus",
+                "parenthesized_expression",
+                "field_access",
+                "field_access_index",
+            }
+            if used_index["type"] not in allowed_types:
+                raise SemanticError(
+                    f"Unsupported index type for integer/range dimension: {used_index['type']}",
+                    lineno=lineno,
+                )
+            if used_index["type"] == "number_literal_index" and dim_type == "range_index":
+                start_bound = declared_dim["start"]
+                end_bound = declared_dim["end"]
+                if (
+                    isinstance(start_bound, dict)
+                    and start_bound.get("type") == "number"
+                    and isinstance(end_bound, dict)
+                    and end_bound.get("type") == "number"
+                ):
+                    if not (start_bound["value"] <= used_index["value"] <= end_bound["value"]):
+                        raise SemanticError(
+                            f"Index {used_index['value']} for dimension {dimension_number} of '{name}' is out of declared range [{start_bound['value']}..{end_bound['value']}].",
+                            lineno=lineno,
+                        )
+                return used_index
+            index_type = used_index.get("sem_type")
+            if index_type not in ("int", "int+"):
+                logger.debug(
+                    f"[SEMANTIC] Rejecting index for dim {dimension_number} of '{name}': "
+                    f"type={used_index['type']}, sem_type={index_type}"
+                )
+                raise SemanticError(
+                    f"Index expression for dimension {dimension_number} of '{name}' must be integer-valued, got type '{index_type}'.",
+                    lineno=lineno,
+                )
+            return used_index
+
+        if dim_type != "named_set_dimension":
+            raise SemanticError(
+                f"Dimension {dimension_number} of '{name}' is not indexable. Declared as type: {dim_type}.",
+                lineno=lineno,
+            )
+
+        set_info = self.symbol_table.get_symbol(declared_dim["name"])
+        set_value = set_info.get("value") or {}
+        tuple_type = set_value.get("tuple_type") if isinstance(set_value, dict) else None
+        base_type = set_value.get("base_type") if isinstance(set_value, dict) else None
+        index_type = used_index.get("type")
+        index_sem_type = used_index.get("sem_type")
+        if tuple_type:
+            if (
+                index_type in ("name_reference_index", "name") and index_sem_type == tuple_type
+            ) or index_type == "tuple_literal":
+                return used_index
+            raise SemanticError(
+                f"Index expression for tuple set dimension {dimension_number} of '{name}' must be of tuple type '{tuple_type}', got type '{index_sem_type}'.",
+                lineno=lineno,
+            )
+        if base_type and index_sem_type != base_type:
+            raise SemanticError(
+                f"Index expression for set dimension {dimension_number} of '{name}' must be {base_type}-valued, got type '{index_sem_type}'.",
+                lineno=lineno,
+            )
+        if not base_type and index_sem_type not in ("string", "int", "int+"):
+            raise SemanticError(
+                f"Index expression for set dimension {dimension_number} of '{name}' must be string- or integer-valued, got type '{index_sem_type}'.",
+                lineno=lineno,
+            )
+        return used_index
+
+    def _parse_indexed_reference(self, p):
         # Look up the symbol and check dimensions
         try:
             symbol_info = self.symbol_table.get_symbol(p.NAME)
@@ -2708,112 +2794,10 @@ class OPLParser(Parser):
                 lineno=p.lineno,
             )
 
-        processed_dims = []
-        for i, (declared_dim_spec, used_index_spec) in enumerate(zip(declared_dims, used_dims)):
-            dim_type = declared_dim_spec["type"]
-            # Accept index expressions (binop, uminus, parenthesized_expression, field_access, etc.)
-            if dim_type in ["range_index", "named_range_dimension"]:
-                # Integer/range dimension: enforce integer-typed index
-                if used_index_spec["type"] in [
-                    "number_literal_index",
-                    "name_reference_index",
-                    "binop",
-                    "uminus",
-                    "parenthesized_expression",
-                    "field_access",
-                    "field_access_index",
-                ]:
-                    # For number_literal_index, check bounds if declared_dim_spec is range_index and bounds are constant numbers
-                    if used_index_spec["type"] == "number_literal_index" and dim_type == "range_index":
-                        start_bound = declared_dim_spec["start"]
-                        end_bound = declared_dim_spec["end"]
-                        # Only check bounds if both are AST number nodes
-                        if (
-                            isinstance(start_bound, dict)
-                            and start_bound.get("type") == "number"
-                            and isinstance(end_bound, dict)
-                            and end_bound.get("type") == "number"
-                        ):
-                            s_val = start_bound["value"]
-                            e_val = end_bound["value"]
-                            if not (s_val <= used_index_spec["value"] <= e_val):
-                                raise SemanticError(
-                                    f"Index {used_index_spec['value']} for dimension {i+1} of '{p.NAME}' is out of declared range [{s_val}..{e_val}].",
-                                    lineno=p.lineno,
-                                )
-                    # Otherwise, skip static check (defer to codegen/runtime)
-                    # For all non-literal indices, check that the semantic type is integer
-                    index_sem_type = used_index_spec.get("sem_type", None)
-                    if used_index_spec["type"] != "number_literal_index":
-                        # Accept field_access as index if its sem_type is int or int+
-                        if index_sem_type not in ["int", "int+"]:
-                            logger.debug(
-                                f"[SEMANTIC] Rejecting index for dim {i+1} of '{p.NAME}': type={used_index_spec['type']}, sem_type={index_sem_type}"
-                            )
-                            raise SemanticError(
-                                f"Index expression for dimension {i+1} of '{p.NAME}' must be integer-valued, got type '{index_sem_type}'.",
-                                lineno=p.lineno,
-                            )
-                        else:
-                            logger.debug(
-                                f"[SEMANTIC] Accepting index for dim {i+1} of '{p.NAME}': type={used_index_spec['type']}, sem_type={index_sem_type}"
-                            )
-                    processed_dims.append(used_index_spec)
-                else:
-                    logger.debug(f"[SEMANTIC] Unsupported index type for integer/range dimension: {used_index_spec['type']}")
-                    raise SemanticError(
-                        f"Unsupported index type for integer/range dimension: {used_index_spec['type']}",
-                        lineno=p.lineno,
-                    )
-            elif dim_type == "named_set_dimension":
-                # Set dimension: allow tuple-typed index if set is a set of tuples
-                set_name = declared_dim_spec["name"]
-                set_info = self.symbol_table.get_symbol(set_name)
-                tuple_type = None
-                base_type = None
-                if set_info.get("value") and isinstance(set_info["value"], dict):
-                    if "tuple_type" in set_info["value"]:
-                        tuple_type = set_info["value"]["tuple_type"]
-                    if "base_type" in set_info["value"]:
-                        base_type = set_info["value"]["base_type"]
-
-                if tuple_type:
-                    # Accept index if its sem_type matches the tuple type (or is a tuple_literal)
-                    idx_type = used_index_spec.get("type")
-                    idx_sem_type = used_index_spec.get("sem_type")
-                    if idx_type in ["name_reference_index", "name"] and idx_sem_type == tuple_type:
-                        processed_dims.append(used_index_spec)
-                    elif idx_type == "tuple_literal":
-                        processed_dims.append(used_index_spec)
-                    else:
-                        raise SemanticError(
-                            f"Index expression for tuple set dimension {i+1} of '{p.NAME}' must be of tuple type '{tuple_type}', got type '{idx_sem_type}'.",
-                            lineno=p.lineno,
-                        )
-                else:
-                    # Typed scalar set: require the index to match the set's base type (OPL semantics).
-                    # If the set is untyped (no base_type), allow string or integer indices for compatibility.
-                    idx_sem_type = used_index_spec.get("sem_type")
-                    if base_type:
-                        if idx_sem_type != base_type:
-                            raise SemanticError(
-                                f"Index expression for set dimension {i+1} of '{p.NAME}' must be {base_type}-valued, got type '{idx_sem_type}'.",
-                                lineno=p.lineno,
-                            )
-                        processed_dims.append(used_index_spec)
-                    else:
-                        # Untyped set: accept string or integer iterator indices
-                        if idx_sem_type not in ["string", "int", "int+"]:
-                            raise SemanticError(
-                                f"Index expression for set dimension {i+1} of '{p.NAME}' must be string- or integer-valued, got type '{idx_sem_type}'.",
-                                lineno=p.lineno,
-                            )
-                        processed_dims.append(used_index_spec)
-            else:
-                raise SemanticError(
-                    f"Dimension {i+1} of '{p.NAME}' is not indexable. Declared as type: {dim_type}.",
-                    lineno=p.lineno,
-                )
+        processed_dims = [
+            self._validate_indexed_dimension(declared_dim, used_dim, index, p.NAME, p.lineno)
+            for index, (declared_dim, used_dim) in enumerate(zip(declared_dims, used_dims), 1)
+        ]
 
         # For tuple_array, expose underlying tuple_type as semantic type so field access works
         sem_type = symbol_info["type"]

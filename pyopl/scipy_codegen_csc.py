@@ -4690,6 +4690,36 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         ):
             raise SemanticError("Constraint references parameter with no data provided")
 
+    def _collect_passive_bound_for_pair(self, variable_node, number_node, operator, env, variable_on_left):
+        vname = (
+            self._multi_indexed_var_name(variable_node, env)
+            if variable_node.get("type") == "indexed_name"
+            else variable_node["value"]
+        )
+        value = float(number_node.get("value"))
+        normalized_operator = operator if variable_on_left else {">=": "<=", "<=": ">=", "==": "=="}[operator]
+
+        if normalized_operator == ">=":
+            self._collected_lbs[vname] = max(self._collected_lbs.get(vname, -float("inf")), value)
+        elif normalized_operator == "<=":
+            self._collected_ubs[vname] = min(self._collected_ubs.get(vname, float("inf")), value)
+        else:
+            self._collected_lbs[vname] = max(self._collected_lbs.get(vname, -float("inf")), value)
+            self._collected_ubs[vname] = min(self._collected_ubs.get(vname, float("inf")), value)
+
+        if variable_node.get("type") != "indexed_name":
+            return
+        base_symbol = variable_node.get("name")
+        base_operator = operator if variable_on_left else {">=": "<=", "<=": ">=", "==": "=="}[operator]
+        if base_operator in (">=", "=="):
+            current_lower = self._collected_lbs.get(base_symbol)
+            if current_lower is None or value < current_lower:
+                self._collected_lbs[base_symbol] = max(self._collected_lbs.get(base_symbol, -float("inf")), value)
+        if base_operator in ("<=", "=="):
+            current_upper = self._collected_ubs.get(base_symbol)
+            if current_upper is None or value > current_upper:
+                self._collected_ubs[base_symbol] = min(self._collected_ubs.get(base_symbol, float("inf")), value)
+
     def _collect_passive_constraint_bounds(self, constr, env, bool_expr_var) -> None:
         """Collect simple variable bounds for later big-M tightening without changing core constraint handling."""
 
@@ -4717,50 +4747,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             left = constr.get("left")
             right = constr.get("right")
             if self._is_var_reference_node(left) and self._is_number_node(right):
-                vname = self._multi_indexed_var_name(left, env) if left.get("type") == "indexed_name" else left["value"]
-                val = float(right.get("value"))
-                if op_sym == ">=":
-                    tighten_lower_bound(vname, val)
-                elif op_sym == "<=":
-                    tighten_upper_bound(vname, val)
-                elif op_sym == "==":
-                    tighten_bounds(vname, val)
-                if left.get("type") == "indexed_name":
-                    base_sym = left.get("name")
-                    if op_sym in (">=", "=="):
-                        cur_lb = self._collected_lbs.get(base_sym)
-                        if cur_lb is None or val < cur_lb:
-                            tighten_lower_bound(base_sym, val)
-                    if op_sym in ("<=", "=="):
-                        cur_ub = self._collected_ubs.get(base_sym)
-                        if cur_ub is None or val > cur_ub:
-                            tighten_upper_bound(base_sym, val)
+                self._collect_passive_bound_for_pair(left, right, op_sym, env, variable_on_left=True)
             elif self._is_var_reference_node(right) and self._is_number_node(left):
-                vname = self._multi_indexed_var_name(right, env) if right.get("type") == "indexed_name" else right["value"]
-                val = float(left.get("value"))
-                if op_sym == ">=":
-                    tighten_upper_bound(vname, val)
-                elif op_sym == "<=":
-                    tighten_lower_bound(vname, val)
-                elif op_sym == "==":
-                    tighten_bounds(vname, val)
-                if right.get("type") == "indexed_name":
-                    base_sym = right.get("name")
-                    if op_sym == ">=":
-                        cur_ub = self._collected_ubs.get(base_sym)
-                        if cur_ub is None or val > cur_ub:
-                            tighten_upper_bound(base_sym, val)
-                    elif op_sym == "<=":
-                        cur_lb = self._collected_lbs.get(base_sym)
-                        if cur_lb is None or val < cur_lb:
-                            tighten_lower_bound(base_sym, val)
-                    elif op_sym == "==":
-                        cur_lb = self._collected_lbs.get(base_sym)
-                        if cur_lb is None or val < cur_lb:
-                            tighten_lower_bound(base_sym, val)
-                        cur_ub = self._collected_ubs.get(base_sym)
-                        if cur_ub is None or val > cur_ub:
-                            tighten_upper_bound(base_sym, val)
+                self._collect_passive_bound_for_pair(right, left, op_sym, env, variable_on_left=False)
         except Exception:
             pass
 
