@@ -1125,115 +1125,102 @@ class GurobiCodeGenerator:
             return (None, None)
         return (None, None)
 
-    def _linear_bounds_safe(self, node):
-        """Attempt to compute (lower, upper) bounds for a linear expression tree.
-        Returns tuple (L,U) or None if unsupported. Mirrors subset of _linear_bounds earlier.
-        """
-        # Fast path for variable / indexed_name with collected bounds
-        if isinstance(node, dict) and node.get("type") in ("name", "indexed_name") and hasattr(self, "_collected_lbs"):
-            base_sym = node.get("value") if node.get("type") == "name" else node.get("name")
-            lb = self._collected_lbs.get(base_sym)
-            ub = self._collected_ubs.get(base_sym)
-            # Merge with static type-derived bounds
-            vL, vU = self._var_bounds_safe(node)
-            if vL is not None:
-                lb = max(lb, vL) if lb is not None else vL
-            if vU is not None:
-                ub = min(ub, vU) if ub is not None else vU
-            if lb is not None or ub is not None:
-                return (lb, ub)
-
-        def _lb_rec(n):
-            if not isinstance(n, dict):
-                return None
-            t = n.get("type")
-            if t in ("name", "indexed_name"):
-                # Try collected then fall back
-                if hasattr(self, "_collected_lbs"):
-                    base_sym = n.get("value") if t == "name" else n.get("name")
-                    lb = self._collected_lbs.get(base_sym)
-                    ub = self._collected_ubs.get(base_sym)
-                    vL, vU = self._var_bounds_safe(n)
-                    if vL is not None:
-                        lb = max(lb, vL) if lb is not None else vL
-                    if vU is not None:
-                        ub = min(ub, vU) if ub is not None else vU
-                    if lb is not None or ub is not None:
-                        return (lb, ub)
-                return self._var_bounds_safe(n)
-            if t == "number":
-                v = float(n.get("value", 0))
-                return (v, v)
-            if t == "binop":
-                op = n.get("op")
-                left = n.get("left")
-                right = n.get("right")
-                lB = _lb_rec(left)
-                rB = _lb_rec(right)
-                if lB is None or rB is None:
-                    return None
-                lL, lU = lB
-                rL, rU = rB
-                if op == "+":
-                    if None in (lL, lU, rL, rU):
-                        return (None, None)
-                    return (lL + rL, lU + rU)
-                if op == "-":
-                    if None in (lL, lU, rL, rU):
-                        return (None, None)
-                    return (lL - rU, lU - rL)
-                if op == "*":
-                    # allow constant * linear var
-                    if left.get("type") == "number":
-                        coef = float(left.get("value", 0))
-                        baseB = rB
-                    elif right.get("type") == "number":
-                        coef = float(right.get("value", 0))
-                        baseB = lB
-                    else:
-                        return None
-                    bL, bU = baseB
-                    if bL is None or bU is None:
-                        return (None, None)
-                    if coef >= 0:
-                        return (coef * bL, coef * bU)
-                    else:
-                        return (coef * bU, coef * bL)
-                return None
-            if t == "sum":
-                # conservative: attempt inner bounds * cardinality if finite
-                expr = n.get("expression")
-                innerB = _lb_rec(expr)
-                if innerB is None:
-                    return None
-                innerL, innerU = innerB
-                if innerL is None or innerU is None:
-                    return (None, None)
-                card = 1
-                for it in n.get("iterators", []):
-                    rng = it.get("range")
-                    if rng.get("type") == "range_specifier":
-                        s = rng.get("start")
-                        e = rng.get("end")
-                        if s.get("type") == "number" and e.get("type") == "number":
-                            try:
-                                a = int(float(s.get("value", 0)))
-                                b = int(float(e.get("value", 0)))
-                                if b >= a:
-                                    card *= b - a + 1
-                                else:
-                                    return (None, None)
-                            except Exception:
-                                return (None, None)
-                        else:
-                            return (None, None)
-                    else:
-                        return (None, None)
-                return (innerL * card, innerU * card)
+    def _collected_variable_bounds(self, node):
+        if not hasattr(self, "_collected_lbs"):
             return None
+        symbol = node.get("value") if node.get("type") == "name" else node.get("name")
+        lower = self._collected_lbs.get(symbol)
+        upper = self._collected_ubs.get(symbol)
+        type_lower, type_upper = self._var_bounds_safe(node)
+        if type_lower is not None:
+            lower = type_lower if lower is None else max(lower, type_lower)
+        if type_upper is not None:
+            upper = type_upper if upper is None else min(upper, type_upper)
+        return (lower, upper) if lower is not None or upper is not None else None
 
-        res = _lb_rec(node)
-        return res
+    @staticmethod
+    def _combine_linear_bounds(left_bounds, right_bounds, operator):
+        if None in (*left_bounds, *right_bounds):
+            return (None, None)
+        left_lower, left_upper = left_bounds
+        right_lower, right_upper = right_bounds
+        if operator == "+":
+            return (left_lower + right_lower, left_upper + right_upper)
+        if operator == "-":
+            return (left_lower - right_upper, left_upper - right_lower)
+        return None
+
+    @staticmethod
+    def _scale_linear_bounds(bounds, coefficient):
+        lower, upper = bounds
+        if lower is None or upper is None:
+            return (None, None)
+        if coefficient >= 0:
+            return (coefficient * lower, coefficient * upper)
+        return (coefficient * upper, coefficient * lower)
+
+    def _linear_binop_bounds(self, node, resolve):
+        left = node.get("left")
+        right = node.get("right")
+        operator = node.get("op")
+        left_bounds = resolve(left)
+        right_bounds = resolve(right)
+        if left_bounds is None or right_bounds is None:
+            return None
+        if operator in ("+", "-"):
+            return self._combine_linear_bounds(left_bounds, right_bounds, operator)
+        if operator != "*":
+            return None
+        if left.get("type") == "number":
+            return self._scale_linear_bounds(right_bounds, float(left.get("value", 0)))
+        if right.get("type") == "number":
+            return self._scale_linear_bounds(left_bounds, float(right.get("value", 0)))
+        return None
+
+    def _linear_sum_bounds(self, node, resolve):
+        inner_bounds = resolve(node.get("expression"))
+        if inner_bounds is None:
+            return None
+        lower, upper = inner_bounds
+        if lower is None or upper is None:
+            return (None, None)
+        cardinality = 1
+        for iterator in node.get("iterators", []):
+            range_node = iterator.get("range")
+            if range_node.get("type") != "range_specifier":
+                return (None, None)
+            start = range_node.get("start")
+            end = range_node.get("end")
+            if start.get("type") != "number" or end.get("type") != "number":
+                return (None, None)
+            try:
+                start_value = int(float(start.get("value", 0)))
+                end_value = int(float(end.get("value", 0)))
+            except (TypeError, ValueError):
+                return (None, None)
+            if end_value < start_value:
+                return (None, None)
+            cardinality *= end_value - start_value + 1
+        return (lower * cardinality, upper * cardinality)
+
+    def _linear_bounds_for_node(self, node):
+        if not isinstance(node, dict):
+            return None
+        node_type = node.get("type")
+        if node_type in ("name", "indexed_name"):
+            return self._collected_variable_bounds(node) or self._var_bounds_safe(node)
+        if node_type == "number":
+            value = float(node.get("value", 0))
+            return (value, value)
+        if node_type == "binop":
+            return self._linear_binop_bounds(node, self._linear_bounds_for_node)
+        if node_type == "sum":
+            return self._linear_sum_bounds(node, self._linear_bounds_for_node)
+        return None
+
+    def _linear_bounds_safe(self, node):
+        """Attempt to compute conservative bounds for a linear expression tree."""
+        return self._linear_bounds_for_node(node)
 
     def _emit_implication_consequent(self, cons_op, cons_left_expr, cons_right_expr, bigM_cons, flag_var, constr_name_prefix):
         if cons_op == "==":
