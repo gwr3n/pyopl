@@ -3938,6 +3938,87 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 raise SemanticError(f"Non-numeric term '{value}' in linear comparison; cannot linearize")
         raise SemanticError(f"Unsupported constant type {type(value)} in linear comparison")
 
+    def _comparison_truth_for_sum(self, node, env, ctx, comparison_truth_cache, key):
+        if node.get("op") != "==":
+            return None
+        left_truths = self._sum_comparison_truth_names(node.get("left"), env, ctx)
+        right_truths = self._sum_comparison_truth_names(node.get("right"), env, ctx)
+        if left_truths is None and right_truths is None:
+            return None
+        z_names = left_truths if left_truths is not None else right_truths
+        other_side = node.get("right") if left_truths is not None else node.get("left")
+        k_value = self._ground_numeric_comparison_value(other_side, env)
+        if k_value is None or abs(k_value - len(z_names)) >= LINEAR_ZERO_TOLERANCE:
+            return None
+        bname = f"cmp_flag_{len(comparison_truth_cache)}"
+        self._add_comparison_binary(bname)
+        for z_name in z_names:
+            row = [0.0] * len(self.var_names)
+            row[self.var_indices[bname]] += 1.0
+            row[self.var_indices[z_name]] -= 1.0
+            self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
+        row = [0.0] * len(self.var_names)
+        for z_name in z_names:
+            row[self.var_indices[z_name]] += 1.0
+        row[self.var_indices[bname]] -= 1.0
+        self._append_sparse_row(ctx.state, row, float(len(z_names) - 1), sense="ub")
+        comparison_truth_cache[key] = bname
+        self._add_code_line("# comparison truth var for conjunction of sum-comparisons")
+        return bname
+
+    def _comparison_truth_affine_parts(self, node, env):
+        lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
+        rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
+        lhs_const = self._coerce_comparison_numeric(lhs_const)
+        rhs_const = self._coerce_comparison_numeric(rhs_const)
+        expr_coef = dict(lhs_dict)
+        for var_name, coef in rhs_dict.items():
+            expr_coef[var_name] = expr_coef.get(var_name, 0.0) - coef
+        expr_const = lhs_const - rhs_const
+        return expr_coef, expr_const
+
+    def _append_comparison_inequality_rows(self, expr_coef, expr_const, op, bname, ctx):
+        oriented_coef = dict(expr_coef)
+        oriented_const = expr_const
+        if op in (">=", ">"):
+            oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
+            oriented_const = -oriented_const
+        if op in ("<", ">"):
+            oriented_const += BOOL_EPS
+        lower, upper = self._finite_affine_bounds(
+            oriented_coef,
+            oriented_const,
+            f"Comparison truth variable for '{op}'",
+        )
+        true_row = dict(oriented_coef)
+        true_row[bname] = upper
+        self._append_sparse_coef_row(ctx.state, true_row, upper - oriented_const, sense="ub")
+        false_row = {var_name: -coef for var_name, coef in oriented_coef.items()}
+        false_row[bname] = lower - BOOL_EPS
+        self._append_sparse_coef_row(ctx.state, false_row, -BOOL_EPS + oriented_const, sense="ub")
+
+    def _append_comparison_equality_rows(self, expr_coef, expr_const, op, bname, ctx):
+        lower, upper = self._finite_integer_affine_bounds(
+            expr_coef,
+            expr_const,
+            f"Comparison truth variable for '{op}'",
+        )
+        negative_name = f"{bname}_negative"
+        positive_name = f"{bname}_positive"
+        self._add_comparison_binary(negative_name)
+        self._add_comparison_binary(positive_name)
+        relation = {negative_name: 1.0, positive_name: 1.0}
+        relation[bname] = 1.0 if op == "==" else -1.0
+        self._append_sparse_coef_row(ctx.state, relation, 1.0 if op == "==" else 0.0, sense="eq")
+        lower_row = {var_name: -coef for var_name, coef in expr_coef.items()}
+        lower_row[negative_name] = lower
+        lower_row[positive_name] = 1.0
+        self._append_sparse_coef_row(ctx.state, lower_row, expr_const, sense="ub")
+        upper_row = dict(expr_coef)
+        upper_row[negative_name] = 1.0
+        upper_row[positive_name] = -upper
+        self._append_sparse_coef_row(ctx.state, upper_row, -expr_const, sense="ub")
+
     def _comparison_truth_var(self, node, env, ctx: _ConstraintBuildContext):
         """Return a binary var name representing truth of a supported linear comparison."""
         if not (
@@ -3952,96 +4033,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if key in comparison_truth_cache:
             return comparison_truth_cache[key]
         op = node.get("op")
+        sum_truth_name = self._comparison_truth_for_sum(node, env, ctx, comparison_truth_cache, key)
+        if sum_truth_name is not None:
+            return sum_truth_name
 
-        if op == "==":
-            left_truths = self._sum_comparison_truth_names(node.get("left"), env, ctx)
-            right_truths = self._sum_comparison_truth_names(node.get("right"), env, ctx)
-            if left_truths is not None or right_truths is not None:
-                z_names = left_truths if left_truths is not None else right_truths
-                other_side = node.get("right") if left_truths is not None else node.get("left")
-                k_value = self._ground_numeric_comparison_value(other_side, env)
-                if k_value is not None and abs(k_value - len(z_names)) < LINEAR_ZERO_TOLERANCE:
-                    bname = f"cmp_flag_{len(comparison_truth_cache)}"
-                    self._add_comparison_binary(bname)
-
-                    for z_name in z_names:
-                        row = [0.0] * len(self.var_names)
-                        row[self.var_indices[bname]] += 1.0
-                        row[self.var_indices[z_name]] -= 1.0
-                        self._append_sparse_row(ctx.state, row, 0.0, sense="ub")
-
-                    row = [0.0] * len(self.var_names)
-                    for z_name in z_names:
-                        row[self.var_indices[z_name]] += 1.0
-                    row[self.var_indices[bname]] -= 1.0
-                    self._append_sparse_row(ctx.state, row, float(len(z_names) - 1), sense="ub")
-
-                    comparison_truth_cache[key] = bname
-                    self._add_code_line("# comparison truth var for conjunction of sum-comparisons")
-                    return bname
-
-        lhs_dict, lhs_const = self._eval_expr(node["left"], dict(env))
-        rhs_dict, rhs_const = self._eval_expr(node["right"], dict(env))
-
-        lhs_const = self._coerce_comparison_numeric(lhs_const)
-        rhs_const = self._coerce_comparison_numeric(rhs_const)
-        expr_coef = dict(lhs_dict)
-        for var_name, coef in rhs_dict.items():
-            expr_coef[var_name] = expr_coef.get(var_name, 0.0) - coef
-        expr_const = lhs_const - rhs_const
+        expr_coef, expr_const = self._comparison_truth_affine_parts(node, env)
         bname = f"cmp_flag_{len(comparison_truth_cache)}"
-
         self._add_comparison_binary(bname)
-
-        def add_ub(row_coef_dict, rhs):
-            self._append_sparse_coef_row(ctx.state, row_coef_dict, rhs, sense="ub")
-
         if op in ("<=", "<", ">=", ">"):
-            oriented_coef = dict(expr_coef)
-            oriented_const = expr_const
-            if op in (">=", ">"):
-                oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
-                oriented_const = -oriented_const
-            if op in ("<", ">"):
-                oriented_const += BOOL_EPS
-            lower, upper = self._finite_affine_bounds(
-                oriented_coef,
-                oriented_const,
-                f"Comparison truth variable for '{op}'",
-            )
-            true_row = dict(oriented_coef)
-            true_row[bname] = upper
-            add_ub(true_row, upper - oriented_const)
-            false_row = {var_name: -coef for var_name, coef in oriented_coef.items()}
-            false_row[bname] = lower - BOOL_EPS
-            add_ub(false_row, -BOOL_EPS + oriented_const)
+            self._append_comparison_inequality_rows(expr_coef, expr_const, op, bname, ctx)
         else:
-            lower, upper = self._finite_integer_affine_bounds(
-                expr_coef,
-                expr_const,
-                f"Comparison truth variable for '{op}'",
-            )
-            negative_name = f"{bname}_negative"
-            positive_name = f"{bname}_positive"
-            self._add_comparison_binary(negative_name)
-            self._add_comparison_binary(positive_name)
-
-            relation = {negative_name: 1.0, positive_name: 1.0}
-            if op == "==":
-                relation[bname] = 1.0
-                self._append_sparse_coef_row(ctx.state, relation, 1.0, sense="eq")
-            else:
-                relation[bname] = -1.0
-                self._append_sparse_coef_row(ctx.state, relation, 0.0, sense="eq")
-
-            lower_row = {var_name: -coef for var_name, coef in expr_coef.items()}
-            lower_row[negative_name] = lower
-            lower_row[positive_name] = 1.0
-            add_ub(lower_row, expr_const)
-            upper_row = dict(expr_coef)
-            upper_row[negative_name] = 1.0
-            upper_row[positive_name] = -upper
-            add_ub(upper_row, -expr_const)
+            self._append_comparison_equality_rows(expr_coef, expr_const, op, bname, ctx)
         comparison_truth_cache[key] = bname
         self._add_code_line(f"# comparison truth var for {op}")
         return bname
@@ -5181,23 +5183,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             append_ub_row,
         )
 
-    def _try_handle_weighted_boolean_sum_constraint(
-        self,
-        left,
-        right,
-        op_sym_top,
-        env,
-        bool_expr_var,
-        state,
-    ):
+    def _weighted_boolean_sum_operands(self, left):
         sum_node = self._unwrap_parenthesized_node(left)
         if not (isinstance(sum_node, dict) and sum_node.get("type") == "sum"):
-            return False
+            return None
         inner = self._unwrap_parenthesized_node(sum_node.get("expression"))
         if not (isinstance(inner, dict) and inner.get("type") == "binop" and inner.get("op") == "*"):
-            return False
+            return None
 
-        weighted_bool = None
         for weight_node, bool_node in (
             (inner.get("left"), inner.get("right")),
             (inner.get("right"), inner.get("left")),
@@ -5208,25 +5201,26 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 and bool_node.get("sem_type") == "boolean"
                 and bool_node.get("type") not in ("name", "indexed_name")
             ):
-                weighted_bool = weight_node, bool_node
-                break
-        if weighted_bool is None or op_sym_top not in (">=", "==", "<=", ">", "<"):
-            return False
+                return sum_node, weight_node, bool_node
+        return None
 
+    def _weighted_boolean_sum_rhs(self, right, op_sym_top, env):
+        if op_sym_top not in (">=", "==", "<=", ">", "<"):
+            return None
         try:
             rhs_coef, rhs_const = self._eval_expr(right, dict(env or {}))
         except Exception:
-            return False
+            return None
         if rhs_coef != {} or not isinstance(rhs_const, (int, float)):
-            return False
-
-        weight_node, bool_node = weighted_bool
+            return None
         rhs_value = float(rhs_const)
         if op_sym_top == ">":
             rhs_value += BOOL_EPS
         elif op_sym_top == "<":
             rhs_value -= BOOL_EPS
+        return rhs_value
 
+    def _weighted_boolean_sum_row(self, sum_node, weight_node, bool_node, env, bool_expr_var):
         row = [0.0] * len(self.var_names)
         for env2, _idx_tuple in self._iter_filtered_environments(
             sum_node.get("iterators", []),
@@ -5240,13 +5234,29 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if len(row) < len(self.var_names):
                 row.extend([0.0] * (len(self.var_names) - len(row)))
             row[self.var_indices[bool_var]] += float(weight_const)
+        return row
 
+    def _append_weighted_boolean_sum_row(self, row, rhs_value, op_sym_top, state):
         if op_sym_top in (">=", ">"):
             self._append_sparse_row(state, [-coef for coef in row], -rhs_value, sense="ub")
         elif op_sym_top in ("<=", "<"):
             self._append_sparse_row(state, row, rhs_value, sense="ub")
         else:
             self._append_sparse_row(state, row, rhs_value, sense="eq")
+
+    def _try_handle_weighted_boolean_sum_constraint(
+        self, left, right, op_sym_top, env, bool_expr_var, state
+    ):
+        weighted_operands = self._weighted_boolean_sum_operands(left)
+        if weighted_operands is None:
+            return False
+        sum_node, weight_node, bool_node = weighted_operands
+        rhs_value = self._weighted_boolean_sum_rhs(right, op_sym_top, env)
+        if rhs_value is None:
+            return False
+
+        row = self._weighted_boolean_sum_row(sum_node, weight_node, bool_node, env, bool_expr_var)
+        self._append_weighted_boolean_sum_row(row, rhs_value, op_sym_top, state)
         return True
 
     def _try_handle_sum_of_comparisons_constraint(
@@ -5633,7 +5643,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise SemanticError(f"Variable '{variable_name}' not found for boolean linearization")
         return variable_name, 1 if value_node["value"] == 1 else -1
 
-    def _try_handle_and_or_literal_fast_path(self, left, right, op_sym, env, bool_expr_var, state):
+    def _and_or_literal_operands(self, left, right, op_sym):
         left = self._unwrap_parenthesized_node(left)
         right = self._unwrap_parenthesized_node(right)
         if self._is_boolean_literal_node(left) and isinstance(right, dict) and right.get("type") in ("and", "or"):
@@ -5644,10 +5654,53 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             and self._is_boolean_literal_node(right)
             and op_sym == "=="
         ):
-            return False
+            return None
+        return left, left["type"], bool(right.get("value", True))
 
-        operator = left["type"]
-        target_value = bool(right.get("value", True))
+    def _emit_and_or_literal_rows(self, literals, operator, target_value, state):
+        literal_count = len(literals)
+        if operator == "and" and target_value:
+            for variable_name, polarity in literals:
+                row = [0.0] * len(self.var_names)
+                row[self.var_indices[variable_name]] = 1.0
+                self._append_sparse_row(state, row, 1.0 if polarity == 1 else 0.0, sense="eq")
+            return True
+        if operator == "and":
+            row = [0.0] * len(self.var_names)
+            constant_shift = 0.0
+            for variable_name, polarity in literals:
+                row[self.var_indices[variable_name]] += polarity
+                if polarity == -1:
+                    constant_shift += 1.0
+            self._append_sparse_row(state, row, literal_count - 1 - constant_shift, sense="ub")
+            return True
+        row = [0.0] * len(self.var_names)
+        constant_shift = 0.0
+        for variable_name, polarity in literals:
+            row[self.var_indices[variable_name]] += polarity
+            if polarity == -1:
+                constant_shift += 1.0
+        if target_value:
+            self._append_sparse_row(state, [-coefficient for coefficient in row], constant_shift - 1.0, sense="ub")
+        else:
+            self._append_sparse_row(state, row, -constant_shift, sense="eq")
+        return True
+
+    def _emit_and_or_expression_row(self, expression, target_value, env, bool_expr_var, state):
+        try:
+            expression_var = bool_expr_var(expression, env)
+        except SemanticError:
+            return False
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[expression_var]] = 1.0
+        self._append_sparse_row(state, row, 1.0 if target_value else 0.0, sense="eq")
+        return True
+
+    def _try_handle_and_or_literal_fast_path(self, left, right, op_sym, env, bool_expr_var, state):
+        operands = self._and_or_literal_operands(left, right, op_sym)
+        if operands is None:
+            return False
+        left, operator, target_value = operands
         try:
             literals = [
                 self._resolve_atomic_boolean_literal(atom, env) for atom in self._flatten_boolean_operator(left, operator)
@@ -5656,42 +5709,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             literals = None
 
         if literals is not None:
-            literal_count = len(literals)
-            if operator == "and" and target_value:
-                for variable_name, polarity in literals:
-                    row = [0.0] * len(self.var_names)
-                    row[self.var_indices[variable_name]] = 1.0
-                    self._append_sparse_row(state, row, 1.0 if polarity == 1 else 0.0, sense="eq")
-            elif operator == "and":
-                row = [0.0] * len(self.var_names)
-                constant_shift = 0.0
-                for variable_name, polarity in literals:
-                    row[self.var_indices[variable_name]] += polarity
-                    if polarity == -1:
-                        constant_shift += 1.0
-                self._append_sparse_row(state, row, literal_count - 1 - constant_shift, sense="ub")
-            elif operator == "or":
-                row = [0.0] * len(self.var_names)
-                constant_shift = 0.0
-                for variable_name, polarity in literals:
-                    row[self.var_indices[variable_name]] += polarity
-                    if polarity == -1:
-                        constant_shift += 1.0
-                if target_value:
-                    self._append_sparse_row(state, [-coefficient for coefficient in row], constant_shift - 1.0, sense="ub")
-                else:
-                    self._append_sparse_row(state, row, -constant_shift, sense="eq")
-                return True
-            return True
-
-        try:
-            expression_var = bool_expr_var(left, env)
-        except SemanticError:
-            return False
-        row = [0.0] * len(self.var_names)
-        row[self.var_indices[expression_var]] = 1.0
-        self._append_sparse_row(state, row, 1.0 if target_value else 0.0, sense="eq")
-        return True
+            return self._emit_and_or_literal_rows(literals, operator, target_value, state)
+        return self._emit_and_or_expression_row(left, target_value, env, bool_expr_var, state)
 
     def _try_handle_asserted_and(self, left, right, op_sym, env, handle_constraint):
         if not (isinstance(left, dict) and left.get("type") == "and" and op_sym == "=="):
