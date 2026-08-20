@@ -2532,15 +2532,14 @@ class OPLParser(Parser):
         left_type = self._normalize_binop_type(left_expr.get("sem_type", None))
         right_type = self._normalize_binop_type(right_expr.get("sem_type", None))
         tuple_type_names = {
-            symbol
-            for scope in self.symbol_table.scopes
-            for symbol, info in scope.items()
-            if info.get("type") == "tuple_type"
+            symbol for scope in self.symbol_table.scopes for symbol, info in scope.items() if info.get("type") == "tuple_type"
         }
         for expression, expression_type in ((left_expr, left_type), (right_expr, right_type)):
             if expression_type in tuple_type_names and expression.get("type") != "field_access":
                 value = expression.get("value", "?")
-                logger.error(f"[BINOP] Cannot use tuple variable '{value}' of type '{expression_type}' in arithmetic; use a field access like '{value}.field'.")
+                logger.error(
+                    f"[BINOP] Cannot use tuple variable '{value}' of type '{expression_type}' in arithmetic; use a field access like '{value}.field'."
+                )
                 raise SemanticError(
                     f"Cannot use tuple variable '{value}' of type '{expression_type}' in arithmetic; use a field access like '{value}.field'.",
                     lineno=lineno,
@@ -2663,13 +2662,26 @@ class OPLParser(Parser):
         return self._parse_indexed_reference(p)
 
     def _validate_range_index(self, declared_dim, used_index, dimension_number, name, lineno):
-        allowed_types = {"number_literal_index", "name_reference_index", "binop", "uminus", "parenthesized_expression", "field_access", "field_access_index"}
+        allowed_types = {
+            "number_literal_index",
+            "name_reference_index",
+            "binop",
+            "uminus",
+            "parenthesized_expression",
+            "field_access",
+            "field_access_index",
+        }
         if used_index["type"] not in allowed_types:
             raise SemanticError(f"Unsupported index type for integer/range dimension: {used_index['type']}", lineno=lineno)
         if used_index["type"] == "number_literal_index" and declared_dim["type"] == "range_index":
             start_bound = declared_dim["start"]
             end_bound = declared_dim["end"]
-            if isinstance(start_bound, dict) and start_bound.get("type") == "number" and isinstance(end_bound, dict) and end_bound.get("type") == "number":
+            if (
+                isinstance(start_bound, dict)
+                and start_bound.get("type") == "number"
+                and isinstance(end_bound, dict)
+                and end_bound.get("type") == "number"
+            ):
                 if not (start_bound["value"] <= used_index["value"] <= end_bound["value"]):
                     raise SemanticError(
                         f"Index {used_index['value']} for dimension {dimension_number} of '{name}' is out of declared range [{start_bound['value']}..{end_bound['value']}].",
@@ -2678,7 +2690,9 @@ class OPLParser(Parser):
             return used_index
         index_type = used_index.get("sem_type")
         if index_type not in ("int", "int+"):
-            logger.debug(f"[SEMANTIC] Rejecting index for dim {dimension_number} of '{name}': type={used_index['type']}, sem_type={index_type}")
+            logger.debug(
+                f"[SEMANTIC] Rejecting index for dim {dimension_number} of '{name}': type={used_index['type']}, sem_type={index_type}"
+            )
             raise SemanticError(
                 f"Index expression for dimension {dimension_number} of '{name}' must be integer-valued, got type '{index_type}'.",
                 lineno=lineno,
@@ -3389,7 +3403,7 @@ class OPLCompiler:
         decl_type = decl.get("type")
         name = decl.get("name")
         value = decl.get("value")
-        if not name or value is None:
+        if not isinstance(decl_type, str) or not isinstance(name, str) or value is None:
             return
         if decl_type.startswith("parameter") or decl_type == "parameter_array":
             working_data[name] = value
@@ -3402,9 +3416,12 @@ class OPLCompiler:
             working_data[name] = {"elements": elements, "tuple_type": decl.get("tuple_type")}
 
     def _validate_reserved_model_names(self, declarations: list, working_data: dict[str, Any]) -> None:
-        declared_names = {
-            decl.get("name") for decl in declarations if isinstance(decl, dict) and isinstance(decl.get("name"), str)
-        }
+        declared_names: set[str] = set()
+        for decl in declarations:
+            if isinstance(decl, dict):
+                name = decl.get("name")
+                if isinstance(name, str):
+                    declared_names.add(name)
         bad_decl = declared_names & RESERVED_PY_IDENTIFIERS
         if bad_decl:
             bad = sorted(bad_decl)[0]
@@ -3661,7 +3678,14 @@ class OPLCompiler:
         if not isinstance(expr, dict):
             return expr
         expr_type = expr.get("type")
-        if expr_type in ("number", "boolean_literal", "string_literal", "name", "name_reference_index", "number_literal_index"):
+        if expr_type in (
+            "number",
+            "boolean_literal",
+            "string_literal",
+            "name",
+            "name_reference_index",
+            "number_literal_index",
+        ):
             return self._eval_comprehension_atom(expr, env, working_data)
         if expr_type == "indexed_name":
             return self._eval_comprehension_indexed_name(expr, env, working_data)
@@ -4326,7 +4350,9 @@ class OPLCompiler:
     def _typed_set_values(declaration: dict[str, Any], data_dict: dict[str, Any]) -> Any:
         values = declaration.get("value")
         if values is None:
-            values = data_dict.get(declaration.get("name"))
+            name = declaration.get("name")
+            if isinstance(name, str):
+                values = data_dict.get(name)
         if isinstance(values, dict) and "elements" in values:
             values = values["elements"]
         return values
@@ -4631,7 +4657,11 @@ class OPLCompiler:
             }
         if node_type == "parenthesized_expression":
             inner = self._simplify_boolean_node(node.get("expression"), env, dvars)
-            return {"type": "parenthesized_expression", "expression": inner, "sem_type": inner.get("sem_type") if isinstance(inner, dict) else None}
+            return {
+                "type": "parenthesized_expression",
+                "expression": inner,
+                "sem_type": inner.get("sem_type") if isinstance(inner, dict) else None,
+            }
         if node_type == "binop" and node.get("sem_type") == "boolean" and node.get("op") in ("<", "<=", ">", ">=", "==", "!="):
             return {
                 "type": "binop",
@@ -4668,7 +4698,11 @@ class OPLCompiler:
                 if node["type"] == "or":
                     return self._boolean_literal(True) if right.get("value") else left
                 return left if right.get("value") else self._boolean_literal(False)
-        if node.get("type") == "not" and isinstance(node.get("value"), dict) and node["value"].get("type") == "boolean_literal":
+        if (
+            node.get("type") == "not"
+            and isinstance(node.get("value"), dict)
+            and node["value"].get("type") == "boolean_literal"
+        ):
             return self._boolean_literal(not node["value"].get("value"))
         return node
 
@@ -4687,10 +4721,19 @@ class OPLCompiler:
         if isinstance(left, dict) and left.get("type") == "boolean_literal":
             if left.get("value") == right.get("value"):
                 return []
-            return [{"type": "constraint", "op": "==", "left": {"type": "number", "value": 0, "sem_type": "int"}, "right": {"type": "number", "value": 1, "sem_type": "int"}}]
+            return [
+                {
+                    "type": "constraint",
+                    "op": "==",
+                    "left": {"type": "number", "value": 0, "sem_type": "int"},
+                    "right": {"type": "number", "value": 1, "sem_type": "int"},
+                }
+            ]
         if isinstance(left, dict) and left.get("type") == "binop" and left.get("sem_type") == "boolean":
             operator = left.get("op")
-            if isinstance(operator, str) and right.get("value") is True:
+            if not isinstance(operator, str):
+                return [{"type": "constraint", "op": "==", "left": left, "right": right}]
+            if right.get("value") is True:
                 return [{"type": "constraint", "op": operator, "left": left.get("left"), "right": left.get("right")}]
             negated = {"<": ">=", "<=": ">", ">": "<=", ">=": "<", "==": "!=", "!=": "=="}.get(operator)
             if isinstance(negated, str):
@@ -4713,7 +4756,11 @@ class OPLCompiler:
         simplified = [item for child in children for item in self._simplify_constraint_node(child, env, dvars)]
         if not simplified:
             return []
-        result = {"type": "forall_constraint", "iterators": constraint.get("iterators", []), "index_constraint": index_constraint}
+        result = {
+            "type": "forall_constraint",
+            "iterators": constraint.get("iterators", []),
+            "index_constraint": index_constraint,
+        }
         result["constraint" if len(simplified) == 1 else "constraints"] = simplified[0] if len(simplified) == 1 else simplified
         return [result]
 
@@ -4824,7 +4871,9 @@ class OPLCompiler:
             return left
         return {"type": "and", "left": left, "right": right, "sem_type": "boolean"}
 
-    def _rewrite_forall_if_child(self, child: dict, iterators: list, base_constraint: Optional[dict], dvar_names: set[str]) -> list[dict]:
+    def _rewrite_forall_if_child(
+        self, child: dict, iterators: list, base_constraint: Optional[dict], dvar_names: set[str]
+    ) -> list[dict]:
         condition = child.get("condition")
         if not isinstance(condition, dict):
             raise SemanticError("Malformed if-constraint: missing condition.")
@@ -4846,19 +4895,23 @@ class OPLCompiler:
                 rewritten.extend(self._rewrite_forall_conditions(branch_node, dvar_names))
         return rewritten
 
-    def _rewrite_forall_implication(self, child: dict, iterators: list, base_constraint: Optional[dict], dvar_names: set[str]) -> list[dict]:
+    def _rewrite_forall_implication(
+        self, child: dict, iterators: list, base_constraint: Optional[dict], dvar_names: set[str]
+    ) -> list[dict]:
         antecedent = self._condition_to_boolean_expr(child.get("antecedent"))
         if self._expr_contains_dvar(antecedent, dvar_names):
             return [child]
         consequent = child.get("consequent")
         if not isinstance(consequent, dict):
             return []
-        return [{
-            "type": "forall_constraint",
-            "iterators": iterators,
-            "index_constraint": self._combine_conditions(base_constraint, antecedent),
-            "constraint": consequent,
-        }]
+        return [
+            {
+                "type": "forall_constraint",
+                "iterators": iterators,
+                "index_constraint": self._combine_conditions(base_constraint, antecedent),
+                "constraint": consequent,
+            }
+        ]
 
     @staticmethod
     def _rebuild_regular_forall(iterators: list, base_constraint: Optional[dict], regular: list[dict]) -> Optional[dict]:
@@ -4916,9 +4969,7 @@ class OPLCompiler:
             rewritten.append(constraint)
         ast["constraints"] = rewritten
 
-    def _rewrite_top_level_implication(
-        self, constraint: dict, env: dict[str, Any], dvar_names: set[str]
-    ) -> Optional[dict]:
+    def _rewrite_top_level_implication(self, constraint: dict, env: dict[str, Any], dvar_names: set[str]) -> Optional[dict]:
         antecedent = self._condition_to_boolean_expr(constraint.get("antecedent"))
         if self._expr_contains_dvar(antecedent, dvar_names):
             return constraint
@@ -4932,7 +4983,11 @@ class OPLCompiler:
             raise SemanticError("Malformed if-constraint: missing condition.")
         if self._expr_contains_dvar(condition, dvar_names):
             raise SemanticError("Condition of if-constraint must be ground (must not reference decision variables).")
-        selected = constraint.get("then_constraints") if self._eval_ground_condition(condition, env) else constraint.get("else_constraints")
+        selected = (
+            constraint.get("then_constraints")
+            if self._eval_ground_condition(condition, env)
+            else constraint.get("else_constraints")
+        )
         rewritten: list[dict] = []
         for item in selected or []:
             if isinstance(item, dict) and item.get("type") == "forall_constraint":
@@ -4965,12 +5020,14 @@ class OPLCompiler:
             if operator == relation and isinstance(aggregate, dict) and predicate(aggregate):
                 args, _single = self._maxmin_args_or_error(aggregate)
                 return [
-                    labeled({
-                        "type": "constraint",
-                        "op": relation,
-                        "left": arg if side == "left" else left,
-                        "right": right if side == "left" else arg,
-                    })
+                    labeled(
+                        {
+                            "type": "constraint",
+                            "op": relation,
+                            "left": arg if side == "left" else left,
+                            "right": right if side == "left" else arg,
+                        }
+                    )
                     for arg in args
                 ]
         if self._contains_maxmin(left) or self._contains_maxmin(right):
@@ -5144,6 +5201,8 @@ class OPLCompiler:
 
     def _eval_ground_binop(self, expr: dict, env: dict) -> Any:
         operator = expr.get("op")
+        if not isinstance(operator, str):
+            raise SemanticError(f"Unsupported operator in ground expression: {operator}")
         left = self._eval_ground_expr(expr.get("left"), env)
         right = self._eval_ground_expr(expr.get("right"), env)
         operations = {
@@ -5179,7 +5238,7 @@ class OPLCompiler:
             return expr.get("value")
         if t == "name":
             name = expr.get("value")
-            if name in env:
+            if isinstance(name, str) and name in env:
                 return env[name]
             # If it's a known scalar set/range name etc., leave as-is or raise
             raise SemanticError(f"Unknown symbol in ground expression: {name}")
@@ -5249,12 +5308,14 @@ class OPLCompiler:
             "left": expression if aggregate_on_left else other,
             "right": other if aggregate_on_left else expression,
         }
-        return [{
-            "type": "forall_constraint",
-            "iterators": aggregate["iterators"],
-            "index_constraint": aggregate.get("index_constraint"),
-            "constraint": constraint,
-        }]
+        return [
+            {
+                "type": "forall_constraint",
+                "iterators": aggregate["iterators"],
+                "index_constraint": aggregate.get("index_constraint"),
+                "constraint": constraint,
+            }
+        ]
 
     def _rewrite_minmax_constraint_body(self, node: dict[str, Any]) -> list[dict]:
         left = node.get("left")
