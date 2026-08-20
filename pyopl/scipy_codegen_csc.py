@@ -1037,69 +1037,60 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.aux_created.append(name)
         return name
 
+    def _linearize_or_comparison(self, comparison, env, z_name):
+        operator = comparison.get("op")
+        big_m = self._big_m_for_comparison(comparison, env=env)
+        lhs_coef, lhs_const = self._eval_expr(comparison["left"], env)
+        rhs_node = comparison["right"]
+        rhs_coef, rhs_const = (
+            self._eval_expr(rhs_node, env)
+            if isinstance(rhs_node, dict)
+            else ({}, rhs_node if isinstance(rhs_node, (int, float)) else 0.0)
+        )
+        expression_coef = dict(lhs_coef)
+        for variable, coefficient in rhs_coef.items():
+            expression_coef[variable] = expression_coef.get(variable, 0.0) - coefficient
+        expression_const = lhs_const - rhs_const
+
+        def append_guarded_row(sign, rhs):
+            row = [0.0] * len(self.var_names)
+            for variable, coefficient in expression_coef.items():
+                row[self.var_indices[variable]] += sign * coefficient
+            row[self.var_indices[z_name]] += big_m
+            self.A_ub.append(row)
+            self.b_ub.append(rhs)
+
+        if operator == "<=":
+            append_guarded_row(1.0, big_m - expression_const)
+        elif operator == ">=":
+            append_guarded_row(-1.0, big_m + expression_const)
+        elif operator == "==":
+            append_guarded_row(1.0, big_m - expression_const)
+            append_guarded_row(-1.0, big_m + expression_const)
+
+    def _linearize_or_not_equal(self, comparison, env):
+        lower = dict(comparison)
+        lower["op"] = "<"
+        upper = dict(comparison)
+        upper["op"] = ">"
+        self._linearize_or([lower], env=env)
+        self._linearize_or([upper], env=env)
+
     def _linearize_or(self, comparisons: List[Any], env: Optional[Dict[str, Any]] = None) -> None:
-        """Linearize disjunction of linear comparisons using big-M and auxiliary binaries.
-        For '!=': split into two comparisons: < and >.
-        """
+        """Linearize disjunction of linear comparisons using big-M and auxiliary binaries."""
         env_eval = env or {}
         z_vars = []
-        for comp in comparisons:
-            op = comp.get("op")
-            if op == "!=":
-                comp_lt = dict(comp)
-                comp_lt["op"] = "<"
-                comp_gt = dict(comp)
-                comp_gt["op"] = ">"
-                self._linearize_or([comp_lt], env=env_eval)
-                self._linearize_or([comp_gt], env=env_eval)
-            else:
-                z = self._ensure_aux_binary("or_flag")
-                z_vars.append(z)
-                # Use the bound env so indices are resolved
-                M = self._big_m_for_comparison(comp, env=env_eval)
-                # Evaluate sides under the same env
-                coef_lhs, const_lhs = self._eval_expr(comp["left"], env_eval)
-                rhs_node = comp["right"]
-                coef_rhs, const_rhs = (
-                    self._eval_expr(rhs_node, env_eval)
-                    if isinstance(rhs_node, dict)
-                    else ({}, rhs_node if isinstance(rhs_node, (int, float)) else 0.0)
-                )
-                expr_coef = dict(coef_lhs)
-                for v, c in coef_rhs.items():
-                    expr_coef[v] = expr_coef.get(v, 0.0) - c
-                expr_const = const_lhs - const_rhs
-                if op == "<=":
-                    row = [0.0] * len(self.var_names)
-                    for v, c in expr_coef.items():
-                        row[self.var_indices[v]] += c
-                    row[self.var_indices[z]] += M
-                    self.A_ub.append(row)
-                    self.b_ub.append(M - expr_const)
-                elif op == ">=":
-                    row = [0.0] * len(self.var_names)
-                    for v, c in expr_coef.items():
-                        row[self.var_indices[v]] -= c
-                    row[self.var_indices[z]] += M
-                    self.A_ub.append(row)
-                    self.b_ub.append(M + expr_const)
-                elif op == "==":
-                    row1 = [0.0] * len(self.var_names)
-                    for v, c in expr_coef.items():
-                        row1[self.var_indices[v]] += c
-                    row1[self.var_indices[z]] += M
-                    self.A_ub.append(row1)
-                    self.b_ub.append(M - expr_const)
-                    row2 = [0.0] * len(self.var_names)
-                    for v, c in expr_coef.items():
-                        row2[self.var_indices[v]] -= c
-                    row2[self.var_indices[z]] += M
-                    self.A_ub.append(row2)
-                    self.b_ub.append(M + expr_const)
+        for comparison in comparisons:
+            if comparison.get("op") == "!=":
+                self._linearize_or_not_equal(comparison, env_eval)
+                continue
+            z_name = self._ensure_aux_binary("or_flag")
+            z_vars.append(z_name)
+            self._linearize_or_comparison(comparison, env_eval, z_name)
         if z_vars:
             row = [0.0] * len(self.var_names)
-            for z in z_vars:
-                row[self.var_indices[z]] -= 1.0
+            for z_name in z_vars:
+                row[self.var_indices[z_name]] -= 1.0
             self.A_ub.append(row)
             self.b_ub.append(-1.0)
 
@@ -1843,25 +1834,32 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _normalize_parameter_key(key):
         return tuple(key) if isinstance(key, (list, tuple)) else key
 
+    @staticmethod
+    def _parameter_list_pairs(val: list):
+        if len(val) % 2 != 0 or not val:
+            return None
+        keys = val[::2]
+        values = val[1::2]
+        if not all(isinstance(key, (list, tuple, str)) for key in keys):
+            return None
+        if not all(isinstance(value, (int, float)) for value in values):
+            return None
+        return zip(keys, values)
+
+    @staticmethod
+    def _parameter_entry_pairs(val: list):
+        if not all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
+            return None
+        pairs = [(entry[0], entry[1]) for entry in val]
+        if not all(isinstance(key, (list, tuple, str)) and isinstance(value, (int, float)) for key, value in pairs):
+            return None
+        return pairs
+
     def _flat_parameter_list_to_dict(self, val: list) -> dict | None:
-        if len(val) % 2 == 0 and val:
-            keys = val[::2]
-            values = val[1::2]
-            if all(isinstance(key, (list, tuple, str)) for key in keys) and all(
-                isinstance(value, (int, float)) for value in values
-            ):
-                return {
-                    self._normalize_parameter_key(key): value
-                    for key, value in zip(keys, values)
-                }
-        if all(isinstance(entry, (list, tuple)) and len(entry) == 2 for entry in val):
-            pairs = [(entry[0], entry[1]) for entry in val]
-            if all(isinstance(key, (list, tuple, str)) and isinstance(value, (int, float)) for key, value in pairs):
-                return {
-                    self._normalize_parameter_key(key): value
-                    for key, value in pairs
-                }
-        return None
+        pairs = self._parameter_list_pairs(val) or self._parameter_entry_pairs(val)
+        if pairs is None:
+            return None
+        return {self._normalize_parameter_key(key): value for key, value in pairs}
 
     def _normalize_parameter_lookup_value(self, name: str, val: object, indices: list | None, logger) -> object:
         if not isinstance(val, list) or indices is None:
@@ -2181,49 +2179,54 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             loop_vars.append(name)
         return loop_vars, loop_ranges
 
+    def _eval_bound_binop(self, expr: dict) -> float | int:
+        left = self._eval_bound(expr["left"])
+        right = self._eval_bound(expr["right"])
+        operations = {
+            "+": lambda: left + right,
+            "-": lambda: left - right,
+            "*": lambda: left * right,
+        }
+        operator = expr["op"]
+        if operator not in operations:
+            raise self._unsupported_operator_error("index bound binop", operator)
+        return operations[operator]()
+
+    def _eval_bound_collection(self, expr: dict) -> float | int:
+        values = [self._eval_bound(argument) for argument in expr.get("args", [])]
+        if not values:
+            raise self._unsupported_type_error("expr in index bound", expr.get("type"))
+        return min(values) if expr.get("type") == "minl" else max(values)
+
     def _eval_bound(self, expr: object) -> float | int:
         """
         Evaluate a bound expression for index/range bounds (used in variable declarations, sum, forall, etc).
         Supports: number, name, binop (+, -, *), uminus, parenthesized_expression.
         Raises SemanticError for unsupported types or operators.
         """
-        if isinstance(expr, dict):
-            t = expr.get("type")
-            if t == "number":
-                return expr["value"]
-            elif t == "name":
-                name = expr["value"]
-                if name not in self.data_dict:
-                    raise SemanticError(f"Range bound parameter '{name}' has no data provided")
-                value = self.data_dict[name]
-                if not isinstance(value, (int, float, bool)):
-                    raise SemanticError(f"Range bound parameter '{name}' must be numeric")
-                return value
-            elif t == "binop":
-                left = self._eval_bound(expr["left"])
-                right = self._eval_bound(expr["right"])
-                if expr["op"] == "+":
-                    return left + right
-                elif expr["op"] == "-":
-                    return left - right
-                elif expr["op"] == "*":
-                    return left * right
-                else:
-                    raise self._unsupported_operator_error("index bound binop", expr["op"])
-            elif t == "uminus":
-                val = self._eval_bound(expr["value"])
-                return -val
-            elif t == "parenthesized_expression":
-                return self._eval_bound(expr["expression"])
-            elif t in ("minl", "maxl"):
-                vals = [self._eval_bound(a) for a in expr.get("args", [])]
-                if not vals:
-                    raise self._unsupported_type_error("expr in index bound", t)
-                return min(vals) if t == "minl" else max(vals)
-            else:
-                raise self._unsupported_type_error("expr in index bound", t)
-        else:
+        if not isinstance(expr, dict):
             raise self._unsupported_type_error("expr in index bound", type(expr))
+
+        expression_type = expr.get("type")
+        if expression_type == "number":
+            return expr["value"]
+        if expression_type == "name":
+            name = expr["value"]
+            if name not in self.data_dict:
+                raise SemanticError(f"Range bound parameter '{name}' has no data provided")
+            value = self.data_dict[name]
+            if not isinstance(value, (int, float, bool)):
+                raise SemanticError(f"Range bound parameter '{name}' must be numeric")
+            return value
+        if expression_type == "binop":
+            return self._eval_bound_binop(expr)
+        if expression_type == "uminus":
+            return -self._eval_bound(expr["value"])
+        if expression_type == "parenthesized_expression":
+            return self._eval_bound(expr["expression"])
+        if expression_type in ("minl", "maxl"):
+            return self._eval_bound_collection(expr)
+        raise self._unsupported_type_error("expr in index bound", expression_type)
 
     def _eval_dynamic_bound_name(self, expr, env):
         name = expr.get("value")
