@@ -986,7 +986,7 @@ class OPLIDE(tk.Tk):
             pass
 
     def _clear_output_session_state(self) -> None:
-        defaults = {
+        defaults: dict[str, dict[Any, Any] | list[Any]] = {
             "_output_sessions": {},
             "_output_session_ids": [],
             "_output_session_display": {},
@@ -3084,16 +3084,34 @@ class OPLIDE(tk.Tk):
 
         strategy_frame = ttk.Frame(root)
         strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(strategy_frame, text="Comparison strategy").pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
+        strategy_frame.columnconfigure(1, uniform="comparison-strategy")
+        strategy_frame.columnconfigure(2, minsize=4)
+        strategy_frame.columnconfigure(3, uniform="comparison-strategy")
         strategy_var = tk.StringVar(value="abstract")
-        strategy_combo = ttk.Combobox(
+
+        def set_strategy(strategy: str) -> None:
+            strategy_var.set(strategy)
+            abstract_button.configure(style=("GenaiModeActive.TButton" if strategy == "abstract" else "GenaiMode.TButton"))
+            concrete_button.configure(style=("GenaiModeActive.TButton" if strategy == "concrete" else "GenaiMode.TButton"))
+
+        strategy_button_width = max(len("Abstract"), len("Concrete"))
+        abstract_button = ttk.Button(
             strategy_frame,
-            textvariable=strategy_var,
-            values=("concrete", "abstract"),
-            state="readonly",
-            width=16,
+            text="Abstract",
+            style="GenaiModeActive.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("abstract"),
         )
-        strategy_combo.pack(side=tk.LEFT)
+        abstract_button.grid(row=0, column=1, sticky="ew")
+        concrete_button = ttk.Button(
+            strategy_frame,
+            text="Concrete",
+            style="GenaiMode.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("concrete"),
+        )
+        concrete_button.grid(row=0, column=3, sticky="ew")
 
         path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
         path_frame.grid(row=1, column=0, sticky="ew")
@@ -3166,7 +3184,8 @@ class OPLIDE(tk.Tk):
             state = "disabled" if running else "normal"
             for control in browse_buttons:
                 control.config(state=state)
-            strategy_combo.config(state="disabled" if running else "readonly")
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
             close_button.config(state=state)
             compare_button.config(
                 text=("Interrupt" if running else "Compare"),
@@ -3484,9 +3503,7 @@ class OPLIDE(tk.Tk):
         self._last_syntax_error_by_widget[id(text_widget)] = message
         self._last_syntax_error = message
 
-    def _highlight_model(
-        self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]
-    ) -> None:
+    def _highlight_model(self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]) -> None:
         lexer = OPLLexer()
         parser = OPLParser()
         try:
@@ -3522,9 +3539,7 @@ class OPLIDE(tk.Tk):
                     self._set_highlight_error(text_widget, "Parser Error", exc)
         self._apply_data_highlighting(text_widget, code, fast_index)
 
-    def _apply_token_highlighting(
-        self, text_widget: tk.Text, tokens: list[Any], fast_index: Callable[[int], str]
-    ) -> None:
+    def _apply_token_highlighting(self, text_widget: tk.Text, tokens: list[Any], fast_index: Callable[[int], str]) -> None:
         tag_ranges: dict[str, list[str]] = {}
         for token in tokens:
             tag = token.type if token.type in TOKEN_COLORS else None
@@ -3534,9 +3549,7 @@ class OPLIDE(tk.Tk):
                 )
         OPLIDE._apply_tag_ranges(text_widget, tag_ranges)
 
-    def _apply_data_highlighting(
-        self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]
-    ) -> None:
+    def _apply_data_highlighting(self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]) -> None:
         keyword_ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
         for keyword in ("param", "set", "true", "false"):
             tag = "PARAM" if keyword == "param" else "SET" if keyword == "set" else "BOOLEAN"
@@ -4147,8 +4160,6 @@ class OPLIDE(tk.Tk):
             messagebox.showinfo("Solve Model", "Model is already running.")
             return
 
-        import re
-
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
         data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
@@ -4225,9 +4236,7 @@ class OPLIDE(tk.Tk):
                 return False
 
         missing_vars = [
-            variable
-            for variable in data_vars
-            if not re.search(r"\b" + re.escape(variable) + r"\s*(=|\[)", data_code)
+            variable for variable in data_vars if not re.search(r"\b" + re.escape(variable) + r"\s*(=|\[)", data_code)
         ]
         if missing_vars:
             missing = ", ".join(missing_vars)
@@ -4379,9 +4388,7 @@ class OPLIDE(tk.Tk):
             self.status_var.set("Error running model")
             self._finish_foreground_operation(operation)
 
-    def _handle_solver_explanation(
-        self, payload: Any, operation: Optional[_ForegroundOperation]
-    ) -> bool:
+    def _handle_solver_explanation(self, payload: Any, operation: Optional[_ForegroundOperation]) -> bool:
         if operation is None or not operation.explain_after_solve:
             return False
         success = isinstance(payload, dict) and (
@@ -4409,6 +4416,10 @@ class OPLIDE(tk.Tk):
                     "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
                     "Include key findings and suggested next steps.\n\nSolution:\n" + solution_text
                 )
+                model_name = self.genai_model
+                if model_name is None:
+                    self.after(0, self._append_output, "\n[GenAI] No model selected for explanation.\n", operation.session_id)
+                    return
                 self.after(0, self._append_output, "\n[GenAI] Requesting explanation...\n", operation.session_id)
                 try:
                     feedback = generative_feedback(
@@ -4416,7 +4427,7 @@ class OPLIDE(tk.Tk):
                         operation.model_file,
                         operation.data_file,
                         llm_provider=self.genai_provider or None,
-                        model_name=self.genai_model or None,
+                        model_name=model_name,
                         progress=None,
                     )
                 except Exception:
@@ -4769,11 +4780,7 @@ class OPLIDE(tk.Tk):
         self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
         raw_artifacts = session.get("output_session_artifacts", {}) or {}
         self._output_session_artifacts = {
-            str(sid): {
-                key: str(artifact.get(key) or "")
-                for key in ("model_text", "data_text")
-                if key in artifact
-            }
+            str(sid): {key: str(artifact.get(key) or "") for key in ("model_text", "data_text") if key in artifact}
             for sid, artifact in raw_artifacts.items()
             if isinstance(artifact, dict)
         }
@@ -4818,15 +4825,15 @@ class OPLIDE(tk.Tk):
 
         if hasattr(self, "output_text") and self.output_text.winfo_exists():
             try:
-                sid = self._viewing_output_session_id or (
+                session_id: Optional[str] = self._viewing_output_session_id or (
                     self._output_session_ids[0] if self._output_session_ids else None
                 )
-                if sid:
-                    self._current_output_session_id = self._current_output_session_id or sid
-                    self._viewing_output_session_id = sid
+                if session_id:
+                    self._current_output_session_id = self._current_output_session_id or session_id
+                    self._viewing_output_session_id = session_id
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
-                    self.output_text.insert(tk.END, self._output_sessions.get(sid, ""))
+                    self.output_text.insert(tk.END, self._output_sessions.get(session_id, ""))
                     self.output_text.see(tk.END)
                     self.output_text.config(state="disabled")
             except Exception:
@@ -5616,20 +5623,52 @@ class OPLIDE(tk.Tk):
     def _theme_palette(theme: str) -> dict[str, str]:
         if theme == "darkly":
             return {
-                "root_bg": "#212529", "editor_bg": "#2b3035", "editor_fg": "#e9ecef", "caret_fg": "#e9ecef",
-                "sidebar_bg": "#2b3035", "output_bg": "#212529", "output_fg": "#e9ecef", "error_fg": "white",
-                "paned_bg": "#212529", "sidebar_fg": "#e9ecef", "sidebar_muted": "#aab4be", "list_select_bg": "#334155",
-                "inset_border": "#495057", "status_bg": "#212529", "status_fg": "#cfd6dd", "status_meta_fg": "#8f9aa3",
-                "scrollbar_thumb_bg": "#495057", "scrollbar_active_bg": "#5c636a", "scrollbar_trough_bg": "#212529",
-                "ttk_scrollbar_bg": "#495057", "ttk_scrollbar_active_bg": "#5c636a", "ttk_scrollbar_trough_bg": "#2b3035",
+                "root_bg": "#212529",
+                "editor_bg": "#2b3035",
+                "editor_fg": "#e9ecef",
+                "caret_fg": "#e9ecef",
+                "sidebar_bg": "#2b3035",
+                "output_bg": "#212529",
+                "output_fg": "#e9ecef",
+                "error_fg": "white",
+                "paned_bg": "#212529",
+                "sidebar_fg": "#e9ecef",
+                "sidebar_muted": "#aab4be",
+                "list_select_bg": "#334155",
+                "inset_border": "#495057",
+                "status_bg": "#212529",
+                "status_fg": "#cfd6dd",
+                "status_meta_fg": "#8f9aa3",
+                "scrollbar_thumb_bg": "#495057",
+                "scrollbar_active_bg": "#5c636a",
+                "scrollbar_trough_bg": "#212529",
+                "ttk_scrollbar_bg": "#495057",
+                "ttk_scrollbar_active_bg": "#5c636a",
+                "ttk_scrollbar_trough_bg": "#2b3035",
             }
         return {
-            "root_bg": "#f8f9fa", "editor_bg": "#ffffff", "editor_fg": "#212529", "caret_fg": "#212529",
-            "sidebar_bg": "#ffffff", "output_bg": "#f8f9fa", "output_fg": "#212529", "error_fg": "black",
-            "paned_bg": "#f8f9fa", "sidebar_fg": "#212529", "sidebar_muted": "#6b7785", "list_select_bg": "#cfe0ff",
-            "inset_border": "#ced4da", "status_bg": "#f8f9fa", "status_fg": "#364152", "status_meta_fg": "#7b8794",
-            "scrollbar_thumb_bg": "#c1c9d0", "scrollbar_active_bg": "#adb5bd", "scrollbar_trough_bg": "#f1f3f5",
-            "ttk_scrollbar_bg": "#c1c9d0", "ttk_scrollbar_active_bg": "#adb5bd", "ttk_scrollbar_trough_bg": "#f1f3f5",
+            "root_bg": "#f8f9fa",
+            "editor_bg": "#ffffff",
+            "editor_fg": "#212529",
+            "caret_fg": "#212529",
+            "sidebar_bg": "#ffffff",
+            "output_bg": "#f8f9fa",
+            "output_fg": "#212529",
+            "error_fg": "black",
+            "paned_bg": "#f8f9fa",
+            "sidebar_fg": "#212529",
+            "sidebar_muted": "#6b7785",
+            "list_select_bg": "#cfe0ff",
+            "inset_border": "#ced4da",
+            "status_bg": "#f8f9fa",
+            "status_fg": "#364152",
+            "status_meta_fg": "#7b8794",
+            "scrollbar_thumb_bg": "#c1c9d0",
+            "scrollbar_active_bg": "#adb5bd",
+            "scrollbar_trough_bg": "#f1f3f5",
+            "ttk_scrollbar_bg": "#c1c9d0",
+            "ttk_scrollbar_active_bg": "#adb5bd",
+            "ttk_scrollbar_trough_bg": "#f1f3f5",
         }
 
         pass
@@ -5642,8 +5681,12 @@ class OPLIDE(tk.Tk):
             if pane is not None and pane.winfo_exists():
                 pane.config(bg=colors["paned_bg"], bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
         editor_config = {
-            "bg": colors["editor_bg"], "fg": colors["editor_fg"], "insertbackground": colors["caret_fg"],
-            "relief": tk.FLAT, "bd": 0, "highlightbackground": colors["inset_border"],
+            "bg": colors["editor_bg"],
+            "fg": colors["editor_fg"],
+            "insertbackground": colors["caret_fg"],
+            "relief": tk.FLAT,
+            "bd": 0,
+            "highlightbackground": colors["inset_border"],
             "highlightcolor": colors["inset_border"],
         }
         for widget_name in ("model_text", "data_text"):
@@ -5653,8 +5696,12 @@ class OPLIDE(tk.Tk):
         output = getattr(self, "output_text", None)
         if output is not None:
             output.config(
-                bg=colors["output_bg"], fg=colors["output_fg"], relief=tk.FLAT, bd=0,
-                highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"],
+                bg=colors["output_bg"],
+                fg=colors["output_fg"],
+                relief=tk.FLAT,
+                bd=0,
+                highlightbackground=colors["inset_border"],
+                highlightcolor=colors["inset_border"],
             )
 
     @staticmethod
@@ -5663,23 +5710,69 @@ class OPLIDE(tk.Tk):
             style = self.style
             style.configure("Editor.TFrame", background=colors["editor_bg"])
             style.configure("Sidebar.TFrame", background=colors["sidebar_bg"])
-            style.configure("SidebarHeader.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_fg"], font=(self.interface_font_family, 13, "bold"))
-            style.configure("SidebarSection.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_fg"], font=(self.interface_font_family, 10, "bold"))
-            style.configure("SidebarSubtle.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_muted"], font=(self.interface_font_family, 9))
+            style.configure(
+                "SidebarHeader.TLabel",
+                background=colors["sidebar_bg"],
+                foreground=colors["sidebar_fg"],
+                font=(self.interface_font_family, 13, "bold"),
+            )
+            style.configure(
+                "SidebarSection.TLabel",
+                background=colors["sidebar_bg"],
+                foreground=colors["sidebar_fg"],
+                font=(self.interface_font_family, 10, "bold"),
+            )
+            style.configure(
+                "SidebarSubtle.TLabel",
+                background=colors["sidebar_bg"],
+                foreground=colors["sidebar_muted"],
+                font=(self.interface_font_family, 9),
+            )
             for style_name, background, foreground in (
                 ("GenaiMode.TButton", colors["paned_bg"], colors["sidebar_muted"]),
                 ("GenaiModeActive.TButton", colors["list_select_bg"], colors["sidebar_fg"]),
             ):
-                style.configure(style_name, background=background, foreground=foreground, borderwidth=0, focusthickness=0, padding=(10, 5), font=self.interface_button_font)
+                style.configure(
+                    style_name,
+                    background=background,
+                    foreground=foreground,
+                    borderwidth=0,
+                    focusthickness=0,
+                    padding=(10, 5),
+                    font=self.interface_button_font,
+                )
                 style.map(style_name, background=[("active", colors["list_select_bg"]), ("pressed", colors["list_select_bg"])])
             button_layout = OPLIDE._strip_focus_from_ttk_layout(self, style.layout("TButton"))
             for style_name in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
                 style.layout(style_name, button_layout)
             style.configure("StatusBar.TFrame", background=colors["status_bg"])
-            style.configure("StatusBar.TLabel", background=colors["status_bg"], foreground=colors["status_fg"], font=self.interface_button_font)
-            style.configure("StatusBarMeta.TLabel", background=colors["status_bg"], foreground=colors["status_meta_fg"], font=self.interface_button_font)
-            style.configure("TScrollbar", background=colors["ttk_scrollbar_bg"], troughcolor=colors["ttk_scrollbar_trough_bg"], bordercolor=colors["ttk_scrollbar_trough_bg"], darkcolor=colors["ttk_scrollbar_bg"], lightcolor=colors["ttk_scrollbar_bg"], arrowcolor=colors["editor_fg"], gripcount=0)
-            style.map("TScrollbar", background=[("active", colors["ttk_scrollbar_active_bg"]), ("pressed", colors["ttk_scrollbar_active_bg"])], arrowcolor=[("disabled", colors["sidebar_muted"]), ("active", colors["editor_fg"])])
+            style.configure(
+                "StatusBar.TLabel",
+                background=colors["status_bg"],
+                foreground=colors["status_fg"],
+                font=self.interface_button_font,
+            )
+            style.configure(
+                "StatusBarMeta.TLabel",
+                background=colors["status_bg"],
+                foreground=colors["status_meta_fg"],
+                font=self.interface_button_font,
+            )
+            style.configure(
+                "TScrollbar",
+                background=colors["ttk_scrollbar_bg"],
+                troughcolor=colors["ttk_scrollbar_trough_bg"],
+                bordercolor=colors["ttk_scrollbar_trough_bg"],
+                darkcolor=colors["ttk_scrollbar_bg"],
+                lightcolor=colors["ttk_scrollbar_bg"],
+                arrowcolor=colors["editor_fg"],
+                gripcount=0,
+            )
+            style.map(
+                "TScrollbar",
+                background=[("active", colors["ttk_scrollbar_active_bg"]), ("pressed", colors["ttk_scrollbar_active_bg"])],
+                arrowcolor=[("disabled", colors["sidebar_muted"]), ("active", colors["editor_fg"])],
+            )
         except Exception:
             pass
 
@@ -5698,8 +5791,12 @@ class OPLIDE(tk.Tk):
             except Exception:
                 pass
         editor_config = {
-            "bg": colors["editor_bg"], "fg": colors["editor_fg"], "insertbackground": colors["caret_fg"],
-            "relief": tk.FLAT, "bd": 0, "highlightbackground": colors["inset_border"],
+            "bg": colors["editor_bg"],
+            "fg": colors["editor_fg"],
+            "insertbackground": colors["caret_fg"],
+            "relief": tk.FLAT,
+            "bd": 0,
+            "highlightbackground": colors["inset_border"],
             "highlightcolor": colors["inset_border"],
         }
         prompt = getattr(self, "genai_prompt_text", None)
@@ -5708,13 +5805,34 @@ class OPLIDE(tk.Tk):
         for widget_name in ("genai_attachment_listbox", "request_listbox"):
             widget = getattr(self, widget_name, None)
             if widget is not None:
-                widget.config(bg=colors["editor_bg"], fg=colors["editor_fg"], selectbackground=colors["list_select_bg"], selectforeground=colors["editor_fg"], relief=tk.FLAT, bd=0, highlightthickness=0)
+                widget.config(
+                    bg=colors["editor_bg"],
+                    fg=colors["editor_fg"],
+                    selectbackground=colors["list_select_bg"],
+                    selectforeground=colors["editor_fg"],
+                    relief=tk.FLAT,
+                    bd=0,
+                    highlightthickness=0,
+                )
         surface = getattr(self, "sessions_surface", None)
         if surface is not None:
-            surface.config(bg=colors["inset_border"], highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"])
-        for widget in (getattr(self, "model_text", None), getattr(self, "data_text", None), getattr(self, "output_text", None), prompt):
+            surface.config(
+                bg=colors["inset_border"], highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"]
+            )
+        for widget in (
+            getattr(self, "model_text", None),
+            getattr(self, "data_text", None),
+            getattr(self, "output_text", None),
+            prompt,
+        ):
             if widget is not None:
-                self._configure_tk_scrollbar(getattr(widget, "vbar", None), thumb_bg=colors["scrollbar_thumb_bg"], active_bg=colors["scrollbar_active_bg"], trough_bg=colors["scrollbar_trough_bg"], border_color=colors["inset_border"])
+                self._configure_tk_scrollbar(
+                    getattr(widget, "vbar", None),
+                    thumb_bg=colors["scrollbar_thumb_bg"],
+                    active_bg=colors["scrollbar_active_bg"],
+                    trough_bg=colors["scrollbar_trough_bg"],
+                    border_color=colors["inset_border"],
+                )
         for widget_name in ("model_text", "data_text"):
             widget = getattr(self, widget_name, None)
             if widget is not None:
@@ -6039,7 +6157,9 @@ class OPLIDE(tk.Tk):
         if active is not None:
             self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
         else:
-            self.genai_menu.add_command(label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E"))
+            self.genai_menu.add_command(
+                label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
+            )
         if getattr(self, "debug", False):
             self.genai_menu.add_separator()
             self.genai_menu.add_checkbutton(

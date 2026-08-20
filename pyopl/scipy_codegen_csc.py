@@ -1276,7 +1276,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if op in ("+", "-"):
             left_lower, left_upper = self._linear_bounds_safe(left)
             right_lower, right_upper = self._linear_bounds_safe(right)
-            if None in (left_lower, left_upper, right_lower, right_upper):
+            if left_lower is None or left_upper is None or right_lower is None or right_upper is None:
                 return (None, None)
             if op == "+":
                 return (left_lower + right_lower, left_upper + right_upper)
@@ -1565,9 +1565,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 upper = value
         return [lower, upper], int_flag
 
-    def _expand_named_set_variable_declaration(
-        self, decl: dict, var_names: list, bounds: list, integrality: list
-    ) -> None:
+    def _expand_named_set_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
         name = decl["name"]
         set_name = decl["dimensions"][0]["name"]
         set_decl = self._find_decl(set_name)
@@ -1597,9 +1595,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             bounds.append(bound)
             integrality.append(int_flag)
 
-    def _expand_indexed_variable_declaration(
-        self, decl: dict, var_names: list, bounds: list, integrality: list
-    ) -> None:
+    def _expand_indexed_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
         name = decl["name"]
         dims = decl["dimensions"]
         iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
@@ -1825,8 +1821,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return None
         if dimension_type == "named_set_dimension":
             set_name = dimension.get("name")
+            if not isinstance(set_name, str):
+                return None
             values = self._variable_domain_set_values(set_name)
-            if values is not None and index not in values:
+            if isinstance(values, (list, tuple, set, frozenset, dict)) and index not in values:
                 return f"{index} not in {set_name}"
         return None
 

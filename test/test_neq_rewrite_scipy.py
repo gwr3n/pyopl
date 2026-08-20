@@ -59,10 +59,7 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
             (((x_idx, 1.0, 1e-9), (y_idx, -1.0, 1e-9), (delta_idx, M, 1e-6)), M - 1.0, 1e-3),
         )
         found_forms = sum(
-            any(
-                self._row_matches(row, rhs, coefficients, expected_rhs, rhs_tolerance)
-                for row, rhs in zip(gen.A_ub, gen.b_ub)
-            )
+            any(self._row_matches(row, rhs, coefficients, expected_rhs, rhs_tolerance) for row, rhs in zip(gen.A_ub, gen.b_ub))
             for coefficients, expected_rhs, rhs_tolerance in expected_forms
         )
         self.assertGreaterEqual(
@@ -85,10 +82,10 @@ class TestNotEqualRewriteSciPy(unittest.TestCase):
 
     @staticmethod
     def _row_matches(row, rhs, coefficients, expected_rhs, rhs_tolerance):
-        return all(
-            abs(row[index] - expected) < tolerance
-            for index, expected, tolerance in coefficients
-        ) and abs(rhs - expected_rhs) < rhs_tolerance
+        return (
+            all(abs(row[index] - expected) < tolerance for index, expected, tolerance in coefficients)
+            and abs(rhs - expected_rhs) < rhs_tolerance
+        )
 
     def test_float_neq_is_rejected_without_an_explicit_tolerance_policy(self):
         opl = """
