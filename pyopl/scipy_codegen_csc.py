@@ -2253,6 +2253,63 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return min(vals) if t == "minl" else max(vals)
         raise self._unsupported_type_error("expr in index bound", t)
 
+    def _iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
+        rng = iterator.get("range") or {}
+        range_type = rng.get("type")
+        if range_type == "range_specifier":
+            start_expr = cast(Dict[str, Any], rng.get("start"))
+            end_expr = cast(Dict[str, Any], rng.get("end"))
+            start = self._eval_bound_dynamic(start_expr, env)
+            end = self._eval_bound_dynamic(end_expr, env)
+            if end < start:
+                return []
+            return list(range(int(start), int(end) + 1))
+        if range_type == "named_range":
+            range_name = cast(str, rng.get("name"))
+            declaration = self._find_decl(range_name, "range_declaration_inline")
+            if declaration is None:
+                raise SemanticError(f"Named range '{range_name}' is not declared")
+            start = int(self._eval_bound(declaration["start"]))
+            end = int(self._eval_bound(declaration["end"]))
+            return list(range(start, end + 1))
+        if range_type in ("named_set", "named_set_dimension"):
+            return self._named_iterator_domain(rng)
+        if range_type == "indexed_set":
+            return self._indexed_iterator_domain(rng, env)
+        raise self._unsupported_type_error("iterator range type", range_type)
+
+    def _named_iterator_domain(self, rng: dict) -> list:
+        set_name = cast(str, rng.get("name"))
+        set_values = self.data_dict.get(set_name)
+        if isinstance(set_values, dict) and "elements" in set_values:
+            set_values = set_values["elements"]
+        if set_values is not None:
+            return list(set_values)
+
+        set_decl = self._find_decl(set_name)
+        if set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
+            set_values = set_decl.get("value")
+            if set_decl.get("type") == "typed_set_external" and set_values is None:
+                raise SemanticError(f"External set '{set_name}' has no data provided")
+            return list(set_values or [])
+        if set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
+            return list(TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict))
+        raise SemanticError(f"Named set '{set_name}' is not declared")
+
+    def _indexed_iterator_domain(self, rng: dict, env: dict) -> list:
+        set_values = self.data_dict.get(rng.get("name"), [])
+        for dimension in rng.get("dimensions", []) or []:
+            _, index_value = self._eval_index_expr(cast(Dict[str, Any], dimension), env)
+            if isinstance(set_values, dict):
+                set_values = set_values[index_value]
+            elif isinstance(set_values, (list, tuple)):
+                if isinstance(index_value, float) and index_value.is_integer():
+                    index_value = int(index_value)
+                set_values = set_values[int(index_value) - 1]
+            else:
+                return []
+        return list(set_values or [])
+
     # NEW: build dynamic iterator domains honoring dependencies between bounds
     def _iterate_iterators_dynamic(self, iterators: list[dict], outer_env: dict) -> list[tuple[dict, tuple]]:
         """
@@ -2261,63 +2318,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         results: list[tuple[dict, tuple]] = []
 
-        def domain_for_iterator(it: dict, env: dict) -> list:
-            rng = it.get("range") or {}
-            rt = rng.get("type")
-            if rt == "range_specifier":
-                start_expr = cast(Dict[str, Any], rng.get("start"))
-                end_expr = cast(Dict[str, Any], rng.get("end"))
-                start = self._eval_bound_dynamic(start_expr, env)
-                end = self._eval_bound_dynamic(end_expr, env)
-                # Safe guard: empty if start > end
-                if end < start:
-                    return []
-                return list(range(int(start), int(end) + 1))
-            if rt == "named_range":
-                # Use declaration
-                decl = self._find_decl(cast(str, rng.get("name")), "range_declaration_inline")
-                if decl is None:
-                    raise SemanticError(f"Named range '{rng.get('name')}' is not declared")
-                # _eval_bound returns float | int; coerce to int for range
-                start = int(self._eval_bound(decl["start"]))
-                end = int(self._eval_bound(decl["end"]))
-                return list(range(start, end + 1))
-            if rt in ("named_set", "named_set_dimension"):
-                set_name = cast(str, rng.get("name"))
-                # Prefer data_dict override
-                set_vals = self.data_dict.get(set_name)
-                if isinstance(set_vals, dict) and "elements" in set_vals:
-                    set_vals = set_vals["elements"]
-                if set_vals is None:
-                    # fallback to AST typed set or set-of-tuples
-                    set_decl = self._find_decl(set_name)
-                    if set_decl and set_decl.get("type") in ("typed_set", "typed_set_external"):
-                        set_vals = set_decl.get("value")
-                        if set_decl.get("type") == "typed_set_external" and set_vals is None:
-                            raise SemanticError(f"External set '{set_name}' has no data provided")
-                        set_vals = set_vals or []
-                    elif set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                        set_vals = TupleSetHelper.get_tuple_set(set_name, self.ast, self.data_dict)
-                    else:
-                        raise SemanticError(f"Named set '{set_name}' is not declared")
-                return list(set_vals)
-            if rt == "indexed_set":
-                set_name = cast(str, rng.get("name"))
-                set_vals = self.data_dict.get(set_name, [])
-                for dim in rng.get("dimensions", []) or []:
-                    _, idx_val = self._eval_index_expr(cast(Dict[str, Any], dim), env)
-                    if isinstance(set_vals, dict):
-                        set_vals = set_vals[idx_val]
-                    elif isinstance(set_vals, (list, tuple)):
-                        if isinstance(idx_val, float) and idx_val.is_integer():
-                            idx_val = int(idx_val)
-                        set_vals = set_vals[int(idx_val) - 1]
-                    else:
-                        set_vals = []
-                        break
-                return list(set_vals or [])
-            raise self._unsupported_type_error("iterator range type", rt)
-
         def rec(idx: int, env: dict, acc: list):
             if idx == len(iterators):
                 # snapshot env to avoid mutation
@@ -2325,7 +2325,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return
             it = iterators[idx]
             it_name = it.get("iterator")
-            dom = domain_for_iterator(it, env)
+            dom = self._iterator_domain_dynamic(it, env)
             for v in dom:
                 env[it_name] = v
                 acc.append(v)
