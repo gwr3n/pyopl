@@ -2497,17 +2497,11 @@ class OPLParser(Parser):
     def opt_index_constraint(self, p):
         return None
 
-    def _handle_binop(self, left_expr, right_expr, op, lineno):
-        # Extensive logger debugging for binop typing issues
-        logger.debug(f"[BINOP] op: {op}, left_expr: {left_expr}, right_expr: {right_expr}, lineno: {lineno}")
-
-        # If both sides are sum/forall, return a binop node with both as children
+    def _lift_binop_over_sum(self, left_expr, right_expr, op):
         left_is_sum = isinstance(left_expr, dict) and left_expr.get("type") in ("sum", "forall")
         right_is_sum = isinstance(right_expr, dict) and right_expr.get("type") in ("sum", "forall")
-
         if left_is_sum and right_is_sum:
             result_type = left_expr.get("sem_type") or right_expr.get("sem_type") or "int"
-            logger.debug("[BINOP] Both sides are sum/forall: returning binop of two sums/foralls")
             return {
                 "type": "binop",
                 "op": op,
@@ -2515,11 +2509,6 @@ class OPLParser(Parser):
                 "right": right_expr,
                 "sem_type": result_type,
             }
-
-        # DO NOT lift +/- into sum (prevents accidental duplication of unrelated terms)
-        # Only allow pushing into sums for multiplicative contexts handled below.
-
-        # If only left is sum/forall, push binop inside left sum/forall (for *, /, % only)
         if left_is_sum and op in ("*", "/", "%"):
             new_body = {"type": "binop", "op": op, "left": left_expr["expression"], "right": right_expr, "sem_type": None}
             sum_node = dict(left_expr)
@@ -2534,44 +2523,45 @@ class OPLParser(Parser):
             sum_node["expression"] = new_body
             sum_node["sem_type"] = right_expr.get("sem_type", left_expr.get("sem_type"))
             return sum_node
+        return None
 
-        # Patch: allow boolean variables in arithmetic and sum contexts (OPL semantics)
-        def normalize_type(t):
-            if t == "int+":
-                return "int"
-            if t == "float+":
-                return "float"
-            return t
+    @staticmethod
+    def _normalize_binop_type(value_type):
+        if value_type == "int+":
+            return "int"
+        if value_type == "float+":
+            return "float"
+        return value_type
 
-        left_type = normalize_type(left_expr.get("sem_type", None))
-        right_type = normalize_type(right_expr.get("sem_type", None))
-        # Check for tuple types: if either side is a tuple type, error unless it's a field access
-        tuple_type_names = set()
-        for scope in self.symbol_table.scopes:
-            for sym, info in scope.items():
-                if info.get("type") == "tuple_type":
-                    tuple_type_names.add(sym)
-        if left_type in tuple_type_names and left_expr.get("type") != "field_access":
-            logger.error(
-                f"[BINOP] Cannot use tuple variable '{left_expr.get('value', '?')}' of type '{left_type}' in arithmetic; use a field access like '{left_expr.get('value', '?')}.field'."
-            )
-            raise SemanticError(
-                f"Cannot use tuple variable '{left_expr.get('value', '?')}' of type '{left_type}' in arithmetic; use a field access like '{left_expr.get('value', '?')}.field'.",
-                lineno=lineno,
-            )
-        if right_type in tuple_type_names and right_expr.get("type") != "field_access":
-            logger.error(
-                f"[BINOP] Cannot use tuple variable '{right_expr.get('value', '?')}' of type '{right_type}' in arithmetic; use a field access like '{right_expr.get('value', '?')}.field'."
-            )
-            raise SemanticError(
-                f"Cannot use tuple variable '{right_expr.get('value', '?')}' of type '{right_type}' in arithmetic; use a field access like '{right_expr.get('value', '?')}.field'.",
-                lineno=lineno,
-            )
+    def _validate_binop_types(self, left_expr, right_expr, lineno):
+        left_type = self._normalize_binop_type(left_expr.get("sem_type", None))
+        right_type = self._normalize_binop_type(right_expr.get("sem_type", None))
+        tuple_type_names = {
+            symbol
+            for scope in self.symbol_table.scopes
+            for symbol, info in scope.items()
+            if info.get("type") == "tuple_type"
+        }
+        for expression, expression_type in ((left_expr, left_type), (right_expr, right_type)):
+            if expression_type in tuple_type_names and expression.get("type") != "field_access":
+                value = expression.get("value", "?")
+                logger.error(f"[BINOP] Cannot use tuple variable '{value}' of type '{expression_type}' in arithmetic; use a field access like '{value}.field'.")
+                raise SemanticError(
+                    f"Cannot use tuple variable '{value}' of type '{expression_type}' in arithmetic; use a field access like '{value}.field'.",
+                    lineno=lineno,
+                )
         allowed_types = {"int", "float", "boolean", None}
         if left_type not in allowed_types or right_type not in allowed_types:
             logger.error(f"[BINOP] Type mismatch in arithmetic: {left_type} vs {right_type}")
             raise SemanticError(f"Type mismatch in arithmetic: {left_type} vs {right_type}", lineno)
-        # Otherwise, allow (int, float, boolean) in any combination
+        return left_type, right_type
+
+    def _handle_binop(self, left_expr, right_expr, op, lineno):
+        logger.debug(f"[BINOP] op: {op}, left_expr: {left_expr}, right_expr: {right_expr}, lineno: {lineno}")
+        lifted = self._lift_binop_over_sum(left_expr, right_expr, op)
+        if lifted is not None:
+            return lifted
+        left_type, right_type = self._validate_binop_types(left_expr, right_expr, lineno)
         result_type = "float" if "float" in [left_type, right_type] else "int"
         logger.debug(f"[BINOP] Returning binop node, result_type: {result_type}")
         return {
@@ -4298,33 +4288,41 @@ class OPLCompiler:
     def _is_numeric_value(value: Any) -> bool:
         return isinstance(value, (int, float)) and not isinstance(value, bool)
 
+    @staticmethod
+    def _typed_set_values(declaration: dict[str, Any], data_dict: dict[str, Any]) -> Any:
+        values = declaration.get("value")
+        if values is None:
+            values = data_dict.get(declaration.get("name"))
+        if isinstance(values, dict) and "elements" in values:
+            values = values["elements"]
+        return values
+
+    def _validate_typed_set_values(self, name: str, base: str, values: Any) -> None:
+        if not isinstance(values, list):
+            raise SemanticError(f"Set '{name}' must be assigned a list of values, got {type(values).__name__}.")
+        if base == "int" and not all(self._is_int_value(value) for value in values):
+            raise SemanticError(f"All elements of set '{name}' must be integers.")
+        if base == "float" and not all(self._is_numeric_value(value) for value in values):
+            raise SemanticError(f"All elements of set '{name}' must be numeric (int/float).")
+        if base == "boolean" and not all(isinstance(value, bool) for value in values):
+            raise SemanticError(f"All elements of set '{name}' must be booleans (true/false).")
+        if base == "string" and not all(isinstance(value, str) for value in values):
+            raise SemanticError(f"All elements of set '{name}' must be strings.")
+
     def _validate_typed_sets(self, model_ast: dict[str, Any], data_dict: dict[str, Any]) -> None:
         if not model_ast or "declarations" not in model_ast:
             return
         for decl in model_ast["declarations"]:
             if decl.get("type") not in ("typed_set", "typed_set_external"):
                 continue
-            base = decl.get("base_type")
             name = decl.get("name")
-            values = decl.get("value")
-            if values is None:
-                values = data_dict.get(name)
+            values = self._typed_set_values(decl, data_dict)
             if values is None:
                 continue
-            if isinstance(values, dict) and "elements" in values:
-                values = values["elements"]
-            if not isinstance(values, list):
-                raise SemanticError(f"Set '{name}' must be assigned a list of values, got {type(values).__name__}.")
-            if base == "int" and not all(self._is_int_value(value) for value in values):
-                raise SemanticError(f"All elements of set '{name}' must be integers.")
+            base = decl.get("base_type")
+            self._validate_typed_set_values(name, base, values)
             if base == "float":
-                if not all(self._is_numeric_value(value) for value in values):
-                    raise SemanticError(f"All elements of set '{name}' must be numeric (int/float).")
                 data_dict[name] = [float(value) for value in values]
-            elif base == "boolean" and not all(isinstance(value, bool) for value in values):
-                raise SemanticError(f"All elements of set '{name}' must be booleans (true/false).")
-            elif base == "string" and not all(isinstance(value, str) for value in values):
-                raise SemanticError(f"All elements of set '{name}' must be strings.")
 
     def _validate_named_ranges(self, ast: dict[str, Any], data_dict: dict[str, Any]) -> None:
         declared_inline = {
@@ -5155,57 +5153,61 @@ class OPLCompiler:
     def _is_min_aggregate(node: Any) -> bool:
         return isinstance(node, dict) and node.get("type") == "min_agg"
 
+    @staticmethod
+    def _minmax_forall_from(aggregate: dict, other: Any, relation: str, aggregate_on_left: bool) -> list[dict]:
+        expression = aggregate["expression"]
+        constraint = {
+            "type": "constraint",
+            "op": relation,
+            "left": expression if aggregate_on_left else other,
+            "right": other if aggregate_on_left else expression,
+        }
+        return [{
+            "type": "forall_constraint",
+            "iterators": aggregate["iterators"],
+            "index_constraint": aggregate.get("index_constraint"),
+            "constraint": constraint,
+        }]
+
+    def _rewrite_minmax_constraint_body(self, node: dict[str, Any]) -> list[dict]:
+        left = node.get("left")
+        right = node.get("right")
+        operator = node.get("op")
+        cases = (
+            (left, right, self._is_max_aggregate, operator == "<=", "<=", True),
+            (right, left, self._is_max_aggregate, operator == ">=", ">=", False),
+            (left, right, self._is_min_aggregate, operator == ">=", ">=", True),
+            (right, left, self._is_min_aggregate, operator == "<=", "<=", False),
+        )
+        for aggregate, other, predicate, matches, relation, aggregate_on_left in cases:
+            if matches and isinstance(aggregate, dict) and predicate(aggregate):
+                return self._minmax_forall_from(aggregate, other, relation, aggregate_on_left)
+        if self._is_minmax_aggregate(left) or self._is_minmax_aggregate(right):
+            raise SemanticError("Unsupported non-convex aggregate placement (==, >, <, or reversed forms).")
+        return [node]
+
+    def _rewrite_minmax_forall(self, node: dict[str, Any]) -> list[dict]:
+        if "constraint" in node and isinstance(node["constraint"], dict):
+            expanded = self._rewrite_minmax_constraint(node["constraint"])
+            if len(expanded) == 1:
+                return [dict(node, constraint=expanded[0])]
+            rewritten = dict(node)
+            rewritten.pop("constraint", None)
+            rewritten["constraints"] = expanded
+            return [rewritten]
+        if isinstance(node.get("constraints"), list):
+            children = [item for child in node["constraints"] for item in self._rewrite_minmax_constraint(child)]
+            return [dict(node, constraints=children)]
+        return [node]
+
     def _rewrite_minmax_constraint(self, node: Any) -> list[dict]:
         if not isinstance(node, dict):
             return [node]
         if node.get("type") == "constraint":
-            left = node.get("left")
-            right = node.get("right")
-            operator = node.get("op")
-
-            def forall_from(aggregate: dict, other: Any, relation: str, aggregate_on_left: bool) -> list[dict]:
-                expression = aggregate["expression"]
-                constraint = {
-                    "type": "constraint",
-                    "op": relation,
-                    "left": expression if aggregate_on_left else other,
-                    "right": other if aggregate_on_left else expression,
-                }
-                return [
-                    {
-                        "type": "forall_constraint",
-                        "iterators": aggregate["iterators"],
-                        "index_constraint": aggregate.get("index_constraint"),
-                        "constraint": constraint,
-                    }
-                ]
-
-            if self._is_max_aggregate(left) and operator == "<=" and isinstance(left, dict):
-                return forall_from(left, right, "<=", True)
-            if self._is_max_aggregate(right) and operator == ">=" and isinstance(right, dict):
-                return forall_from(right, left, ">=", False)
-            if self._is_min_aggregate(left) and operator == ">=" and isinstance(left, dict):
-                return forall_from(left, right, ">=", True)
-            if self._is_min_aggregate(right) and operator == "<=" and isinstance(right, dict):
-                return forall_from(right, left, "<=", False)
-            if self._is_minmax_aggregate(left) or self._is_minmax_aggregate(right):
-                raise SemanticError("Unsupported non-convex aggregate placement (==, >, <, or reversed forms).")
-            return [node]
+            return self._rewrite_minmax_constraint_body(node)
 
         if node.get("type") == "forall_constraint":
-            if "constraint" in node and isinstance(node["constraint"], dict):
-                expanded = self._rewrite_minmax_constraint(node["constraint"])
-                if len(expanded) == 1:
-                    return [dict(node, constraint=expanded[0])]
-                rewritten = dict(node)
-                rewritten.pop("constraint", None)
-                rewritten["constraints"] = expanded
-                return [rewritten]
-            if isinstance(node.get("constraints"), list):
-                children = []
-                for child in node["constraints"]:
-                    children.extend(self._rewrite_minmax_constraint(child))
-                return [dict(node, constraints=children)]
+            return self._rewrite_minmax_forall(node)
         return [node]
 
     def _lower_maxmin_objective(self, ast: dict, objective: dict) -> None:
