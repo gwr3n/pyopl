@@ -169,34 +169,12 @@ def prove_equivalent(
             max_projected_assignments,
         )
     if mode == "projection":
-        if variable_mapping is None:
-            return EquivalenceResult(
-                status="unknown",
-                level="projection",
-                reason="projection mode requires a user variable mapping",
-            )
-        projection = _project_to_mapping(left, right, variable_mapping, tolerance)
-        if projection is None:
-            return EquivalenceResult(
-                status="unknown",
-                level="projection",
-                reason="projection mode only supports independent zero-objective auxiliary variables",
-            )
-        left, right, projection_steps = projection
-        result = prove_equivalent(
+        return _prove_projection_equivalent(
             left,
             right,
-            mode="solver",
-            variable_mapping=variable_mapping,
-            tolerance=tolerance,
-            max_iterations=max_iterations,
-        )
-        return EquivalenceResult(
-            status=result.status,
-            level="projection",
-            reason=result.reason,
-            proof_steps=projection_steps + result.proof_steps,
-            counterexample=result.counterexample,
+            variable_mapping,
+            tolerance,
+            max_iterations,
         )
     if mode not in {"structural", "normalized", "solver", "auto"}:
         return EquivalenceResult(
@@ -205,6 +183,64 @@ def prove_equivalent(
             reason=f"unsupported equivalence mode: {mode}",
         )
 
+    return _prove_normalized_equivalent(
+        left,
+        right,
+        mode,
+        variable_mapping,
+        tolerance,
+        max_iterations,
+        max_projected_assignments,
+    )
+
+
+def _prove_projection_equivalent(
+    left: LinearProblem,
+    right: LinearProblem,
+    variable_mapping: dict[str, str] | None,
+    tolerance: float,
+    max_iterations: int | None,
+) -> EquivalenceResult:
+    if variable_mapping is None:
+        return EquivalenceResult(
+            status="unknown",
+            level="projection",
+            reason="projection mode requires a user variable mapping",
+        )
+    projection = _project_to_mapping(left, right, variable_mapping, tolerance)
+    if projection is None:
+        return EquivalenceResult(
+            status="unknown",
+            level="projection",
+            reason="projection mode only supports independent zero-objective auxiliary variables",
+        )
+    projected_left, projected_right, projection_steps = projection
+    result = prove_equivalent(
+        projected_left,
+        projected_right,
+        mode="solver",
+        variable_mapping=variable_mapping,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+    )
+    return EquivalenceResult(
+        status=result.status,
+        level="projection",
+        reason=result.reason,
+        proof_steps=projection_steps + result.proof_steps,
+        counterexample=result.counterexample,
+    )
+
+
+def _prove_normalized_equivalent(
+    left: LinearProblem,
+    right: LinearProblem,
+    mode: Literal["structural", "normalized", "solver", "auto"],
+    variable_mapping: dict[str, str] | None,
+    tolerance: float,
+    max_iterations: int | None,
+    max_projected_assignments: int,
+) -> EquivalenceResult:
     left_normalized = _canonicalize(left, tolerance, max_iterations)
     right_normalized = _canonicalize(right, tolerance, max_iterations)
     mapping_issue = _mapping_issue(left_normalized, right_normalized, variable_mapping)
@@ -604,15 +640,8 @@ def _drop_independent_auxiliaries(problem: LinearProblem, kept_names: set[str], 
         return None
 
     auxiliary_indices = [index for index, name in enumerate(problem.var_names) if name not in kept_names]
-    for index in auxiliary_indices:
-        if abs(float(problem.c[index])) > tolerance:
-            return None
-        if problem.integrality[index] != 0:
-            return None
-        if any(abs(float(row[index])) > tolerance for row in problem.A_eq):
-            return None
-        if any(abs(float(row[index])) > tolerance for row in problem.A_ub):
-            return None
+    if not _are_independent_auxiliaries(problem, auxiliary_indices, tolerance):
+        return None
 
     return LinearProblem(
         sense=problem.sense,
@@ -626,6 +655,19 @@ def _drop_independent_auxiliaries(problem: LinearProblem, kept_names: set[str], 
         b_ub=problem.b_ub[:],
         objective_offset=problem.objective_offset,
     )
+
+
+def _are_independent_auxiliaries(
+    problem: LinearProblem,
+    auxiliary_indices: list[int],
+    tolerance: float,
+) -> bool:
+    for index in auxiliary_indices:
+        if abs(float(problem.c[index])) > tolerance or problem.integrality[index] != 0:
+            return False
+        if any(abs(float(row[index])) > tolerance for row in problem.A_eq + problem.A_ub):
+            return False
+    return True
 
 
 def _mapping_issue(
@@ -990,23 +1032,31 @@ def _is_lp_redundant_row(
     variable_count: int,
     tolerance: float,
 ) -> bool:
-    objective = [-coefficient for coefficient in _row_coefficients(row, variable_count, tolerance)]
-    result = linprog(
-        c=objective,
-        A_ub=[_row_coefficients(other_row, variable_count, tolerance) for other_row in other_rows if other_row.sense == "<="]
-        or None,
-        b_ub=[_row_rhs(other_row, tolerance) for other_row in other_rows if other_row.sense == "<="] or None,
-        A_eq=[_row_coefficients(other_row, variable_count, tolerance) for other_row in other_rows if other_row.sense == "="]
-        or None,
-        b_eq=[_row_rhs(other_row, tolerance) for other_row in other_rows if other_row.sense == "="] or None,
-        bounds=[(None, None)] * variable_count,
-        method="highs",
-    )
+    result = linprog(**_lp_redundancy_inputs(row, other_rows, variable_count, tolerance))
     if result.status != 0:
         return False
     if result.fun is None:
         return False
     return -float(result.fun) <= _row_rhs(row, tolerance) + tolerance
+
+
+def _lp_redundancy_inputs(
+    row: _Row,
+    other_rows: tuple[_Row, ...],
+    variable_count: int,
+    tolerance: float,
+) -> dict[str, object]:
+    inequality_rows = [other_row for other_row in other_rows if other_row.sense == "<="]
+    equality_rows = [other_row for other_row in other_rows if other_row.sense == "="]
+    return {
+        "c": [-coefficient for coefficient in _row_coefficients(row, variable_count, tolerance)],
+        "A_ub": [_row_coefficients(other_row, variable_count, tolerance) for other_row in inequality_rows] or None,
+        "b_ub": [_row_rhs(other_row, tolerance) for other_row in inequality_rows] or None,
+        "A_eq": [_row_coefficients(other_row, variable_count, tolerance) for other_row in equality_rows] or None,
+        "b_eq": [_row_rhs(other_row, tolerance) for other_row in equality_rows] or None,
+        "bounds": [(None, None)] * variable_count,
+        "method": "highs",
+    }
 
 
 def _is_milp_redundant_row(

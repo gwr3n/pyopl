@@ -143,27 +143,24 @@ def prove_abstract_equivalent(
             reason=f"unsupported abstract equivalence mode: {mode}",
         )
 
-    grounded_indexed_schema = False
     try:
-        try:
-            left_model = lower_symbolic_model(left_ast, assumptions)
-            right_model = lower_symbolic_model(right_ast, assumptions)
-        except UnsupportedAlgebra:
-            if not isinstance(left, str) or not isinstance(right, str) or left_data_text is None or right_data_text is None:
-                raise
-            left_model = lower_linear_problem(linear_problem_from_opl(left, left_data_text))
-            right_model = lower_linear_problem(linear_problem_from_opl(right, right_data_text))
-            grounded_indexed_schema = True
-        effective_variable_mapping = variable_mapping
-        effective_left_auxiliaries = set(left_auxiliaries)
-        effective_right_auxiliaries = set(right_auxiliaries)
-        if grounded_indexed_schema and effective_variable_mapping is None:
-            left_types = {variable.name: variable.value_type for variable in left_model.variables}
-            right_types = {variable.name: variable.value_type for variable in right_model.variables}
-            shared_names = {name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]}
-            effective_variable_mapping = {name: name for name in shared_names}
-            effective_left_auxiliaries.update(left_types.keys() - shared_names)
-            effective_right_auxiliaries.update(right_types.keys() - shared_names)
+        left_model, right_model, grounded_indexed_schema = _lower_comparison_models(
+            left_ast,
+            right_ast,
+            left,
+            right,
+            assumptions,
+            left_data_text,
+            right_data_text,
+        )
+        effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries = _effective_algebraic_mappings(
+            left_model,
+            right_model,
+            grounded_indexed_schema,
+            variable_mapping,
+            left_auxiliaries,
+            right_auxiliaries,
+        )
         proof = prove_algebraic_equivalence(
             left_model,
             right_model,
@@ -192,6 +189,50 @@ def prove_abstract_equivalent(
         proof_steps=tuple(dict.fromkeys(proof_steps)),
         counterexample=proof.counterexample,
     )
+
+
+def _lower_comparison_models(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left: AbstractModelInput,
+    right: AbstractModelInput,
+    assumptions: Mapping[str, str] | None,
+    left_data_text: str | None,
+    right_data_text: str | None,
+) -> tuple[Any, Any, bool]:
+    try:
+        return lower_symbolic_model(left_ast, assumptions), lower_symbolic_model(right_ast, assumptions), False
+    except UnsupportedAlgebra:
+        if not isinstance(left, str) or not isinstance(right, str) or left_data_text is None or right_data_text is None:
+            raise
+        return (
+            lower_linear_problem(linear_problem_from_opl(left, left_data_text)),
+            lower_linear_problem(linear_problem_from_opl(right, right_data_text)),
+            True,
+        )
+
+
+def _effective_algebraic_mappings(
+    left_model: Any,
+    right_model: Any,
+    grounded_indexed_schema: bool,
+    variable_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+) -> tuple[Mapping[str, str] | None, set[str], set[str]]:
+    effective_variable_mapping = variable_mapping
+    effective_left_auxiliaries = set(left_auxiliaries)
+    effective_right_auxiliaries = set(right_auxiliaries)
+    if not grounded_indexed_schema or effective_variable_mapping is not None:
+        return effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries
+
+    left_types = {variable.name: variable.value_type for variable in left_model.variables}
+    right_types = {variable.name: variable.value_type for variable in right_model.variables}
+    shared_names = {name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]}
+    effective_variable_mapping = {name: name for name in shared_names}
+    effective_left_auxiliaries.update(left_types.keys() - shared_names)
+    effective_right_auxiliaries.update(right_types.keys() - shared_names)
+    return effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries
 
 
 def _prove_schema_isomorphism(
