@@ -577,21 +577,14 @@ class ExpressionEvaluator:
         aux_name = self.parent._ensure_aux_binary("xor_flag")
         return {"type": "aux_var", "name": aux_name, "sem_type": "boolean"}, 0.0
 
-    def _eval_binop_equality(
-        self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
-    ) -> Tuple[Dict[str, Any], Union[float, str, bool]]:
-        left_result = self.eval(left, env)
-        right_result = self.eval(right, env)
-        if left_result is None or right_result is None:
-            raise SemanticError(f"_eval_binop: == failed, left or right is None: left={left_result}, right={right_result}")
-        left_coef, left_val = left_result
-        right_coef, right_val = right_result
-        left_key = left.get("value") if isinstance(left, dict) and left.get("type") == "name" else None
-        if isinstance(left_key, str) and left_key in env:
-            left_val = env[left_key]
-        right_key = right.get("value") if isinstance(right, dict) and right.get("type") == "name" else None
-        if isinstance(right_key, str) and right_key in env:
-            right_val = env[right_key]
+    def _resolve_equality_operand(self, node, result, env):
+        if isinstance(node, dict) and node.get("type") == "name":
+            name = node.get("value")
+            if isinstance(name, str) and name in env:
+                return result[0], env[name]
+        return result
+
+    def _eval_ground_equality(self, left_coef, left_val, right_coef, right_val):
         if (
             not left_coef
             and not right_coef
@@ -603,6 +596,17 @@ class ExpressionEvaluator:
         if symbolic and not getattr(self.parent, "_allow_symbolic_bool", False):
             raise SemanticError("Non-ground boolean == outside constraint build context")
         return {}, str(left_val) == str(right_val)
+
+    def _eval_binop_equality(
+        self, left: Dict[str, Any], right: Dict[str, Any], env: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Union[float, str, bool]]:
+        left_result = self.eval(left, env)
+        right_result = self.eval(right, env)
+        if left_result is None or right_result is None:
+            raise SemanticError(f"_eval_binop: == failed, left or right is None: left={left_result}, right={right_result}")
+        left_coef, left_val = self._resolve_equality_operand(left, left_result, env)
+        right_coef, right_val = self._resolve_equality_operand(right, right_result, env)
+        return self._eval_ground_equality(left_coef, left_val, right_coef, right_val)
 
     def _dispatch_binop(
         self, left: Dict[str, Any], right: Dict[str, Any], op: str, env: Dict[str, Any]
@@ -741,61 +745,44 @@ class ExpressionEvaluator:
         # Fallback (shouldn’t reach)
         return {}, float(cast(Union[int, float], lconst)) * inv
 
-    def _handle_binop_cmp(
-        self,
-        left: Dict[str, Any],
-        right: Dict[str, Any],
-        op: str,
-        env: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], Union[float, str]]:
-        # Evaluate both sides; do not mask SemanticError here
-        ldict, lconst = self.eval(left, env)
-        rdict, rconst = self.eval(right, env)
+    def _comparison_is_numeric(self, value):
+        return isinstance(value, (int, float, bool))
 
-        def _is_num(x: object) -> bool:
-            return isinstance(x, (int, float, bool))
+    def _handle_string_comparison(self, left, right, op):
+        if not isinstance(left, str) or not isinstance(right, str) or op not in ("!=", "=="):
+            return None
+        return {}, float(left != right) if op == "!=" else float(left == right)
 
-        # NEW: treat pure string-vs-string comparisons as ground booleans
-        if isinstance(lconst, str) and isinstance(rconst, str):
-            if op == "!=":
-                return {}, float(lconst != rconst)
-            if op == "==":
-                return {}, float(lconst == rconst)
-            # For ordering ops on strings, fall back to symbolic gating below
+    def _handle_symbolic_comparison(self, left_dict, right_dict, left, right, op):
+        is_symbolic = bool(left_dict) or bool(right_dict) or isinstance(left, (str, tuple)) or isinstance(right, (str, tuple))
+        if not is_symbolic:
+            return None
+        if not getattr(self.parent, "_allow_symbolic_bool", False):
+            raise SemanticError("Non-ground boolean comparison outside constraint build context")
+        return {}, f"({left}) {op} ({right})"
 
-        # Symbolic if any variable coefficient or non-numeric literal shows up
-        is_symbolic = bool(ldict) or bool(rdict) or isinstance(lconst, (str, tuple)) or isinstance(rconst, (str, tuple))
-        if is_symbolic:
-            # Respect symbolic-boolean gating
-            if not getattr(self.parent, "_allow_symbolic_bool", False):
-                raise SemanticError("Non-ground boolean comparison outside constraint build context")
-            # In symbolic mode, never numerically evaluate; emit a symbolic placeholder string
-            return {}, f"({lconst}) {op} ({rconst})"
-
-        # Ground case: both sides numeric or simple booleans
+    def _handle_numeric_comparison(self, left, right, op):
         if op == "!=":
-            return {}, (
-                float(bool(lconst) != bool(rconst)) if not (_is_num(lconst) and _is_num(rconst)) else float(lconst != rconst)
-            )
-        if op in ("<", ">", "<=", ">="):
-            # Only perform ordering comparisons if both sides are numeric
-            if not (_is_num(lconst) and _is_num(rconst)):
-                # With ground but non-numeric (e.g., strings), treat as symbolic gated by flag
-                if not getattr(self.parent, "_allow_symbolic_bool", False):
-                    raise SemanticError("Non-numeric comparison outside constraint build context")
-                return {}, f"({lconst}) {op} ({rconst})"
-            lc = float(cast(Union[int, float], lconst))
-            rc = float(cast(Union[int, float], rconst))
-            if op == "<":
-                return {}, float(lc < rc)
-            if op == ">":
-                return {}, float(lc > rc)
-            if op == "<=":
-                return {}, float(lc <= rc)
-            # op == ">="
-            return {}, float(lc >= rc)
-        # Should not reach here (== handled in _eval_binop)
-        raise self.parent._unsupported_operator_error("binop", op)
+            return {}, float(left != right) if self._comparison_is_numeric(left) and self._comparison_is_numeric(right) else float(bool(left) != bool(right))
+        if op not in ("<", ">", "<=", ">="):
+            raise self.parent._unsupported_operator_error("binop", op)
+        if not (self._comparison_is_numeric(left) and self._comparison_is_numeric(right)):
+            if not getattr(self.parent, "_allow_symbolic_bool", False):
+                raise SemanticError("Non-numeric comparison outside constraint build context")
+            return {}, f"({left}) {op} ({right})"
+        operations = {"<": lambda: left < right, ">": lambda: left > right, "<=": lambda: left <= right, ">=": lambda: left >= right}
+        return {}, float(operations[op]())
+
+    def _handle_binop_cmp(self, left, right, op, env):
+        left_dict, left_value = self.eval(left, env)
+        right_dict, right_value = self.eval(right, env)
+        result = self._handle_string_comparison(left_value, right_value, op)
+        if result is not None:
+            return result
+        result = self._handle_symbolic_comparison(left_dict, right_dict, left_value, right_value, op)
+        if result is not None:
+            return result
+        return self._handle_numeric_comparison(left_value, right_value, op)
 
     def _eval_uminus(self, expr: Dict[str, Any], env: Dict[str, Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
         d, c = self.eval(expr["value"], env)
@@ -2216,55 +2203,54 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         else:
             raise self._unsupported_type_error("expr in index bound", type(expr))
 
-    # NEW: evaluate integer bound with env support (iterators first, then data)
+    def _eval_dynamic_bound_name(self, expr, env):
+        name = expr.get("value")
+        if name in env:
+            return int(env[name])
+        value = self.data_dict.get(name)
+        if isinstance(value, (int, float, bool)):
+            return int(value)
+        declaration = self._find_decl(name, "range_declaration_inline")
+        if declaration:
+            return int(self._eval_bound(declaration["end"]))
+        raise self._unsupported_type_error("name in index bound", name)
+
+    def _eval_dynamic_bound_binop(self, expr, env):
+        op = expr.get("op")
+        left = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("left")), env)
+        right = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("right")), env)
+        operations = {"+": lambda: left + right, "-": lambda: left - right, "*": lambda: left * right}
+        if op not in operations:
+            raise self._unsupported_operator_error("index bound binop", op)
+        return int(operations[op]())
+
+    def _eval_dynamic_bound_collection(self, expr, env):
+        args = expr.get("args", []) or []
+        values = [self._eval_bound_dynamic(cast(Dict[str, Any], arg), env) for arg in args]
+        if not values:
+            raise self._unsupported_type_error("expr in index bound", expr.get("type"))
+        return min(values) if expr.get("type") == "minl" else max(values)
+
     def _eval_bound_dynamic(self, expr: dict, env: dict) -> int:
         if not isinstance(expr, dict):
             raise self._unsupported_type_error("expr in index bound", type(expr))
-        t = expr.get("type")
-        if t == "number":
-            # mypy: value can be Any|None; coerce safely
-            v_any = expr.get("value", 0)
-            if isinstance(v_any, bool):
-                return int(v_any)
-            if isinstance(v_any, (int, float)):
-                return int(v_any)
-            raise self._unsupported_type_error("number literal in index bound", type(v_any))
-        if t == "name":
-            name = expr.get("value")
-            if name in env:
-                return int(env[name])
-            # fallback to merged data_dict (handles named ranges/scalars)
-            val = self.data_dict.get(name)
-            if isinstance(val, (int, float, bool)):
-                return int(val)
-            # For named ranges, prefer declaration
-            decl = self._find_decl(name, "range_declaration_inline")
-            if decl:
-                return int(self._eval_bound(decl["end"]))  # typical usage for upper bound shortcuts
-            raise self._unsupported_type_error("name in index bound", name)
-        if t == "binop":
-            op = expr.get("op")
-            left = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("left")), env)
-            right = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("right")), env)
-            if op == "+":
-                return int(left + right)
-            if op == "-":
-                return int(left - right)
-            if op == "*":
-                return int(left * right)
-            raise self._unsupported_operator_error("index bound binop", op)
-        if t == "uminus":
-            v = self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("value")), env)
-            return int(-v)
-        if t == "parenthesized_expression":
+        expression_type = expr.get("type")
+        if expression_type == "number":
+            value = expr.get("value", 0)
+            if isinstance(value, (bool, int, float)):
+                return int(value)
+            raise self._unsupported_type_error("number literal in index bound", type(value))
+        if expression_type == "name":
+            return self._eval_dynamic_bound_name(expr, env)
+        if expression_type == "binop":
+            return self._eval_dynamic_bound_binop(expr, env)
+        if expression_type == "uminus":
+            return -self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("value")), env)
+        if expression_type == "parenthesized_expression":
             return self._eval_bound_dynamic(cast(Dict[str, Any], expr.get("expression")), env)
-        if t in ("minl", "maxl"):
-            args = expr.get("args", []) or []
-            vals = [self._eval_bound_dynamic(cast(Dict[str, Any], a), env) for a in args]
-            if not vals:
-                raise self._unsupported_type_error("expr in index bound", t)
-            return min(vals) if t == "minl" else max(vals)
-        raise self._unsupported_type_error("expr in index bound", t)
+        if expression_type in ("minl", "maxl"):
+            return self._eval_dynamic_bound_collection(expr, env)
+        raise self._unsupported_type_error("expr in index bound", expression_type)
 
     def _iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
         rng = iterator.get("range") or {}
@@ -3066,6 +3052,25 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return int(range_data["start"]), int(range_data["end"])
         raise SemanticError(f"Named range '{range_name}' has no bounds.")
 
+    def _tuple_set_parameter_elements(self, set_name, data_dict):
+        set_declaration = self._find_decl(set_name, "set_of_tuples") or self._find_decl(set_name, "set_of_tuples_external")
+        if set_name in data_dict:
+            raw_set = data_dict[set_name]
+            set_values = raw_set["elements"] if isinstance(raw_set, dict) and "elements" in raw_set else raw_set
+        elif set_declaration and set_declaration.get("value"):
+            set_values = [value["elements"] for value in set_declaration["value"]]
+        else:
+            return None
+        return [tuple(value) if isinstance(value, (list, tuple)) else (value,) for value in set_values]
+
+    def _tuple_set_parameter_rows(self, set_elements, parameter_rows, expected_length):
+        if not (
+            len(set_elements) == len(parameter_rows)
+            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in parameter_rows)
+        ):
+            return None
+        return list(zip(set_elements, parameter_rows))
+
     def _normalize_tuple_set_range_parameter(self, declaration, data_dict):
         dimensions = declaration.get("dimensions", [])
         name = declaration.get("name")
@@ -3076,27 +3081,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             and isinstance(data_dict.get(name), list)
         ):
             return
-        set_name = dimensions[0]["name"]
-        set_declaration = self._find_decl(set_name, "set_of_tuples") or self._find_decl(set_name, "set_of_tuples_external")
-        if set_name in data_dict:
-            raw_set = data_dict[set_name]
-            set_values = raw_set["elements"] if isinstance(raw_set, dict) and "elements" in raw_set else raw_set
-        elif set_declaration and set_declaration.get("value"):
-            set_values = [value["elements"] for value in set_declaration["value"]]
-        else:
+        set_elements = self._tuple_set_parameter_elements(dimensions[0]["name"], data_dict)
+        if set_elements is None:
             return
-        set_elements = [tuple(value) if isinstance(value, (list, tuple)) else (value,) for value in set_values]
         start, end = self._data_range_bounds(dimensions[1], data_dict)
-        parameter_rows = data_dict[name]
-        expected_length = end - start + 1
-        if not (
-            len(set_elements) == len(parameter_rows)
-            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in parameter_rows)
-        ):
+        rows = self._tuple_set_parameter_rows(set_elements, data_dict[name], end - start + 1)
+        if rows is None:
             return
         data_dict[name] = {
             key: {index: float(row[index - start]) for index in range(start, end + 1)}
-            for key, row in zip(set_elements, parameter_rows)
+            for key, row in rows
         }
 
     def _emit_ast_data_declarations(self, data_dict):
