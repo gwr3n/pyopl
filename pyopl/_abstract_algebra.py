@@ -741,22 +741,14 @@ def _solve_farkas_multipliers(
 ) -> np.ndarray | None:
     variable_count = len(premise_vectors) + 2 * len(equality_vectors)
     if variable_count == 0:
-        if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients):
-            return np.asarray([])
-        return None
+        return _trivial_farkas_solution(conclusion_coefficients, conclusion_constant)
 
-    equality_matrix = [
-        [float(row[0][index]) for row in premise_vectors]
-        + [float(row[0][index]) for row in equality_vectors]
-        + [-float(row[0][index]) for row in equality_vectors]
-        for index in range(len(variables))
-    ]
-    equality_rhs = [float(conclusion_coefficients[index]) for index in range(len(variables))]
-    upper_matrix = [
-        [-float(row[1]) for row in premise_vectors]
-        + [-float(row[1]) for row in equality_vectors]
-        + [float(row[1]) for row in equality_vectors]
-    ]
+    equality_matrix, equality_rhs, upper_matrix = _farkas_lp_matrices(
+        premise_vectors,
+        equality_vectors,
+        conclusion_coefficients,
+        variables,
+    )
     result = linprog(
         c=np.zeros(variable_count),
         A_ub=np.asarray(upper_matrix),
@@ -769,6 +761,35 @@ def _solve_farkas_multipliers(
     if result.status != 0 or result.x is None:
         return None
     return result.x
+
+
+def _trivial_farkas_solution(
+    conclusion_coefficients: list[sp.Expr], conclusion_constant: sp.Expr
+) -> np.ndarray | None:
+    if conclusion_constant <= 0 and all(value == 0 for value in conclusion_coefficients):
+        return np.asarray([])
+    return None
+
+
+def _farkas_lp_matrices(
+    premise_vectors: list[tuple[list[sp.Expr], sp.Expr]],
+    equality_vectors: list[tuple[list[sp.Expr], sp.Expr]],
+    conclusion_coefficients: list[sp.Expr],
+    variables: list[str],
+) -> tuple[list[list[float]], list[float], list[list[float]]]:
+    equality_matrix = [
+        [float(row[0][index]) for row in premise_vectors]
+        + [float(row[0][index]) for row in equality_vectors]
+        + [-float(row[0][index]) for row in equality_vectors]
+        for index in range(len(variables))
+    ]
+    equality_rhs = [float(coefficient) for coefficient in conclusion_coefficients]
+    upper_matrix = [
+        [-float(row[1]) for row in premise_vectors]
+        + [-float(row[1]) for row in equality_vectors]
+        + [float(row[1]) for row in equality_vectors]
+    ]
+    return equality_matrix, equality_rhs, upper_matrix
 
 
 def _farkas_certificate(
@@ -894,31 +915,51 @@ def _enumerate_integer_projection(
     kept_variables: set[str],
 ) -> set[tuple[tuple[tuple[str, int], ...], Fraction]] | None:
     variables = [variable.name for variable in model.variables]
-    bounds: dict[str, tuple[int, int]] = {}
-    for variable in variables:
-        lower, upper = _constant_integer_bounds(model.constraints, variable, variables)
-        if lower is None or upper is None:
-            return None
-        bounds[variable] = (lower, upper)
-    size = 1
-    for lower, upper in bounds.values():
-        size *= upper - lower + 1
-        if size > 100_000:
-            return None
+    bounds = _bounded_integer_domains(model.constraints, variables)
+    if bounds is None:
+        return None
+
     points: dict[tuple[tuple[str, int], ...], Fraction] = {}
-    ranges = [range(bounds[name][0], bounds[name][1] + 1) for name in variables]
+    ranges = [range(lower, upper + 1) for lower, upper in bounds.values()]
     symbols = {name: sp.Symbol(name, real=True) for name in variables}
     for values in product(*ranges):
         assignment = dict(zip(variables, values, strict=True))
         substitutions = {symbols[name]: value for name, value in assignment.items()}
         if not all(_constraint_holds(constraint, substitutions) for constraint in model.constraints):
             continue
-        key = tuple(sorted((name, assignment[name]) for name in kept_variables))
-        objective = _as_fraction(sp.expand(model.objective.subs(substitutions)))
-        incumbent = points.get(key)
-        if incumbent is None or objective < incumbent:
-            points[key] = objective
+        _record_integer_projection_point(model, assignment, substitutions, kept_variables, points)
     return {(key, objective) for key, objective in points.items()}
+
+
+def _bounded_integer_domains(
+    constraints: Sequence[AffineConstraint],
+    variables: Sequence[str],
+) -> dict[str, tuple[int, int]] | None:
+    bounds: dict[str, tuple[int, int]] = {}
+    assignment_count = 1
+    for variable in variables:
+        lower, upper = _constant_integer_bounds(constraints, variable, variables)
+        if lower is None or upper is None:
+            return None
+        bounds[variable] = (lower, upper)
+        assignment_count *= upper - lower + 1
+        if assignment_count > 100_000:
+            return None
+    return bounds
+
+
+def _record_integer_projection_point(
+    model: SymbolicModel,
+    assignment: dict[str, int],
+    substitutions: Mapping[sp.Symbol, int],
+    kept_variables: set[str],
+    points: dict[tuple[tuple[str, int], ...], Fraction],
+) -> None:
+    key = tuple(sorted((name, assignment[name]) for name in kept_variables))
+    objective = _as_fraction(sp.expand(model.objective.subs(substitutions)))
+    incumbent = points.get(key)
+    if incumbent is None or objective < incumbent:
+        points[key] = objective
 
 
 def _constant_integer_bounds(
