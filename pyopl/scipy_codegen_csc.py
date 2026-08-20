@@ -1971,40 +1971,48 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return False, 0.0, False
         raise SemanticError(f"Parameter or variable '{name}' with indices {indices} not found in environment.")
 
+    @staticmethod
+    def _normalize_safe_index_number(value):
+        if isinstance(value, bool) or (isinstance(value, float) and value.is_integer()):
+            return int(value)
+        return value
+
+    def _eval_safe_index_number(self, node, env):
+        if isinstance(node, ast.Num):
+            return int(node.n)
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float, bool)):
+                return self._normalize_safe_index_number(node.value)
+            raise ValueError("Non-numeric constant in index")
+        value = env.get(node.id, self.data_dict.get(node.id, node.id))
+        if isinstance(value, (int, float, bool)):
+            return self._normalize_safe_index_number(value)
+        raise ValueError(f"Name '{node.id}' not numeric for index")
+
+    def _eval_safe_index_binop(self, node, env, allowed_nodes, allowed_ops):
+        left = self._eval_safe_index_ast(node.left, env, allowed_nodes, allowed_ops)
+        right = self._eval_safe_index_ast(node.right, env, allowed_nodes, allowed_ops)
+        if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
+            raise ValueError("Non-numeric operands in index arithmetic")
+        operations = {
+            ast.Add: lambda: left + right,
+            ast.Sub: lambda: left - right,
+            ast.Mult: lambda: left * right,
+            ast.FloorDiv: lambda: left // right,
+        }
+        return operations[type(node.op)]()
+
     def _eval_safe_index_ast(self, node, env, allowed_nodes, allowed_ops):
         if not isinstance(node, allowed_nodes):
             raise ValueError("Disallowed expression in index")
         if isinstance(node, ast.Expression):
             return self._eval_safe_index_ast(node.body, env, allowed_nodes, allowed_ops)
-        if isinstance(node, ast.Num):
-            return int(node.n)
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, (int, float, bool)):
-                return (
-                    int(node.value)
-                    if isinstance(node.value, bool) or (isinstance(node.value, float) and node.value.is_integer())
-                    else node.value
-                )
-            raise ValueError("Non-numeric constant in index")
-        if isinstance(node, ast.Name):
-            value = env.get(node.id, self.data_dict.get(node.id, node.id))
-            if isinstance(value, (int, float, bool)):
-                return int(value) if isinstance(value, bool) or (isinstance(value, float) and value.is_integer()) else value
-            raise ValueError(f"Name '{node.id}' not numeric for index")
+        if isinstance(node, (ast.Num, ast.Constant, ast.Name)):
+            return self._eval_safe_index_number(node, env)
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             return -self._eval_safe_index_ast(node.operand, env, allowed_nodes, allowed_ops)
         if isinstance(node, ast.BinOp) and isinstance(node.op, allowed_ops):
-            left = self._eval_safe_index_ast(node.left, env, allowed_nodes, allowed_ops)
-            right = self._eval_safe_index_ast(node.right, env, allowed_nodes, allowed_ops)
-            if not (isinstance(left, (int, float)) and isinstance(right, (int, float))):
-                raise ValueError("Non-numeric operands in index arithmetic")
-            if isinstance(node.op, ast.Add):
-                return left + right
-            if isinstance(node.op, ast.Sub):
-                return left - right
-            if isinstance(node.op, ast.Mult):
-                return left * right
-            return left // right
+            return self._eval_safe_index_binop(node, env, allowed_nodes, allowed_ops)
         if isinstance(node, ast.Tuple):
             return tuple(self._eval_safe_index_ast(element, env, allowed_nodes, allowed_ops) for element in node.elts)
         raise ValueError("Unsupported node in index")
@@ -2882,42 +2890,47 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return left // right
         raise ValueError("Unsupported range bound expr")
 
+    def _validate_one_dimensional_parameter_shape(self, param_data, dimension, data_dict, parameter_name):
+        if dimension.get("type") == "named_range_dimension":
+            range_name = dimension["name"]
+            range_declaration = self._find_decl(range_name, "range_declaration_inline")
+            if range_declaration:
+                start = self._eval_data_bound(range_declaration["start"], data_dict)
+                end = self._eval_data_bound(range_declaration["end"], data_dict)
+                expected_length = end - start + 1
+                if len(param_data) != expected_length:
+                    raise SemanticError(
+                        f"Parameter '{parameter_name}' has {len(param_data)} items but declared range "
+                        f"'{range_name}' expects {expected_length}."
+                    )
+        elif dimension.get("type") == "named_set_dimension":
+            set_name = dimension["name"]
+            elements = data_dict.get(set_name)
+            if elements is None:
+                declaration = self._find_decl(set_name)
+                if declaration and declaration.get("type") in ("typed_set", "set_declaration"):
+                    elements = declaration.get("value") or []
+            set_length = len(elements.get("elements", [])) if isinstance(elements, dict) else len(elements or [])
+            if set_length and len(param_data) != set_length:
+                raise SemanticError(
+                    f"Parameter '{parameter_name}' has {len(param_data)} items but declared set "
+                    f"'{set_name}' has {set_length} elements."
+                )
+
+    def _validate_two_dimensional_parameter_shape(self, param_data, parameter_name):
+        if not all(isinstance(row, (list, tuple)) for row in param_data):
+            return
+        row_length = len(param_data[0]) if param_data else 0
+        if not all(len(row) == row_length for row in param_data):
+            raise SemanticError(f"Parameter '{parameter_name}' 2-D data must be rectangular (all rows same length).")
+
     def _validate_parameter_shape(self, param_data, dimensions, data_dict, parameter_name):
         if not isinstance(dimensions, list) or isinstance(param_data, dict):
             return
         if len(dimensions) == 1 and isinstance(param_data, list):
-            dimension = dimensions[0]
-            if dimension.get("type") == "named_range_dimension":
-                range_name = dimension["name"]
-                range_declaration = self._find_decl(range_name, "range_declaration_inline")
-                if range_declaration:
-                    start = self._eval_data_bound(range_declaration["start"], data_dict)
-                    end = self._eval_data_bound(range_declaration["end"], data_dict)
-                    expected_length = end - start + 1
-                    if len(param_data) != expected_length:
-                        raise SemanticError(
-                            f"Parameter '{parameter_name}' has {len(param_data)} items but declared range "
-                            f"'{range_name}' expects {expected_length}."
-                        )
-            elif dimension.get("type") == "named_set_dimension":
-                set_name = dimension["name"]
-                elements = data_dict.get(set_name)
-                if elements is None:
-                    declaration = self._find_decl(set_name)
-                    if declaration and declaration.get("type") in ("typed_set", "set_declaration"):
-                        elements = declaration.get("value") or []
-                set_length = len(elements.get("elements", [])) if isinstance(elements, dict) else len(elements or [])
-                if set_length and len(param_data) != set_length:
-                    raise SemanticError(
-                        f"Parameter '{parameter_name}' has {len(param_data)} items but declared set "
-                        f"'{set_name}' has {set_length} elements."
-                    )
+            self._validate_one_dimensional_parameter_shape(param_data, dimensions[0], data_dict, parameter_name)
         if len(dimensions) == 2 and isinstance(param_data, list):
-            if not all(isinstance(row, (list, tuple)) for row in param_data):
-                return
-            row_length = len(param_data[0]) if param_data else 0
-            if not all(len(row) == row_length for row in param_data):
-                raise SemanticError(f"Parameter '{parameter_name}' 2-D data must be rectangular (all rows same length).")
+            self._validate_two_dimensional_parameter_shape(param_data, parameter_name)
 
     def _resolve_data_set_elements(self, set_name, data_dict):
         if set_name in data_dict:
@@ -2936,6 +2949,35 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             ]
         return None
 
+    def _set_range_value_row(self, row, start, end):
+        if isinstance(row, dict):
+            return {int(index): float(item) for index, item in row.items()}
+        if len(row) != end - start + 1:
+            return None
+        return {index: float(row[index - start]) for index in range(start, end + 1)}
+
+    def _normalize_set_range_rows(self, rows, start, end):
+        nested = {}
+        for key, row in rows:
+            normalized_row = self._set_range_value_row(row, start, end)
+            if normalized_row is not None:
+                normalized_key = tuple(key) if isinstance(key, (list, tuple)) else key
+                nested[normalized_key] = normalized_row
+        return nested
+
+    def _normalize_set_range_value(self, value, set_elements, start, end):
+        expected_length = end - start + 1
+        if isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
+            return self._normalize_set_range_rows(value.items(), start, end)
+        if (
+            isinstance(value, list)
+            and set_elements is not None
+            and len(set_elements) == len(value)
+            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in value)
+        ):
+            return self._normalize_set_range_rows(zip(set_elements, value), start, end)
+        return {}
+
     def _normalize_set_range_parameter(self, declaration, data_dict):
         dimensions = declaration.get("dimensions", [])
         if not (
@@ -2948,31 +2990,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         value = data_dict.get(name)
         if value is None:
             return
-        range_dimension = dimensions[1]
         try:
-            start = self._eval_data_bound(range_dimension["start"], data_dict)
-            end = self._eval_data_bound(range_dimension["end"], data_dict)
+            start = self._eval_data_bound(dimensions[1]["start"], data_dict)
+            end = self._eval_data_bound(dimensions[1]["end"], data_dict)
         except Exception:
             return
-        expected_length = end - start + 1
         set_elements = self._resolve_data_set_elements(dimensions[0]["name"], data_dict)
-        nested = {}
-        if isinstance(value, dict) and all(isinstance(row, (list, tuple, dict)) for row in value.values()):
-            for key, row in value.items():
-                normalized_key = tuple(key) if isinstance(key, (list, tuple)) else key
-                if isinstance(row, dict):
-                    nested[normalized_key] = {int(index): float(item) for index, item in row.items()}
-                elif len(row) == expected_length:
-                    nested[normalized_key] = {index: float(row[index - start]) for index in range(start, end + 1)}
-        elif (
-            isinstance(value, list)
-            and set_elements is not None
-            and len(set_elements) == len(value)
-            and all(isinstance(row, (list, tuple)) and len(row) == expected_length for row in value)
-        ):
-            for key, row in zip(set_elements, value):
-                normalized_key = tuple(key) if isinstance(key, (list, tuple)) else key
-                nested[normalized_key] = {index: float(row[index - start]) for index in range(start, end + 1)}
+        nested = self._normalize_set_range_value(value, set_elements, start, end)
         if nested:
             data_dict[name] = nested
 
