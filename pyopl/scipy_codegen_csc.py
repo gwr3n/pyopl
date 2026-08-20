@@ -2394,6 +2394,31 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         indices = [self._emit_python_expr(dim, env) for dim in expr["dimensions"]]
         return f"{expr['name']}[{', '.join(indices)}]"
 
+    def _emit_python_compound_expr(self, expr: dict, env: dict) -> str | None:
+        expression_type = expr.get("type")
+        if expression_type == "binop":
+            left = self._emit_python_expr(expr["left"], env)
+            right = self._emit_python_expr(expr["right"], env)
+            return f"({left} {expr['op']} {right})"
+        if expression_type == "uminus":
+            return f"-({self._emit_python_expr(expr['value'], env)})"
+        if expression_type == "parenthesized_expression":
+            return f"({self._emit_python_expr(expr['expression'], env)})"
+        if expression_type == "conditional":
+            condition = self._emit_python_expr(expr["condition"], env)
+            then_expr = self._emit_python_expr(expr["then"], env)
+            else_expr = self._emit_python_expr(expr["else"], env)
+            return f"({then_expr} if ({condition}) else {else_expr})"
+        if expression_type == "indexed_name":
+            return self._emit_python_indexed_name(expr, env)
+        if expression_type == "field_access":
+            return self._emit_python_field_access(expr, env)
+        if expression_type == "funcall":
+            return self._emit_python_call(expr, env)
+        if expression_type in ("minl", "maxl"):
+            return self._emit_python_aggregate(expr, env)
+        return None
+
     def _emit_python_expr(self, expr: dict, env: dict | None = None) -> str:
         """
         Emit a valid Python expression from an AST node, using env for index variables.
@@ -2401,42 +2426,22 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         if env is None:
             env = {}
-        t = expr.get("type") if isinstance(expr, dict) else None
-        if t == "number":
-            return str(expr["value"])
-        if t == "name":
-            return expr["value"]
-        if t == "binop":
-            left = self._emit_python_expr(expr["left"], env)
-            right = self._emit_python_expr(expr["right"], env)
-            return f"({left} {expr['op']} {right})"
-        if t == "uminus":
-            return f"-({self._emit_python_expr(expr['value'], env)})"
-        if t == "parenthesized_expression":
-            return f"({self._emit_python_expr(expr['expression'], env)})"
-        if t == "conditional":
-            cond = self._emit_python_expr(expr["condition"], env)
-            then_expr = self._emit_python_expr(expr["then"], env)
-            else_expr = self._emit_python_expr(expr["else"], env)
-            return f"({then_expr} if ({cond}) else {else_expr})"
-        if t == "indexed_name":
-            return self._emit_python_indexed_name(expr, env)
-        if t == "field_access":
-            return self._emit_python_field_access(expr, env)
-        # NEW: boolean literal for emitted Python expr
-        if t == "boolean_literal":
-            return "True" if expr.get("value") else "False"
-        if t == "funcall":
-            return self._emit_python_call(expr, env)
-        # NEW: emit min/max for symbolic comments
-        if t in ("minl", "maxl"):
-            return self._emit_python_aggregate(expr, env)
-        if t == "name_reference_index":
-            return env.get(expr["name"], expr["name"])
-        if t == "number_literal_index":
-            return str(expr["value"])
-        if t == "string_literal":
-            return repr(expr["value"])
+        if not isinstance(expr, dict):
+            return str(expr)
+        t = expr.get("type")
+        leaf_emitters = {
+            "number": lambda: str(expr["value"]),
+            "name": lambda: expr["value"],
+            "boolean_literal": lambda: "True" if expr.get("value") else "False",
+            "name_reference_index": lambda: env.get(expr["name"], expr["name"]),
+            "number_literal_index": lambda: str(expr["value"]),
+            "string_literal": lambda: repr(expr["value"]),
+        }
+        if t in leaf_emitters:
+            return leaf_emitters[t]()
+        compound = self._emit_python_compound_expr(expr, env)
+        if compound is not None:
+            return compound
         return str(expr)
 
     def _emit_symbolic_expr(self, expr: dict) -> str:
@@ -2449,6 +2454,33 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     # ------------------------------------------------------------------
     # Restored symbolic traversal utilities (lost during Stage 2 refactor)
     # ------------------------------------------------------------------
+    def _traverse_compound_expression(self, expr: dict) -> str | None:
+        expression_type = expr.get("type")
+        if expression_type == "binop":
+            left = self._traverse_expression_value(expr.get("left"))
+            right = self._traverse_expression_value(expr.get("right"))
+            return f"({left} {expr.get('op')} {right})"
+        if expression_type == "uminus":
+            return f"-({self._traverse_expression_value(expr.get('value'))})"
+        if expression_type == "parenthesized_expression":
+            return f"({self._traverse_expression_value(expr.get('expression'))})"
+        if expression_type == "conditional":
+            condition = self._traverse_expression_value(expr.get("condition"))
+            then_expr = self._traverse_expression_value(expr.get("then"))
+            else_expr = self._traverse_expression_value(expr.get("else"))
+            return f"({then_expr} if ({condition}) else {else_expr})"
+        if expression_type == "indexed_name":
+            return self._traverse_indexed_name(expr)
+        if expression_type == "field_access":
+            return self._traverse_field_access(expr)
+        if expression_type == "tuple_literal":
+            return self._traverse_tuple_literal(expr)
+        if expression_type == "funcall":
+            return self._traverse_function_call(expr)
+        if expression_type in ("minl", "maxl"):
+            return self._traverse_aggregate(expr)
+        return None
+
     def _traverse_expression(self, expr: dict) -> str:
         """Produce a symbolic string form of an expression AST node.
         Only structural; does not evaluate parameters so emitted code mirrors model text.
@@ -2462,25 +2494,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if t == "number":
             return str(expr.get("value"))
         if t == "name":
-            val = expr.get("value")
-            return str(val) if val is not None else ""
-        if t == "binop":
-            left = self._traverse_expression_value(expr.get("left"))
-            right = self._traverse_expression_value(expr.get("right"))
-            return f"({left} {expr.get('op')} {right})"
-        if t == "uminus":
-            return f"-({self._traverse_expression_value(expr.get('value'))})"
-        if t == "parenthesized_expression":
-            return f"({self._traverse_expression_value(expr.get('expression'))})"
-        if t == "conditional":
-            cond = self._traverse_expression_value(expr.get("condition"))
-            then = self._traverse_expression_value(expr.get("then"))
-            els = self._traverse_expression_value(expr.get("else"))
-            return f"({then} if ({cond}) else {els})"
-        if t == "indexed_name":
-            return self._traverse_indexed_name(expr)
-        if t == "field_access":
-            return self._traverse_field_access(expr)
+            value = expr.get("value")
+            return str(value) if value is not None else ""
         if t in ("name_reference_index", "number_literal_index"):
             if "value" in expr:
                 return str(expr["value"])
@@ -2488,18 +2503,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 return str(expr["name"])
             return str(expr)
 
-        if t == "tuple_literal":
-            return self._traverse_tuple_literal(expr)
-
         if t == "string_literal":  # <-- support in symbolic traversal
             return repr(expr.get("value"))
-
-        if t == "funcall":
-            return self._traverse_function_call(expr)
-
-        # NEW: symbolic minl/maxl
-        if t in ("minl", "maxl"):
-            return self._traverse_aggregate(expr)
+        compound = self._traverse_compound_expression(expr)
+        if compound is not None:
+            return compound
 
         # Default: return empty string if no known type matched
         return ""
@@ -5548,7 +5556,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _is_boolean_literal_node(node):
         return isinstance(node, dict) and node.get("type") == "boolean_literal"
 
-    def _try_handle_bool_tree_literal_comparison(self, left, right, op_sym, env, bool_expr_var, state):
+    def _bool_tree_literal_operands(self, left, right, op_sym):
         if op_sym not in ("==", "!=", "<=", ">="):
             return None
         left_is_tree = self._is_bool_tree_node(left)
@@ -5559,24 +5567,36 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return None
         if right_is_tree:
             left, right = right, left
-
         target_value = int(bool(right.get("value"))) if self._is_boolean_literal_node(right) else int(right.get("value"))
-        enforce = None
-        if op_sym == "==" and left.get("type") not in ("and", "or"):
-            enforce = target_value
-        elif op_sym == "!=":
-            enforce = 1 - target_value
-        elif op_sym == ">=" and target_value == 1:
-            enforce = 1
-        elif op_sym == "<=" and target_value == 0:
-            enforce = 0
+        return left, right, target_value
 
+    def _bool_tree_literal_enforcement(self, tree, op_sym, target_value):
+        if op_sym == "==" and tree.get("type") not in ("and", "or"):
+            return target_value
+        if op_sym == "!=":
+            return 1 - target_value
+        if op_sym == ">=" and target_value == 1:
+            return 1
+        if op_sym == "<=" and target_value == 0:
+            return 0
+        return None
+
+    def _emit_bool_tree_literal_comparison(self, tree, enforce, env, bool_expr_var, state):
+        expression_var = bool_expr_var(tree, env)
+        row = [0.0] * len(self.var_names)
+        row[self.var_indices[expression_var]] = 1.0
+        self._append_sparse_row(state, row, float(enforce), sense="eq")
+
+    def _try_handle_bool_tree_literal_comparison(self, left, right, op_sym, env, bool_expr_var, state):
+        operands = self._bool_tree_literal_operands(left, right, op_sym)
+        if operands is None:
+            return None
+        left, right, target_value = operands
+        enforce = self._bool_tree_literal_enforcement(left, op_sym, target_value)
         if enforce is not None:
-            expression_var = bool_expr_var(left, env)
-            row = [0.0] * len(self.var_names)
-            row[self.var_indices[expression_var]] = 1.0
-            self._append_sparse_row(state, row, float(enforce), sense="eq")
+            self._emit_bool_tree_literal_comparison(left, enforce, env, bool_expr_var, state)
             return True, left, right
+
         handled = op_sym != "==" or left.get("type") not in ("and", "or")
         return handled, left, right
 
