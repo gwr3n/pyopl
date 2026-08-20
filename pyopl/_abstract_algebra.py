@@ -67,21 +67,15 @@ class FarkasCertificate:
     equality_multipliers: tuple[Fraction, ...]
 
 
-def lower_symbolic_model(
-    ast: Mapping[str, Any],
-    assumptions: Mapping[str, str] | None = None,
-) -> SymbolicModel:
-    """Lower a parser AST to the typed scalar affine proof IR."""
-
+def _lower_declarations(
+    declarations: list[Any],
+) -> tuple[list[Symbol], list[Symbol], dict[str, sp.Symbol], dict[str, sp.Expr], list[sp.Expr]]:
     parameter_declarations: list[Symbol] = []
     variable_declarations: list[Symbol] = []
     symbols: dict[str, sp.Symbol] = {}
     inline_values: dict[str, sp.Expr] = {}
     inferred_assumptions: list[sp.Expr] = []
 
-    declarations = ast.get("declarations")
-    if not isinstance(declarations, list):
-        raise UnsupportedAlgebra("abstract declarations must be a list")
     for declaration in declarations:
         if not isinstance(declaration, Mapping):
             raise UnsupportedAlgebra("abstract declaration must be an object")
@@ -122,6 +116,44 @@ def lower_symbolic_model(
         if node_type in {"parameter_inline", "parameter_inline_expr"} and value is not None:
             inline_values[name] = _expression(value, symbols, inline_values, set())
 
+    return parameter_declarations, variable_declarations, symbols, inline_values, inferred_assumptions
+
+
+def _lower_explicit_assumptions(
+    assumptions: Mapping[str, str] | None,
+    symbols: Mapping[str, sp.Symbol],
+    inferred_assumptions: list[sp.Expr],
+) -> list[sp.Expr]:
+    explicit_assumptions = list(inferred_assumptions)
+    builders = {
+        "positive": lambda symbol: symbol > 0,
+        "nonnegative": lambda symbol: symbol >= 0,
+        "nonzero": lambda symbol: sp.Ne(symbol, 0),
+    }
+    for name, condition in (assumptions or {}).items():
+        symbol = symbols.get(name)
+        if symbol is None:
+            raise UnsupportedAlgebra(f"assumption references unknown symbol: {name}")
+        builder = builders.get(condition)
+        if builder is None:
+            raise UnsupportedAlgebra(f"unsupported assumption condition: {condition}")
+        explicit_assumptions.append(builder(symbol))
+    return explicit_assumptions
+
+
+def lower_symbolic_model(
+    ast: Mapping[str, Any],
+    assumptions: Mapping[str, str] | None = None,
+) -> SymbolicModel:
+    """Lower a parser AST to the typed scalar affine proof IR."""
+
+    declarations = ast.get("declarations")
+    if not isinstance(declarations, list):
+        raise UnsupportedAlgebra("abstract declarations must be a list")
+    parameter_declarations, variable_declarations, symbols, inline_values, inferred_assumptions = _lower_declarations(
+        declarations
+    )
+
     constraints: list[AffineConstraint] = []
     for node in ast.get("constraints", []):
         constraints.extend(_lower_constraint(node, symbols, inline_values))
@@ -141,27 +173,13 @@ def lower_symbolic_model(
         raise UnsupportedAlgebra("unsupported objective sense")
     objective = _expression(objective_node.get("expression"), symbols, inline_values, set())
 
-    explicit_assumptions = list(inferred_assumptions)
-    for name, condition in (assumptions or {}).items():
-        symbol = symbols.get(name)
-        if symbol is None:
-            raise UnsupportedAlgebra(f"assumption references unknown symbol: {name}")
-        if condition == "positive":
-            explicit_assumptions.append(symbol > 0)
-        elif condition == "nonnegative":
-            explicit_assumptions.append(symbol >= 0)
-        elif condition == "nonzero":
-            explicit_assumptions.append(sp.Ne(symbol, 0))
-        else:
-            raise UnsupportedAlgebra(f"unsupported assumption condition: {condition}")
-
     model = SymbolicModel(
         parameters=tuple(parameter_declarations),
         variables=tuple(variable_declarations),
         constraints=tuple(constraints),
         objective=sp.expand(objective),
         objective_sense=objective_sense,
-        assumptions=tuple(explicit_assumptions),
+        assumptions=tuple(_lower_explicit_assumptions(assumptions, symbols, inferred_assumptions)),
     )
     _validate_affine(model)
     return model
