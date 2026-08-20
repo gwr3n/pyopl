@@ -1,5 +1,6 @@
 import logging
 import unittest
+from unittest import mock
 
 from pyopl.pyopl_core import OPLCompiler, OPLLexer, OPLParser
 from pyopl.scipy_codegen_csc import ExpressionEvaluator, SciPyCSCCodeGenerator
@@ -207,6 +208,17 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
             generator._iter_filtered_environments(string_iterators, {}, string_filter),
             [({"city": "B"}, ("B",))],
         )
+
+        with mock.patch.object(generator, "_iterate_iterators_dynamic", side_effect=AssertionError("full scan")):
+            self.assertEqual(
+                generator._iter_filtered_environments(string_iterators, {}, string_filter),
+                [({"city": "B"}, ("B",))],
+            )
+
+        missing_filter = dict(string_filter, right={"type": "string_literal", "value": "C"})
+        self.assertEqual(generator._iter_filtered_environments(string_iterators, {}, missing_filter), [])
+        self.assertEqual(generator._static_iterator_domain_cache[id(string_iterators[0])], ["A", "B"])
+        self.assertEqual(generator._iterator_domain_membership_cache[id(string_iterators[0])], frozenset({"A", "B"}))
 
     def test_bound_tightening_forall_keeps_multi_iterator_domains_separate(self) -> None:
         model = """

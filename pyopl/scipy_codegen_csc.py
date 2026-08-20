@@ -2282,6 +2282,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         raise self._unsupported_type_error("expr in index bound", expression_type)
 
     def _iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
+        if not env:
+            cache = getattr(self, "_static_iterator_domain_cache", None)
+            if cache is None:
+                cache = self._static_iterator_domain_cache = {}
+            cache_key = id(iterator)
+            if cache_key in cache:
+                return cache[cache_key]
+            domain = self._uncached_iterator_domain_dynamic(iterator, env)
+            cache[cache_key] = domain
+            return domain
+        return self._uncached_iterator_domain_dynamic(iterator, env)
+
+    def _uncached_iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
         rng = iterator.get("range") or {}
         range_type = rng.get("type")
         if range_type == "range_specifier":
@@ -2373,6 +2386,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         skip_unresolved: bool = False,
     ) -> list[tuple[dict, tuple]]:
         """Return iterator environments whose optional filter is definitively true."""
+        singleton = self._singleton_filtered_environment(iterators, outer_env or {}, index_constraint)
+        if singleton is not None:
+            return singleton
         environments = self._iterate_iterators_dynamic(iterators, outer_env or {})
         if index_constraint is None:
             return environments
@@ -2392,6 +2408,62 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if bool(value):
                 included.append((env, idx_tuple))
         return included
+
+    def _singleton_filtered_environment(
+        self,
+        iterators: list[dict],
+        outer_env: dict,
+        index_constraint: dict | None,
+    ) -> list[tuple[dict, tuple]] | None:
+        if len(iterators) != 1 or not isinstance(index_constraint, dict):
+            return None
+        if index_constraint.get("type") != "binop" or index_constraint.get("op") != "==":
+            return None
+
+        iterator = iterators[0]
+        iterator_name = iterator.get("iterator")
+        left = index_constraint.get("left")
+        right = index_constraint.get("right")
+        if not isinstance(iterator_name, str) or not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+
+        if left.get("type") == "name" and left.get("value") == iterator_name:
+            bound_expr = right
+        elif right.get("type") == "name" and right.get("value") == iterator_name:
+            bound_expr = left
+        else:
+            return None
+
+        try:
+            coefficients, value = self._eval_expr(bound_expr, outer_env)
+        except Exception:
+            return None
+        if coefficients or isinstance(value, dict):
+            return None
+
+        domain = self._iterator_domain_dynamic(iterator, outer_env)
+        if not self._iterator_domain_contains(iterator, domain, value):
+            return []
+        env = dict(outer_env)
+        env[iterator_name] = value
+        return [(env, (value,))]
+
+    def _iterator_domain_contains(self, iterator: dict, domain: list, value: Any) -> bool:
+        cache = getattr(self, "_iterator_domain_membership_cache", None)
+        if cache is None:
+            cache = self._iterator_domain_membership_cache = {}
+        cache_key = id(iterator)
+        members = cache.get(cache_key)
+        if members is None:
+            try:
+                members = frozenset(domain)
+            except TypeError:
+                return value in domain
+            cache[cache_key] = members
+        try:
+            return value in members
+        except TypeError:
+            return value in domain
 
     def _emit_python_call(self, expr: dict, env: dict) -> str:
         name = expr.get("name")
