@@ -19,15 +19,6 @@ EQ_TOL = 1e-6  # two-sided tolerance for equality reification
 
 # === GurobiCodeGenerator ===
 class GurobiCodeGenerator:
-    def _expr_conditional(self, expr_node, current_iterators, symbolic):
-        cond = self._traverse_expression(expr_node["condition"], current_iterators, symbolic)
-        then_expr = self._traverse_expression(expr_node["then"], current_iterators, symbolic)
-        else_expr = self._traverse_expression(expr_node["else"], current_iterators, symbolic)
-        # Remove extra parentheses if present
-        if isinstance(cond, str) and cond.startswith("(") and cond.endswith(")"):
-            cond = cond[1:-1]
-        return f"{then_expr} if ({cond}) else {else_expr}"
-
     """
     Generates GurobiPy code from a semantically validated AST.
     """
@@ -49,10 +40,6 @@ class GurobiCodeGenerator:
         self._add_code_line = self.__class__._add_code_line_impl.__get__(self)
         # NEW: active label name expression inside forall (Python expression string or None)
         self._active_label_name_expr = None
-
-    # --- Helper for adding code lines ---
-    def _add_code_line_impl(self, line):
-        self.gurobi_code_lines.append("    " * self.indent_level + line)
 
     # === Public API ===
     def generate_code(self) -> str:
@@ -179,83 +166,80 @@ class GurobiCodeGenerator:
 
         return code
 
+    # === Helper methods ===
+    def _expr_conditional(self, expr_node, current_iterators, symbolic):
+        cond = self._traverse_expression(expr_node["condition"], current_iterators, symbolic)
+        then_expr = self._traverse_expression(expr_node["then"], current_iterators, symbolic)
+        else_expr = self._traverse_expression(expr_node["else"], current_iterators, symbolic)
+        # Remove extra parentheses if present
+        if isinstance(cond, str) and cond.startswith("(") and cond.endswith(")"):
+            cond = cond[1:-1]
+        return f"{then_expr} if ({cond}) else {else_expr}"
+
+    # --- Helper for adding code lines ---
+    def _add_code_line_impl(self, line):
+        self.gurobi_code_lines.append("    " * self.indent_level + line)
+
     # --- Bound Collection (for big-M tightening) ---
+    def _record_variable_bound(self, var_node, op_sym, value):
+        if var_node.get("type") == "name":
+            base = var_node.get("value")
+        elif var_node.get("type") == "indexed_name":
+            base = var_node.get("name")
+        else:
+            return
+
+        if op_sym in (">=", "=="):
+            current = self._collected_lbs.get(base)
+            if current is None or value < current:
+                self._collected_lbs[base] = value
+        if op_sym in ("<=", "=="):
+            current = self._collected_ubs.get(base)
+            if current is None or value > current:
+                self._collected_ubs[base] = value
+
+    def _extract_variable_bound(self, node):
+        if not isinstance(node, dict) or node.get("type") != "constraint":
+            return None
+        op_sym = node.get("op")
+        if op_sym not in (">=", "<=", "=="):
+            return None
+
+        left = node.get("left")
+        right = node.get("right")
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+
+        if right.get("type") == "number" and left.get("type") in ("name", "indexed_name"):
+            var_node, number_node = left, right
+        elif left.get("type") == "number" and right.get("type") in ("name", "indexed_name"):
+            var_node, number_node = right, left
+            op_sym = {">=": "<=", "<=": ">=", "==": "=="}[op_sym]
+        else:
+            return None
+
+        try:
+            return var_node, op_sym, float(number_node.get("value"))
+        except (TypeError, ValueError):
+            return None
+
+    def _walk_variable_bound_constraints(self, node):
+        bound = self._extract_variable_bound(node)
+        if bound is not None:
+            self._record_variable_bound(*bound)
+            return
+        if not isinstance(node, dict) or node.get("type") != "forall_constraint":
+            return
+        self._walk_variable_bound_constraints(node.get("constraint"))
+        for constraint in node.get("constraints", []):
+            self._walk_variable_bound_constraints(constraint)
+
     def _collect_variable_bounds(self, constraints):
         if not hasattr(self, "_collected_lbs"):
             self._collected_lbs = {}
             self._collected_ubs = {}
-
-        def record_bound(var_node, op_sym, val):
-            # Base symbol only (aggregated across indices)
-            if var_node.get("type") == "name":
-                base = var_node.get("value")
-            elif var_node.get("type") == "indexed_name":
-                base = var_node.get("name")
-            else:
-                return
-            if op_sym == ">=":
-                cur = self._collected_lbs.get(base)
-                if cur is None or val < cur:
-                    self._collected_lbs[base] = val
-            elif op_sym == "<=":
-                cur = self._collected_ubs.get(base)
-                if cur is None or val > cur:
-                    self._collected_ubs[base] = val
-            elif op_sym == "==":
-                # equality contributes to both
-                curL = self._collected_lbs.get(base)
-                if curL is None or val < curL:
-                    self._collected_lbs[base] = val
-                curU = self._collected_ubs.get(base)
-                if curU is None or val > curU:
-                    self._collected_ubs[base] = val
-
-        def walk(node):
-            if not isinstance(node, dict):
-                return
-            t = node.get("type")
-            if t == "constraint":
-                op_sym = node.get("op")
-                if op_sym in (">=", "<=", "=="):
-                    left = node.get("left")
-                    right = node.get("right")
-                    if isinstance(left, dict) and isinstance(right, dict):
-                        # var OP number
-                        if right.get("type") == "number" and left.get("type") in (
-                            "name",
-                            "indexed_name",
-                        ):
-                            try:
-                                val = float(right.get("value"))
-                                record_bound(left, op_sym, val)
-                            except Exception:
-                                pass
-                        # number OP var -> flip
-                        elif left.get("type") == "number" and right.get("type") in (
-                            "name",
-                            "indexed_name",
-                        ):
-                            try:
-                                val = float(left.get("value"))
-                                # Flip operator perspective
-                                if op_sym == ">=":  # number >= var  -> var <= number
-                                    record_bound(right, "<=", val)
-                                elif op_sym == "<=":  # number <= var -> var >= number
-                                    record_bound(right, ">=", val)
-                                elif op_sym == "==":
-                                    record_bound(right, "==", val)
-                            except Exception:
-                                pass
-            elif t == "forall_constraint":
-                # Traverse inner constraints without explicit unrolling (aggregate bounds suffice)
-                if "constraint" in node:
-                    walk(node["constraint"])
-                if "constraints" in node:
-                    for c in node["constraints"]:
-                        walk(c)
-
-        for c in constraints:
-            walk(c)
+        for constraint in constraints:
+            self._walk_variable_bound_constraints(constraint)
 
     # === Declaration and Data Section ===
     def _eval_data_bound(self, expr, data_dict):
