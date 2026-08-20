@@ -360,6 +360,28 @@ class ExpressionEvaluator:
         set_decl = self.parent._find_decl(dimensions[0].get("name"))
         return bool(set_decl and set_decl.get("type") in ("set_of_tuples", "set_of_tuples_external"))
 
+    def _set_dimension_values(self, dimension: Dict[str, Any]) -> Optional[list]:
+        set_decl = self.parent._find_decl(dimension.get("name"))
+        set_data = self.parent.data_dict.get(dimension.get("name"))
+        if set_data is None and set_decl and set_decl.get("type") in (
+            "typed_set",
+            "typed_set_external",
+            "set_declaration",
+        ):
+            set_data = set_decl.get("value") or []
+        return set_data if isinstance(set_data, list) else None
+
+    def _remap_set_index(self, index_value: Any, dimension: Dict[str, Any]) -> Tuple[Any, bool]:
+        if dimension.get("type") != "named_set_dimension" or not isinstance(index_value, str):
+            return (index_value, False) if isinstance(index_value, int) else (None, False)
+        set_data = self._set_dimension_values(dimension)
+        if set_data is None:
+            return (index_value, False) if isinstance(index_value, int) else (None, False)
+        try:
+            return set_data.index(index_value) + 1, True
+        except ValueError:
+            return (index_value, False) if isinstance(index_value, int) else (None, False)
+
     def _remap_scalar_set_indices(self, expr: Dict[str, Any], decl: Optional[Dict[str, Any]], indices: List[Any]) -> List[Any]:
         if decl is None or not decl.get("type", "").startswith("parameter"):
             return indices
@@ -371,32 +393,10 @@ class ExpressionEvaluator:
         remapped_any = False
         remapped_indices = []
         for index_value, dimension in zip(indices, dimensions):
-            if dimension.get("type") != "named_set_dimension" or not isinstance(index_value, str):
-                if isinstance(index_value, int):
-                    remapped_indices.append(index_value)
-                continue
-            set_decl = self.parent._find_decl(dimension.get("name"))
-            set_data = self.parent.data_dict.get(dimension.get("name"))
-            if (
-                set_data is None
-                and set_decl
-                and set_decl.get("type")
-                in (
-                    "typed_set",
-                    "typed_set_external",
-                    "set_declaration",
-                )
-            ):
-                set_data = set_decl.get("value") or []
-            if isinstance(set_data, list):
-                try:
-                    remapped_indices.append(set_data.index(index_value) + 1)
-                    remapped_any = True
-                except ValueError:
-                    if isinstance(index_value, int):
-                        remapped_indices.append(index_value)
-            elif isinstance(index_value, int):
-                remapped_indices.append(index_value)
+            remapped_value, was_remapped = self._remap_set_index(index_value, dimension)
+            if remapped_value is not None:
+                remapped_indices.append(remapped_value)
+            remapped_any = remapped_any or was_remapped
         return remapped_indices if remapped_any else indices
 
     def _resolve_indexed_result(
@@ -522,40 +522,54 @@ class ExpressionEvaluator:
             return self._eval_index_tuple(dim_expr, env)
         return self._eval_index_fallback(dim_expr, env)
 
+    def _tuple_indexed_parameter_value(self, name: str, tuple_key: Any) -> Optional[Any]:
+        param_dict = self.parent.data_dict.get(f"{name}__map", self.parent.data_dict.get(name))
+        if isinstance(param_dict, dict) and tuple_key in param_dict:
+            return param_dict[tuple_key]
+        return None
+
+    def _tuple_indexed_inline_value(self, name: str, tuple_key: Any) -> Optional[Any]:
+        for declaration in self.parent._find_decls(name, "parameter_inline_indexed"):
+            dimensions = declaration.get("dimensions", [])
+            if len(dimensions) != 1 or dimensions[0].get("type") != "named_set_dimension":
+                continue
+            tuple_keys = TupleSetHelper.get_tuple_set(
+                dimensions[0]["name"], self.parent.ast, self.parent.data_dict
+            ) or []
+            normalized_keys = [key if isinstance(key, tuple) else (key,) for key in tuple_keys]
+            try:
+                index = normalized_keys.index(tuple_key)
+            except ValueError:
+                continue
+            values = declaration.get("value")
+            if isinstance(values, list) and index < len(values):
+                return values[index]
+        return None
+
+    def _tuple_indexed_variable(self, name: str, tuple_key: Any) -> Optional[str]:
+        for candidate in (f"{name}[{repr(tuple_key)}]", f"{name}[{str(tuple_key)}]"):
+            if candidate in self.parent.var_indices:
+                return candidate
+        return None
+
     def _handle_tuple_indexed(self, expr: Dict[str, Any], indices: List[Any]) -> Tuple[Dict[str, Any], Union[float, str]]:
-        # If index is a tuple (coef_dict, value), extract value
         tuple_key = self._extract_index_value(indices[0])
-        vname_tuple = f"{expr['name']}[{repr(tuple_key)}]"
-        if vname_tuple in self.parent.var_indices:
-            return {vname_tuple: 1.0}, 0.0
-        # Prefer normalized mapping if present under '<name>__map'
-        param_dict = self.parent.data_dict.get(f"{expr['name']}__map", self.parent.data_dict.get(expr["name"]))
-        if param_dict is not None and isinstance(param_dict, dict):
-            if tuple_key in param_dict:
-                # Treat tuple-indexed parameter as a pure constant (no coefficients)
-                return {}, param_dict[tuple_key]
-        # Fallback: find inline param decl and map tuple_key to positional index via tuple-set order
-        for d in self.parent._find_decls(expr["name"], "parameter_inline_indexed"):
-            dims = d.get("dimensions", [])
-            if len(dims) == 1 and dims[0].get("type") == "named_set_dimension":
-                set_name = dims[0]["name"]
-                # Normalize tuple keys from AST/data using helper (supports both dict-with-elements and plain tuples)
-                tuple_keys = TupleSetHelper.get_tuple_set(set_name, self.parent.ast, self.parent.data_dict) or []
-                # Ensure each key is a tuple
-                tuple_keys = [k if isinstance(k, tuple) else (k,) for k in tuple_keys]
-                try:
-                    idx = next((i for i, k in enumerate(tuple_keys) if k == tuple_key), None)
-                except Exception:
-                    idx = None
-                if idx is not None:
-                    param_vals = d.get("value")
-                    if isinstance(param_vals, list) and idx < len(param_vals):
-                        return {}, param_vals[idx]
-        vname_str = f"{expr['name']}[{str(tuple_key)}]"
-        if vname_str in self.parent.var_indices:
-            return {vname_str: 1.0}, 0.0
-        # If not found, raise immediately with clear error
-        raise self.parent._not_found_error("tuple-indexed variable or parameter", vname_tuple)
+        name = expr["name"]
+        variable_name = self._tuple_indexed_variable(name, tuple_key)
+        if variable_name is not None:
+            return {variable_name: 1.0}, 0.0
+
+        parameter_value = self._tuple_indexed_parameter_value(name, tuple_key)
+        if parameter_value is not None:
+            return {}, parameter_value
+
+        inline_value = self._tuple_indexed_inline_value(name, tuple_key)
+        if inline_value is not None:
+            return {}, inline_value
+
+        raise self.parent._not_found_error(
+            "tuple-indexed variable or parameter", f"{name}[{repr(tuple_key)}]"
+        )
 
     def _eval_name_reference_index(
         self, expr: Dict[str, Any], env: Dict[str, Any]
@@ -6295,6 +6309,56 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             if isinstance(cval, (int, float)):
                 const_ref[0] += sign * cval
 
+    def _accumulate_both_sides_sum(self, left, right, op, env, coef_dict, sign, const_ref):
+        left_coefs = defaultdict(float)
+        left_const = [0.0]
+        self._accumulate_sum_expr(left, env, left_coefs, 1, left_const)
+        right_coefs = defaultdict(float)
+        right_const = [0.0]
+        self._accumulate_sum_expr(right, env, right_coefs, 1, right_const)
+        if op not in ("+", "-"):
+            raise self._unsupported_operator_error("binop-with-sum", op)
+
+        factor = 1.0 if op == "+" else -1.0
+        for values, constant in ((left_coefs, left_const[0]), (right_coefs, right_const[0])):
+            for key, value in values.items():
+                coef_dict[key] += sign * (factor if values is right_coefs else 1.0) * value
+            const_ref[0] += sign * (factor if values is right_coefs else 1.0) * constant
+
+    def _accumulate_left_sum(self, left, right, op, env, coef_dict, sign, const_ref):
+        left_coefs = defaultdict(float)
+        left_const = [0.0]
+        self._accumulate_sum_expr(left, env, left_coefs, 1, left_const)
+        right_coefs, right_const = self._eval_expr(right, env)
+        if op not in ("+", "-"):
+            raise self._unsupported_operator_error("binop-with-sum", op)
+
+        for key, value in left_coefs.items():
+            coef_dict[key] += sign * value
+        const_ref[0] += sign * left_const[0]
+        right_factor = 1.0 if op == "+" else -1.0
+        for key, value in right_coefs.items():
+            coef_dict[self._resolve_coefficient_index(key)] += sign * right_factor * value
+        if isinstance(right_const, (int, float)):
+            const_ref[0] += sign * right_factor * right_const
+
+    def _accumulate_right_sum(self, left, right, op, env, coef_dict, sign, const_ref):
+        right_coefs = defaultdict(float)
+        right_const = [0.0]
+        self._accumulate_sum_expr(right, env, right_coefs, 1, right_const)
+        left_coefs, left_const = self._eval_expr(left, env)
+        if op not in ("+", "-"):
+            raise self._unsupported_operator_error("binop-with-sum", op)
+
+        for key, value in left_coefs.items():
+            coef_dict[self._resolve_coefficient_index(key)] += sign * value
+        if isinstance(left_const, (int, float)):
+            const_ref[0] += sign * left_const
+        right_factor = 1.0 if op == "+" else -1.0
+        for key, value in right_coefs.items():
+            coef_dict[key] += sign * right_factor * value
+        const_ref[0] += sign * right_factor * right_const[0]
+
     def _accumulate_binop_with_sum(self, expr, env, coef_dict, sign, const_ref):
         """Helper for _accumulate_sum_to_dict: handles binop where one/both sides include a sum.
 
@@ -6318,65 +6382,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 const_ref[0] += sign * factor * val
 
         if left_is_sum and right_is_sum:
-            # Accumulate each sum side once
-            temp_left = defaultdict(float)
-            left_const_box = [0.0]
-            self._accumulate_sum_expr(left, env, temp_left, 1, left_const_box)
-            temp_right = defaultdict(float)
-            right_const_box = [0.0]
-            self._accumulate_sum_expr(right, env, temp_right, 1, right_const_box)
-            if op == "+":
-                merge(temp_left, 1.0)
-                add_const(left_const_box[0], 1.0)
-                merge(temp_right, 1.0)
-                add_const(right_const_box[0], 1.0)
-            elif op == "-":
-                merge(temp_left, 1.0)
-                add_const(left_const_box[0], 1.0)
-                merge(temp_right, -1.0)
-                add_const(right_const_box[0], -1.0)
-            else:
-                raise self._unsupported_operator_error("binop-with-sum", op)
+            self._accumulate_both_sides_sum(left, right, op, env, coef_dict, sign, const_ref)
             return
         if left_is_sum:
-            left_coefs = defaultdict(float)
-            left_const_box = [0.0]
-            self._accumulate_sum_expr(left, env, left_coefs, 1, left_const_box)
-            right_coefs, right_const = self._eval_expr(right, env)
-            if op == "+":
-                merge(left_coefs, 1.0)
-                add_const(left_const_box[0], 1.0)
-                for vn, cf in right_coefs.items():
-                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
-                add_const(right_const, 1.0)
-            elif op == "-":
-                merge(left_coefs, 1.0)
-                add_const(left_const_box[0], 1.0)
-                for vn, cf in right_coefs.items():
-                    coef_dict[self._resolve_coefficient_index(vn)] += sign * (-cf)
-                add_const(right_const, -1.0)
-            else:
-                raise self._unsupported_operator_error("binop-with-sum", op)
+            self._accumulate_left_sum(left, right, op, env, coef_dict, sign, const_ref)
             return
         if right_is_sum:
-            right_coefs = defaultdict(float)
-            right_const_box = [0.0]
-            self._accumulate_sum_expr(right, env, right_coefs, 1, right_const_box)
-            left_coefs, left_const = self._eval_expr(left, env)
-            if op == "+":
-                for vn, cf in left_coefs.items():
-                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
-                add_const(left_const, 1.0)
-                merge(right_coefs, 1.0)
-                add_const(right_const_box[0], 1.0)
-            elif op == "-":
-                for vn, cf in left_coefs.items():
-                    coef_dict[self._resolve_coefficient_index(vn)] += sign * cf
-                add_const(left_const, 1.0)
-                merge(right_coefs, -1.0)
-                add_const(right_const_box[0], -1.0)
-            else:
-                raise self._unsupported_operator_error("binop-with-sum", op)
+            self._accumulate_right_sum(left, right, op, env, coef_dict, sign, const_ref)
             return
         # Fallback: neither side sum (should not reach here based on guard)
         base_coefs, base_const = self._eval_expr(expr, env)
