@@ -951,104 +951,81 @@ class OPLIDE(tk.Tk):
         ):
             return
         try:
-            # Also clear editors and reset file state to a blank IDE
-            try:
-                self.model_text.delete(1.0, tk.END)
-            except Exception:
-                pass
-            try:
-                self.data_text.delete(1.0, tk.END)
-            except Exception:
-                pass
-            try:
-                self.model_file = None
-            except Exception:
-                self.model_file = None
-            try:
-                self.data_file = None
-            except Exception:
-                self.data_file = None
-            self._mark_editor_baselines_saved()
-
-            # Reset tab labels and focus
-            try:
-                self.editor_notebook.tab(self.model_frame, text="Model")
-                self.editor_notebook.tab(self.data_frame, text="Data")
-                self.editor_notebook.select(self.model_frame)
-            except Exception:
-                pass
-
-            # Re-highlight and update caret
-            try:
-                self.highlight(self.model_text, is_data=False)
-                self.highlight(self.data_text, is_data=True)
-                self._update_caret_position(self.model_text)
-            except Exception:
-                pass
-
-            # Clear in-memory session structures
-            try:
-                self._output_sessions.clear()
-            except Exception:
-                self._output_sessions = {}
-            try:
-                self._output_session_ids.clear()
-            except Exception:
-                self._output_session_ids = []
-            try:
-                self._output_session_display.clear()
-            except Exception:
-                self._output_session_display = {}
-            try:
-                self._output_session_label.clear()
-            except Exception:
-                self._output_session_label = {}
-            try:
-                self._output_session_timestamp.clear()
-            except Exception:
-                self._output_session_timestamp = {}
-            try:
-                self._output_session_artifacts.clear()
-            except Exception:
-                self._output_session_artifacts = {}
-            self._current_output_session_id = None
-            self._viewing_output_session_id = None
-
-            # Remove persisted session file if present
-            try:
-                path = self._session_file_path()
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                logging.getLogger(__name__).exception("Failed to remove .pyopl_session file during new_session")
-
-            # Clear UI list and output pane
-            if hasattr(self, "request_listbox"):
-                try:
-                    self.request_listbox.delete(0, tk.END)
-                except Exception:
-                    pass
-
-            # Clear output pane (do NOT create a new timestamped session entry)
-            try:
-                if hasattr(self, "output_text") and self.output_text.winfo_exists():
-                    self.output_text.config(state="normal")
-                    self.output_text.delete("1.0", tk.END)
-                    self.output_text.insert(tk.END, "Session cleared.\n")
-                    self.output_text.config(state="disabled")
-            except Exception:
-                pass
-
-            try:
-                self.status_var.set("Session cleared.")
-            except Exception:
-                pass
+            OPLIDE._reset_editors_for_new_session(self)
+            OPLIDE._clear_output_session_state(self)
+            OPLIDE._remove_persisted_session(self)
+            OPLIDE._clear_session_widgets(self)
+            self.status_var.set("Session cleared.")
         except Exception as e:
             logging.getLogger(__name__).exception("Error while creating new session")
             try:
                 messagebox.showerror("Session Error", f"Failed to clear session: {e}")
             except Exception:
                 pass
+
+    def _reset_editors_for_new_session(self) -> None:
+        for text_widget in (self.model_text, self.data_text):
+            try:
+                text_widget.delete(1.0, tk.END)
+            except Exception:
+                pass
+        self.model_file = None
+        self.data_file = None
+        self._mark_editor_baselines_saved()
+        try:
+            self.editor_notebook.tab(self.model_frame, text="Model")
+            self.editor_notebook.tab(self.data_frame, text="Data")
+            self.editor_notebook.select(self.model_frame)
+        except Exception:
+            pass
+        try:
+            self.highlight(self.model_text, is_data=False)
+            self.highlight(self.data_text, is_data=True)
+            self._update_caret_position(self.model_text)
+        except Exception:
+            pass
+
+    def _clear_output_session_state(self) -> None:
+        defaults = {
+            "_output_sessions": {},
+            "_output_session_ids": [],
+            "_output_session_display": {},
+            "_output_session_label": {},
+            "_output_session_timestamp": {},
+            "_output_session_artifacts": {},
+        }
+        for attribute, fallback in defaults.items():
+            try:
+                getattr(self, attribute).clear()
+            except Exception:
+                setattr(self, attribute, fallback)
+        self._current_output_session_id = None
+        self._viewing_output_session_id = None
+
+    def _remove_persisted_session(self) -> None:
+        try:
+            path = self._session_file_path()
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to remove .pyopl_session file during new_session")
+
+    def _clear_session_widgets(self) -> None:
+        listbox = getattr(self, "request_listbox", None)
+        if listbox is not None:
+            try:
+                listbox.delete(0, tk.END)
+            except Exception:
+                pass
+        output_text = getattr(self, "output_text", None)
+        try:
+            if output_text is not None and output_text.winfo_exists():
+                output_text.config(state="normal")
+                output_text.delete("1.0", tk.END)
+                output_text.insert(tk.END, "Session cleared.\n")
+                output_text.config(state="disabled")
+        except Exception:
+            pass
 
     def _setup_panes(self) -> None:
         """Set up vertical editor/output rows with independent top and bottom side panels."""
@@ -2377,42 +2354,79 @@ class OPLIDE(tk.Tk):
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
-        m_base_name, m_ext = os.path.splitext(os.path.basename(model_path))
-        m_ext = m_ext or ".mod"
+        model_tgt, data_tgt = OPLIDE._write_pending_revision_files(
+            self,
+            tmp_dir,
+            revised_model,
+            revised_data,
+            model_path,
+            data_path,
+            safe_ts,
+            had_data_file,
+        )
+        OPLIDE._apply_pending_revision_editors(self, revised_model, revised_data, model_tgt, data_tgt, session_id)
+        self.status_var.set("GenAI: revisions applied")
+        self._clear_pending_genai_revisions()
+        try:
+            self._save_session()
+        except Exception:
+            pass
 
-        def _strip_ts_suffix(name: str) -> str:
+    @staticmethod
+    def _write_pending_revision_files(
+        self: Any,
+        tmp_dir: str,
+        revised_model: str,
+        revised_data: str,
+        model_path: str,
+        data_path: str,
+        safe_ts: str,
+        had_data_file: bool,
+    ) -> tuple[str, Optional[str]]:
+        def strip_ts_suffix(name: str) -> str:
             match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
             return match.group(1) if match and match.group(1) else name
 
-        m_base_name = _strip_ts_suffix(m_base_name)
-        model_base = os.path.join(tmp_dir, f"{m_base_name}_{safe_ts}")
-        model_tgt = model_base + m_ext
-        i = 1
-        while os.path.exists(model_tgt):
-            model_tgt = f"{model_base}_{i}{m_ext}"
-            i += 1
-
+        model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
+        model_ext = model_ext or ".mod"
+        model_base_name = strip_ts_suffix(model_base_name)
+        model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
+        model_tgt = OPLIDE._unique_revision_path(model_base, model_ext)
         model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
-        with open(model_tgt, "w", encoding="utf-8") as f:
-            f.write(model_content)
+        with open(model_tgt, "w", encoding="utf-8") as file_obj:
+            file_obj.write(model_content)
 
         data_tgt = None
         if revised_data:
             if had_data_file:
-                d_base_name, d_ext = os.path.splitext(os.path.basename(data_path))
-                d_ext = d_ext or ".dat"
+                data_base_name, data_ext = os.path.splitext(os.path.basename(data_path))
+                data_ext = data_ext or ".dat"
             else:
-                d_base_name, d_ext = m_base_name, ".dat"
-            d_base_name = _strip_ts_suffix(d_base_name)
-            data_base = os.path.join(tmp_dir, f"{d_base_name}_{safe_ts}")
-            data_tgt = data_base + d_ext
-            j = 1
-            while os.path.exists(data_tgt):
-                data_tgt = f"{data_base}_{j}{d_ext}"
-                j += 1
-            with open(data_tgt, "w", encoding="utf-8") as f:
-                f.write(revised_data)
+                data_base_name, data_ext = model_base_name, ".dat"
+            data_base_name = strip_ts_suffix(data_base_name)
+            data_base = os.path.join(tmp_dir, f"{data_base_name}_{safe_ts}")
+            data_tgt = OPLIDE._unique_revision_path(data_base, data_ext)
+            with open(data_tgt, "w", encoding="utf-8") as file_obj:
+                file_obj.write(revised_data)
+        return model_tgt, data_tgt
 
+    @staticmethod
+    def _unique_revision_path(base_path: str, extension: str) -> str:
+        target = base_path + extension
+        suffix = 1
+        while os.path.exists(target):
+            target = f"{base_path}_{suffix}{extension}"
+            suffix += 1
+        return target
+
+    def _apply_pending_revision_editors(
+        self,
+        revised_model: str,
+        revised_data: str,
+        model_tgt: str,
+        data_tgt: Optional[str],
+        session_id: Optional[str],
+    ) -> None:
         if revised_model:
             self.model_text.delete("1.0", tk.END)
             self.model_text.insert(tk.END, revised_model)
@@ -2431,20 +2445,13 @@ class OPLIDE(tk.Tk):
 
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
         if data_tgt:
-            current_data_file = self.data_file or ""
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(current_data_file)}")
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
         mark_baselines_saved = getattr(self, "_mark_editor_baselines_saved", None)
         if callable(mark_baselines_saved):
             mark_baselines_saved()
         self._append_output("\nRevisions applied to editors.\n", session_id)
-        self.status_var.set("GenAI: revisions applied")
-        self._clear_pending_genai_revisions()
-        try:
-            self._save_session()
-        except Exception:
-            pass
 
     def _get_active_editor(self) -> scrolledtext.ScrolledText:
         """Return the currently active editor widget (model or data)."""
@@ -3444,11 +3451,7 @@ class OPLIDE(tk.Tk):
         self._clear_highlight_tags(text_widget)
 
         code = text_widget.get("1.0", tk.END)
-
-        # Pre-calculate line start offsets for O(1) or O(log N) lookups
-        # This avoids the O(N^2) behavior of calling text[:pos].count('\n') for every token
         line_starts = [0] + [i + 1 for i, char in enumerate(code) if char == "\n"]
-
         import bisect
 
         def fast_index(pos: int) -> str:
@@ -3464,115 +3467,95 @@ class OPLIDE(tk.Tk):
 
         # Store the most recent error for status bar display (per widget)
         self._last_syntax_error_by_widget[id(text_widget)] = None
-        # (Keep legacy attribute too, in case other code reads it.)
         self._last_syntax_error = None
 
-        if not is_data:
-            lexer = OPLLexer()
-            parser = OPLParser()
-            tokens = []
-            lexer_error: Exception | None = None
+        if is_data:
+            OPLIDE._highlight_data(self, text_widget, code, fast_index, validate)
+        else:
+            OPLIDE._highlight_model(self, text_widget, code, fast_index)
+
+    def _set_highlight_error(self, text_widget: tk.Text, prefix: str, exc: Exception) -> None:
+        lineno = getattr(exc, "lineno", 1)
+        if not isinstance(lineno, int) or lineno is None:
+            lineno = 1
+        error_message = str(exc).splitlines()[0] if str(exc) else "Unknown syntax error"
+        text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
+        message = f"{prefix} on line {lineno}: {error_message}"
+        self._last_syntax_error_by_widget[id(text_widget)] = message
+        self._last_syntax_error = message
+
+    def _highlight_model(
+        self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]
+    ) -> None:
+        lexer = OPLLexer()
+        parser = OPLParser()
+        try:
+            tokens = list(lexer.tokenize(code))
+        except Exception as exc:
+            self._set_highlight_error(text_widget, "Lexer Error", exc)
+            return
+        try:
+            parser.parse(iter(tokens))
+        except Exception as exc:
+            if not self._is_transient_live_parse_error(exc):
+                self._set_highlight_error(text_widget, "Parser Error", exc)
+        OPLIDE._apply_token_highlighting(self, text_widget, tokens, fast_index)
+
+    def _highlight_data(
+        self,
+        text_widget: tk.Text,
+        code: str,
+        fast_index: Callable[[int], str],
+        validate: bool,
+    ) -> None:
+        if validate:
+            lexer = OPLDataLexer()
+            parser = OPLDataParser()
             try:
                 tokens = list(lexer.tokenize(code))
-            except Exception as e:
-                lexer_error = e
-                lineno = getattr(e, "lineno", 1)
-                if not isinstance(lineno, int) or lineno is None:
-                    lineno = 1
-                error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                msg = f"Lexer Error on line {lineno}: {error_message}"
-                self._last_syntax_error_by_widget[id(text_widget)] = msg
-                self._last_syntax_error = msg
-            if not lexer_error:
+            except Exception as exc:
+                self._set_highlight_error(text_widget, "Lexer Error", exc)
+            else:
                 try:
-                    parser.parse(iter(tokens))
-                except Exception as e:
-                    if not self._is_transient_live_parse_error(e):
-                        lineno = getattr(e, "lineno", 1)
-                        if not isinstance(lineno, int) or lineno is None:
-                            lineno = 1
-                        error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                        text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                        msg = f"Parser Error on line {lineno}: {error_message}"
-                        self._last_syntax_error_by_widget[id(text_widget)] = msg
-                        self._last_syntax_error = msg
+                    parser.parse(iter(tokens), lexer=lexer)
+                except Exception as exc:
+                    self._set_highlight_error(text_widget, "Parser Error", exc)
+        self._apply_data_highlighting(text_widget, code, fast_index)
 
-            # Batch tag application to reduce Tcl overhead
-            tag_ranges: dict[str, list[str]] = {}
-            for token in tokens:
-                # Use the fast lookup instead of self._index_from_pos
-                start_idx = fast_index(token.index)
-                end_idx = fast_index(token.index + len(str(token.value)))
-                tag = token.type if token.type in TOKEN_COLORS else None
-                if tag:
-                    if tag not in tag_ranges:
-                        tag_ranges[tag] = []
-                    tag_ranges[tag].extend([start_idx, end_idx])
+    def _apply_token_highlighting(
+        self, text_widget: tk.Text, tokens: list[Any], fast_index: Callable[[int], str]
+    ) -> None:
+        tag_ranges: dict[str, list[str]] = {}
+        for token in tokens:
+            tag = token.type if token.type in TOKEN_COLORS else None
+            if tag:
+                tag_ranges.setdefault(tag, []).extend(
+                    [fast_index(token.index), fast_index(token.index + len(str(token.value)))]
+                )
+        OPLIDE._apply_tag_ranges(text_widget, tag_ranges)
 
-            for tag, ranges in tag_ranges.items():
-                # Apply in chunks to avoid Tcl argument limits
-                for i in range(0, len(ranges), 2000):
-                    text_widget.tag_add(tag, *ranges[i : i + 2000])
+    def _apply_data_highlighting(
+        self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]
+    ) -> None:
+        keyword_ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
+        for keyword in ("param", "set", "true", "false"):
+            tag = "PARAM" if keyword == "param" else "SET" if keyword == "set" else "BOOLEAN"
+            for match in re.finditer(r"\b" + keyword + r"\b", code):
+                keyword_ranges[tag].extend([fast_index(match.start()), fast_index(match.end())])
 
-        else:
-            import re
+        number_ranges = [
+            index
+            for match in re.finditer(r"\d+(\.\d+)?", code)
+            for index in (fast_index(match.start()), fast_index(match.end()))
+        ]
+        keyword_ranges["NUMBER"] = number_ranges
+        OPLIDE._apply_tag_ranges(text_widget, keyword_ranges)
 
-            if validate:
-                lexer = OPLDataLexer()
-                parser = OPLDataParser()
-                tokens = []
-                lexer_error = None
-                try:
-                    tokens = list(lexer.tokenize(code))
-                except Exception as e:
-                    lexer_error = e
-                    lineno = getattr(e, "lineno", 1)
-                    if not isinstance(lineno, int) or lineno is None:
-                        lineno = 1
-                    error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                    text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                    msg = f"Lexer Error on line {lineno}: {error_message}"
-                    self._last_syntax_error_by_widget[id(text_widget)] = msg
-                    self._last_syntax_error = msg
-                if not lexer_error:
-                    try:
-                        parser.parse(iter(tokens), lexer=lexer)
-                    except Exception as e:
-                        lineno = getattr(e, "lineno", 1)
-                        if not isinstance(lineno, int) or lineno is None:
-                            lineno = 1
-                        error_message = str(e).splitlines()[0] if str(e) else "Unknown syntax error"
-                        text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
-                        msg = f"Parser Error on line {lineno}: {error_message}"
-                        self._last_syntax_error_by_widget[id(text_widget)] = msg
-                        self._last_syntax_error = msg
-
-            # Cheap regex highlighting for .dat
-            # Batch keyword highlighting
-            kw_ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
-            for kw in ["param", "set", "true", "false"]:
-                tag = "PARAM" if kw == "param" else "SET" if kw == "set" else "BOOLEAN"
-                for m in re.finditer(r"\b" + kw + r"\b", code):
-                    start = fast_index(m.start())
-                    end = fast_index(m.end())
-                    kw_ranges[tag].extend([start, end])
-
-            for tag, ranges in kw_ranges.items():
-                if ranges:
-                    for i in range(0, len(ranges), 2000):
-                        text_widget.tag_add(tag, *ranges[i : i + 2000])
-
-            # Batch number highlighting
-            number_ranges = []
-            for m in re.finditer(r"\d+(\.\d+)?", code):
-                start = fast_index(m.start())
-                end = fast_index(m.end())
-                number_ranges.extend([start, end])
-
-            if number_ranges:
-                for i in range(0, len(number_ranges), 2000):
-                    text_widget.tag_add("NUMBER", *number_ranges[i : i + 2000])
+    @staticmethod
+    def _apply_tag_ranges(text_widget: tk.Text, tag_ranges: dict[str, list[str]]) -> None:
+        for tag, ranges in tag_ranges.items():
+            for start in range(0, len(ranges), 2000):
+                text_widget.tag_add(tag, *ranges[start : start + 2000])
 
     def _index_from_pos(self, text: str, pos: int) -> str:
         """
@@ -4183,80 +4166,23 @@ class OPLIDE(tk.Tk):
         if operation is None:
             return
 
-        # Data file checks
-        data_vars = set()
-        # Variables like: int nbSets = ...;
-        for m in re.finditer(
-            r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\.\.\.",
-            model_code,
-        ):
-            data_vars.add(m.group(1))
-        # Arrays: float cost[Sets] = ...;
-        for m in re.finditer(
-            r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[.*?\]\s*=\s*\.\.\.",
-            model_code,
-        ):
-            data_vars.add(m.group(1))
-
-        # Parse the data file, if present
-        if self.data_file and os.path.exists(self.data_file):
-            try:
-                from .pyopl_core import OPLDataLexer, OPLDataParser
-
-                lexer = OPLDataLexer()
-                parser = OPLDataParser()
-                tokens = list(lexer.tokenize(data_code))
-                parser.parse(iter(tokens), lexer=lexer)
-            except Exception as e:
-                self.status_var.set(f"Error: Data file failed to parse: {e}")
-                self._append_output(f"\nError: Data file failed to parse: {e}\n", operation.session_id)
-                self._finish_foreground_operation(operation)
-                return
-
-        # Check that all required data variables are present
-        missing_vars = []
-        for var in data_vars:
-            if not re.search(r"\b" + re.escape(var) + r"\s*(=|\[)", data_code):
-                missing_vars.append(var)
-        if missing_vars:
-            self.status_var.set(f"Error: Data missing for: {', '.join(missing_vars)}")
-            self._append_output(f"\nError: Data missing for: {', '.join(missing_vars)}\n", operation.session_id)
-            self._finish_foreground_operation(operation)
+        if not OPLIDE._validate_run_model_data(self, model_code, data_code, operation):
             return
 
         tmp_dir = os.path.join(os.getcwd(), "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
 
-        # Save temp files if not saved
-        model_file = model_file_override or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
-        data_file = data_file_override or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
-        try:
-            with open(model_file, "w", encoding="utf-8") as f:
-                f.write(model_code)
-            with open(data_file, "w", encoding="utf-8") as f:
-                f.write(data_code)
-        except Exception as e:
-            self.status_var.set(f"Error saving temp files: {e}")
-            self._append_output(f"\nError saving temp files: {e}\n", operation.session_id)
-            self._finish_foreground_operation(operation)
+        file_paths = OPLIDE._save_run_model_files(
+            self, model_code, data_code, tmp_dir, model_file_override, data_file_override, operation
+        )
+        if file_paths is None:
             return
+        model_file, data_file = file_paths
 
         self._current_solver_choice = solver_choice
         operation.model_file = model_file
         operation.data_file = data_file
-        try:
-            self._solver_queue = multiprocessing.Queue()
-            self._solver_process = multiprocessing.Process(
-                target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, self._solver_queue),
-            )
-            self._solver_process.start()
-        except Exception as e:
-            self.status_var.set(f"Error starting solve: {e}")
-            self._append_output(f"\nError starting solve: {e}\n", operation.session_id)
-            self._solver_process = None
-            self._solver_queue = None
-            self._finish_foreground_operation(operation)
+        if not OPLIDE._start_solver_process(self, model_file, data_file, solver_choice, operation):
             return
 
         self._set_run_menu_running(True)
@@ -4269,6 +4195,93 @@ class OPLIDE(tk.Tk):
         self._start_run_timer("Solving model...")
 
         self.after(100, self._poll_solver, operation)
+
+    def _validate_run_model_data(
+        self,
+        model_code: str,
+        data_code: str,
+        operation: _ForegroundOperation,
+    ) -> bool:
+        data_vars = {
+            match.group(1)
+            for pattern in (
+                r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\.\.\.",
+                r"\b(?:int|float|boolean|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\[.*?\]\s*=\s*\.\.\.",
+            )
+            for match in re.finditer(pattern, model_code)
+        }
+        if self.data_file and os.path.exists(self.data_file):
+            try:
+                from .pyopl_core import OPLDataLexer, OPLDataParser
+
+                lexer = OPLDataLexer()
+                parser = OPLDataParser()
+                tokens = list(lexer.tokenize(data_code))
+                parser.parse(iter(tokens), lexer=lexer)
+            except Exception as exc:
+                self.status_var.set(f"Error: Data file failed to parse: {exc}")
+                self._append_output(f"\nError: Data file failed to parse: {exc}\n", operation.session_id)
+                self._finish_foreground_operation(operation)
+                return False
+
+        missing_vars = [
+            variable
+            for variable in data_vars
+            if not re.search(r"\b" + re.escape(variable) + r"\s*(=|\[)", data_code)
+        ]
+        if missing_vars:
+            missing = ", ".join(missing_vars)
+            self.status_var.set(f"Error: Data missing for: {missing}")
+            self._append_output(f"\nError: Data missing for: {missing}\n", operation.session_id)
+            self._finish_foreground_operation(operation)
+            return False
+        return True
+
+    def _save_run_model_files(
+        self,
+        model_code: str,
+        data_code: str,
+        tmp_dir: str,
+        model_file_override: Optional[str],
+        data_file_override: Optional[str],
+        operation: _ForegroundOperation,
+    ) -> Optional[tuple[str, str]]:
+        model_file = model_file_override or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
+        data_file = data_file_override or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
+        try:
+            with open(model_file, "w", encoding="utf-8") as file_obj:
+                file_obj.write(model_code)
+            with open(data_file, "w", encoding="utf-8") as file_obj:
+                file_obj.write(data_code)
+        except Exception as exc:
+            self.status_var.set(f"Error saving temp files: {exc}")
+            self._append_output(f"\nError saving temp files: {exc}\n", operation.session_id)
+            self._finish_foreground_operation(operation)
+            return None
+        return model_file, data_file
+
+    def _start_solver_process(
+        self,
+        model_file: str,
+        data_file: str,
+        solver_choice: str,
+        operation: _ForegroundOperation,
+    ) -> bool:
+        try:
+            self._solver_queue = multiprocessing.Queue()
+            self._solver_process = multiprocessing.Process(
+                target=_solve_wrapper,
+                args=(model_file, data_file, solver_choice, self._solver_queue),
+            )
+            self._solver_process.start()
+        except Exception as exc:
+            self.status_var.set(f"Error starting solve: {exc}")
+            self._append_output(f"\nError starting solve: {exc}\n", operation.session_id)
+            self._solver_process = None
+            self._solver_queue = None
+            self._finish_foreground_operation(operation)
+            return False
+        return True
 
     def stop_model(self) -> None:
         p = self._solver_process
@@ -4331,38 +4344,10 @@ class OPLIDE(tk.Tk):
         if not p or not q:
             return
 
-        while True:
-            try:
-                kind, payload = q.get_nowait()
-            except queue.Empty:
-                if p.is_alive():
-                    self.after(100, self._poll_solver, operation)
-                    return
-
-                # Process ended but no terminal message
-                self._set_run_menu_running(False)
-                self._restore_output_textbox()
-                self._append_output(
-                    "\nError: Solver process terminated unexpectedly.\n",
-                    operation.session_id if operation is not None else None,
-                )
-
-                # Stop timer updates
-                self._stop_run_timer()
-
-                self.status_var.set("Error: Solver process terminated.")
-                self._finish_solver_progress(status="ended unexpectedly")
-                self._cleanup_solver_ipc(cancel_queue_thread=True)
-                self._finish_foreground_operation(operation)
-                return
-            if kind == "progress":
-                if isinstance(payload, dict):
-                    self._record_solver_progress(payload)
-                continue
-            if kind == "log":
-                self._append_solver_log_text(str(payload))
-                continue
-            break
+        terminal_message = OPLIDE._drain_solver_queue(self, p, q, operation)
+        if terminal_message is None:
+            return
+        kind, payload = terminal_message
 
         # Got a message => process should be done
         try:
@@ -4385,117 +4370,105 @@ class OPLIDE(tk.Tk):
                 solver_choice=operation.solver_choice if operation is not None else None,
             )
 
-            # Determine whether the solver actually produced a usable solution.
-            success = False
-            try:
-                if isinstance(payload, dict):
-                    # Prefer an explicit solution payload
-                    if payload.get("solution"):
-                        success = True
-                    else:
-                        st = str(payload.get("status", "")).lower()
-                        if st in ("optimal", "feasible", "optimal solution", "feasible solution", "success"):
-                            success = True
-            except Exception:
-                success = False
-
-            # If user requested Solve & Explain, only run generative feedback when solve succeeded
-            try:
-                if operation is not None and operation.explain_after_solve:
-                    if not success:
-                        # Skip explanation when solve failed
-                        try:
-                            self._append_output(
-                                "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n",
-                                operation.session_id,
-                            )
-                        except Exception:
-                            pass
-                        self._finish_foreground_operation(operation)
-                    else:
-                        # run feedback in background thread to avoid blocking UI
-                        def _run_feedback():
-                            try:
-                                if operation.cancel_requested:
-                                    return
-                                # Compose solution text as JSON
-                                try:
-                                    sol_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
-                                except Exception:
-                                    sol_text = str(payload)
-
-                                feedback_prompt = (
-                                    "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
-                                    "Include key findings and suggested next steps.\n\nSolution:\n" + sol_text
-                                )
-
-                                model_path = operation.model_file
-                                data_path = operation.data_file
-
-                                # Notify UI and request feedback
-                                if operation.cancel_requested:
-                                    return
-                                self.after(
-                                    0, self._append_output, "\n[GenAI] Requesting explanation...\n", operation.session_id
-                                )
-
-                                try:
-                                    fb = generative_feedback(
-                                        feedback_prompt,
-                                        model_path,
-                                        data_path,
-                                        llm_provider=(self.genai_provider if self.genai_provider else None),
-                                        model_name=(self.genai_model if self.genai_model else None),
-                                        progress=(None),
-                                    )
-                                except Exception:
-                                    self.after(
-                                        0,
-                                        self._append_output,
-                                        "\n[GenAI] Error requesting explanation:\n",
-                                        operation.session_id,
-                                    )
-                                    self.after(0, self._finish_foreground_operation, operation)
-                                    return
-
-                                if operation.cancel_requested:
-                                    self.after(0, self._finish_foreground_operation, operation)
-                                    return
-
-                                # Format feedback for output
-                                try:
-                                    if isinstance(fb, dict):
-                                        out = fb.get("feedback") or json.dumps(fb, indent=2, sort_keys=True, default=str)
-                                    else:
-                                        out = str(fb)
-                                except Exception:
-                                    out = str(fb)
-
-                                # Note: unescaping of double-escaped sequences is handled centrally
-                                # in `pyopl.genai.pyopl_generative.generative_feedback`.
-
-                                self.after(
-                                    0, self._append_output, "\n[GenAI] Explanation:\n" + out + "\n", operation.session_id
-                                )
-                                self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
-                                self.after(0, self._finish_foreground_operation, operation)
-                            except Exception:
-                                try:
-                                    self.after(0, self._append_output, "\n[GenAI] Explanation failed.\n", operation.session_id)
-                                except Exception:
-                                    pass
-                                self.after(0, self._finish_foreground_operation, operation)
-
-                        threading.Thread(target=_run_feedback, daemon=True).start()
-                        return
-            except Exception:
-                pass
+            if OPLIDE._handle_solver_explanation(self, payload, operation):
+                return
             self._finish_foreground_operation(operation)
         else:
             self._finish_solver_progress(status="failed")
             self._append_output(f"\nError:\n{payload}\n", operation.session_id if operation is not None else None)
             self.status_var.set("Error running model")
             self._finish_foreground_operation(operation)
+
+    def _handle_solver_explanation(
+        self, payload: Any, operation: Optional[_ForegroundOperation]
+    ) -> bool:
+        if operation is None or not operation.explain_after_solve:
+            return False
+        success = isinstance(payload, dict) and (
+            bool(payload.get("solution"))
+            or str(payload.get("status", "")).lower()
+            in ("optimal", "feasible", "optimal solution", "feasible solution", "success")
+        )
+        if not success:
+            self._append_output(
+                "\n[GenAI] Skipping explanation because solve did not produce a successful solution.\n",
+                operation.session_id,
+            )
+            self._finish_foreground_operation(operation)
+            return False
+
+        def run_feedback() -> None:
+            try:
+                if operation.cancel_requested:
+                    return
+                try:
+                    solution_text = json.dumps(payload, indent=2, sort_keys=True, default=str)
+                except Exception:
+                    solution_text = str(payload)
+                prompt = (
+                    "Translate the following optimization solution into clear, non-technical language targeting a lay user. "
+                    "Include key findings and suggested next steps.\n\nSolution:\n" + solution_text
+                )
+                self.after(0, self._append_output, "\n[GenAI] Requesting explanation...\n", operation.session_id)
+                try:
+                    feedback = generative_feedback(
+                        prompt,
+                        operation.model_file,
+                        operation.data_file,
+                        llm_provider=self.genai_provider or None,
+                        model_name=self.genai_model or None,
+                        progress=None,
+                    )
+                except Exception:
+                    self.after(0, self._append_output, "\n[GenAI] Error requesting explanation:\n", operation.session_id)
+                    self.after(0, self._finish_foreground_operation, operation)
+                    return
+                if operation.cancel_requested:
+                    return
+                if isinstance(feedback, dict):
+                    output = feedback.get("feedback") or json.dumps(feedback, indent=2, sort_keys=True, default=str)
+                else:
+                    output = str(feedback)
+                self.after(0, self._append_output, "\n[GenAI] Explanation:\n" + output + "\n", operation.session_id)
+                self.after(0, lambda: self.status_var.set("GenAI: explanation complete"))
+            except Exception:
+                self.after(0, self._append_output, "\n[GenAI] Explanation failed.\n", operation.session_id)
+            finally:
+                self.after(0, self._finish_foreground_operation, operation)
+
+        threading.Thread(target=run_feedback, daemon=True).start()
+        return True
+
+    def _drain_solver_queue(
+        self, process: multiprocessing.Process, solver_queue: multiprocessing.Queue, operation: Optional[_ForegroundOperation]
+    ) -> Optional[tuple[str, Any]]:
+        while True:
+            try:
+                kind, payload = solver_queue.get_nowait()
+            except queue.Empty:
+                if process.is_alive():
+                    self.after(100, self._poll_solver, operation)
+                    return None
+                self._set_run_menu_running(False)
+                self._restore_output_textbox()
+                self._append_output(
+                    "\nError: Solver process terminated unexpectedly.\n",
+                    operation.session_id if operation is not None else None,
+                )
+                self._stop_run_timer()
+                self.status_var.set("Error: Solver process terminated.")
+                self._finish_solver_progress(status="ended unexpectedly")
+                self._cleanup_solver_ipc(cancel_queue_thread=True)
+                self._finish_foreground_operation(operation)
+                return None
+            if kind == "progress":
+                if isinstance(payload, dict):
+                    self._record_solver_progress(payload)
+                continue
+            if kind == "log":
+                self._append_solver_log_text(str(payload))
+                continue
+            return kind, payload
 
     def _display_solve_results(
         self,
@@ -4783,120 +4756,111 @@ class OPLIDE(tk.Tk):
             return
 
         try:
-            self._output_sessions = session.get("output_sessions", {}) or {}
-            self._output_session_ids = session.get("output_session_ids", []) or []
-            self._output_session_display = session.get("output_session_display", {}) or {}
-            self._output_session_label = session.get("output_session_label", {}) or {}
-            self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
-            raw_artifacts = session.get("output_session_artifacts", {}) or {}
-            self._output_session_artifacts = {}
-            for sid, artifact in raw_artifacts.items():
-                if not isinstance(artifact, dict):
-                    continue
-                normalized: dict[str, str] = {}
-                if "model_text" in artifact:
-                    normalized["model_text"] = str(artifact.get("model_text") or "")
-                if "data_text" in artifact:
-                    normalized["data_text"] = str(artifact.get("data_text") or "")
-                self._output_session_artifacts[str(sid)] = normalized
-            self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
-            self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
-
-            for sid in self._output_session_ids:
-                if sid not in self._output_session_timestamp:
-                    display = self._output_session_display.get(sid, sid)
-                    if " • " in display:
-                        self._output_session_timestamp[sid] = display.split(" • ", 1)[0]
-                    else:
-                        self._output_session_timestamp[sid] = display
-                if sid not in self._output_session_label:
-                    display = self._output_session_display.get(sid, sid)
-                    timestamp = self._output_session_timestamp.get(sid, "")
-                    prefix = f"{timestamp} • "
-                    if timestamp and display.startswith(prefix):
-                        self._output_session_label[sid] = display[len(prefix) :]
-                    elif " • " in display:
-                        self._output_session_label[sid] = display.split(" • ", 1)[-1]
-                    else:
-                        self._output_session_label[sid] = str(display)
-
-            # Restore listbox UI
-            if hasattr(self, "request_listbox"):
-                try:
-                    self.request_listbox.delete(0, tk.END)
-                    for sid in self._output_session_ids:
-                        display = self._output_session_display.get(sid, sid)
-                        self.request_listbox.insert(tk.END, display)
-                    # Select viewing session if available
-                    if self._viewing_output_session_id and self._viewing_output_session_id in self._output_session_ids:
-                        idx = self._output_session_ids.index(self._viewing_output_session_id)
-                        self.request_listbox.selection_clear(0, tk.END)
-                        self.request_listbox.selection_set(idx)
-                        self.request_listbox.activate(idx)
-                    elif self._output_session_ids:
-                        self.request_listbox.selection_clear(0, tk.END)
-                        self.request_listbox.selection_set(0)
-                        self.request_listbox.activate(0)
-                except Exception:
-                    pass
-
-            # Restore output_text
-            if hasattr(self, "output_text") and self.output_text.winfo_exists():
-                try:
-                    sid = self._viewing_output_session_id or (
-                        self._output_session_ids[0] if self._output_session_ids else None
-                    )
-                    if sid:
-                        content = self._output_sessions.get(sid, "")
-                        self._current_output_session_id = self._current_output_session_id or sid
-                        self._viewing_output_session_id = sid
-                        self.output_text.config(state="normal")
-                        self.output_text.delete("1.0", tk.END)
-                        self.output_text.insert(tk.END, content)
-                        self.output_text.see(tk.END)
-                        self.output_text.config(state="disabled")
-                except Exception:
-                    pass
-
-            # Restore file pointers if present
-            try:
-                if session.get("model_file"):
-                    self.model_file = session.get("model_file")
-                    try:
-                        with open(self.model_file, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        self.model_text.delete("1.0", tk.END)
-                        self.model_text.insert(tk.END, content)
-                    except Exception:
-                        self.model_file = None  # Clear pointer if file can't be read
-                if session.get("data_file"):
-                    self.data_file = session.get("data_file")
-                    try:
-                        with open(self.data_file, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        self.data_text.delete("1.0", tk.END)
-                        self.data_text.insert(tk.END, content)
-                    except Exception:
-                        self.data_file = None  # Clear pointer if file can't be read
-                # If files were restored, update tab titles to show filenames
-                try:
-                    if hasattr(self, "editor_notebook"):
-                        try:
-                            model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"
-                            self.editor_notebook.tab(self.model_frame, text=model_label)
-                        except Exception:
-                            pass
-                        try:
-                            data_label = f"Data: {os.path.basename(self.data_file)}" if self.data_file else "Data"
-                            self.editor_notebook.tab(self.data_frame, text=data_label)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            except Exception:
-                pass
+            OPLIDE._restore_session_history(self, session)
+            OPLIDE._restore_session_files(self, session)
         except Exception:
             logging.getLogger(__name__).exception("Failed to restore session state from .pyopl_session")
+
+    def _restore_session_history(self, session: dict[str, Any]) -> None:
+        self._output_sessions = session.get("output_sessions", {}) or {}
+        self._output_session_ids = session.get("output_session_ids", []) or []
+        self._output_session_display = session.get("output_session_display", {}) or {}
+        self._output_session_label = session.get("output_session_label", {}) or {}
+        self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
+        raw_artifacts = session.get("output_session_artifacts", {}) or {}
+        self._output_session_artifacts = {
+            str(sid): {
+                key: str(artifact.get(key) or "")
+                for key in ("model_text", "data_text")
+                if key in artifact
+            }
+            for sid, artifact in raw_artifacts.items()
+            if isinstance(artifact, dict)
+        }
+        self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
+        self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
+
+        for sid in self._output_session_ids:
+            display = self._output_session_display.get(sid, sid)
+            timestamp = self._output_session_timestamp.setdefault(
+                sid, display.split(" • ", 1)[0] if " • " in display else display
+            )
+            if sid not in self._output_session_label:
+                prefix = f"{timestamp} • "
+                if timestamp and display.startswith(prefix):
+                    self._output_session_label[sid] = display[len(prefix) :]
+                elif " • " in display:
+                    self._output_session_label[sid] = display.split(" • ", 1)[-1]
+                else:
+                    self._output_session_label[sid] = str(display)
+
+        OPLIDE._restore_session_history_widgets(self)
+
+    def _restore_session_history_widgets(self) -> None:
+        if hasattr(self, "request_listbox"):
+            try:
+                self.request_listbox.delete(0, tk.END)
+                for sid in self._output_session_ids:
+                    self.request_listbox.insert(tk.END, self._output_session_display.get(sid, sid))
+                selected_id = self._viewing_output_session_id
+                if selected_id and selected_id in self._output_session_ids:
+                    index = self._output_session_ids.index(selected_id)
+                elif self._output_session_ids:
+                    index = 0
+                else:
+                    index = None
+                if index is not None:
+                    self.request_listbox.selection_clear(0, tk.END)
+                    self.request_listbox.selection_set(index)
+                    self.request_listbox.activate(index)
+            except Exception:
+                pass
+
+        if hasattr(self, "output_text") and self.output_text.winfo_exists():
+            try:
+                sid = self._viewing_output_session_id or (
+                    self._output_session_ids[0] if self._output_session_ids else None
+                )
+                if sid:
+                    self._current_output_session_id = self._current_output_session_id or sid
+                    self._viewing_output_session_id = sid
+                    self.output_text.config(state="normal")
+                    self.output_text.delete("1.0", tk.END)
+                    self.output_text.insert(tk.END, self._output_sessions.get(sid, ""))
+                    self.output_text.see(tk.END)
+                    self.output_text.config(state="disabled")
+            except Exception:
+                pass
+
+    def _restore_session_files(self, session: dict[str, Any]) -> None:
+        try:
+            OPLIDE._restore_session_file(self, session.get("model_file"), "model_file", self.model_text)
+            OPLIDE._restore_session_file(self, session.get("data_file"), "data_file", self.data_text)
+            if hasattr(self, "editor_notebook"):
+                try:
+                    model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"
+                    self.editor_notebook.tab(self.model_frame, text=model_label)
+                except Exception:
+                    pass
+                try:
+                    data_label = f"Data: {os.path.basename(self.data_file)}" if self.data_file else "Data"
+                    self.editor_notebook.tab(self.data_frame, text=data_label)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _restore_session_file(self, path: Optional[str], attribute: str, text_widget: Any) -> None:
+        if not path:
+            return
+        setattr(self, attribute, path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert(tk.END, content)
+        except Exception:
+            setattr(self, attribute, None)
 
     def _ensure_model_data_saved(
         self, model_target: Optional[str] = None, data_target: Optional[str] = None
@@ -5643,264 +5607,118 @@ class OPLIDE(tk.Tk):
         """Apply text widget colors based on theme."""
         theme = self.theme_var.get()
         self._apply_macos_theme_appearance(theme)
+        colors = OPLIDE._theme_palette(theme)
+        OPLIDE._apply_theme_base_widgets(self, colors)
+        OPLIDE._apply_theme_styles(self, colors)
+        OPLIDE._apply_theme_optional_widgets(self, colors)
+
+    @staticmethod
+    def _theme_palette(theme: str) -> dict[str, str]:
         if theme == "darkly":
-            root_bg = "#212529"
-            editor_bg = "#2b3035"
-            editor_fg = "#e9ecef"
-            caret_fg = "#e9ecef"
-            sidebar_bg = editor_bg
-            output_bg = "#212529"
-            output_fg = "#e9ecef"
-            error_fg = "white"
-            paned_bg = root_bg
-            sidebar_fg = editor_fg
-            sidebar_muted = "#aab4be"
-            list_select_bg = "#334155"
-            inset_border = "#495057"
-            status_bg = "#212529"
-            status_fg = "#cfd6dd"
-            status_meta_fg = "#8f9aa3"
-            scrollbar_thumb_bg = "#495057"
-            scrollbar_active_bg = "#5c636a"
-            scrollbar_trough_bg = "#212529"
-            ttk_scrollbar_bg = "#495057"
-            ttk_scrollbar_active_bg = "#5c636a"
-            ttk_scrollbar_trough_bg = "#2b3035"
-        else:
-            root_bg = "#f8f9fa"
-            editor_bg = "#ffffff"
-            editor_fg = "#212529"
-            caret_fg = "#212529"
-            sidebar_bg = editor_bg
-            output_bg = "#f8f9fa"
-            output_fg = "#212529"
-            error_fg = "black"
-            paned_bg = root_bg
-            sidebar_fg = editor_fg
-            sidebar_muted = "#6b7785"
-            list_select_bg = "#cfe0ff"
-            inset_border = "#ced4da"
-            status_bg = "#f8f9fa"
-            status_fg = "#364152"
-            status_meta_fg = "#7b8794"
-            scrollbar_thumb_bg = "#c1c9d0"
-            scrollbar_active_bg = "#adb5bd"
-            scrollbar_trough_bg = "#f1f3f5"
-            ttk_scrollbar_bg = "#c1c9d0"
-            ttk_scrollbar_active_bg = "#adb5bd"
-            ttk_scrollbar_trough_bg = "#f1f3f5"
+            return {
+                "root_bg": "#212529", "editor_bg": "#2b3035", "editor_fg": "#e9ecef", "caret_fg": "#e9ecef",
+                "sidebar_bg": "#2b3035", "output_bg": "#212529", "output_fg": "#e9ecef", "error_fg": "white",
+                "paned_bg": "#212529", "sidebar_fg": "#e9ecef", "sidebar_muted": "#aab4be", "list_select_bg": "#334155",
+                "inset_border": "#495057", "status_bg": "#212529", "status_fg": "#cfd6dd", "status_meta_fg": "#8f9aa3",
+                "scrollbar_thumb_bg": "#495057", "scrollbar_active_bg": "#5c636a", "scrollbar_trough_bg": "#212529",
+                "ttk_scrollbar_bg": "#495057", "ttk_scrollbar_active_bg": "#5c636a", "ttk_scrollbar_trough_bg": "#2b3035",
+            }
+        return {
+            "root_bg": "#f8f9fa", "editor_bg": "#ffffff", "editor_fg": "#212529", "caret_fg": "#212529",
+            "sidebar_bg": "#ffffff", "output_bg": "#f8f9fa", "output_fg": "#212529", "error_fg": "black",
+            "paned_bg": "#f8f9fa", "sidebar_fg": "#212529", "sidebar_muted": "#6b7785", "list_select_bg": "#cfe0ff",
+            "inset_border": "#ced4da", "status_bg": "#f8f9fa", "status_fg": "#364152", "status_meta_fg": "#7b8794",
+            "scrollbar_thumb_bg": "#c1c9d0", "scrollbar_active_bg": "#adb5bd", "scrollbar_trough_bg": "#f1f3f5",
+            "ttk_scrollbar_bg": "#c1c9d0", "ttk_scrollbar_active_bg": "#adb5bd", "ttk_scrollbar_trough_bg": "#f1f3f5",
+        }
 
-        # Root background
+        pass
+
+    @staticmethod
+    def _apply_theme_base_widgets(self: Any, colors: dict[str, str]) -> None:
+        self.configure(bg=colors["root_bg"])
+        for pane_name in ("editor_output_paned", "top_row_paned", "bottom_row_paned"):
+            pane = getattr(self, pane_name, None)
+            if pane is not None and pane.winfo_exists():
+                pane.config(bg=colors["paned_bg"], bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+        editor_config = {
+            "bg": colors["editor_bg"], "fg": colors["editor_fg"], "insertbackground": colors["caret_fg"],
+            "relief": tk.FLAT, "bd": 0, "highlightbackground": colors["inset_border"],
+            "highlightcolor": colors["inset_border"],
+        }
+        for widget_name in ("model_text", "data_text"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.config(**editor_config)
+        output = getattr(self, "output_text", None)
+        if output is not None:
+            output.config(
+                bg=colors["output_bg"], fg=colors["output_fg"], relief=tk.FLAT, bd=0,
+                highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"],
+            )
+
+    @staticmethod
+    def _apply_theme_styles(self: Any, colors: dict[str, str]) -> None:
         try:
-            self.configure(bg=root_bg)
+            style = self.style
+            style.configure("Editor.TFrame", background=colors["editor_bg"])
+            style.configure("Sidebar.TFrame", background=colors["sidebar_bg"])
+            style.configure("SidebarHeader.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_fg"], font=(self.interface_font_family, 13, "bold"))
+            style.configure("SidebarSection.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_fg"], font=(self.interface_font_family, 10, "bold"))
+            style.configure("SidebarSubtle.TLabel", background=colors["sidebar_bg"], foreground=colors["sidebar_muted"], font=(self.interface_font_family, 9))
+            for style_name, background, foreground in (
+                ("GenaiMode.TButton", colors["paned_bg"], colors["sidebar_muted"]),
+                ("GenaiModeActive.TButton", colors["list_select_bg"], colors["sidebar_fg"]),
+            ):
+                style.configure(style_name, background=background, foreground=foreground, borderwidth=0, focusthickness=0, padding=(10, 5), font=self.interface_button_font)
+                style.map(style_name, background=[("active", colors["list_select_bg"]), ("pressed", colors["list_select_bg"])])
+            button_layout = OPLIDE._strip_focus_from_ttk_layout(self, style.layout("TButton"))
+            for style_name in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
+                style.layout(style_name, button_layout)
+            style.configure("StatusBar.TFrame", background=colors["status_bg"])
+            style.configure("StatusBar.TLabel", background=colors["status_bg"], foreground=colors["status_fg"], font=self.interface_button_font)
+            style.configure("StatusBarMeta.TLabel", background=colors["status_bg"], foreground=colors["status_meta_fg"], font=self.interface_button_font)
+            style.configure("TScrollbar", background=colors["ttk_scrollbar_bg"], troughcolor=colors["ttk_scrollbar_trough_bg"], bordercolor=colors["ttk_scrollbar_trough_bg"], darkcolor=colors["ttk_scrollbar_bg"], lightcolor=colors["ttk_scrollbar_bg"], arrowcolor=colors["editor_fg"], gripcount=0)
+            style.map("TScrollbar", background=[("active", colors["ttk_scrollbar_active_bg"]), ("pressed", colors["ttk_scrollbar_active_bg"])], arrowcolor=[("disabled", colors["sidebar_muted"]), ("active", colors["editor_fg"])])
         except Exception:
             pass
 
-        # Paned background (and keep it flat)
-        if hasattr(self, "editor_output_paned") and self.editor_output_paned.winfo_exists():
-            try:
-                self.editor_output_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
-            except Exception:
-                pass
-        if hasattr(self, "top_row_paned") and self.top_row_paned.winfo_exists():
-            try:
-                self.top_row_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
-            except Exception:
-                pass
-        if hasattr(self, "bottom_row_paned") and self.bottom_row_paned.winfo_exists():
-            try:
-                self.bottom_row_paned.config(bg=paned_bg, bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
-            except Exception:
-                pass
-
-        # Apply to editors
-        if hasattr(self, "model_text"):
-            self.model_text.config(
-                bg=editor_bg,
-                fg=editor_fg,
-                insertbackground=caret_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightbackground=inset_border,
-                highlightcolor=inset_border,
-            )
-        if hasattr(self, "data_text"):
-            self.data_text.config(
-                bg=editor_bg,
-                fg=editor_fg,
-                insertbackground=caret_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightbackground=inset_border,
-                highlightcolor=inset_border,
-            )
-        if hasattr(self, "output_text"):
-            self.output_text.config(
-                bg=output_bg,
-                fg=output_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightbackground=inset_border,
-                highlightcolor=inset_border,
-            )
-
-        # Ensure the editor frames share the same background as the text area
-        try:
-            self.style.configure("Editor.TFrame", background=editor_bg)
-            self.style.configure("Sidebar.TFrame", background=sidebar_bg)
-            self.style.configure(
-                "SidebarHeader.TLabel",
-                background=sidebar_bg,
-                foreground=sidebar_fg,
-                font=(self.interface_font_family, 13, "bold"),
-            )
-            self.style.configure(
-                "SidebarSection.TLabel",
-                background=sidebar_bg,
-                foreground=sidebar_fg,
-                font=(self.interface_font_family, 10, "bold"),
-            )
-            self.style.configure(
-                "SidebarSubtle.TLabel",
-                background=sidebar_bg,
-                foreground=sidebar_muted,
-                font=(self.interface_font_family, 9),
-            )
-            self.style.configure(
-                "GenaiMode.TButton",
-                background=paned_bg,
-                foreground=sidebar_muted,
-                borderwidth=0,
-                focusthickness=0,
-                padding=(10, 5),
-                font=self.interface_button_font,
-            )
-            self.style.map("GenaiMode.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
-            self.style.configure(
-                "GenaiModeActive.TButton",
-                background=list_select_bg,
-                foreground=sidebar_fg,
-                borderwidth=0,
-                focusthickness=0,
-                padding=(10, 5),
-                font=self.interface_button_font,
-            )
-            self.style.map("GenaiModeActive.TButton", background=[("active", list_select_bg), ("pressed", list_select_bg)])
-            button_layout = self._strip_focus_from_ttk_layout(self.style.layout("TButton"))
-            for button_style in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
-                self.style.layout(button_style, button_layout)
-            self.style.configure("StatusBar.TFrame", background=status_bg)
-            self.style.configure(
-                "StatusBar.TLabel", background=status_bg, foreground=status_fg, font=self.interface_button_font
-            )
-            self.style.configure(
-                "StatusBarMeta.TLabel",
-                background=status_bg,
-                foreground=status_meta_fg,
-                font=self.interface_button_font,
-            )
-            self.style.configure(
-                "TScrollbar",
-                background=ttk_scrollbar_bg,
-                troughcolor=ttk_scrollbar_trough_bg,
-                bordercolor=ttk_scrollbar_trough_bg,
-                darkcolor=ttk_scrollbar_bg,
-                lightcolor=ttk_scrollbar_bg,
-                arrowcolor=editor_fg,
-                gripcount=0,
-            )
-            self.style.map(
-                "TScrollbar",
-                background=[("active", ttk_scrollbar_active_bg), ("pressed", ttk_scrollbar_active_bg)],
-                arrowcolor=[("disabled", sidebar_muted), ("active", editor_fg)],
-            )
-        except Exception:
-            pass
-
-        if hasattr(self, "status_bar"):
-            try:
-                self.status_bar.configure(style="StatusBar.TFrame")
-            except Exception:
-                pass
-        if hasattr(self, "editor_notebook"):
-            try:
-                self.editor_notebook.configure(style="TNotebook", padding=0)
-            except Exception:
-                pass
-        if hasattr(self, "status_bar_labels"):
-            for idx, label in enumerate(self.status_bar_labels):
+    @staticmethod
+    def _apply_theme_optional_widgets(self: Any, colors: dict[str, str]) -> None:
+        for widget_name, style_name in (("status_bar", "StatusBar.TFrame"), ("editor_notebook", "TNotebook")):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
                 try:
-                    label.configure(style=("StatusBar.TLabel" if idx == 0 else "StatusBarMeta.TLabel"))
+                    widget.configure(style=style_name, **({"padding": 0} if widget_name == "editor_notebook" else {}))
                 except Exception:
                     pass
-
-        if hasattr(self, "genai_prompt_text"):
-            self.genai_prompt_text.config(
-                bg=editor_bg,
-                fg=editor_fg,
-                insertbackground=caret_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightbackground=inset_border,
-                highlightcolor=inset_border,
-            )
-            self._configure_tk_scrollbar(
-                getattr(self.genai_prompt_text, "vbar", None),
-                thumb_bg=scrollbar_thumb_bg,
-                active_bg=scrollbar_active_bg,
-                trough_bg=scrollbar_trough_bg,
-                border_color=inset_border,
-            )
-        if hasattr(self, "genai_attachment_listbox"):
-            self.genai_attachment_listbox.config(
-                bg=editor_bg,
-                fg=editor_fg,
-                selectbackground=list_select_bg,
-                selectforeground=editor_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightthickness=0,
-            )
-        if hasattr(self, "sessions_surface"):
-            self.sessions_surface.config(bg=inset_border, highlightbackground=inset_border, highlightcolor=inset_border)
-            for child in self.sessions_surface.winfo_children():
-                if isinstance(child, tk.Scrollbar):
-                    self._configure_tk_scrollbar(
-                        child,
-                        thumb_bg=scrollbar_thumb_bg,
-                        active_bg=scrollbar_active_bg,
-                        trough_bg=scrollbar_trough_bg,
-                        border_color=inset_border,
-                    )
-        if hasattr(self, "request_listbox"):
-            self.request_listbox.config(
-                bg=editor_bg,
-                fg=editor_fg,
-                selectbackground=list_select_bg,
-                selectforeground=editor_fg,
-                relief=tk.FLAT,
-                bd=0,
-                highlightthickness=0,
-            )
-        for text_widget in (
-            getattr(self, "model_text", None),
-            getattr(self, "data_text", None),
-            getattr(self, "output_text", None),
-            getattr(self, "genai_prompt_text", None),
-        ):
-            self._configure_tk_scrollbar(
-                getattr(text_widget, "vbar", None),
-                thumb_bg=scrollbar_thumb_bg,
-                active_bg=scrollbar_active_bg,
-                trough_bg=scrollbar_trough_bg,
-                border_color=inset_border,
-            )
-
-        # Adjust ERROR tag for contrast
-        if hasattr(self, "model_text"):
-            self.model_text.tag_configure("ERROR", background="#e06c75", foreground=error_fg)
-        if hasattr(self, "data_text"):
-            self.data_text.tag_configure("ERROR", background="#e06c75", foreground=error_fg)
+        for index, label in enumerate(getattr(self, "status_bar_labels", [])):
+            try:
+                label.configure(style="StatusBar.TLabel" if index == 0 else "StatusBarMeta.TLabel")
+            except Exception:
+                pass
+        editor_config = {
+            "bg": colors["editor_bg"], "fg": colors["editor_fg"], "insertbackground": colors["caret_fg"],
+            "relief": tk.FLAT, "bd": 0, "highlightbackground": colors["inset_border"],
+            "highlightcolor": colors["inset_border"],
+        }
+        prompt = getattr(self, "genai_prompt_text", None)
+        if prompt is not None:
+            prompt.config(**editor_config)
+        for widget_name in ("genai_attachment_listbox", "request_listbox"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.config(bg=colors["editor_bg"], fg=colors["editor_fg"], selectbackground=colors["list_select_bg"], selectforeground=colors["editor_fg"], relief=tk.FLAT, bd=0, highlightthickness=0)
+        surface = getattr(self, "sessions_surface", None)
+        if surface is not None:
+            surface.config(bg=colors["inset_border"], highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"])
+        for widget in (getattr(self, "model_text", None), getattr(self, "data_text", None), getattr(self, "output_text", None), prompt):
+            if widget is not None:
+                self._configure_tk_scrollbar(getattr(widget, "vbar", None), thumb_bg=colors["scrollbar_thumb_bg"], active_bg=colors["scrollbar_active_bg"], trough_bg=colors["scrollbar_trough_bg"], border_color=colors["inset_border"])
+        for widget_name in ("model_text", "data_text"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.tag_configure("ERROR", background="#e06c75", foreground=colors["error_fg"])
 
     # --- Settings ---
     def _init_settings_storage(self) -> None:
@@ -6177,108 +5995,94 @@ class OPLIDE(tk.Tk):
         self._genai_provider_submenus: dict[str, tk.Menu] = {}
 
         if any_models:
-            # Add provider submenus with radio selections
-            def add_provider_menu(provider_label: str, provider_key: str, models: list[str]):
-                sub = tk.Menu(self.genai_menu, tearoff=0)
-                self._genai_provider_submenus[provider_key] = sub
-                for m in sorted(models):
-                    value = f"{provider_key}|{m}"
-                    sub.add_radiobutton(
-                        label=m,
-                        variable=self.genai_selection_var,
-                        value=value,
-                        command=self._make_select_model_cmd(provider_key, m),
-                    )
-                self.genai_menu.add_cascade(label=provider_label, menu=sub)
+            OPLIDE._add_genai_provider_menus(self, provider_models)
+            OPLIDE._add_genai_menu_actions(self, active)
+            OPLIDE._restore_genai_menu_selection(self, provider_models)
+        else:
+            OPLIDE._set_empty_genai_menu(self, active)
 
-            if provider_models.get("openai"):
-                add_provider_menu("OpenAI", "openai", provider_models["openai"])
-            if provider_models.get("google"):
-                add_provider_menu("Gemini", "google", provider_models["google"])
-            if provider_models.get("ollama"):
-                add_provider_menu("Ollama", "ollama", provider_models["ollama"])
-
-            # Generation Method submenu
-            method_menu = tk.Menu(self.genai_menu, tearoff=0)
-            for label, key in self._genai_methods:
-                method_menu.add_radiobutton(
-                    label=label,
-                    variable=self.genai_method_var,
-                    value=key,
-                    command=self._make_select_genai_method_cmd(key),
+    def _add_genai_provider_menus(self, provider_models: dict[str, list[str]]) -> None:
+        provider_labels = {"openai": "OpenAI", "google": "Gemini", "ollama": "Ollama"}
+        for provider_key, models in provider_models.items():
+            if not models:
+                continue
+            submenu = tk.Menu(self.genai_menu, tearoff=0)
+            self._genai_provider_submenus[provider_key] = submenu
+            for model_name in sorted(models):
+                submenu.add_radiobutton(
+                    label=model_name,
+                    variable=self.genai_selection_var,
+                    value=f"{provider_key}|{model_name}",
+                    command=self._make_select_model_cmd(provider_key, model_name),
                 )
+            self.genai_menu.add_cascade(label=provider_labels[provider_key], menu=submenu)
 
-            # Actions
+    def _add_genai_menu_actions(self, active: Optional[_ForegroundOperation]) -> None:
+        method_menu = tk.Menu(self.genai_menu, tearoff=0)
+        for label, key in self._genai_methods:
+            method_menu.add_radiobutton(
+                label=label,
+                variable=self.genai_method_var,
+                value=key,
+                command=self._make_select_genai_method_cmd(key),
+            )
+        self.genai_menu.add_separator()
+        self.genai_menu.add_cascade(label="Method", menu=method_menu)
+        self.genai_menu.add_checkbutton(
+            label="Show GenAI Panel",
+            onvalue=True,
+            offvalue=False,
+            variable=self.show_genai_panel_var,
+            command=self._toggle_genai_panel_visibility,
+        )
+        self.genai_menu.add_separator()
+        if active is not None:
+            self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
+        else:
+            self.genai_menu.add_command(label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E"))
+        if getattr(self, "debug", False):
             self.genai_menu.add_separator()
-            self.genai_menu.add_cascade(label="Method", menu=method_menu)
             self.genai_menu.add_checkbutton(
-                label="Show GenAI Panel",
+                label="Verbose LLM progress logs",
                 onvalue=True,
                 offvalue=False,
-                variable=self.show_genai_panel_var,
-                command=self._toggle_genai_panel_visibility,
+                variable=self.verbose_llm_var,
+                command=self._save_settings,
             )
-            # Solve & Explain: solve current model/data then ask LLM to explain results
-            self.genai_menu.add_separator()
-            if active is not None:
-                self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
-            else:
-                self.genai_menu.add_command(
-                    label="Solve & Explain", command=self._genai_solve_and_explain, accelerator=self._accel("E")
-                )
+        try:
+            self.menubar.entryconfig("GenAI", state="normal")
+        except Exception:
+            pass
 
-            # Verbose LLM progress logs (only visible when launched with --debug)
-            if getattr(self, "debug", False):
-                self.genai_menu.add_separator()
-                self.genai_menu.add_checkbutton(
-                    label="Verbose LLM progress logs",
-                    onvalue=True,
-                    offvalue=False,
-                    variable=self.verbose_llm_var,
-                    command=self._save_settings,
-                )
+    def _restore_genai_menu_selection(self, provider_models: dict[str, list[str]]) -> None:
+        choices = (
+            (self.genai_provider, self.genai_model, False),
+            (self._desired_genai_provider, self._desired_genai_model, True),
+        )
+        for provider, model, apply_selection in choices:
+            if provider and model and model in (provider_models.get(provider) or []):
+                self.genai_selection_var.set(f"{provider}|{model}")
+                if apply_selection:
+                    self._on_select_genai_model(provider, model)
+                return
+        if self.genai_provider and self.genai_model:
+            return
+        for provider in ("openai", "google", "ollama"):
+            models = provider_models.get(provider) or []
+            if models:
+                self.genai_selection_var.set(f"{provider}|{models[0]}")
+                self._on_select_genai_model(provider, models[0])
+                return
 
-            # Enable GenAI cascade
-            try:
-                self.menubar.entryconfig("GenAI", state="normal")
-            except Exception:
-                pass
-
-            # Preserve the live selection when menus refresh; fall back to the saved
-            # selection only when there is no current valid choice.
-            preselected = False
-            try:
-                if self.genai_provider and self.genai_model:
-                    models = provider_models.get(self.genai_provider) or []
-                    if self.genai_model in models:
-                        self.genai_selection_var.set(f"{self.genai_provider}|{self.genai_model}")
-                        preselected = True
-                if not preselected and self._desired_genai_provider and self._desired_genai_model:
-                    models = provider_models.get(self._desired_genai_provider) or []
-                    if self._desired_genai_model in models:
-                        self.genai_selection_var.set(f"{self._desired_genai_provider}|{self._desired_genai_model}")
-                        self._on_select_genai_model(self._desired_genai_provider, self._desired_genai_model)
-                        preselected = True
-            except Exception:
-                pass
-
-            if not preselected and not (self.genai_provider and self.genai_model):
-                for pk in ("openai", "google", "ollama"):
-                    if provider_models.get(pk):
-                        first = provider_models[pk][0]
-                        self.genai_selection_var.set(f"{pk}|{first}")
-                        self._on_select_genai_model(pk, first)
-                        break
+    def _set_empty_genai_menu(self, active: Optional[_ForegroundOperation]) -> None:
+        if active is not None:
+            self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
         else:
-            if active is not None:
-                self.genai_menu.add_command(label=f"Interrupt {active.label}", command=self.interrupt_active_operation)
-            else:
-                # No models available
-                self.genai_menu.add_command(label="No models available", state="disabled")
-            try:
-                self.menubar.entryconfig("GenAI", state=("normal" if active is not None else "disabled"))
-            except Exception:
-                pass
+            self.genai_menu.add_command(label="No models available", state="disabled")
+        try:
+            self.menubar.entryconfig("GenAI", state=("normal" if active is not None else "disabled"))
+        except Exception:
+            pass
 
     def _make_select_genai_method_cmd(self, key: str) -> Callable[[], None]:
         """Factory for selecting generation method."""
