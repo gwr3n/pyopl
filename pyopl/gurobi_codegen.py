@@ -322,14 +322,14 @@ class GurobiCodeGenerator:
             for sub_data in param_data:
                 self._check_parameter_shape(sub_data, dimensions[1:], data_dict, param_name, dim + 1)
 
-    def _normalize_data_declaration_inputs(self, data_dict):
-        declarations = self.ast.get("declarations", []) if hasattr(self, "ast") else []
-        for declaration in declarations:
-            if declaration.get("type") in ("set_of_tuples", "set_of_tuples_external"):
-                set_name = declaration.get("name")
-                if set_name in data_dict and isinstance(data_dict[set_name], list):
-                    data_dict[set_name] = {"elements": data_dict[set_name]}
+    def _normalize_tuple_set_input(self, declaration, data_dict):
+        if declaration.get("type") not in ("set_of_tuples", "set_of_tuples_external"):
+            return
+        set_name = declaration.get("name")
+        if set_name in data_dict and isinstance(data_dict[set_name], list):
+            data_dict[set_name] = {"elements": data_dict[set_name]}
 
+    def _normalize_parameter_input(self, declaration, data_dict):
         parameter_types = (
             "parameter_external",
             "parameter_external_indexed",
@@ -338,29 +338,33 @@ class GurobiCodeGenerator:
             "parameter_inline",
             "parameter_inline_indexed",
         )
+        if declaration.get("type") not in parameter_types or not declaration.get("dimensions"):
+            return
+        param_name = declaration["name"]
+        param_data = data_dict.get(param_name)
+        if param_name == "Capacity" and "Stores" in data_dict:
+            logger.debug(
+                "[data_dict] Stores: %s len=%d",
+                data_dict["Stores"],
+                len(data_dict["Stores"]),
+            )
+        if isinstance(param_data, list) and param_data and len(param_data) % 2 == 0:
+            is_flat_kv = all(
+                isinstance(param_data[index], str) and isinstance(param_data[index + 1], (int, float))
+                for index in range(0, len(param_data), 2)
+            )
+            if is_flat_kv:
+                data_dict[param_name] = {param_data[index]: param_data[index + 1] for index in range(0, len(param_data), 2)}
+                return
+        if isinstance(param_data, (list, tuple)):
+            self._check_parameter_shape(param_data, declaration["dimensions"], data_dict, param_name)
+
+    def _normalize_data_declaration_inputs(self, data_dict):
+        declarations = self.ast.get("declarations", []) if hasattr(self, "ast") else []
         for declaration in declarations:
-            if declaration.get("type") not in parameter_types or not declaration.get("dimensions"):
-                continue
-            param_name = declaration["name"]
-            param_data = data_dict.get(param_name)
-            if param_name == "Capacity" and "Stores" in data_dict:
-                logger.debug(
-                    "[data_dict] Stores: %s len=%d",
-                    data_dict["Stores"],
-                    len(data_dict["Stores"]),
-                )
-            if isinstance(param_data, list) and param_data and len(param_data) % 2 == 0:
-                is_flat_kv = all(
-                    isinstance(param_data[index], str) and isinstance(param_data[index + 1], (int, float))
-                    for index in range(0, len(param_data), 2)
-                )
-                if is_flat_kv:
-                    data_dict[param_name] = {
-                        param_data[index]: param_data[index + 1] for index in range(0, len(param_data), 2)
-                    }
-                    continue
-            if isinstance(param_data, (list, tuple)):
-                self._check_parameter_shape(param_data, declaration["dimensions"], data_dict, param_name)
+            self._normalize_tuple_set_input(declaration, data_dict)
+        for declaration in declarations:
+            self._normalize_parameter_input(declaration, data_dict)
 
     def _tuple_array_records(self, data_value, field_names, index_values=None):
         if isinstance(data_value, dict):
@@ -386,48 +390,63 @@ class GurobiCodeGenerator:
             items = enumerate(data_value, start=1)
         return {key: list(records or []) for key, records in items}
 
+    def _emit_structured_tuple_type(self, declaration):
+        self.tuple_types = getattr(self, "tuple_types", {})
+        self.tuple_types[declaration["name"]] = declaration["fields"]
+
+    def _emit_structured_tuple_set(self, declaration, data_dict):
+        set_name = declaration["name"]
+        tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
+        if tuple_list:
+            self._add_code_line(f"{set_name} = {repr(tuple_list)}")
+
+    def _emit_structured_tuple_set_array(self, declaration, data_dict):
+        set_name = declaration["name"]
+        dimensions = declaration.get("dimensions") or []
+        index_values = None
+        if len(dimensions) == 1 and dimensions[0].get("type") in (
+            "named_range_dimension",
+            "named_set_dimension",
+        ):
+            index_values = data_dict.get(dimensions[0].get("name"))
+        data_value = data_dict.get(set_name)
+        if data_value is not None:
+            records = self._tuple_set_array_records(data_value, index_values)
+            self._add_code_line(f"{set_name} = {repr(records)}")
+
+    def _emit_structured_typed_set(self, declaration, data_dict):
+        set_name = declaration["name"]
+        elements = declaration.get("value")
+        if not elements and set_name in data_dict:
+            elements = data_dict[set_name]
+        elements = [] if elements is None else elements
+        elems_str = ", ".join(repr(element) for element in elements)
+        self._add_code_line(f"{set_name} = [{elems_str}]")
+        self._add_code_line(f"{set_name}_index = {{v:i for i,v in enumerate({set_name})}}")
+
+    def _emit_structured_tuple_array(self, declaration, data_dict):
+        array_name = declaration["name"]
+        tuple_type = declaration["tuple_type"]
+        data_value = data_dict.get(array_name)
+        if data_value is not None and tuple_type in getattr(self, "tuple_types", {}):
+            field_names = [field["name"] for field in self.tuple_types[tuple_type]]
+            index_values = data_dict.get(declaration["index_set"])
+            records = self._tuple_array_records(data_value, field_names, index_values)
+            self._add_code_line(f"{array_name} = {repr(records)}")
+
     def _emit_structured_data_declarations(self, data_dict):
         for declaration in self.ast.get("declarations", []):
             declaration_type = declaration.get("type")
             if declaration_type == "tuple_type":
-                self.tuple_types = getattr(self, "tuple_types", {})
-                self.tuple_types[declaration["name"]] = declaration["fields"]
+                self._emit_structured_tuple_type(declaration)
             elif declaration_type in ("set_of_tuples", "set_of_tuples_external"):
-                set_name = declaration["name"]
-                tuple_list = TupleSetHelper.get_tuple_set(set_name, self.ast, data_dict)
-                if tuple_list:
-                    self._add_code_line(f"{set_name} = {repr(tuple_list)}")
+                self._emit_structured_tuple_set(declaration, data_dict)
             elif declaration_type == "set_of_tuples_array_external":
-                set_name = declaration["name"]
-                dimensions = declaration.get("dimensions") or []
-                index_values = None
-                if len(dimensions) == 1 and dimensions[0].get("type") in (
-                    "named_range_dimension",
-                    "named_set_dimension",
-                ):
-                    index_values = data_dict.get(dimensions[0].get("name"))
-                data_value = data_dict.get(set_name)
-                if data_value is not None:
-                    records = self._tuple_set_array_records(data_value, index_values)
-                    self._add_code_line(f"{set_name} = {repr(records)}")
+                self._emit_structured_tuple_set_array(declaration, data_dict)
             elif declaration_type in ("typed_set", "typed_set_external"):
-                set_name = declaration["name"]
-                elements = declaration.get("value")
-                if not elements and set_name in data_dict:
-                    elements = data_dict[set_name]
-                elements = [] if elements is None else elements
-                elems_str = ", ".join(repr(element) for element in elements)
-                self._add_code_line(f"{set_name} = [{elems_str}]")
-                self._add_code_line(f"{set_name}_index = {{v:i for i,v in enumerate({set_name})}}")
+                self._emit_structured_typed_set(declaration, data_dict)
             elif declaration_type in ("tuple_array", "tuple_array_external"):
-                array_name = declaration["name"]
-                tuple_type = declaration["tuple_type"]
-                data_value = data_dict.get(array_name)
-                if data_value is not None and tuple_type in getattr(self, "tuple_types", {}):
-                    field_names = [field["name"] for field in self.tuple_types[tuple_type]]
-                    index_values = data_dict.get(declaration["index_set"])
-                    records = self._tuple_array_records(data_value, field_names, index_values)
-                    self._add_code_line(f"{array_name} = {repr(records)}")
+                self._emit_structured_tuple_array(declaration, data_dict)
 
     def _build_working_data(self, data_dict):
         working_data = dict(data_dict or {})
@@ -534,34 +553,28 @@ class GurobiCodeGenerator:
         self.dict_params.add(name)
         return True
 
-    def _emit_tuple_range_list_rows(self, name, value, declaration, working_data):
-        if not (self._is_tuple_range_parameter(declaration) and isinstance(value, list) and value):
+    def _emit_tuple_range_pair_rows(self, name, value, start, end, expected_len):
+        if not all(isinstance(item, (list, tuple)) and len(item) == 2 for item in value):
             return False
-        set_name = declaration["dimensions"][0]["name"]
-        range_dimension = declaration["dimensions"][1]
-        set_elements = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
-        set_elements = [tuple(element) if isinstance(element, (list, tuple)) else (element,) for element in set_elements]
-        start, end = self._named_range_bounds(range_dimension, working_data)
-        expected_len = end - start + 1
-        if all(isinstance(item, (list, tuple)) and len(item) == 2 for item in value):
-            flattened = {}
-            valid = True
-            for key_raw, row in value:
-                key_object = tuple(key_raw) if isinstance(key_raw, (list, tuple)) else key_raw
-                if not isinstance(row, (list, tuple)) or len(row) != expected_len:
-                    valid = False
-                    break
-                for offset, cell in enumerate(row):
-                    flattened[(key_object, start + offset)] = cell
-            if valid and flattened:
-                self._add_code_line(f"{name} = {repr(flattened)}")
-                logger.info(
-                    "Emitting tuple-range flattened dict for '%s' with %d entries",
-                    name,
-                    len(flattened),
-                )
-                self.dict_params.add(name)
-                return True
+        flattened = {}
+        for key_raw, row in value:
+            key_object = tuple(key_raw) if isinstance(key_raw, (list, tuple)) else key_raw
+            if not isinstance(row, (list, tuple)) or len(row) != expected_len:
+                return False
+            for offset, cell in enumerate(row):
+                flattened[(key_object, start + offset)] = cell
+        if not flattened:
+            return False
+        self._add_code_line(f"{name} = {repr(flattened)}")
+        logger.info(
+            "Emitting tuple-range flattened dict for '%s' with %d entries",
+            name,
+            len(flattened),
+        )
+        self.dict_params.add(name)
+        return True
+
+    def _emit_tuple_range_row_major(self, name, value, set_elements, start, end, expected_len):
         if len(set_elements) != len(value) or not all(
             isinstance(row, (list, tuple)) and len(row) == expected_len for row in value
         ):
@@ -579,6 +592,19 @@ class GurobiCodeGenerator:
         )
         self.dict_params.add(name)
         return True
+
+    def _emit_tuple_range_list_rows(self, name, value, declaration, working_data):
+        if not (self._is_tuple_range_parameter(declaration) and isinstance(value, list) and value):
+            return False
+        set_name = declaration["dimensions"][0]["name"]
+        range_dimension = declaration["dimensions"][1]
+        set_elements = TupleSetHelper.get_tuple_set(set_name, self.ast, working_data) or []
+        set_elements = [tuple(element) if isinstance(element, (list, tuple)) else (element,) for element in set_elements]
+        start, end = self._named_range_bounds(range_dimension, working_data)
+        expected_len = end - start + 1
+        if self._emit_tuple_range_pair_rows(name, value, start, end, expected_len):
+            return True
+        return self._emit_tuple_range_row_major(name, value, set_elements, start, end, expected_len)
 
     def _emit_typed_set_data(self, name, value):
         declaration = self._find_declaration_by_name(name, types=["typed_set", "typed_set_external"])
@@ -622,13 +648,7 @@ class GurobiCodeGenerator:
         self.dict_params.add(name)
         return True
 
-    def _emit_1d_set_parameter(self, name, value, declaration, data_dict):
-        dimensions = declaration.get("dimensions", []) if declaration is not None else []
-        if not (
-            isinstance(value, list) and value and len(dimensions) == 1 and dimensions[0].get("type") == "named_set_dimension"
-        ):
-            return False
-        set_name = dimensions[0]["name"]
+    def _matching_1d_set_elements(self, set_name, value, data_dict):
         set_declaration = self._find_declaration_by_name(
             set_name,
             types=[
@@ -647,16 +667,25 @@ class GurobiCodeGenerator:
             if isinstance(set_elements, dict) and "elements" in set_elements:
                 set_elements = set_elements["elements"]
             if set_elements is not None and len(set_elements) == len(value):
-                mapping = dict(zip(set_elements, value))
-                self._add_code_line(f"{name} = {repr(mapping)}")
-                self.dict_params.add(name)
-                return True
+                return set_elements
         if set_name not in data_dict:
-            return False
+            return None
         set_elements = data_dict[set_name]
         if isinstance(set_elements, dict) and "elements" in set_elements:
             set_elements = set_elements["elements"]
         if len(set_elements) != len(value):
+            return None
+        return set_elements
+
+    def _emit_1d_set_parameter(self, name, value, declaration, data_dict):
+        dimensions = declaration.get("dimensions", []) if declaration is not None else []
+        if not (
+            isinstance(value, list) and value and len(dimensions) == 1 and dimensions[0].get("type") == "named_set_dimension"
+        ):
+            return False
+        set_name = dimensions[0]["name"]
+        set_elements = self._matching_1d_set_elements(set_name, value, data_dict)
+        if set_elements is None:
             return False
         items = ", ".join(f"{json.dumps(key)}: {json.dumps(item)}" for key, item in zip(set_elements, value))
         self._add_code_line(f"{name} = {{{items}}}")
@@ -926,9 +955,7 @@ class GurobiCodeGenerator:
 
         self.dict_params = set(self.dict_params)
         self._emit_structured_data_declarations(data_dict)
-        self._emit_remaining_data_declarations(
-            working_data_pref, param_decl_map, data_dict, already_emitted
-        )
+        self._emit_remaining_data_declarations(working_data_pref, param_decl_map, data_dict, already_emitted)
 
     def _emit_tuple_indexed_dvar(self, decl):
         dimensions = decl.get("dimensions", [])
@@ -986,9 +1013,7 @@ class GurobiCodeGenerator:
             return
         method = getattr(self, f"_decl_{decl_type}", None)
         if method is None:
-            raise NotImplementedError(
-                f"Declaration type '{decl_type}' is not supported by the Gurobi code generator."
-            )
+            raise NotImplementedError(f"Declaration type '{decl_type}' is not supported by the Gurobi code generator.")
         method(decl)
 
     def _generate_declarations(self, declarations):
@@ -2098,6 +2123,39 @@ class GurobiCodeGenerator:
             current_iterators,
         )
 
+    def _emit_index_condition_binary(self, node, current_iterators):
+        node_type = node.get("type")
+        if node_type == "not":
+            value = self._emit_index_condition(node.get("value"), current_iterators)
+            return f"(not ({value}))"
+        if node_type in ("and", "or"):
+            left = self._emit_index_condition(node.get("left"), current_iterators)
+            right = self._emit_index_condition(node.get("right"), current_iterators)
+            return f"(({left}) {node_type} ({right}))"
+        if node_type == "binop":
+            op = node.get("op")
+            left = self._emit_index_condition(node.get("left"), current_iterators)
+            right = self._emit_index_condition(node.get("right"), current_iterators)
+            return f"({left} {op} {right})"
+        return None
+
+    def _emit_index_condition_sum(self, node, current_iterators):
+        iters = node.get("iterators", [])
+        index_constraint = node.get("index_constraint")
+        inner_expr = self._emit_index_condition(node.get("expression"), current_iterators)
+        generators = []
+        local_iterators = current_iterators.copy()
+        for iterator in iters:
+            variable = iterator["iterator"]
+            range_expr = self._forall_range_expr(iterator["range"], local_iterators)
+            generators.append(f"for {variable} in {range_expr}")
+            local_iterators[variable] = variable
+        generator_text = " ".join(generators)
+        guard = ""
+        if index_constraint is not None:
+            guard = f" if {self._emit_index_condition(index_constraint, local_iterators)}"
+        return f"sum((1 if ({inner_expr}) else 0) {generator_text}{guard})"
+
     def _emit_index_condition(self, node, current_iterators):
         """
         Emit a pure-Python boolean/numeric expression for forall/sum index filters.
@@ -2130,44 +2188,11 @@ class GurobiCodeGenerator:
         if t == "parenthesized_expression":
             inner = self._emit_index_condition(node.get("expression"), current_iterators)
             return f"({inner})"
-        if t == "not":
-            val = self._emit_index_condition(node.get("value"), current_iterators)
-            return f"(not ({val}))"
-        if t == "and":
-            L = self._emit_index_condition(node.get("left"), current_iterators)
-            R = self._emit_index_condition(node.get("right"), current_iterators)
-            return f"(({L}) and ({R}))"
-        if t == "or":
-            L = self._emit_index_condition(node.get("left"), current_iterators)
-            R = self._emit_index_condition(node.get("right"), current_iterators)
-            return f"(({L}) or ({R}))"
-        if t == "binop":
-            op = node.get("op")
-            L = self._emit_index_condition(node.get("left"), current_iterators)
-            R = self._emit_index_condition(node.get("right"), current_iterators)
-            return f"({L} {op} {R})"
+        binary = self._emit_index_condition_binary(node, current_iterators)
+        if binary is not None:
+            return binary
         if t == "sum":
-            # Python sum over iterators, converting boolean to 0/1
-            iters = node.get("iterators", [])
-            idxc = node.get("index_constraint")
-            inner = node.get("expression")
-            # if inner is a comparison, emit 1 if (...) else 0
-            inner_expr = self._emit_index_condition(inner, current_iterators)
-            # wrap non-numeric booleans into int(): int(cond)
-            # Use generators with nested 'for ... in ...' and optional if guard
-            gens = []
-            local_iterators = current_iterators.copy()
-            for it in iters:
-                var = it["iterator"]
-                rng = self._forall_range_expr(it["range"], local_iterators)
-                gens.append(f"for {var} in {rng}")
-                local_iterators[var] = var
-            gen_str = " ".join(gens)
-            guard = ""
-            if idxc is not None:
-                guard = f" if {self._emit_index_condition(idxc, local_iterators)}"
-            # Coerce boolean to 0/1 via int(...)
-            return f"sum((1 if ({inner_expr}) else 0) {gen_str}{guard})"
+            return self._emit_index_condition_sum(node, current_iterators)
         # Fallback to symbolic traversal for safe literals
         return self._traverse_expression(node, current_iterators, symbolic=True)
 
@@ -2355,6 +2380,34 @@ class GurobiCodeGenerator:
                     )
             raise ValueError(f"Undeclared variable or unhandled context: {name}")
 
+    def _emit_index_expr_tuple(self, dim_expr, current_iterators, symbolic):
+        parts = []
+        for element in dim_expr.get("elements", []):
+            if isinstance(element, dict):
+                if element.get("type") == "boolean_literal":
+                    parts.append("True" if element.get("value") else "False")
+                else:
+                    parts.append(self._traverse_expression(element, current_iterators, symbolic))
+            else:
+                parts.append(repr(element))
+        if len(parts) == 1:
+            return f"({parts[0]},)"
+        return f"({', '.join(parts)})"
+
+    def _emit_index_expr_recursive(self, dim_expr, current_iterators, symbolic):
+        expr_type = dim_expr.get("type")
+        if expr_type == "binop":
+            left = self._emit_index_expr(dim_expr["left"], current_iterators, symbolic)
+            right = self._emit_index_expr(dim_expr["right"], current_iterators, symbolic)
+            return f"({left} {dim_expr['op']} {right})"
+        if expr_type == "uminus":
+            value = self._emit_index_expr(dim_expr["value"], current_iterators, symbolic)
+            return f"-({value})"
+        if expr_type == "parenthesized_expression":
+            value = self._emit_index_expr(dim_expr["expression"], current_iterators, symbolic)
+            return f"({value})"
+        return self._emit_index_expr_tuple(dim_expr, current_iterators, symbolic)
+
     def _emit_index_expr(self, dim_expr, current_iterators, symbolic):
         expr_type = dim_expr.get("type")
         if expr_type in ("field_access_index", "field_access"):
@@ -2367,29 +2420,8 @@ class GurobiCodeGenerator:
             return self._expr_indexed_name(dim_expr, current_iterators, symbolic)
         if expr_type == "string_literal":
             return repr(dim_expr["value"])
-        if expr_type == "binop":
-            left = self._emit_index_expr(dim_expr["left"], current_iterators, symbolic)
-            right = self._emit_index_expr(dim_expr["right"], current_iterators, symbolic)
-            return f"({left} {dim_expr['op']} {right})"
-        if expr_type == "uminus":
-            value = self._emit_index_expr(dim_expr["value"], current_iterators, symbolic)
-            return f"-({value})"
-        if expr_type == "parenthesized_expression":
-            value = self._emit_index_expr(dim_expr["expression"], current_iterators, symbolic)
-            return f"({value})"
-        if expr_type == "tuple_literal":
-            parts = []
-            for element in dim_expr.get("elements", []):
-                if isinstance(element, dict):
-                    if element.get("type") == "boolean_literal":
-                        parts.append("True" if element.get("value") else "False")
-                    else:
-                        parts.append(self._traverse_expression(element, current_iterators, symbolic))
-                else:
-                    parts.append(repr(element))
-            if len(parts) == 1:
-                return f"({parts[0]},)"
-            return f"({', '.join(parts)})"
+        if expr_type in ("binop", "uminus", "parenthesized_expression", "tuple_literal"):
+            return self._emit_index_expr_recursive(dim_expr, current_iterators, symbolic)
         if "value" in dim_expr:
             return str(dim_expr["value"])
         if "name" in dim_expr:
@@ -2674,6 +2706,56 @@ class GurobiCodeGenerator:
             return aux
         raise ValueError(f"Unsupported boolean expression type for Gurobi constraint: {t}")
 
+    def _next_comparison_expr_name(self):
+        if not hasattr(self, "_comparison_expr_counter"):
+            self._comparison_expr_counter = 0
+        self._comparison_expr_counter += 1
+        return f"_cmp_expr_{self._comparison_expr_counter}"
+
+    def _reify_scoped_comparison_in_scope(self, aux_name, comp_node, current_iterators):
+        scope_vars, scope_ranges = self._active_scope_iterators(current_iterators)
+        left_node = comp_node["left"]
+        right_node = comp_node["right"]
+        op = comp_node["op"]
+        self._add_code_line(f"{aux_name} = {{}}")
+        if len(scope_vars) == 1:
+            outer_loop_header = f"for {scope_vars[0]} in {scope_ranges[0]}:"
+        else:
+            self._add_code_line("import itertools  # needed for multi-index forall")
+            outer_loop_header = f"for {', '.join(scope_vars)} in itertools.product({', '.join(scope_ranges)}):"
+        self._add_code_line(outer_loop_header)
+        self.indent_level += 1
+        scope_iterators = {name: name for name in scope_vars}
+        scope_key_expr = self._format_scope_key_expr(scope_vars, scope_iterators)
+        aux_ref = f"{aux_name}[{scope_key_expr}]"
+        self._add_code_line(f"{aux_ref} = model.addVar(vtype=GRB.BINARY)")
+        previous_active_ranges = getattr(self, "_active_iterator_ranges", {}).copy()
+        inner_active_ranges = previous_active_ranges.copy()
+        for name in scope_vars:
+            inner_active_ranges.pop(name, None)
+        self._active_iterator_ranges = inner_active_ranges
+        try:
+            left_expr = self._traverse_expression(left_node, scope_iterators)
+            right_expr = self._traverse_expression(right_node, scope_iterators)
+        finally:
+            self._active_iterator_ranges = previous_active_ranges
+        for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_ref).split("\n"):
+            self._add_code_line(line)
+        self.indent_level -= 1
+        key_expr = self._format_scope_key_expr(scope_vars, current_iterators)
+        return f"{aux_name}[{key_expr}]"
+
+    def _reify_local_comparison(self, aux_name, comp_node, current_iterators):
+        left_node = comp_node["left"]
+        right_node = comp_node["right"]
+        left_expr = self._traverse_expression(left_node, current_iterators)
+        right_expr = self._traverse_expression(right_node, current_iterators)
+        for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, comp_node["op"], aux_name).split(
+            "\n"
+        ):
+            self._add_code_line(line)
+        return aux_name
+
     def _reify_scoped_comparison(self, comp_node, current_iterators):
         while isinstance(comp_node, dict) and comp_node.get("type") == "parenthesized_expression":
             comp_node = comp_node.get("expression")
@@ -2683,56 +2765,16 @@ class GurobiCodeGenerator:
             and comp_node.get("op") in (">=", "<=", "==", "!=", ">", "<")
         ):
             return self._traverse_expression(comp_node, current_iterators)
-
         if not self._expr_depends_on_decision_var(comp_node):
             cond_expr = self._emit_index_condition(comp_node, current_iterators)
             return f"(1 if ({cond_expr}) else 0)"
-
-        if not hasattr(self, "_comparison_expr_counter"):
-            self._comparison_expr_counter = 0
-        self._comparison_expr_counter += 1
-        aux_name = f"_cmp_expr_{self._comparison_expr_counter}"
-        scope_vars, scope_ranges = self._active_scope_iterators(current_iterators)
+        aux_name = self._next_comparison_expr_name()
+        scope_vars, _ = self._active_scope_iterators(current_iterators)
         in_materialized_loop = getattr(self, "_materialized_loop_depth", 0) > 0
-
-        left_node = comp_node["left"]
-        right_node = comp_node["right"]
-        op = comp_node["op"]
         if scope_vars and not in_materialized_loop:
-            self._add_code_line(f"{aux_name} = {{}}")
-            if len(scope_vars) == 1:
-                outer_loop_header = f"for {scope_vars[0]} in {scope_ranges[0]}:"
-            else:
-                self._add_code_line("import itertools  # needed for multi-index forall")
-                outer_loop_header = f"for {', '.join(scope_vars)} in itertools.product({', '.join(scope_ranges)}):"
-            self._add_code_line(outer_loop_header)
-            self.indent_level += 1
-            scope_iterators = {name: name for name in scope_vars}
-            scope_key_expr = self._format_scope_key_expr(scope_vars, scope_iterators)
-            aux_ref = f"{aux_name}[{scope_key_expr}]"
-            self._add_code_line(f"{aux_ref} = model.addVar(vtype=GRB.BINARY)")
-            previous_active_ranges = getattr(self, "_active_iterator_ranges", {}).copy()
-            inner_active_ranges = previous_active_ranges.copy()
-            for name in scope_vars:
-                inner_active_ranges.pop(name, None)
-            self._active_iterator_ranges = inner_active_ranges
-            try:
-                left_expr = self._traverse_expression(left_node, scope_iterators)
-                right_expr = self._traverse_expression(right_node, scope_iterators)
-            finally:
-                self._active_iterator_ranges = previous_active_ranges
-            for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_ref).split("\n"):
-                self._add_code_line(line)
-            self.indent_level -= 1
-            key_expr = self._format_scope_key_expr(scope_vars, current_iterators)
-            return f"{aux_name}[{key_expr}]"
-
+            return self._reify_scoped_comparison_in_scope(aux_name, comp_node, current_iterators)
         self._add_code_line(f"{aux_name} = model.addVar(vtype=GRB.BINARY)")
-        left_expr = self._traverse_expression(left_node, current_iterators)
-        right_expr = self._traverse_expression(right_node, current_iterators)
-        for line in self._emit_reify_comparison(left_node, right_node, left_expr, right_expr, op, aux_name).split("\n"):
-            self._add_code_line(line)
-        return aux_name
+        return self._reify_local_comparison(aux_name, comp_node, current_iterators)
 
     def _comparison_sum_struct_key(self, expr_node, current_iterators):
         inner_expression = self._unwrap_parenthesized(expr_node.get("expression"))
@@ -2810,22 +2852,28 @@ class GurobiCodeGenerator:
             iterator_map[name] = name
         return loop_vars, loop_ranges, iterator_map
 
+    def _comparison_sum_reuse(self, metadata, current_iterators, expected_scope=None):
+        if not metadata or not metadata.get("list_name"):
+            return None
+        metadata_scope = tuple(metadata.get("scope_vars") or ())
+        if expected_scope is not None and metadata_scope != tuple(expected_scope):
+            return None
+        if metadata_scope and not all(name in current_iterators for name in metadata_scope):
+            return None
+        list_expr, _ = self._comparison_sum_accessors(metadata, current_iterators)
+        return f"gp.quicksum({list_expr})"
+
     def _reused_comparison_sum(self, expr_node, current_iterators, structural_key=None, scope_vars=()):
-        if hasattr(self, "_comparison_sum_meta") and id(expr_node) in self._comparison_sum_meta:
-            meta_reuse = self._comparison_sum_meta[id(expr_node)]
-            if meta_reuse.get("list_name"):
-                cached_scope = tuple(meta_reuse.get("scope_vars") or ())
-                if not cached_scope or all(name in current_iterators for name in cached_scope):
-                    list_expr, _ = self._comparison_sum_accessors(meta_reuse, current_iterators)
-                    return f"gp.quicksum({list_expr})"
-        if structural_key and hasattr(self, "_comparison_sum_key_map") and structural_key in self._comparison_sum_key_map:
-            metadata = self._comparison_sum_key_map[structural_key]
-            metadata_scope = tuple(metadata.get("scope_vars") or ())
-            if metadata_scope == tuple(scope_vars) and (
-                not metadata_scope or all(name in current_iterators for name in metadata_scope)
-            ):
-                list_expr, _ = self._comparison_sum_accessors(metadata, current_iterators)
-                return f"gp.quicksum({list_expr})"
+        if hasattr(self, "_comparison_sum_meta"):
+            reused = self._comparison_sum_reuse(self._comparison_sum_meta.get(id(expr_node)), current_iterators)
+            if reused is not None:
+                return reused
+        if structural_key and hasattr(self, "_comparison_sum_key_map"):
+            reused = self._comparison_sum_reuse(
+                self._comparison_sum_key_map.get(structural_key), current_iterators, scope_vars
+            )
+            if reused is not None:
+                return reused
         return None
 
     def _emit_comparison_sum(
@@ -3049,40 +3097,37 @@ class GurobiCodeGenerator:
             lines.append(f"model.addConstr({aux_sym} == 0, name={self._format_name_expr('aux', f'_reify_unk_{aux_sym}')} )")
         return "\n".join(lines)
 
+    def _field_access_tuple_type(self, base_node, current_iterators):
+        base_sem_type = None
+        if isinstance(base_node, dict):
+            base_sem_type = base_node.get("sem_type")
+        if base_sem_type and hasattr(self, "tuple_types") and base_sem_type in self.tuple_types:
+            return base_sem_type
+        if not (isinstance(base_node, dict) and base_node.get("type") == "name"):
+            return None
+        varname = base_node.get("value")
+        for declaration in self.ast.get("declarations", []):
+            if declaration.get("type") == "set_of_tuples" and declaration.get("name"):
+                if varname in current_iterators.values():
+                    return declaration.get("tuple_type")
+        return None
+
+    def _tuple_field_index(self, tuple_type, field):
+        if not tuple_type or not hasattr(self, "tuple_types") or tuple_type not in self.tuple_types:
+            return None
+        field_names = [field_info["name"] for field_info in self.tuple_types[tuple_type]]
+        if field not in field_names:
+            return None
+        return field_names.index(field)
+
     def _expr_field_access(self, expr_node, current_iterators, symbolic):
         base_str = self._traverse_expression(expr_node["base"], current_iterators)
         field = expr_node["field"]
-        # Try to resolve tuple type for the base
-        tuple_type = None
-        # Try to get the semantic type from the AST node if available
-        base_sem_type = None
-        base_node = expr_node["base"]
-        if isinstance(base_node, dict):
-            base_sem_type = base_node.get("sem_type")
-        # If the base is a known iterator, try to get its type from the AST declarations
-        if base_sem_type and hasattr(self, "tuple_types") and base_sem_type in self.tuple_types:
-            tuple_type = base_sem_type
-        else:
-            # Try to infer from iterator names in current_iterators
-            if isinstance(base_node, dict) and base_node.get("type") == "name":
-                varname = base_node.get("value")
-                # Look for iterator type in AST declarations
-                for decl in self.ast.get("declarations", []):
-                    if decl.get("type") == "set_of_tuples" and decl.get("name"):
-                        # If this set is used as a loop range, its tuple_type is relevant
-                        if varname in current_iterators.values():
-                            tuple_type = decl.get("tuple_type")
-                            break
-        # If we have tuple_type and tuple_types dict, map field name to index
-        if tuple_type and hasattr(self, "tuple_types") and tuple_type in self.tuple_types:
-            fields = self.tuple_types[tuple_type]
-            field_names = [f["name"] for f in fields]
-            if field in field_names:
-                idx = field_names.index(field)
-                # We expect tuple arrays emitted as dicts of field->value; prefer dict access when base indexing already selects record.
-                # However if record is stored as list (legacy path), positional index works.
-                return f"({base_str}['{field}'] if isinstance({base_str}, dict) else {base_str}[{idx}])"
-        # Fallback: emit as dict access (legacy, but should not happen for tuples)
+        tuple_type = self._field_access_tuple_type(expr_node["base"], current_iterators)
+        field_index = self._tuple_field_index(tuple_type, field)
+        if field_index is not None:
+            # Prefer named field access for emitted tuple-array dictionaries, with positional fallback for legacy records.
+            return f"({base_str}['{field}'] if isinstance({base_str}, dict) else {base_str}[{field_index}])"
         return f"{base_str}['{field}']"
 
     def _expr_boolean_literal(self, expr_node, current_iterators, symbolic):
@@ -3117,32 +3162,26 @@ class GurobiCodeGenerator:
         if not isinstance(node, dict):
             return False
         node_type = node.get("type")
-        if node_type == "name":
-            decl = self._find_declaration_by_name(node.get("value"))
+        if node_type in ("name", "indexed_name"):
+            identifier = node.get("value") if node_type == "name" else node.get("name")
+            decl = self._find_declaration_by_name(identifier)
             return decl is not None and decl.get("type") in ("dvar", "dvar_indexed")
-        if node_type == "indexed_name":
-            decl = self._find_declaration_by_name(node.get("name"))
-            return decl is not None and decl.get("type") in ("dvar", "dvar_indexed")
-        if node_type == "field_access":
-            return self._expr_depends_on_decision_var(node.get("base"))
-        if node_type == "parenthesized_expression":
-            return self._expr_depends_on_decision_var(node.get("expression"))
-        if node_type in ("binop", "constraint", "and", "or"):
-            return self._expr_depends_on_decision_var(node.get("left")) or self._expr_depends_on_decision_var(
-                node.get("right")
-            )
-        if node_type in ("not", "uminus"):
-            return self._expr_depends_on_decision_var(node.get("value"))
-        if node_type == "conditional":
-            return (
-                self._expr_depends_on_decision_var(node.get("condition"))
-                or self._expr_depends_on_decision_var(node.get("then"))
-                or self._expr_depends_on_decision_var(node.get("else"))
-            )
-        if node_type in ("sum", "min_agg", "max_agg"):
-            return self._expr_depends_on_decision_var(node.get("expression")) or self._expr_depends_on_decision_var(
-                node.get("index_constraint")
-            )
+        child_fields = {
+            "field_access": ("base",),
+            "parenthesized_expression": ("expression",),
+            "binop": ("left", "right"),
+            "constraint": ("left", "right"),
+            "and": ("left", "right"),
+            "or": ("left", "right"),
+            "not": ("value",),
+            "uminus": ("value",),
+            "conditional": ("condition", "then", "else"),
+            "sum": ("expression", "index_constraint"),
+            "min_agg": ("expression", "index_constraint"),
+            "max_agg": ("expression", "index_constraint"),
+        }
+        if node_type in child_fields:
+            return any(self._expr_depends_on_decision_var(node.get(field)) for field in child_fields[node_type])
         if node_type == "tuple_literal":
             return any(self._expr_depends_on_decision_var(el) for el in node.get("elements", []))
         return False
