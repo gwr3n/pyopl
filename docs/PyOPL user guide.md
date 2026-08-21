@@ -41,6 +41,7 @@
 - [GenAI Assistants](#genai-assistants)
 - [PyOPL IDE](#pyopl-ide)
   - [Launching the IDE](#launching-the-ide)
+  - [Collapsible model sections](#collapsible-model-sections)
 - [PyOPL CLI](#pyopl-cli)
 - [PyOPL MCP](#pyopl-mcp)
 - [Rhetor MCP](#rhetor-mcp)
@@ -802,6 +803,7 @@ Notes and tips:
 PyOPL includes a graphical IDE for editing, running, and debugging OPL models and data files. The IDE features:
 
 - Syntax highlighting for OPL models and data files
+- Line numbers and explicit collapsible model sections
 - Side-by-side model and data editors
 - Output panel for solver results, errors, messages, and detailed solver statistics (the 'stats' field)
 - File tree for easy switching between model and data
@@ -819,6 +821,28 @@ python -m pyopl
 This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or SciPy/HiGHS as the solver from the IDE's menu bar. The IDE provides syntax highlighting, error diagnostics, and a modern UI for rapid prototyping and learning.
 
 When the IDE solves a model, it looks in the current working directory for `gurobi.json` when Gurobi is selected or `highs.json` when SciPy/HiGHS is selected. If the corresponding file exists, the IDE loads its top-level JSON object and passes it as the solver settings. If the file is absent, default solver settings apply. Invalid JSON or a top-level value other than an object stops the solve and reports an error.
+
+### Collapsible model sections
+
+The IDE recognizes a comment containing `§` as an explicit section header when the comment starts a line. All three PyOPL comment styles are supported:
+
+```opl
+// § Variables
+dvar float x;
+
+/* § Objective */
+minimize x;
+
+subject to {
+  # § Bounds
+  x >= 0;
+  x <= 10;
+}
+```
+
+Click the triangle beside a section header to collapse or expand it. The header remains visible. A section ends before the next `§` header, at the end of the file, or immediately before the closing brace of the block containing the header. Nested braces are respected, and the containing block's final `}` remains visible. Ordinary comments and inline markers such as `x >= 0; // § Bounds` do not create sections.
+
+Section headers are ordinary comments and do not change model semantics. When an editor contains no collapsible sections, the gutter contracts to line-number-only width.
 
 ---
 

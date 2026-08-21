@@ -182,6 +182,9 @@ def _find_fold_regions(text: str) -> dict[int, int]:
 class _EditorGutter:
     """Draw line numbers and explicit section-folding controls beside a Text widget."""
 
+    LINE_NUMBER_WIDTH = 32
+    FOLDING_WIDTH = 48
+
     def __init__(self, owner: Any, text_widget: tk.Text, canvas: tk.Canvas) -> None:
         self.owner = owner
         self.text_widget = text_widget
@@ -198,8 +201,13 @@ class _EditorGutter:
         text = self.text_widget.get("1.0", "end-1c")
         self.fold_regions = _find_fold_regions(text)
         self.folded_lines.intersection_update(self.fold_regions)
+        self._update_width()
         self._apply_folds()
         self.schedule_redraw()
+
+    def _update_width(self) -> None:
+        width = self.FOLDING_WIDTH if self.fold_regions else self.LINE_NUMBER_WIDTH
+        self.canvas.configure(width=width)
 
     def toggle_fold(self, opening_line: int) -> bool:
         if opening_line not in self.fold_regions:
@@ -240,7 +248,7 @@ class _EditorGutter:
                 line = int(str(index).split(".", 1)[0])
                 y = int(line_info[1])
                 self.canvas.create_text(
-                    42,
+                    self.FOLDING_WIDTH - 6 if self.fold_regions else self.LINE_NUMBER_WIDTH - 4,
                     y,
                     anchor="ne",
                     text=str(line),

@@ -144,6 +144,19 @@ value = 1;
         self.assertEqual(gutter.folded_lines, set())
         self.assertFalse(gutter.toggle_fold(99))
 
+    def test_editor_gutter_hides_fold_control_space_without_sections(self):
+        canvas = mock.Mock()
+        gutter = _EditorGutter.__new__(_EditorGutter)
+        gutter.canvas = canvas
+
+        gutter.fold_regions = {}
+        gutter._update_width()
+        canvas.configure.assert_called_with(width=_EditorGutter.LINE_NUMBER_WIDTH)
+
+        gutter.fold_regions = {2: 4}
+        gutter._update_width()
+        canvas.configure.assert_called_with(width=_EditorGutter.FOLDING_WIDTH)
+
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
             def __init__(self):
