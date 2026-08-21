@@ -870,6 +870,22 @@ class TestPyOPLParser(TestPyOPL):
             if os.path.exists(dummy_data_file):
                 os.remove(dummy_data_file)
 
+    def test_solver_solution_excludes_linearization_auxiliaries(self):
+        model = """
+        dvar boolean a;
+        dvar boolean b;
+        dvar boolean y;
+        minimize y;
+        subject to {
+            y == (a + b >= 1);
+        }
+        """
+
+        gurobi, scipy = self.run_both_solvers(model)
+
+        self.assertEqual(set(gurobi["solution"]), {"a", "b", "y"})
+        self.assertEqual(set(scipy["solution"]), {"a", "b", "y"})
+
     def test_parse_simple_param(self):
         """Test parsing a simple model with a parameter 'int initial_value = 2;'"""
         from pyopl.pyopl_core import OPLLexer, OPLParser

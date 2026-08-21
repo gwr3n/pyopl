@@ -2695,6 +2695,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.scipy_code_lines = []
         self.indent_level = 0
         self.var_names = []  # List of variable names in order
+        self.original_var_names: list[str] = []  # Variables declared in the PyOPL model
         self.var_indices = {}  # Map variable name to index in c, bounds, etc.
         self.bounds = []  # List of (low, high) for each variable
         self.c = []  # Objective coefficients
@@ -2796,6 +2797,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 found_c = True
         if not found_var_names:
             self._add_code_line(f"var_names = {repr(self.var_names)}")
+        self._add_code_line(f"original_var_names = {repr(self.original_var_names)}")
         if not found_bounds:
             self._add_code_line(f"bounds = {bounds_py}")
         if not found_integrality:
@@ -2825,6 +2827,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("")
         self._add_code_line("# Build LP vectors/matrices")
         self._build_variables()
+        self.original_var_names = list(self.var_names)
         self._build_objective()
         self._build_constraints()
         self._apply_top_level_binary_assignments()
@@ -2931,8 +2934,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("print('Optimal solution found:')")
         self._add_code_line("solution = {}")
-        self._add_code_line("for i, name in enumerate(var_names):")
+        self._add_code_line("for name in original_var_names:")
         self.indent_level += 1
+        self._add_code_line("i = var_names.index(name)")
         self._add_code_line("solution[name] = res.x[i]")
         self._add_code_line("if abs(res.x[i]) > 1e-8:")
         self.indent_level += 1

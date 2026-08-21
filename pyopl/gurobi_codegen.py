@@ -110,6 +110,7 @@ class GurobiCodeGenerator:
         self.indent_level -= 1
         self._add_code_line("")
         self._generate_declarations(self.ast["declarations"])
+        self._add_code_line("_pyopl_original_var_names = {v.VarName for v in model.getVars()}")
         self._generate_objective(self.ast["objective"])
         # Collect variable bounds before constraints for tighter big-M
         self._collect_variable_bounds(self.ast.get("constraints", []))
@@ -155,8 +156,11 @@ class GurobiCodeGenerator:
         self._add_code_line("solution = {}")
         self._add_code_line("for v in model.getVars():")
         self.indent_level += 1
+        self._add_code_line("if v.VarName in _pyopl_original_var_names:")
+        self.indent_level += 1
         self._add_code_line("print(f'{v.VarName}: {v.X}')")
         self._add_code_line("solution[v.VarName] = v.X")
+        self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("print(f'Objective value: {model.ObjVal}')")
         self._add_code_line("results['solution'] = solution")

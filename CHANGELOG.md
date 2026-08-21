@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Hardened tuple-array handling and tuple validation across solver backends.
+- Solver results now report only variables declared in the PyOPL model, excluding linearisation auxiliaries.
 
 ### Changed
 
