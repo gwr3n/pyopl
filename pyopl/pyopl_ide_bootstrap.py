@@ -694,7 +694,7 @@ class OPLIDE(tk.Tk):
         runmenu = tk.Menu(menubar, tearoff=0)
         self.run_menu = runmenu
         runmenu.add_command(
-            label="Solve Model",
+            label="Solve",
             command=self.run_model,
             accelerator=self._accel("R"),
         )

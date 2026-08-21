@@ -676,7 +676,7 @@ highs_results = solve(
 )
 ```
 
-The repository provides `gurobi.json` and `highs.json` templates containing the default settings exposed by the supported solver APIs. A JSON `null` value means “retain the backend default” and is not passed to the solver. When `solver_settings` is omitted, PyOPL uses its normal default solver configuration.
+The repository provides [`gurobi.json`](https://github.com/gwr3n/pyopl/blob/main/gurobi.json) and [`highs.json`](https://github.com/gwr3n/pyopl/blob/main/highs.json) templates containing the default settings exposed by the supported solver APIs. A JSON `null` value means “retain the backend default” and is not passed to the solver. When `solver_settings` is omitted, PyOPL uses its normal default solver configuration.
 
 Settings are backend-specific. Invalid names or values are reported by Gurobi or SciPy/HiGHS; PyOPL does not translate parameter names between solvers. Do not store credentials or secrets in solver settings files.
 
