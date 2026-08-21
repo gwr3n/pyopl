@@ -407,31 +407,36 @@ class GurobiCodeGenerator:
         for declaration in declarations:
             self._normalize_parameter_input(declaration, data_dict)
 
-    def _tuple_array_records(self, data_value, field_names, index_values=None):
+    @staticmethod
+    def _tuple_array_items(data_value, index_values):
         if isinstance(data_value, dict):
-            items = sorted(data_value.items(), key=lambda item: item[0])
-        elif isinstance(index_values, list) and len(index_values) == len(data_value):
-            items = zip(index_values, data_value)
-        else:
-            items = enumerate(data_value, start=1)
-        records = {}
-        for key, record in items:
-            if isinstance(record, dict):
-                missing = [field for field in field_names if field not in record]
-                extra = [field for field in record if field not in field_names]
-                if missing or extra:
-                    raise SemanticError(
-                        f"Tuple array record at index {key!r} has missing fields {missing} and unknown fields {extra}."
-                    )
-                records[key] = {field: record[field] for field in field_names}
-                continue
-            if not isinstance(record, (list, tuple)) or len(record) != len(field_names):
-                actual_length = len(record) if isinstance(record, (list, tuple)) else "non-sequence"
+            return sorted(data_value.items(), key=lambda item: item[0])
+        if isinstance(index_values, list) and len(index_values) == len(data_value):
+            return zip(index_values, data_value)
+        return enumerate(data_value, start=1)
+
+    @staticmethod
+    def _tuple_array_record(record, field_names, key):
+        if isinstance(record, dict):
+            missing = [field for field in field_names if field not in record]
+            extra = [field for field in record if field not in field_names]
+            if missing or extra:
                 raise SemanticError(
-                    f"Tuple array record at index {key!r} has {actual_length} fields; expected {len(field_names)}."
+                    f"Tuple array record at index {key!r} has missing fields {missing} and unknown fields {extra}."
                 )
-            records[key] = {field: record[index] for index, field in enumerate(field_names)}
-        return records
+            return {field: record[field] for field in field_names}
+        if not isinstance(record, (list, tuple)) or len(record) != len(field_names):
+            actual_length = len(record) if isinstance(record, (list, tuple)) else "non-sequence"
+            raise SemanticError(
+                f"Tuple array record at index {key!r} has {actual_length} fields; expected {len(field_names)}."
+            )
+        return {field: record[index] for index, field in enumerate(field_names)}
+
+    def _tuple_array_records(self, data_value, field_names, index_values=None):
+        return {
+            key: self._tuple_array_record(record, field_names, key)
+            for key, record in self._tuple_array_items(data_value, index_values)
+        }
 
     def _tuple_set_array_records(self, data_value, index_values=None):
         if isinstance(data_value, dict):

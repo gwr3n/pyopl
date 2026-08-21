@@ -2406,6 +2406,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 included.append((env, idx_tuple))
         return included
 
+    @staticmethod
+    def _singleton_equality_bound(iterator_name: Any, index_constraint: dict) -> dict | None:
+        left = index_constraint.get("left")
+        right = index_constraint.get("right")
+        if not isinstance(iterator_name, str) or not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+        if left.get("type") == "name" and left.get("value") == iterator_name:
+            return right
+        return left if right.get("type") == "name" and right.get("value") == iterator_name else None
+
     def _singleton_filtered_environment(
         self,
         iterators: list[dict],
@@ -2419,16 +2429,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         iterator = iterators[0]
         iterator_name = iterator.get("iterator")
-        left = index_constraint.get("left")
-        right = index_constraint.get("right")
-        if not isinstance(iterator_name, str) or not isinstance(left, dict) or not isinstance(right, dict):
-            return None
-
-        if left.get("type") == "name" and left.get("value") == iterator_name:
-            bound_expr = right
-        elif right.get("type") == "name" and right.get("value") == iterator_name:
-            bound_expr = left
-        else:
+        bound_expr = self._singleton_equality_bound(iterator_name, index_constraint)
+        if bound_expr is None:
             return None
 
         try:

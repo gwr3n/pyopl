@@ -103,6 +103,35 @@ def _validate_input_file(path: Path, label: str) -> bool:
     return False
 
 
+def _load_solver_settings(path_text: Optional[str]) -> Optional[dict]:
+    if not path_text:
+        return None
+    settings_path = Path(path_text)
+    if not _validate_input_file(settings_path, "solver settings"):
+        raise FileNotFoundError(settings_path)
+    settings = json.loads(_read_text(settings_path))
+    if not isinstance(settings, dict):
+        raise ValueError("solver settings JSON must contain an object at the top level")
+    return settings
+
+
+def _write_json_result(results: object, out_file: Optional[str]) -> None:
+    out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
+    if out_file:
+        _write_text(Path(out_file), out_text)
+    else:
+        print(out_text)
+
+
+def _validate_export_path(out_format: str, out_file: Optional[str]) -> Path:
+    if not out_file:
+        raise ValueError(f"--out {out_format} requires --out-file")
+    out_path = Path(out_file)
+    if out_path.suffix.lower() != f".{out_format}":
+        raise ValueError(f"--out {out_format} requires an output file ending in .{out_format}")
+    return out_path
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pyopl", description="PyOPL command-line interface")
 
@@ -188,22 +217,11 @@ def _handle_solve(args: argparse.Namespace) -> int:
 
     solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
     try:
-        solver_settings = None
-        if args.solver_settings:
-            settings_path = Path(args.solver_settings)
-            if not _validate_input_file(settings_path, "solver settings"):
-                return 2
-            solver_settings = json.loads(_read_text(settings_path))
-            if not isinstance(solver_settings, dict):
-                raise ValueError("solver settings JSON must contain an object at the top level")
+        solver_settings = _load_solver_settings(args.solver_settings)
         if args.out == "json":
             with redirect_stdout(sys.stderr):
                 results = _run_solve(model_path, data_path, solver_key, solver_settings)
-            out_text = json.dumps(results, indent=2, sort_keys=True, default=str)
-            if args.out_file:
-                _write_text(Path(args.out_file), out_text)
-            else:
-                print(out_text)
+            _write_json_result(results, args.out_file)
             return 0
 
         if args.out == "py":
@@ -214,17 +232,14 @@ def _handle_solve(args: argparse.Namespace) -> int:
                 print(code)
             return 0
 
-        if not args.out_file:
-            print(f"Error: --out {args.out} requires --out-file", file=sys.stderr)
-            return 2
-        out_path = Path(args.out_file)
-        if out_path.suffix.lower() != f".{args.out}":
-            print(f"Error: --out {args.out} requires an output file ending in .{args.out}", file=sys.stderr)
-            return 2
+        out_path = _validate_export_path(args.out, args.out_file)
         with redirect_stdout(sys.stderr):
             _export_lp_mps(model_path, data_path, out_path)
         return 0
     except Exception as exc:
+        if isinstance(exc, (FileNotFoundError, ValueError)) and str(exc).startswith("--out"):
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
         print(f"Error during solve/export: {exc}", file=sys.stderr)
         return 1
 
