@@ -3240,25 +3240,29 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _emit_tuple_array_data(self, declaration, data_dict):
         array_name = declaration["name"]
         tuple_type = declaration["tuple_type"]
-        data_list = data_dict.get(array_name)
-        if data_list is None or tuple_type not in getattr(self, "tuple_types", {}):
+        data_value = data_dict.get(array_name)
+        if data_value is None or tuple_type not in getattr(self, "tuple_types", {}):
             return
-        field_names = [field["name"] for field in self.tuple_types[tuple_type]]
-        index_values = data_dict.get(declaration["index_set"])
-        if isinstance(data_list, dict):
-            items = sorted(data_list.items(), key=lambda item: item[0])
-        elif isinstance(index_values, list) and len(index_values) == len(data_list):
-            items = zip(index_values, data_list)
-        else:
-            items = enumerate(data_list, start=1)
-        structured = {}
-        for key, value in items:
-            if isinstance(value, dict):
-                structured[key] = {field: value.get(field) for field in field_names if field in value}
+        dimensions = declaration.get("dimensions") or []
+        index_set = declaration.get("index_set")
+        if len(dimensions) == 1 or (not dimensions and index_set):
+            field_names = [field["name"] for field in self.tuple_types[tuple_type]]
+            index_set = index_set or dimensions[0].get("name")
+            index_values = data_dict.get(index_set)
+            if isinstance(data_value, dict):
+                items = sorted(data_value.items(), key=lambda item: item[0])
+            elif isinstance(index_values, list) and len(index_values) == len(data_value):
+                items = zip(index_values, data_value)
             else:
-                structured[key] = {field: value[index] for index, field in enumerate(field_names) if index < len(value)}
-        self._add_code_line(f"{array_name} = {repr(structured)}")
-        self.data_dict[array_name] = structured
+                items = enumerate(data_value, start=1)
+            data_value = {
+                key: value
+                if isinstance(value, dict)
+                else {field: value[index] for index, field in enumerate(field_names)}
+                for key, value in items
+            }
+        self._add_code_line(f"{array_name} = {repr(data_value)}")
+        self.data_dict[array_name] = data_value
 
     def _emit_inline_indexed_parameter(self, declaration, data_dict):
         dimensions = declaration.get("dimensions", [])

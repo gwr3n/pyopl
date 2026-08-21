@@ -120,8 +120,9 @@ opt_semicolon ::= (";" _)?
 
 # --- tuple arrays (model)
 tuple_array_declaration ::=
-      NAME _ NAME _ "[" _ NAME _ "]" _ "=" _ "..." _ ";" _   // TupleType Arr[Set] = ...;
-    | NAME _ NAME _ "[" _ NAME _ "]" _ ";" _                 // TupleType Arr[Set];
+      NAME _ NAME _ named_dimensions _ "=" _ "..." _ ";" _
+    | NAME _ NAME _ named_dimensions _ ";" _
+named_dimensions ::= ("[" _ NAME _ "]" _)+
 
 // --- param declarations
 param_declaration ::=
@@ -219,18 +220,19 @@ function_call ::=
 
 arg_list ::= expression ( _ "," _ expression )*
 
-// --- Tuple literals (ensure iterator/name elements are allowed)
-// Model tuple literals allow NAME elements and allow empty `<>`.
+// --- Tuple literals
+// Model tuple literals allow names, Boolean literals, nested tuples, and empty `<>`.
 tuple_literal_model ::= "<" _ tuple_element_list_model_opt _ ">" _
 tuple_element_list_model_opt ::= (tuple_element_model (_ "," _ tuple_element_model)*)?
-tuple_element_model ::= NAME | STRING_LITERAL | NUMBER | tuple_literal_model
+tuple_element_model ::= NAME | STRING_LITERAL | NUMBER | BOOLEAN_LITERAL | tuple_literal_model
 
 // Non-empty tuple literal lists (model)
 tuple_literal_list_model ::= tuple_literal_model ( _ "," _ tuple_literal_model )*
 
 // Tuple comprehension (model)
-tuple_comprehension ::= "<" _ tuple_element_list_model _ ">" _ "|" _ sum_index_list _ opt_index_constraint
-tuple_element_list_model ::= tuple_element_model ( _ "," _ tuple_element_model )*
+tuple_comprehension ::= "<" _ tuple_comprehension_element_list _ ">" _ "|" _ sum_index_list _ opt_index_constraint
+tuple_comprehension_element_list ::= tuple_comprehension_element ( _ "," _ tuple_comprehension_element )*
+tuple_comprehension_element ::= tuple_element_model | indexed_name | "(" _ tuple_comprehension_element _ ")" | "-" _ tuple_comprehension_element | tuple_comprehension_element _ ("+" | "-" | "*" | "/" | "%") _ tuple_comprehension_element
 
 
 // --- Arrays (nested) for inline params (.mod) ---
@@ -240,6 +242,8 @@ row_list ::=
     | scalar_value
     | row_list _ "," _ array_value
     | array_value
+    | row_list _ "," _ tuple_literal_data
+    | tuple_literal_data
 
 scalar_value ::= NUMBER | STRING_LITERAL | BOOLEAN_LITERAL
 
@@ -258,8 +262,7 @@ data_declaration ::=
 
 // Set-of-tuples in .dat (untyped or typed)
 set_of_tuples_data_assignment ::=
-      NAME _ "=" _ "{" _ tuple_literal_list_data _ "}" _ ";" _
-    | NAME _ "=" _ "[" _ tuple_literal_list_data _ "]" _ ";" _
+  NAME _ "=" _ "{" _ tuple_literal_list_data _ "}" _ ";" _
 
 // set values for .dat scalar sets
 set_value ::= "{" _ element_list_scalar _ "}"

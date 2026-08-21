@@ -580,19 +580,25 @@
 
     "TupleArray": {
       "type": "object",
-      "required": ["type", "name", "tuple_type", "index_set", "dimensions"],
+      "required": ["type", "name", "tuple_type", "index_sets", "dimensions"],
       "properties": {
         "type": { "enum": ["tuple_array", "tuple_array_external"] },
         "name": { "type": "string" },
         "tuple_type": { "type": "string" },
         "index_set": { "type": "string" },
+        "index_sets": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        },
         "dimensions": {
           "type": "array",
+          "minItems": 1,
           "items": {
             "type": "object",
             "required": ["type", "name"],
             "properties": {
-              "type": { "const": "named_set_dimension" },
+              "type": { "enum": ["named_set_dimension", "named_range_dimension"] },
               "name": { "type": "string" }
             },
             "additionalProperties": true

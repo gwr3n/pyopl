@@ -84,7 +84,9 @@ Decision variables are the unknowns to be determined by the optimizer. They can 
 
 - Index expressions in variable/parameter indexing can be integer expressions (e.g., t-1, (i+j), -k) and tuple field access, provided the expression is integer-valued by type inference.
 
-- New: Tuple arrays are supported as first-class data (see “Tuple arrays” below).
+- Decision-variable types are restricted to `boolean`, `int`, `int+`, `float`, and `float+`. A tuple may index a decision variable (`dvar float x[arcs]`), but a tuple type cannot itself be used as a decision-variable type (`dvar Arc x` is rejected).
+
+- Tuple arrays are supported as first-class data (see “Tuple arrays” below).
 
 ### Ranges (`range`)
 Ranges define integer sequences for indexing and iteration. Bounds can be integer expressions or parameter names.
@@ -153,6 +155,8 @@ param float w[arcs] = [1.5, 2.5];
 ```
 - Use dot access for fields, e.g. `a.cost` (where `a` is a tuple of type `Arc`) and `o.pair.i` (where `o` is a nested tuple).
 - Positional tuple-field access like `a[2]` is not part of the OPL syntax; use dot access.
+- Tuple literals can contain integer, float, string, Boolean, and nested tuple values. Empty (`<>`) and singleton (`<1>`) tuples are supported.
+- PyOPL validates tuple schemas before code generation. Unknown tuple types, duplicate field names, incorrect arity, invalid primitive or nested field values, and malformed tuple-array records produce `SemanticError` diagnostics rather than silently truncating or guessing a schema.
 
 #### Basic Tuple Example
 ```opl
@@ -162,21 +166,45 @@ dvar float x[arcs];
 param float w[arcs] = [1.5, 2.5];
 ```
 
-### Tuple arrays
-Tuple arrays (arrays of tuples keyed by a set) are supported as data-only constructs in the model and .dat.
+Boolean and nested values can be used directly:
 ```opl
-tuple Arc { string start; string end; float cost; }
-{Arc} arcs = { <"A","B",10.0>, <"B","C",12.5> };
+tuple Flag { boolean enabled; }
+tuple Item { int id; Flag flag; }
+{Item} items = { <1, <true>>, <2, <false>> };
+```
 
-Arc Arr[arcs];     // declared in model
-Arc Arr[arcs] = ...; // external data in .dat
+Tuple-set comprehensions support arithmetic components and indexed parameter lookups:
+```opl
+range Items = 1..3;
+int Cost[Items] = [10, 20, 30];
+tuple Row { int id; int next; int shiftedCost; }
+{Row} Rows = { <i, i + 1, Cost[i] - 1> | i in Items };
+```
+
+### Tuple arrays
+Tuple arrays are data-only arrays whose leaves are tuple records. They support one or more named set or range dimensions.
+```opl
+range Rows = 1..2;
+range Cols = 1..2;
+tuple Arc { int from; int to; float cost; }
+
+Arc Arr[Rows][Cols] = ...;
 
 // Access fields
-Arr[a].cost      // dot access
-Arr[a]['cost']   // dict-style access (backend emits dicts)
+Arr[i][j].cost
 ```
+
+Corresponding `.dat` data uses nested arrays:
+```opl
+Arr = [
+  [<1, 1, 1.0>, <1, 2, 2.0>],
+  [<2, 1, 3.0>, <2, 2, 4.0>]
+];
+```
+
 Notes:
-- In codegen, a tuple array is made available as a dict keyed by the index set element mapping to a record-like dict {field: value}, so `Arr[a].cost` and `Arr[a]['cost']` both work.
+- Tuple arrays may be indexed by named ranges, typed scalar sets, or a combination of them.
+- PyOPL normalizes tuple arrays internally for both Gurobi and SciPy/HiGHS. Use OPL dot syntax such as `Arr[i][j].cost`; generated Python representation is an implementation detail.
 - Positional tuple indexing (e.g., `a[2]`) is not supported in OPL; always use dot access.
 
 ### Data Input (`.dat` files)
@@ -191,6 +219,8 @@ my_array = [10, 20];
 my_2d_array = [[1, 2], [3, 4]];
 Items = 1..5; // range data
 ```
+
+Tuple literals can appear at any depth inside data arrays, which is how multidimensional tuple arrays are supplied.
 
 Additional supported forms:
 - Range data (integer) assignment:
@@ -259,7 +289,7 @@ float v[items] = ...; // Value provided in .dat file
 dvar float x[items];        // Decision variable indexed by set of nested tuples
 ```
 - Parameters and variables can be indexed by any set of tuples, including nested, singleton, or empty tuples.
-- Tuple field access is supported everywhere: use dot notation or integer index, including for nested fields (e.g., `o.pair.i`, `o.value`).
+- Tuple field access uses dot notation, including for nested fields (e.g., `o.pair.i`, `o.value`).
 
 **Example usage in constraints/objective:**
 ```opl
@@ -495,10 +525,14 @@ Expressions can include:
 These functions are fully supported for ground/computed parameter expressions. Nonlinear uses involving decision variables may parse, but linear/MIP backends cannot generally solve expressions such as `exp(x)` or `sin(x)` where `x` is a decision variable.
 
 Additional notes:
-- Index expressions can be arithmetic or field accesses as long as they are integer-typed:
-  - `x[t-1]`, `s[(i+j)]`, `y[-k]`, `cost[a.cost]` (if field is int).
+- Index expressions can be arithmetic or field accesses when their values match the indexed domain:
+  - `x[t-1]`, `s[(i+j)]`, `y[-k]`, `cost[a.to]`.
+- Computed parameters can use tuple fields as indices:
+  ```opl
+  int Selected[a in Arcs] = Cost[a.to];
+  ```
 - Tuple arrays and tuple fields are accessible everywhere:
-  - `Arr[a].value`, `Arr[a]['value']`, `o.pair.i`.
+  - `Arr[a].value`, `Arr[i][j].cost`, `o.pair.i`.
 
 ---
 
@@ -552,6 +586,8 @@ subject to {
   forall(o in Orders) ship[o] >= O[o].demand;
 }
 ```
+
+For multidimensional tuple arrays, repeat the named dimensions and provide nested `.dat` arrays as shown in the [Tuple arrays](#tuple-arrays) section.
 
 ### 3) Cardinality and reification
 
@@ -692,6 +728,8 @@ Solver specifics:
 
 ## Limitations
 - Named ranges must be declared inline in the model with explicit bounds (e.g., `range T = 1..N;`). A bare `range T;` is parsed but not supported by code generation at loop sites.
+- Tuple types are data schemas and cannot be used as `dvar` types. Use scalar decision variables indexed by tuple sets instead.
+- Named tuple initialization (`#<field:value, ...>#`), tuple `key` fields, and sorted tuple sets are not yet supported.
 - SciPy/HiGHS backend:
   - Composite boolean implication antecedents are supported via big‑M and auxiliaries; prefer simple forms for robustness.
   - Capabilities for larger MIP models depend on your SciPy/HiGHS version.

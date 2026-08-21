@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 
 from pyopl.pyopl_core import OPLCompiler, OPLLexer, OPLParser, solve
@@ -112,6 +113,93 @@ class TestTupleParsing(unittest.TestCase):
             r"Tuple type 'Point' cannot be used as a decision-variable type.*boolean, int, int\+, float, float\+",
         ):
             OPLCompiler().compile_model(code, solver="gurobi")
+
+    def test_boolean_literals_in_model_tuples(self):
+        code = """
+        tuple Flag { boolean enabled; };
+        tuple Item { int id; Flag flag; };
+        {Item} Items = { <1, <true>>, <2, <false>> };
+        dvar int x;
+        minimize x;
+        subject to { x >= 0; }
+        """
+
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                ast, _, _ = OPLCompiler().compile_model(code, solver=solver)
+                items = next(decl for decl in ast["declarations"] if decl.get("name") == "Items")
+                self.assertIs(items["value"][0]["elements"][1]["elements"][0], True)
+                self.assertIs(items["value"][1]["elements"][1]["elements"][0], False)
+
+    def test_tuple_comprehension_arithmetic_components(self):
+        code = """
+        range Items = 1..3;
+        int Cost[Items] = [10, 20, 30];
+        tuple Row { int id; int next; int shiftedCost; };
+        {Row} Rows = { <i, i + 1, Cost[i] - 1> | i in Items };
+        dvar int x;
+        minimize x;
+        subject to { x >= 0; }
+        """
+
+        expected = [(1, 2, 9), (2, 3, 19), (3, 4, 29)]
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                _, _, data = OPLCompiler().compile_model(code, solver=solver)
+                self.assertEqual(data["Rows"], expected)
+
+    def test_tuple_field_access_in_computed_parameter_index(self):
+        code = """
+        range Nodes = 1..3;
+        int Cost[Nodes] = [10, 20, 30];
+        tuple Arc { int from; int to; };
+        {Arc} Arcs = { <1, 2>, <2, 3> };
+        int Selected[a in Arcs] = Cost[a.to];
+        dvar int x;
+        minimize x;
+        subject to { x >= 0; }
+        """
+
+        expected = {(1, 2): 20.0, (2, 3): 30.0}
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                _, _, data = OPLCompiler().compile_model(code, solver=solver)
+                self.assertEqual(data["Selected__map"], expected)
+
+    def test_multidimensional_tuple_array(self):
+        model_code = """
+        range Rows = 1..2;
+        range Cols = 1..2;
+        tuple Arc { int from; int to; float cost; };
+        Arc arcs[Rows][Cols] = ...;
+        dvar float x;
+        minimize x;
+        subject to { x >= sum(i in Rows, j in Cols) arcs[i][j].cost; }
+        """
+        data_code = """
+        arcs = [
+            [<1, 1, 1.0>, <1, 2, 2.0>],
+            [<2, 1, 3.0>, <2, 2, 4.0>]
+        ];
+        """
+
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                with (
+                    tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as model_file,
+                    tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as data_file,
+                ):
+                    model_file.write(model_code)
+                    data_file.write(data_code)
+                    model_path = model_file.name
+                    data_path = data_file.name
+                try:
+                    result = solve(model_path, data_path, solver=solver)
+                    self.assertEqual(result["status"], "OPTIMAL")
+                    self.assertAlmostEqual(result["objective_value"], 10.0, places=6)
+                finally:
+                    os.remove(model_path)
+                    os.remove(data_path)
 
     def test_large_tuple_set_and_field_access(self):
         """

@@ -566,11 +566,6 @@ class OPLParser(Parser):
         # Allow user-defined types (tuple types) as valid types for tuple fields
         return p.NAME
 
-    @_("NAME")  # NEW: allow iterator names inside tuple literals (e.g., <i,j,...>)
-    def tuple_element(self, p):
-        # Do not require sem_type here; it will be resolved during evaluation
-        return {"type": "name", "value": p.NAME}
-
     # --- Typed set-of-tuples WITH comprehension ---
     # { Pair } Pairs = { <i,j,i2,j2> | i in Rows, j in Cols, i2 in Rows, j2 in Cols : condition };
     @_('"{" NAME "}" NAME "=" "{" tuple_comprehension "}" ";"')  # type: ignore
@@ -593,7 +588,7 @@ class OPLParser(Parser):
             "comprehension": comp,
         }
 
-    # tuple_comprehension: <tuple_elems> | sum_index_list [ : condition ]
+    # tuple_comprehension: <tuple_expressions> | sum_index_list [ : condition ]
     @_('"<" tuple_element_list ">" "|" sum_index_list opt_index_constraint')  # type: ignore
     def tuple_comprehension(self, p):
         return {
@@ -1164,19 +1159,82 @@ class OPLParser(Parser):
     def tuple_element_list(self, p):
         return _list_with_item(p.tuple_element)
 
-    # Tuple elements: allow negative numbers via signed_number
-    @_("STRING_LITERAL")  # type: ignore
+    @_("tuple_comprehension_additive")  # type: ignore
     def tuple_element(self, p):
+        return p.tuple_comprehension_additive
+
+    @_('tuple_comprehension_additive "+" tuple_comprehension_multiplicative')  # type: ignore
+    @_('tuple_comprehension_additive "-" tuple_comprehension_multiplicative')  # type: ignore
+    def tuple_comprehension_additive(self, p):
+        return {
+            "type": "binop",
+            "op": p[1],
+            "left": p.tuple_comprehension_additive,
+            "right": p.tuple_comprehension_multiplicative,
+        }
+
+    @_("tuple_comprehension_multiplicative")  # type: ignore
+    def tuple_comprehension_additive(self, p):
+        return p.tuple_comprehension_multiplicative
+
+    @_('tuple_comprehension_multiplicative "*" tuple_comprehension_unary')  # type: ignore
+    @_('tuple_comprehension_multiplicative "/" tuple_comprehension_unary')  # type: ignore
+    @_('tuple_comprehension_multiplicative "%" tuple_comprehension_unary')  # type: ignore
+    def tuple_comprehension_multiplicative(self, p):
+        return {
+            "type": "binop",
+            "op": p[1],
+            "left": p.tuple_comprehension_multiplicative,
+            "right": p.tuple_comprehension_unary,
+        }
+
+    @_("tuple_comprehension_unary")  # type: ignore
+    def tuple_comprehension_multiplicative(self, p):
+        return p.tuple_comprehension_unary
+
+    @_('"-" tuple_comprehension_unary')  # type: ignore
+    def tuple_comprehension_unary(self, p):
+        return {"type": "uminus", "value": p.tuple_comprehension_unary}
+
+    @_("tuple_comprehension_atom")  # type: ignore
+    def tuple_comprehension_unary(self, p):
+        return p.tuple_comprehension_atom
+
+    @_("NAME tuple_comprehension_dimensions")  # type: ignore
+    def tuple_comprehension_atom(self, p):
+        return {"type": "indexed_name", "name": p.NAME, "dimensions": p.tuple_comprehension_dimensions}
+
+    @_("NAME")  # type: ignore
+    def tuple_comprehension_atom(self, p):
+        return {"type": "name", "value": p.NAME}
+
+    @_("NUMBER")  # type: ignore
+    def tuple_comprehension_atom(self, p):
+        return p.NUMBER
+
+    @_("STRING_LITERAL")  # type: ignore
+    def tuple_comprehension_atom(self, p):
         return _unquote_string_literal(p.STRING_LITERAL)
 
-    @_("signed_number")  # type: ignore
-    def tuple_element(self, p):
-        return p.signed_number
+    @_("BOOLEAN_LITERAL")  # type: ignore
+    def tuple_comprehension_atom(self, p):
+        return _model_boolean_literal_to_bool(p.BOOLEAN_LITERAL)
 
     @_("tuple_literal")  # type: ignore
-    def tuple_element(self, p):
-        # Allow nested tuple literals as tuple elements
+    def tuple_comprehension_atom(self, p):
         return p.tuple_literal
+
+    @_('"(" tuple_comprehension_additive ")"')  # type: ignore
+    def tuple_comprehension_atom(self, p):
+        return {"type": "parenthesized_expression", "expression": p.tuple_comprehension_additive}
+
+    @_('tuple_comprehension_dimensions "[" tuple_comprehension_additive "]"')  # type: ignore
+    def tuple_comprehension_dimensions(self, p):
+        return _append_list_item(p.tuple_comprehension_dimensions, p.tuple_comprehension_additive)
+
+    @_('"[" tuple_comprehension_additive "]"')  # type: ignore
+    def tuple_comprehension_dimensions(self, p):
+        return _list_with_item(p.tuple_comprehension_additive)
 
     @_("STRING")  # type: ignore
     def type(self, p):
@@ -1492,14 +1550,14 @@ class OPLParser(Parser):
             symbol_info = self.symbol_table.get_symbol(tuple_type)
         except SemanticError:
             return None
-        if symbol_info.get("type") != "tuple_type" or len(dimensions) != 1:
+        if symbol_info.get("type") != "tuple_type" or not dimensions:
             return None
-
-        dim = dimensions[0]
-        if dim["type"] not in ("named_set_dimension", "named_range_dimension"):
+        if any(dim["type"] not in ("named_set_dimension", "named_range_dimension") for dim in dimensions):
             return None
-        index_set = dim["name"]
-        value = {"tuple_type": tuple_type, "index_set": index_set}
+        index_sets = [dim["name"] for dim in dimensions]
+        value = {"tuple_type": tuple_type, "index_sets": index_sets}
+        if len(index_sets) == 1:
+            value["index_set"] = index_sets[0]
         if not external:
             value["elements"] = None
 
@@ -1510,14 +1568,17 @@ class OPLParser(Parser):
             dimensions=dimensions,
             lineno=lineno,
         )
-        return {
+        declaration = {
             "type": "tuple_array_external" if external else "tuple_array",
             "tuple_type": tuple_type,
             "name": array_name,
-            "index_set": index_set,
+            "index_sets": index_sets,
             "dimensions": dimensions,
             "value": None,
         }
+        if len(index_sets) == 1:
+            declaration["index_set"] = index_sets[0]
+        return declaration
 
     def _iterator_range_to_declaration_dimension(self, rng):
         if rng["type"] == "range_specifier":
@@ -3024,7 +3085,6 @@ class OPLDataParser(Parser):
 
     # --- Untyped set-of-tuples assignment: arcs = { <...>, <...> }; ---
     @_('NAME "=" "{" tuple_literal_list "}" ";"')  # type: ignore
-    @_('NAME "=" "[" tuple_literal_list "]" ";"')  # type: ignore
     def data_declaration(self, p):
         # Robustly handle all tuple/set/array assignments, including nested tuples
         # NAME = { <tuple>, ... };
@@ -3032,14 +3092,6 @@ class OPLDataParser(Parser):
             self.data[p.NAME] = p.tuple_literal_list
             return {
                 "type": "set_of_tuples_untyped",
-                "name": p.NAME,
-                "value": p.tuple_literal_list,
-            }
-        # NAME = [ <tuple>, ... ];
-        elif hasattr(p, "NAME") and hasattr(p, "tuple_literal_list") and len(p) > 2 and p[2] == "[":
-            self.data[p.NAME] = p.tuple_literal_list
-            return {
-                "type": "tuple_array_data",
                 "name": p.NAME,
                 "value": p.tuple_literal_list,
             }
@@ -3297,6 +3349,14 @@ class OPLDataParser(Parser):
     def row_list(self, p):
         return _list_with_item(p.tuple_set_value)
 
+    @_('row_list "," tuple_literal')  # type: ignore
+    def row_list(self, p):
+        return _append_list_item(p.row_list, p.tuple_literal)
+
+    @_("tuple_literal")  # type: ignore
+    def row_list(self, p):
+        return _list_with_item(p.tuple_literal)
+
     @_('"{" tuple_literal_list "}"')  # type: ignore
     def tuple_set_value(self, p):
         return p.tuple_literal_list
@@ -3452,6 +3512,28 @@ class OPLCompiler:
     def _tuple_value_elements(value: Any) -> Any:
         if isinstance(value, dict) and value.get("type") == "tuple_literal":
             return value.get("elements")
+        if isinstance(value, dict) and value.get("type") in ("number", "string_literal", "boolean_literal"):
+            return value.get("value")
+        if isinstance(value, dict) and value.get("type") == "parenthesized_expression":
+            return OPLCompiler._tuple_value_elements(value.get("expression"))
+        if isinstance(value, dict) and value.get("type") == "uminus":
+            operand = OPLCompiler._tuple_value_elements(value.get("value"))
+            if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+                return -operand
+        if isinstance(value, dict) and value.get("type") == "binop":
+            left = OPLCompiler._tuple_value_elements(value.get("left"))
+            right = OPLCompiler._tuple_value_elements(value.get("right"))
+            if all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in (left, right)):
+                operations = {
+                    "+": lambda: left + right,
+                    "-": lambda: left - right,
+                    "*": lambda: left * right,
+                    "/": lambda: left / right,
+                    "%": lambda: left % right,
+                }
+                operation = operations.get(value.get("op"))
+                if operation is not None:
+                    return operation()
         return value
 
     @staticmethod
@@ -3547,11 +3629,7 @@ class OPLCompiler:
         tuple_set_types = {"set_of_tuples", "set_of_tuples_external"}
         for decl in declarations:
             declaration_type = decl.get("type")
-            if declaration_type not in tuple_set_types | {
-                "set_of_tuples_array_external",
-                "tuple_array",
-                "tuple_array_external",
-            }:
+            if declaration_type not in tuple_set_types | {"set_of_tuples_array_external", "tuple_array", "tuple_array_external"}:
                 continue
             name = decl.get("name")
             tuple_type = decl.get("tuple_type")
@@ -3571,16 +3649,33 @@ class OPLCompiler:
                 continue
             if not isinstance(raw_value, (dict, list, tuple)):
                 raise SemanticError(f"Tuple array '{name}' must contain a sequence or mapping of values.")
-            rows = list(raw_value.values()) if isinstance(raw_value, dict) else raw_value
             if declaration_type == "set_of_tuples_array_external":
+                rows = list(raw_value.values()) if isinstance(raw_value, dict) else raw_value
                 for row_index, row in enumerate(rows):
                     if not isinstance(row, (list, tuple)):
                         raise SemanticError(f"Tuple-set array row '{name}[{row_index}]' must be a sequence.")
                     for value_index, value in enumerate(row):
                         self._validate_tuple_value(value, tuple_type, tuple_types, f"{name}[{row_index}][{value_index}]")
             else:
-                for index, value in enumerate(rows):
-                    self._validate_tuple_value(value, tuple_type, tuple_types, f"{name}[{index}]")
+                dimensions = decl.get("dimensions") or []
+
+                def validate_array_level(value: Any, remaining: list[dict[str, Any]], path: str) -> None:
+                    if not remaining:
+                        self._validate_tuple_value(value, tuple_type, tuple_types, path)
+                        return
+                    values = list(value.values()) if isinstance(value, dict) else value
+                    if not isinstance(values, (list, tuple)):
+                        raise SemanticError(f"Tuple array '{path}' must contain a sequence or mapping.")
+                    expected_length = self._parameter_dimension_length(remaining[0], model_ast, working_data)
+                    if expected_length is not None and len(values) != expected_length:
+                        raise SemanticError(
+                            f"Tuple array '{path}' has {len(values)} entries for dimension "
+                            f"'{remaining[0].get('name')}'; expected {expected_length}."
+                        )
+                    for index, child in enumerate(values):
+                        validate_array_level(child, remaining[1:], f"{path}[{index}]")
+
+                validate_array_level(raw_value, dimensions, name)
 
     def _prepare_model_ast_and_working_data(
         self,
@@ -3672,7 +3767,12 @@ class OPLCompiler:
                     set_tuple_type_by_name[name] = tuple_type
         return tuple_fields_by_type, set_tuple_type_by_name
 
-    def _eval_computed_parameter_index(self, expr: dict[str, Any], env: dict[str, Any]) -> Any:
+    def _eval_computed_parameter_index(
+        self,
+        expr: dict[str, Any],
+        env: dict[str, Any],
+        field_resolver: Optional[Callable[[dict[str, Any]], Any]] = None,
+    ) -> Any:
         expr_type = expr.get("type")
         if expr_type == "number_literal_index":
             return expr.get("value")
@@ -3683,27 +3783,34 @@ class OPLCompiler:
                 raise SemanticError("Unsupported index expr: missing name.")
             return env.get(name, name)
         if expr_type in ("field_access_index", "field_access"):
-            raise SemanticError("Field access in computed parameter indices not supported.")
+            if field_resolver is None:
+                raise SemanticError("Cannot resolve tuple field access in computed parameter index.")
+            return field_resolver(expr)
         if expr_type == "binop":
-            return self._eval_computed_parameter_index_binop(expr, env)
+            return self._eval_computed_parameter_index_binop(expr, env, field_resolver)
         if expr_type == "uminus":
-            return self._eval_computed_parameter_index_unary(expr, env)
+            return self._eval_computed_parameter_index_unary(expr, env, field_resolver)
         if expr_type == "parenthesized_expression":
             inner_expr = expr.get("expression")
             if not isinstance(inner_expr, dict):
                 raise SemanticError("Unsupported index expr: missing parenthesized expression.")
-            return self._eval_computed_parameter_index(inner_expr, env)
+            return self._eval_computed_parameter_index(inner_expr, env, field_resolver)
         if expr_type == "string_literal":
             return expr.get("value")
         raise SemanticError(f"Unsupported index expr: {expr_type}")
 
-    def _eval_computed_parameter_index_binop(self, expr: dict[str, Any], env: dict[str, Any]) -> int:
+    def _eval_computed_parameter_index_binop(
+        self,
+        expr: dict[str, Any],
+        env: dict[str, Any],
+        field_resolver: Optional[Callable[[dict[str, Any]], Any]] = None,
+    ) -> int:
         left_expr = expr.get("left")
         right_expr = expr.get("right")
         if not isinstance(left_expr, dict) or not isinstance(right_expr, dict):
             raise SemanticError("Unsupported index binop operands.")
-        left = self._eval_computed_parameter_index(left_expr, env)
-        right = self._eval_computed_parameter_index(right_expr, env)
+        left = self._eval_computed_parameter_index(left_expr, env, field_resolver)
+        right = self._eval_computed_parameter_index(right_expr, env, field_resolver)
         operations = {"+": int.__add__, "-": int.__sub__, "*": int.__mul__}
         operator = expr.get("op")
         if not isinstance(operator, str):
@@ -3713,11 +3820,16 @@ class OPLCompiler:
             raise SemanticError(f"Unsupported index binop: {expr.get('op')}")
         return operation(int(left), int(right))
 
-    def _eval_computed_parameter_index_unary(self, expr: dict[str, Any], env: dict[str, Any]) -> int:
+    def _eval_computed_parameter_index_unary(
+        self,
+        expr: dict[str, Any],
+        env: dict[str, Any],
+        field_resolver: Optional[Callable[[dict[str, Any]], Any]] = None,
+    ) -> int:
         value_expr = expr.get("value")
         if not isinstance(value_expr, dict):
             raise SemanticError("Unsupported index expr: missing unary operand.")
-        return -int(self._eval_computed_parameter_index(value_expr, env))
+        return -int(self._eval_computed_parameter_index(value_expr, env, field_resolver))
 
     def _computed_parameter_iterator_domains(
         self,
@@ -3803,6 +3915,7 @@ class OPLCompiler:
             "-": lambda: left - right,
             "*": lambda: left * right,
             "/": lambda: left / right,
+            "%": lambda: left % right,
             "==": lambda: left == right,
             "!=": lambda: left != right,
             "<": lambda: left < right,
@@ -3834,6 +3947,8 @@ class OPLCompiler:
             return self._eval_comprehension_indexed_name(expr, env, working_data)
         if expr_type == "parenthesized_expression":
             return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
+        if expr_type == "uminus":
+            return -self._eval_comprehension_expr(expr.get("value"), env, working_data)
         if expr_type == "not":
             return self._eval_comprehension_logical(expr, env, working_data)
         if expr_type in ("and", "or"):
@@ -3912,16 +4027,7 @@ class OPLCompiler:
                 if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
                     return tuple(eval_tuple(element, env) for element in expr.get("elements", []))
                 if isinstance(expr, dict):
-                    expr_type = expr.get("type")
-                    if expr_type == "name":
-                        name = expr.get("value")
-                        if not isinstance(name, str):
-                            raise SemanticError("Tuple comprehension name expression is missing an identifier.")
-                        return env.get(name)
-                    if expr_type == "number":
-                        return expr.get("value")
-                    if expr_type == "parenthesized_expression":
-                        return eval_tuple(expr.get("expression"), env)
+                    return self._eval_comprehension_expr(expr, env, working_data)
                 return expr
 
             def normalize_tuple_value(value: Any) -> Any:
@@ -4114,7 +4220,11 @@ class OPLCompiler:
                 raise SemanticError(f"Field access failed on base value: {exc}") from exc
             return float(value) if isinstance(value, (int, float)) else value
 
-        def eval_indexed_name(expr: dict[str, Any], env: dict[str, Any]) -> Any:
+        def eval_indexed_name(
+            expr: dict[str, Any],
+            env: dict[str, Any],
+            iter_meta: Optional[dict[str, dict[str, Any]]],
+        ) -> Any:
             base = expr.get("name")
             if not isinstance(base, str):
                 raise SemanticError("Parameter name missing for indexed access.")
@@ -4122,7 +4232,11 @@ class OPLCompiler:
             if current is None:
                 raise SemanticError(f"Parameter '{base}' not found for indexed access.")
             for dimension in expr.get("dimensions", []):
-                index_value = self._eval_computed_parameter_index(dimension, env)
+                index_value = self._eval_computed_parameter_index(
+                    dimension,
+                    env,
+                    lambda field_expr: eval_field_access(field_expr, env, iter_meta),
+                )
                 if isinstance(index_value, float) and index_value.is_integer():
                     index_value = int(index_value)
                 if isinstance(current, list):
@@ -4305,7 +4419,7 @@ class OPLCompiler:
             if expr_type == "field_access":
                 return eval_field_access(expr, env, iter_meta)
             if expr_type == "indexed_name":
-                return eval_indexed_name(expr, env)
+                return eval_indexed_name(expr, env, iter_meta)
             if expr_type == "sum":
                 return eval_sum(expr, env)
             if expr_type in {"max_agg", "min_agg"}:
@@ -4674,6 +4788,63 @@ class OPLCompiler:
             decl["value"] = mapping
             working_data[name] = mapping
 
+    def _tuple_array_dimension_values(
+        self,
+        dimension: dict[str, Any],
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> list[Any]:
+        dimension_type = dimension.get("type")
+        if dimension_type == "named_set_dimension":
+            value = working_data.get(dimension.get("name"), [])
+            if isinstance(value, dict) and "elements" in value:
+                value = value["elements"]
+            return list(value or [])
+        if dimension_type == "named_range_dimension":
+            start, end = self._resolve_named_range(
+                model_ast,
+                working_data,
+                dimension["name"],
+                context="tuple array normalization",
+            )
+            return list(range(start, end + 1))
+        raise SemanticError(f"Unsupported tuple array dimension type '{dimension_type}'.")
+
+    def _normalize_tuple_arrays_for_codegen(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+    ) -> None:
+        tuple_fields = {
+            decl["name"]: [field["name"] for field in decl.get("fields", [])]
+            for decl in model_ast.get("declarations") or []
+            if decl.get("type") == "tuple_type"
+        }
+        for decl in model_ast.get("declarations") or []:
+            if decl.get("type") not in ("tuple_array", "tuple_array_external"):
+                continue
+            name = decl.get("name")
+            tuple_type = decl.get("tuple_type")
+            if not isinstance(name, str) or name not in working_data or tuple_type not in tuple_fields:
+                continue
+            dimensions = decl.get("dimensions") or []
+            domains = [self._tuple_array_dimension_values(dim, model_ast, working_data) for dim in dimensions]
+            field_names = tuple_fields[tuple_type]
+
+            def normalize(value: Any, depth: int) -> Any:
+                if depth == len(domains):
+                    if isinstance(value, dict):
+                        return {field: value[field] for field in field_names}
+                    return {field: value[index] for index, field in enumerate(field_names)}
+                if isinstance(value, dict):
+                    return {key: normalize(child, depth + 1) for key, child in value.items()}
+                return {
+                    key: normalize(child, depth + 1)
+                    for key, child in zip(domains[depth], value, strict=True)
+                }
+
+            working_data[name] = normalize(working_data[name], 0)
+
     def compile_model(
         self,
         model_code: str,
@@ -4765,6 +4936,7 @@ class OPLCompiler:
 
         codegen_ast = copy.deepcopy(ast)
         codegen_data = copy.deepcopy(data_dict)
+        self._normalize_tuple_arrays_for_codegen(codegen_ast, codegen_data)
         self._normalize_indexed_parameters_for_codegen(codegen_ast, codegen_data)
 
         if solver == "gurobi":

@@ -481,10 +481,13 @@ class GurobiCodeGenerator:
         tuple_type = declaration["tuple_type"]
         data_value = data_dict.get(array_name)
         if data_value is not None and tuple_type in getattr(self, "tuple_types", {}):
-            field_names = [field["name"] for field in self.tuple_types[tuple_type]]
-            index_values = data_dict.get(declaration["index_set"])
-            records = self._tuple_array_records(data_value, field_names, index_values)
-            self._add_code_line(f"{array_name} = {repr(records)}")
+            dimensions = declaration.get("dimensions") or []
+            index_set = declaration.get("index_set")
+            if len(dimensions) == 1 or (not dimensions and index_set):
+                field_names = [field["name"] for field in self.tuple_types[tuple_type]]
+                index_set = index_set or dimensions[0].get("name")
+                data_value = self._tuple_array_records(data_value, field_names, data_dict.get(index_set))
+            self._add_code_line(f"{array_name} = {repr(data_value)}")
 
     def _emit_structured_data_declarations(self, data_dict):
         for declaration in self.ast.get("declarations", []):

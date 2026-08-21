@@ -15,7 +15,7 @@ The grammar supports:
   - typed scalar sets (`{string}`, `{int}`, `{float}`, `{boolean}`)
   - tuple types
   - sets of tuples (typed by tuple type)
-  - tuple arrays (`TupleType Arr[Set]`)
+  - tuple arrays with one or more named set/range dimensions (`TupleType Arr[I][J]`)
   - untyped set-of-tuples assignment in model (tuple literals only)
   - decision expressions (`dexpr`) – scalar and indexed, expanded in-place on use
 - Objectives: `minimize` or `maximize` any numeric or boolean expression, with optional label (`minimize z: expr;` or `minimize z = expr;`)
@@ -45,6 +45,9 @@ Notes:
 - Boolean objectives are allowed.
 - `forall` is statement-level (constraints); `sum`/`min`/`max` aggregates are expressions.
 - Field access (`a.b`) follows tuple typing metadata and supports chaining.
+- Tuple literals in models support strings, numbers, booleans, names, and nested tuples.
+- Tuple comprehensions support arithmetic components and indexed parameter lookups, such as `<i, i+1, Cost[i]>`.
+- Computed parameters may use tuple field access in indices, such as `Cost[a.to]`.
 - In model files, scalar sets must be typed; untyped set assignments in models are only allowed for sets of tuples (tuple literals only).
 
 ## BNF Grammar
@@ -203,8 +206,15 @@ Set of tuples in models:
                               | '{' <NAME> '}' <NAME> '=' '...' ';'
                               | '{' <NAME> '}' <NAME> '=' '{' <tuple_comprehension> '}' ';'  // comprehension
 
-// Tuple set comprehension (iterators usable inside the tuple literal)
-<tuple_comprehension> ::= '<' <tuple_element_list> '>' '|' <sum_index_list> <opt_index_constraint>
+// Tuple set comprehension (iterators usable inside component expressions)
+<tuple_comprehension> ::= '<' <tuple_comprehension_element_list> '>' '|' <sum_index_list> <opt_index_constraint>
+<tuple_comprehension_element_list> ::= <tuple_comprehension_element_list> ',' <tuple_comprehension_element>
+                                     | <tuple_comprehension_element>
+<tuple_comprehension_element> ::= <tuple_element>
+                                | <indexed_name>
+                                | '(' <tuple_comprehension_element> ')'
+                                | '-' <tuple_comprehension_element>
+                                | <tuple_comprehension_element> ('+' | '-' | '*' | '/' | '%') <tuple_comprehension_element>
 
 // Guard: in typed set-of-tuples declarations, RHS elements must be tuple literals (the parser rejects scalar elements).
 
@@ -224,8 +234,9 @@ Tuple types:
 Tuple arrays (model declarations):
 
 ```
-<tuple_array_declaration> ::= <NAME> <NAME> '[' <NAME> ']' '=' '...' ';'   // TupleType Arr[Set] = ...;
-                            | <NAME> <NAME> '[' <NAME> ']' ';'             // TupleType Arr[Set];
+<tuple_array_declaration> ::= <NAME> <NAME> <named_dimensions> '=' '...' ';'
+                            | <NAME> <NAME> <named_dimensions> ';'
+<named_dimensions> ::= ('[' <NAME> ']')+
 ```
 
 Decision expressions (expanded on use):
@@ -396,7 +407,7 @@ Sum/forall headers:
 <tuple_literal_list> ::= <tuple_literal_list> ',' <tuple_literal> | <tuple_literal>
 <tuple_literal> ::= '<' <tuple_element_list> '>' | '<>'
 <tuple_element_list> ::= <tuple_element_list> ',' <tuple_element> | <tuple_element>
-<tuple_element> ::= <STRING_LITERAL> | <NUMBER> | <tuple_literal>
+<tuple_element> ::= <NAME> | <STRING_LITERAL> | <NUMBER> | <BOOLEAN_LITERAL> | <tuple_literal>
 
 // Typed scalar set element lists (model)
 <element_list_string> ::= <element_list_string> ',' <STRING_LITERAL> | <STRING_LITERAL>
@@ -429,7 +440,6 @@ Important modeling rule:
                      | <NAME> '=' <key_value_array> ';'          // map-like array: string/tuple -> scalar/array
                      | <NAME> '=' <NUMBER> '..' <NUMBER> ';'
                      | <NAME> '=' '{' <tuple_literal_list> '}' ';'   // set of tuples (untyped)
-                     | <NAME> '=' '[' <tuple_literal_list> ']' ';'   // tuple array: array of tuple literals
 
 <key_value_array> ::= '[' <key_value_row_list> ']'
 <key_value_row_list> ::= <key_value_row_list> ',' <key_value_row> | <key_value_row>
@@ -438,6 +448,11 @@ Important modeling rule:
                   | <tuple_literal> <scalar_value>
                   | <STRING_LITERAL> <array_value>
                   | <tuple_literal> <array_value>
+
+            // Arrays are recursive and may contain tuple literals at any depth.
+            <row_list> ::= <row_list> ',' <scalar_value> | <scalar_value>
+                   | <row_list> ',' <array_value> | <array_value>
+                   | <row_list> ',' <tuple_literal> | <tuple_literal>
 
 // Allow trailing comma via lexer/permissive parsing
 
@@ -496,7 +511,7 @@ From lowest to highest binding power:
 
 - Field access:
   - `a.b` is type-checked against declared tuple types and supports chaining. Tuple iterators carry their tuple type so `i.cost` works inside `sum/forall`.
-  - Tuple field access may be used as an index only if the field is integer‑typed.
+  - Tuple field access may be used in computed-parameter indices when its value matches the indexed domain, for example `Cost[a.to]`.
 
 - Indexing:
   - Range index form `[lo..hi]` requires integer-valued bounds.
