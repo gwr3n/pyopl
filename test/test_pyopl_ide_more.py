@@ -104,6 +104,25 @@ value = 1;
 
         self.assertEqual(_find_fold_regions(text), {2: 3, 4: 5})
 
+    def test_find_fold_regions_keeps_directly_following_brace_block_whole(self):
+        text = """// § Constraints
+subject to {
+    // § First
+    x >= 0;
+
+    // § Repeated bounds
+    forall(i in items) {
+        // § Lower bound
+        x[i] >= 0;
+
+        // § Upper bound
+        x[i] <= 1;
+    }
+}
+"""
+
+        self.assertEqual(_find_fold_regions(text), {1: 14, 3: 4, 6: 13, 8: 9, 11: 12})
+
     def test_find_fold_regions_leaves_trailing_blank_lines_expanded(self):
         top_level_text = (
             """// § Variables

@@ -18,7 +18,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import traceback
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -119,52 +119,80 @@ def _is_section_marker(comment: str, prefix_length: int) -> bool:
     return comment[prefix_length:].lstrip(" \t").startswith("§")
 
 
-def _collect_fold_structure(text: str) -> tuple[list[tuple[int, Optional[int]]], dict[int, int]]:
-    markers: list[tuple[int, Optional[int]]] = []
-    brace_stack: list[int] = []
-    brace_closing_lines: dict[int, int] = {}
-    next_brace_id = 0
-    line = 1
-    line_has_code = False
+@dataclass
+class _FoldScanState:
+    markers: list[tuple[int, Optional[int], Optional[int]]] = field(default_factory=list)
+    brace_stack: list[int] = field(default_factory=list)
+    brace_closing_lines: dict[int, int] = field(default_factory=dict)
+    pending_marker_index: Optional[int] = None
+    next_brace_id: int = 0
+    line: int = 1
+    line_has_code: bool = False
 
-    for match in _FOLD_TOKEN_RE.finditer(text):
+    def consume(self, match: re.Match[str]) -> None:
         token_type = match.lastgroup
         token = match.group()
         if token_type == "newline":
-            line += 1
-            line_has_code = False
+            self.line += 1
+            self.line_has_code = False
         elif token_type in ("double_string", "single_string"):
-            line_has_code = True
+            self.line_has_code = True
         elif token_type in ("line_comment", "hash_comment", "block_comment"):
-            prefix_length = 1 if token_type == "hash_comment" else 2
-            if not line_has_code and _is_section_marker(token, prefix_length):
-                markers.append((line, brace_stack[-1] if brace_stack else None))
-            newline_count = token.count("\n")
-            line += newline_count
-            if newline_count:
-                line_has_code = False
+            self._consume_comment(token, token_type)
         elif token == "{":
-            next_brace_id += 1
-            brace_stack.append(next_brace_id)
-            line_has_code = True
-        elif token == "}" and brace_stack:
-            brace_closing_lines[brace_stack.pop()] = line
-            line_has_code = True
+            self._open_brace()
+        elif token == "}" and self.brace_stack:
+            self.pending_marker_index = None
+            self.brace_closing_lines[self.brace_stack.pop()] = self.line
+            self.line_has_code = True
+        elif token == ";":
+            self.pending_marker_index = None
+            self.line_has_code = True
         elif not token.isspace():
-            line_has_code = True
+            self.line_has_code = True
 
-    return markers, brace_closing_lines
+    def _consume_comment(self, token: str, token_type: str) -> None:
+        prefix_length = 1 if token_type == "hash_comment" else 2
+        if not self.line_has_code and _is_section_marker(token, prefix_length):
+            containing_brace = self.brace_stack[-1] if self.brace_stack else None
+            self.markers.append((self.line, containing_brace, None))
+            self.pending_marker_index = len(self.markers) - 1
+        newline_count = token.count("\n")
+        self.line += newline_count
+        if newline_count:
+            self.line_has_code = False
+
+    def _open_brace(self) -> None:
+        self.next_brace_id += 1
+        self.brace_stack.append(self.next_brace_id)
+        if self.pending_marker_index is not None:
+            marker_line, containing_brace, _ = self.markers[self.pending_marker_index]
+            self.markers[self.pending_marker_index] = (marker_line, containing_brace, self.next_brace_id)
+            self.pending_marker_index = None
+        self.line_has_code = True
+
+
+def _collect_fold_structure(text: str) -> tuple[list[tuple[int, Optional[int], Optional[int]]], dict[int, int]]:
+    state = _FoldScanState()
+    for match in _FOLD_TOKEN_RE.finditer(text):
+        state.consume(match)
+    return state.markers, state.brace_closing_lines
 
 
 def _resolve_fold_regions(
-    markers: list[tuple[int, Optional[int]]],
+    markers: list[tuple[int, Optional[int], Optional[int]]],
     brace_closing_lines: dict[int, int],
     lines: list[str],
 ) -> dict[int, int]:
     regions: dict[int, int] = {}
     final_line = max(1, len(lines))
-    for marker_index, (marker_line, containing_brace) in enumerate(markers):
+    for marker_index, (marker_line, containing_brace, introduced_brace) in enumerate(markers):
         next_marker_line = markers[marker_index + 1][0] if marker_index + 1 < len(markers) else final_line + 1
+        if introduced_brace is not None:
+            next_marker_line = next(
+                (line for line, brace, _ in markers[marker_index + 1 :] if brace == containing_brace),
+                final_line + 1,
+            )
         brace_close_line = (
             brace_closing_lines.get(containing_brace, final_line + 1) if containing_brace is not None else final_line + 1
         )
@@ -716,19 +744,19 @@ class OPLIDE(TkinterDnD.Tk):
             raise ValueError(f"Unsupported Rhetor IDE bridge method: {method}")
 
         updates = (("model_text", self.model_text, False), ("data_text", self.data_text, True))
-        for field, _text_widget, _is_data in updates:
-            if field in payload and not isinstance(payload[field], str):
-                raise ValueError(f"{field} must be a string")
+        for payload_field, _text_widget, _is_data in updates:
+            if payload_field in payload and not isinstance(payload[payload_field], str):
+                raise ValueError(f"{payload_field} must be a string")
 
         changed = []
-        for field, text_widget, is_data in updates:
-            if field not in payload:
+        for payload_field, text_widget, is_data in updates:
+            if payload_field not in payload:
                 continue
-            text = payload[field]
+            text = payload[payload_field]
             text_widget.delete("1.0", tk.END)
             text_widget.insert("1.0", text)
             self._on_text_change(text_widget, is_data)
-            changed.append(field)
+            changed.append(payload_field)
         if not changed:
             raise ValueError("Supply model_text, data_text, or both")
         self.status_var.set("Updated from MCP")

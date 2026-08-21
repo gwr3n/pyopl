@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Made `§` section folds include an immediately following brace block, including nested sections and blank paragraphs.
 - Disabled GenAI composer inputs and model/data editors while Generate or Ask requests are active.
 - Restored the Solve menu's Stop lifecycle after the command was renamed and shortened its running label to "Stop".
 - Corrected static typing for IDE drag-and-drop widget registration.
