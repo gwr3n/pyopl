@@ -5922,6 +5922,7 @@ def load_opl_model(model_file_name, data_file_name=None, solver="gurobi"):
         return None, None, None
     except SemanticError as e:
         logger.error(f"Error parsing OPL model or data: {e}")
+        traceback.print_exc()
         return None, None, None
     except Exception as e:
         logger.error(f"An unexpected error occurred while loading/parsing the model: {e}")

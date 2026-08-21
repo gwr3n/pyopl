@@ -358,6 +358,65 @@ class TestPyOPLIDETyping(unittest.TestCase):
         )
         dummy._restore_output_textbox.assert_called_once()
 
+    def test_poll_solver_persists_traceback_before_failed_result_message(self):
+        class DummyProcess:
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                pass
+
+        class DummyQueue:
+            def __init__(self):
+                self.items = [
+                    ("log", "Traceback (most recent call last):\nSyntaxError: bad token\n"),
+                    ("success", {"status": "FAILED", "message": "Model compilation failed."}),
+                ]
+
+            def get_nowait(self):
+                if self.items:
+                    return self.items.pop(0)
+                raise pyopl_ide_bootstrap.queue.Empty
+
+            def close(self):
+                pass
+
+            def join_thread(self):
+                pass
+
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
+        dummy = SimpleNamespace(
+            _solver_process=DummyProcess(),
+            _solver_queue=DummyQueue(),
+            _solver_log_text=SimpleNamespace(
+                get=lambda *_args: "Traceback (most recent call last):\nSyntaxError: bad token\n"
+            ),
+            _append_solver_log_text=mock.Mock(),
+            _record_solver_progress=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            _cleanup_solver_ipc=lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+                dummy, cancel_queue_thread=cancel_queue_thread
+            ),
+        )
+
+        OPLIDE._poll_solver(dummy, operation)
+
+        self.assertEqual(
+            dummy._append_output.call_args_list,
+            [
+                mock.call("Traceback (most recent call last):\nSyntaxError: bad token\n", "session-1"),
+                mock.call("\nError:\nModel compilation failed.\n", "session-1"),
+            ],
+        )
+        dummy._finish_solver_progress.assert_called_once_with(status="failed")
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
+
     def test_restore_output_textbox_refreshes_hidden_session_history(self):
         class DummyFrame:
             def __init__(self):

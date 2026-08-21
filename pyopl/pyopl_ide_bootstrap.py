@@ -1632,6 +1632,16 @@ class OPLIDE(tk.Tk):
         except Exception:
             pass
 
+    @staticmethod
+    def _get_solver_log_text(ide: Any) -> str:
+        log_text = getattr(ide, "_solver_log_text", None)
+        if log_text is None:
+            return ""
+        try:
+            return str(log_text.get("1.0", tk.END)).rstrip()
+        except Exception:
+            return ""
+
     def _restore_output_textbox(self) -> None:
         log_text = getattr(self, "_solver_log_text", None)
         if log_text is not None:
@@ -4464,35 +4474,64 @@ class OPLIDE(tk.Tk):
             return
         kind, payload = terminal_message
 
-        # Got a message => process should be done
+        OPLIDE._finalize_solver_poll(self, p, kind, payload, operation)
+
+    @staticmethod
+    def _finalize_solver_poll(
+        ide: Any,
+        process: multiprocessing.Process,
+        kind: str,
+        payload: Any,
+        operation: Optional[_ForegroundOperation],
+    ) -> None:
         try:
-            p.join(timeout=0.1)
+            process.join(timeout=0.1)
         except Exception:
             pass
 
-        self._cleanup_solver_ipc(cancel_queue_thread=False)
-        self._set_run_menu_running(False)
+        OPLIDE._cleanup_solver_ipc(ide, cancel_queue_thread=False)
+        ide._set_run_menu_running(False)
+        ide._stop_run_timer()
 
-        # Stop timer updates
-        self._stop_run_timer()
-        self._restore_output_textbox()
+        failed_result = kind == "success" and isinstance(payload, dict) and payload.get("status") == "FAILED"
+        solver_log = OPLIDE._get_solver_log_text(ide) if kind != "success" or failed_result else ""
+        ide._restore_output_textbox()
 
-        if kind == "success":
-            self._finish_solver_progress(payload if isinstance(payload, dict) else None, status="complete")
-            self._display_solve_results(
-                payload,
-                session_id=operation.session_id if operation is not None else None,
-                solver_choice=operation.solver_choice if operation is not None else None,
-            )
+        if kind == "success" and not failed_result:
+            OPLIDE._handle_successful_solver_poll(ide, payload, operation)
+            return
 
-            if OPLIDE._handle_solver_explanation(self, payload, operation):
-                return
-            self._finish_foreground_operation(operation)
-        else:
-            self._finish_solver_progress(status="failed")
-            self._append_output(f"\nError:\n{payload}\n", operation.session_id if operation is not None else None)
-            self.status_var.set("Error running model")
-            self._finish_foreground_operation(operation)
+        OPLIDE._handle_failed_solver_poll(ide, payload, failed_result, solver_log, operation)
+
+    @staticmethod
+    def _handle_successful_solver_poll(ide: Any, payload: Any, operation: Optional[_ForegroundOperation]) -> None:
+        ide._finish_solver_progress(payload if isinstance(payload, dict) else None, status="complete")
+        ide._display_solve_results(
+            payload,
+            session_id=operation.session_id if operation is not None else None,
+            solver_choice=operation.solver_choice if operation is not None else None,
+        )
+
+        if OPLIDE._handle_solver_explanation(ide, payload, operation):
+            return
+        ide._finish_foreground_operation(operation)
+
+    @staticmethod
+    def _handle_failed_solver_poll(
+        ide: Any,
+        payload: Any,
+        failed_result: bool,
+        solver_log: str,
+        operation: Optional[_ForegroundOperation],
+    ) -> None:
+        ide._finish_solver_progress(status="failed")
+        session_id = operation.session_id if operation is not None else None
+        if solver_log:
+            ide._append_output(solver_log + "\n", session_id)
+        failure_message = payload.get("message", payload) if failed_result else payload
+        ide._append_output(f"\nError:\n{failure_message}\n", session_id)
+        ide.status_var.set("Error running model")
+        ide._finish_foreground_operation(operation)
 
     def _handle_solver_explanation(self, payload: Any, operation: Optional[_ForegroundOperation]) -> bool:
         if operation is None or not operation.explain_after_solve:
