@@ -417,9 +417,20 @@ class GurobiCodeGenerator:
         records = {}
         for key, record in items:
             if isinstance(record, dict):
-                records[key] = {field: record.get(field) for field in field_names if field in record}
+                missing = [field for field in field_names if field not in record]
+                extra = [field for field in record if field not in field_names]
+                if missing or extra:
+                    raise SemanticError(
+                        f"Tuple array record at index {key!r} has missing fields {missing} and unknown fields {extra}."
+                    )
+                records[key] = {field: record[field] for field in field_names}
                 continue
-            records[key] = {field: record[index] for index, field in enumerate(field_names) if index < len(record)}
+            if not isinstance(record, (list, tuple)) or len(record) != len(field_names):
+                actual_length = len(record) if isinstance(record, (list, tuple)) else "non-sequence"
+                raise SemanticError(
+                    f"Tuple array record at index {key!r} has {actual_length} fields; expected {len(field_names)}."
+                )
+            records[key] = {field: record[index] for index, field in enumerate(field_names)}
         return records
 
     def _tuple_set_array_records(self, data_value, index_values=None):

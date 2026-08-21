@@ -274,14 +274,10 @@ class ExpressionEvaluator:
                 "tuple field",
                 f"{field} in tuple type {tuple_type_name} for value {base['value']}",
             )
-        if hasattr(self.parent, "tuple_types"):
-            for tname, fields in self.parent.tuple_types.items():
-                if len(tuple_val) == len(fields):
-                    for idx, f in enumerate(fields):
-                        if f["name"] == field:
-                            return {}, tuple_val[idx]
-            raise self.parent._not_found_error("tuple field", f"{field} in tuple types for value {base['value']}")
-        return {}, f"{base['value']}[{field}]"
+        raise self.parent._not_found_error(
+            "tuple type metadata",
+            f"iterator or value '{base['value']}' while resolving field '{field}'",
+        )
 
     def _tuple_type_for_named_set(self, set_name: str) -> Optional[str]:
         for declaration in self.parent.ast.get("declarations", []):

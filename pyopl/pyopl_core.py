@@ -3448,6 +3448,140 @@ class OPLCompiler:
                 lineno=ln,
             )
 
+    @staticmethod
+    def _tuple_value_elements(value: Any) -> Any:
+        if isinstance(value, dict) and value.get("type") == "tuple_literal":
+            return value.get("elements")
+        return value
+
+    @staticmethod
+    def _validate_tuple_primitive(value: Any, field_type: str, path: str) -> None:
+        valid = False
+        if field_type == "boolean":
+            valid = isinstance(value, bool)
+        elif field_type in ("int", "int+"):
+            valid = isinstance(value, int) and not isinstance(value, bool)
+        elif field_type in ("float", "float+"):
+            valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+        elif field_type == "string":
+            valid = isinstance(value, str)
+        if not valid:
+            raise SemanticError(
+                f"Tuple field '{path}' expects type '{field_type}', got {type(value).__name__} value {value!r}."
+            )
+        if field_type in ("int+", "float+") and value < 0:
+            raise SemanticError(f"Tuple field '{path}' expects a nonnegative '{field_type}' value, got {value!r}.")
+
+    def _validate_tuple_value(
+        self,
+        value: Any,
+        tuple_type: str,
+        tuple_types: dict[str, list[dict[str, Any]]],
+        path: str,
+    ) -> None:
+        fields = tuple_types.get(tuple_type)
+        if fields is None:
+            raise SemanticError(f"Unknown tuple type '{tuple_type}' used by '{path}'.")
+        value = self._tuple_value_elements(value)
+        if isinstance(value, dict):
+            expected_names = [field["name"] for field in fields]
+            missing = [name for name in expected_names if name not in value]
+            extra = [name for name in value if name not in expected_names]
+            if missing or extra:
+                details = []
+                if missing:
+                    details.append(f"missing fields {missing}")
+                if extra:
+                    details.append(f"unknown fields {extra}")
+                raise SemanticError(f"Tuple value '{path}' for type '{tuple_type}' has " + " and ".join(details) + ".")
+            values = [value[name] for name in expected_names]
+        elif isinstance(value, (list, tuple)):
+            values = list(value)
+        else:
+            raise SemanticError(
+                f"Tuple value '{path}' for type '{tuple_type}' must be a tuple or record, got {type(value).__name__}."
+            )
+        if len(values) != len(fields):
+            raise SemanticError(
+                f"Tuple value '{path}' for type '{tuple_type}' has {len(values)} fields; expected {len(fields)}."
+            )
+        primitive_types = {"boolean", "int", "int+", "float", "float+", "string"}
+        for field, field_value in zip(fields, values, strict=True):
+            field_name = field.get("name")
+            field_type = field.get("type")
+            field_path = f"{path}.{field_name}"
+            field_value = self._tuple_value_elements(field_value)
+            if field_type in primitive_types:
+                self._validate_tuple_primitive(field_value, field_type, field_path)
+            elif isinstance(field_type, str):
+                self._validate_tuple_value(field_value, field_type, tuple_types, field_path)
+            else:
+                raise SemanticError(f"Tuple field '{field_path}' has an invalid declared type.")
+
+    def _validate_tuple_schemas(self, model_ast: dict[str, Any], working_data: dict[str, Any]) -> None:
+        declarations = model_ast.get("declarations") or []
+        tuple_types: dict[str, list[dict[str, Any]]] = {}
+        for decl in declarations:
+            if decl.get("type") != "tuple_type":
+                continue
+            tuple_type = decl.get("name")
+            fields = decl.get("fields")
+            if not isinstance(tuple_type, str) or not isinstance(fields, list):
+                continue
+            field_names = [field.get("name") for field in fields]
+            duplicates = sorted({name for name in field_names if field_names.count(name) > 1})
+            if duplicates:
+                raise SemanticError(f"Tuple type '{tuple_type}' declares duplicate fields {duplicates}.")
+            tuple_types[tuple_type] = fields
+
+        primitive_types = {"boolean", "int", "int+", "float", "float+", "string"}
+        for tuple_type, fields in tuple_types.items():
+            for field in fields:
+                field_name = field.get("name")
+                field_type = field.get("type")
+                if field_type not in primitive_types and field_type not in tuple_types:
+                    raise SemanticError(
+                        f"Tuple field '{tuple_type}.{field_name}' references unknown tuple type '{field_type}'."
+                    )
+
+        tuple_set_types = {"set_of_tuples", "set_of_tuples_external"}
+        for decl in declarations:
+            declaration_type = decl.get("type")
+            if declaration_type not in tuple_set_types | {
+                "set_of_tuples_array_external",
+                "tuple_array",
+                "tuple_array_external",
+            }:
+                continue
+            name = decl.get("name")
+            tuple_type = decl.get("tuple_type")
+            if not isinstance(name, str) or not isinstance(tuple_type, str):
+                continue
+            if tuple_type not in tuple_types:
+                raise SemanticError(f"Unknown tuple type '{tuple_type}' used by declaration '{name}'.")
+            raw_value = working_data.get(name)
+            if raw_value is None:
+                continue
+            if declaration_type in tuple_set_types:
+                values = raw_value.get("elements") if isinstance(raw_value, dict) and "elements" in raw_value else raw_value
+                if not isinstance(values, (list, tuple)):
+                    raise SemanticError(f"Tuple set '{name}' must contain a sequence of '{tuple_type}' values.")
+                for index, value in enumerate(values):
+                    self._validate_tuple_value(value, tuple_type, tuple_types, f"{name}[{index}]")
+                continue
+            if not isinstance(raw_value, (dict, list, tuple)):
+                raise SemanticError(f"Tuple array '{name}' must contain a sequence or mapping of values.")
+            rows = list(raw_value.values()) if isinstance(raw_value, dict) else raw_value
+            if declaration_type == "set_of_tuples_array_external":
+                for row_index, row in enumerate(rows):
+                    if not isinstance(row, (list, tuple)):
+                        raise SemanticError(f"Tuple-set array row '{name}[{row_index}]' must be a sequence.")
+                    for value_index, value in enumerate(row):
+                        self._validate_tuple_value(value, tuple_type, tuple_types, f"{name}[{row_index}][{value_index}]")
+            else:
+                for index, value in enumerate(rows):
+                    self._validate_tuple_value(value, tuple_type, tuple_types, f"{name}[{index}]")
+
     def _prepare_model_ast_and_working_data(
         self,
         model_code: str,
@@ -4582,6 +4716,7 @@ class OPLCompiler:
         self._materialize_set_of_tuples_comprehensions(model_ast, working_data)
         self._materialize_typed_set_comprehensions(model_ast, working_data)
         self._materialize_computed_parameters(model_ast, working_data)
+        self._validate_tuple_schemas(model_ast, working_data)
         data_dict = dict(working_data)
 
         if model_ast and "declarations" in model_ast:

@@ -13,6 +13,77 @@ def setUpModule():
 
 class TestTupleParsing(unittest.TestCase):
 
+    def assert_tuple_schema_error(self, model_code, message):
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                with self.assertRaisesRegex(SemanticError, message):
+                    OPLCompiler().compile_model(model_code, solver=solver)
+
+    def test_rejects_unknown_tuple_type_in_set_declaration(self):
+        self.assert_tuple_schema_error(
+            """
+            {Missing} Values = { <1> };
+            minimize 0;
+            subject to {}
+            """,
+            r"Unknown tuple type 'Missing'.*Values",
+        )
+
+    def test_rejects_duplicate_tuple_field_names(self):
+        self.assert_tuple_schema_error(
+            """
+            tuple Pair { int value; float value; };
+            {Pair} Values = { <1, 2.0> };
+            minimize 0;
+            subject to {}
+            """,
+            r"Tuple type 'Pair' declares duplicate fields.*value",
+        )
+
+    def test_rejects_unknown_nested_tuple_field_type_without_values(self):
+        self.assert_tuple_schema_error(
+            """
+            tuple Outer { Missing inner; };
+            minimize 0;
+            subject to {}
+            """,
+            r"Tuple field 'Outer\.inner' references unknown tuple type 'Missing'",
+        )
+
+    def test_rejects_tuple_with_wrong_arity(self):
+        self.assert_tuple_schema_error(
+            """
+            tuple Pair { int left; int right; };
+            {Pair} Values = { <1> };
+            minimize 0;
+            subject to {}
+            """,
+            r"Values\[0\].*has 1 fields; expected 2",
+        )
+
+    def test_rejects_tuple_with_wrong_primitive_type(self):
+        self.assert_tuple_schema_error(
+            """
+            tuple Pair { int left; string label; };
+            {Pair} Values = { <1, 2> };
+            minimize 0;
+            subject to {}
+            """,
+            r"Values\[0\]\.label.*expects type 'string'.*int value 2",
+        )
+
+    def test_rejects_tuple_with_wrong_nested_type(self):
+        self.assert_tuple_schema_error(
+            """
+            tuple Inner { int value; };
+            tuple Outer { Inner inner; };
+            {Outer} Values = { < <"bad"> > };
+            minimize 0;
+            subject to {}
+            """,
+            r"Values\[0\]\.inner\.value.*expects type 'int'.*str value 'bad'",
+        )
+
     def test_rejects_scalar_tuple_typed_decision_variable(self):
         code = """
         tuple Point { int x; int y; };

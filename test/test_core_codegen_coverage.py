@@ -242,6 +242,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIsNone(gen._resolve_tuple_field("Arc", "cost", ("A", "B")))
         self.assertIsNone(gen._resolve_tuple_field("Missing", "from", ("A", "B")))
 
+    def test_gurobi_tuple_array_records_reject_malformed_rows(self):
+        gen = GurobiCodeGenerator({"declarations": [], "constraints": []})
+
+        with self.assertRaisesRegex(SemanticError, "1 fields; expected 2"):
+            gen._tuple_array_records([[1]], ["left", "right"])
+        with self.assertRaisesRegex(SemanticError, "missing fields.*right.*unknown fields.*extra"):
+            gen._tuple_array_records({1: {"left": 1, "extra": 2}}, ["left", "right"])
+
     def test_scipy_csc_error_factories_return_semantic_errors(self):
         gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
 

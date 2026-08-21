@@ -379,6 +379,11 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         gen.data_dict["N"] = "3"
         gen.tuple_types = {"Arc": [{"name": "i"}, {"name": "j"}]}
         gen.ast["declarations"].append({"type": "set_of_tuples", "name": "Arcs", "tuple_type": "Arc"})
+        gen.ast["objective"] = {
+            "type": "sum",
+            "iterators": [{"iterator": "a", "range": {"type": "named_range", "name": "Arcs"}}],
+            "expression": {"type": "number", "value": 0},
+        }
         evaluator = ExpressionEvaluator(gen)
 
         self.assertEqual(evaluator._eval_index_expr({"type": "name_reference_index", "name": "N"}, {}), ({}, 3))
@@ -395,6 +400,14 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
             ({}, 3),
         )
         self.assertEqual(evaluator._resolve_tuple_field_access_by_index({"value": "a"}, "j", (10, 20)), ({}, 20))
+
+        gen.ast["declarations"] = []
+        gen.tuple_types = {
+            "First": [{"name": "i"}, {"name": "j"}],
+            "Second": [{"name": "left"}, {"name": "right"}],
+        }
+        with self.assertRaisesRegex(SemanticError, "tuple type metadata.*unknown.*right"):
+            evaluator._resolve_tuple_field_access_by_index({"value": "unknown"}, "right", (10, 20))
 
     def test_find_tuple_type_for_iterator(self) -> None:
         gen = make_generator()
