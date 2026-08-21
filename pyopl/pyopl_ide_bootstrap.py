@@ -102,6 +102,7 @@ TOKEN_COLORS = {
 MAX_HIGHLIGHT_CHARS = 10_000
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
+MAX_FOLD_VIEW_STATES = 100
 
 _FOLD_TOKEN_RE = re.compile(
     r'(?P<double_string>"(?:\\.|[^"\\])*")'
@@ -266,6 +267,10 @@ class _EditorGutter:
             self.folded_lines.add(opening_line)
         self._apply_folds()
         self.schedule_redraw()
+        try:
+            self.owner._on_fold_state_changed(self)
+        except Exception:
+            pass
         return True
 
     def _apply_folds(self) -> None:
@@ -687,6 +692,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._output_session_label: dict[str, str] = {}
         self._output_session_timestamp: dict[str, str] = {}
         self._output_session_artifacts: dict[str, dict[str, str]] = {}
+        self._fold_view_states: dict[str, dict[str, Any]] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
         self._active_operation: Optional[_ForegroundOperation] = None
@@ -1315,6 +1321,7 @@ class OPLIDE(TkinterDnD.Tk):
             "_output_session_label": {},
             "_output_session_timestamp": {},
             "_output_session_artifacts": {},
+            "_fold_view_states": {},
         }
         for attribute, fallback in defaults.items():
             try:
@@ -3413,16 +3420,19 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _open_model_path(self, path: str) -> None:
         """Open a model path into the model editor."""
+        self._store_fold_state(self.model_file, self.model_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as model_handle:
             self.model_text.delete(1.0, tk.END)
             self.model_text.insert(tk.END, model_handle.read())
         self.model_file = path
         self._model_saved_text = self._get_editor_text(self.model_text)
         self.highlight(self.model_text)
+        self._restore_fold_state(path, self.model_gutter)
         self._update_caret_position(self.model_text)
         self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(path)}")
         self.editor_notebook.select(self.model_frame)
         self.on_tab_changed(None)
+        self._save_session()
 
     def open_data(self) -> None:
         """Open a data file into the data editor."""
@@ -3434,16 +3444,19 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _open_data_path(self, path: str) -> None:
         """Open a data path into the data editor."""
+        self._store_fold_state(self.data_file, self.data_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
             self.data_text.insert(tk.END, data_handle.read())
         self.data_file = path
         self._data_saved_text = self._get_editor_text(self.data_text)
         self.highlight(self.data_text, is_data=True)
+        self._restore_fold_state(path, self.data_gutter)
         self._update_caret_position(self.data_text)
         self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(path)}")
         self.editor_notebook.select(self.data_frame)
         self.on_tab_changed(None)
+        self._save_session()
 
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
@@ -5200,12 +5213,56 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             return ".pyopl_session"
 
+    @staticmethod
+    def _fold_state_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+    def _store_fold_state(self, path: Optional[str], gutter: Any, *, touch: bool) -> None:
+        if not path or gutter is None:
+            return
+        key = OPLIDE._fold_state_key(path)
+        previous = self._fold_view_states.get(key, {})
+        if not touch and not previous and not gutter.folded_lines:
+            return
+        edited_at = datetime.now(timezone.utc).isoformat() if touch else str(previous.get("edited_at") or "")
+        self._fold_view_states[key] = {
+            "folded_lines": sorted(int(line) for line in gutter.folded_lines),
+            "edited_at": edited_at,
+        }
+        while len(self._fold_view_states) > MAX_FOLD_VIEW_STATES:
+            oldest_key = min(
+                self._fold_view_states,
+                key=lambda state_key: (str(self._fold_view_states[state_key].get("edited_at") or ""), state_key),
+            )
+            del self._fold_view_states[oldest_key]
+
+    def _restore_fold_state(self, path: Optional[str], gutter: Any) -> None:
+        if not path or gutter is None:
+            return
+        state = self._fold_view_states.get(OPLIDE._fold_state_key(path), {})
+        folded_lines = state.get("folded_lines", [])
+        gutter.folded_lines = {int(line) for line in folded_lines if int(line) in gutter.fold_regions}
+        gutter._apply_folds()
+        gutter.schedule_redraw()
+
+    def _on_fold_state_changed(self, gutter: Any) -> None:
+        if gutter is getattr(self, "model_gutter", None):
+            path = self.model_file
+        elif gutter is getattr(self, "data_gutter", None):
+            path = self.data_file
+        else:
+            return
+        self._store_fold_state(path, gutter, touch=True)
+        self._save_session()
+
     def _save_session(self) -> None:
         """Save the current IDE session (output history, editors, file paths) to JSON.
 
         This is intentionally tolerant: best-effort persistence without blocking UI.
         """
         try:
+            self._store_fold_state(self.model_file, getattr(self, "model_gutter", None), touch=False)
+            self._store_fold_state(self.data_file, getattr(self, "data_gutter", None), touch=False)
             path = self._session_file_path()
             tmp_path = path + ".tmp"
             payload = {
@@ -5219,6 +5276,7 @@ class OPLIDE(TkinterDnD.Tk):
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
                 "data_file": self.data_file,
+                "fold_view_states": self._fold_view_states,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }
             # Write atomically
@@ -5251,6 +5309,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         try:
             OPLIDE._restore_session_history(self, session)
+            OPLIDE._restore_fold_view_states(self, session)
             OPLIDE._restore_session_files(self, session)
         except Exception:
             logging.getLogger(__name__).exception("Failed to restore session state from .pyopl_session")
@@ -5276,6 +5335,24 @@ class OPLIDE(TkinterDnD.Tk):
             self._output_session_label.setdefault(sid, OPLIDE._session_label(display, timestamp))
 
         OPLIDE._restore_session_history_widgets(self)
+
+    def _restore_fold_view_states(self, session: dict[str, Any]) -> None:
+        raw_states = session.get("fold_view_states", {}) or {}
+        states: dict[str, dict[str, Any]] = {}
+        for path, state in raw_states.items():
+            if not isinstance(path, str) or not isinstance(state, dict):
+                continue
+            raw_lines = state.get("folded_lines", [])
+            if not isinstance(raw_lines, list):
+                continue
+            lines = sorted({line for line in raw_lines if isinstance(line, int) and line > 0})
+            states[OPLIDE._fold_state_key(path)] = {
+                "folded_lines": lines,
+                "edited_at": str(state.get("edited_at") or ""),
+            }
+        self._fold_view_states = dict(
+            sorted(states.items(), key=lambda item: (item[1]["edited_at"], item[0]), reverse=True)[:MAX_FOLD_VIEW_STATES]
+        )
 
     @staticmethod
     def _session_timestamp(display: Any) -> str:
@@ -5332,6 +5409,13 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             OPLIDE._restore_session_file(self, session.get("model_file"), "model_file", self.model_text)
             OPLIDE._restore_session_file(self, session.get("data_file"), "data_file", self.data_text)
+            for path, gutter in (
+                (self.model_file, getattr(self, "model_gutter", None)),
+                (self.data_file, getattr(self, "data_gutter", None)),
+            ):
+                if gutter is not None:
+                    gutter.refresh()
+                OPLIDE._restore_fold_state(self, path, gutter)
             if hasattr(self, "editor_notebook"):
                 try:
                     model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"

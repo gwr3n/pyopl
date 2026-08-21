@@ -227,6 +227,42 @@ minimize x;
                 self.assertEqual(gutter.folded_lines, expected_folded_lines)
                 gutter._apply_folds.assert_called_once_with()
 
+    def test_fold_view_state_restores_by_normalized_file_path(self):
+        gutter = SimpleNamespace(
+            fold_regions={2: 4, 6: 8},
+            folded_lines=set(),
+            _apply_folds=mock.Mock(),
+            schedule_redraw=mock.Mock(),
+        )
+        path = "./models/example.mod"
+        key = OPLIDE._fold_state_key(path)
+        dummy = SimpleNamespace(_fold_view_states={key: {"folded_lines": [2, 99], "edited_at": "2026-08-21T12:00:00+00:00"}})
+
+        OPLIDE._restore_fold_state(dummy, path, gutter)
+
+        self.assertEqual(gutter.folded_lines, {2})
+        gutter._apply_folds.assert_called_once_with()
+        gutter.schedule_redraw.assert_called_once_with()
+
+    def test_fold_view_state_evicts_least_recently_edited_file_at_limit(self):
+        states = {
+            OPLIDE._fold_state_key(f"file-{index}.mod"): {
+                "folded_lines": [1],
+                "edited_at": f"2026-08-21T12:{index:02d}:00+00:00",
+            }
+            for index in range(pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
+        }
+        oldest_key = OPLIDE._fold_state_key("file-0.mod")
+        newest_path = "newest.mod"
+        dummy = SimpleNamespace(_fold_view_states=states)
+        gutter = SimpleNamespace(folded_lines={3})
+
+        OPLIDE._store_fold_state(dummy, newest_path, gutter, touch=True)
+
+        self.assertEqual(len(dummy._fold_view_states), pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
+        self.assertNotIn(oldest_key, dummy._fold_view_states)
+        self.assertEqual(dummy._fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
+
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
             def __init__(self):

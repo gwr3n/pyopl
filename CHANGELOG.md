@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Made `§` section folds include an immediately following brace block, including nested sections and blank paragraphs.
 - Preserved folded `§` sections when line insertions or deletions shift their ranges in the IDE.
+- Persisted folded sections for up to 100 recently edited files in the workspace-local `.pyopl_session` file.
 - Disabled GenAI composer inputs and model/data editors while Generate or Ask requests are active.
 - Restored the Solve menu's Stop lifecycle after the command was renamed and shortened its running label to "Stop".
 - Corrected static typing for IDE drag-and-drop widget registration.
