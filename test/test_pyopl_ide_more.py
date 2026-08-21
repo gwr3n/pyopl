@@ -104,6 +104,33 @@ value = 1;
 
         self.assertEqual(_find_fold_regions(text), {2: 3, 4: 5})
 
+    def test_find_fold_regions_leaves_trailing_blank_lines_expanded(self):
+        top_level_text = (
+            """// § Variables
+dvar float x;
+
+"""
+            "   \n"
+            """// § Objective
+minimize x;
+
+"""
+            "   \n"
+        )
+        block_text = (
+            """subject to {
+    // § Bounds
+    x >= 0;
+
+"""
+            "   \n"
+            """}
+"""
+        )
+
+        self.assertEqual(_find_fold_regions(top_level_text), {1: 2, 5: 6})
+        self.assertEqual(_find_fold_regions(block_text), {2: 3})
+
     def test_find_fold_regions_ignores_unmarked_comments_and_inline_markers(self):
         text = """subject to {
     // first comment line

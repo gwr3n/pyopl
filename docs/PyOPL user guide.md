@@ -840,7 +840,7 @@ subject to {
 }
 ```
 
-Click the triangle beside a section header to collapse or expand it. The header remains visible. A section ends before the next `§` header, at the end of the file, or immediately before the closing brace of the block containing the header. Nested braces are respected, and the containing block's final `}` remains visible. Ordinary comments and inline markers such as `x >= 0; // § Bounds` do not create sections.
+Click the triangle beside a section header to collapse or expand it. The header remains visible. A section ends before the next `§` header, at the end of the file, or immediately before the closing brace of the block containing the header. Trailing empty lines remain expanded. Nested braces are respected, and the containing block's final `}` remains visible. Ordinary comments and inline markers such as `x >= 0; // § Bounds` do not create sections.
 
 Section headers are ordinary comments and do not change model semantics. When an editor contains no collapsible sections, the gutter contracts to line-number-only width.
 

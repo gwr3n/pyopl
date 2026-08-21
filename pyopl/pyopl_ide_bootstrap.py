@@ -159,15 +159,18 @@ def _collect_fold_structure(text: str) -> tuple[list[tuple[int, Optional[int]]],
 def _resolve_fold_regions(
     markers: list[tuple[int, Optional[int]]],
     brace_closing_lines: dict[int, int],
-    final_line: int,
+    lines: list[str],
 ) -> dict[int, int]:
     regions: dict[int, int] = {}
+    final_line = max(1, len(lines))
     for marker_index, (marker_line, containing_brace) in enumerate(markers):
         next_marker_line = markers[marker_index + 1][0] if marker_index + 1 < len(markers) else final_line + 1
         brace_close_line = (
             brace_closing_lines.get(containing_brace, final_line + 1) if containing_brace is not None else final_line + 1
         )
         closing_line = min(next_marker_line, brace_close_line) - 1
+        while closing_line > marker_line and not lines[closing_line - 1].strip():
+            closing_line -= 1
         if closing_line > marker_line:
             regions[marker_line] = closing_line
     return regions
@@ -176,7 +179,7 @@ def _resolve_fold_regions(
 def _find_fold_regions(text: str) -> dict[int, int]:
     """Return explicit section folds as marker-line to final collapsible line."""
     markers, brace_closing_lines = _collect_fold_structure(text)
-    return _resolve_fold_regions(markers, brace_closing_lines, max(1, len(text.splitlines())))
+    return _resolve_fold_regions(markers, brace_closing_lines, text.splitlines())
 
 
 class _EditorGutter:
