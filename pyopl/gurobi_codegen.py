@@ -1540,8 +1540,7 @@ class GurobiCodeGenerator:
         self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}')")
         return name
 
-    def _boolean_expr_to_binary(self, node, iterators, constr_name_prefix):
-        node = self._normalize_boolean_aux_node(node)
+    def _unwrap_asserted_boolean_node(self, node):
         if node.get("type") == "constraint":
             left_node = self._unwrap_parenthesized(node.get("left", {}))
             right_node = self._unwrap_parenthesized(node.get("right", {}))
@@ -1553,44 +1552,61 @@ class GurobiCodeGenerator:
                     or (right_node.get("type") == "boolean_literal" and right_node.get("value") is True)
                 )
             ):
-                return self._boolean_expr_to_binary(left_node, iterators, constr_name_prefix)
-        if (
-            node.get("type") in ("constraint", "binop")
-            and node.get("sem_type") == "boolean"
-            and node.get("type") not in ("and", "or", "not")
-        ):
-            binary = self._new_implication_boolean_aux("cmp", constr_name_prefix)
-            self._bind_implication_comparison_to_binary(binary, node, iterators, constr_name_prefix)
-            return binary
+                return left_node
+        return node
+
+    def _boolean_comparison_to_binary(self, node, iterators, constr_name_prefix):
+        binary = self._new_implication_boolean_aux("cmp", constr_name_prefix)
+        self._bind_implication_comparison_to_binary(binary, node, iterators, constr_name_prefix)
+        return binary
+
+    def _boolean_not_to_binary(self, node, iterators, constr_name_prefix):
+        inner = self._boolean_expr_to_binary(node["value"], iterators, constr_name_prefix)
+        binary = self._new_implication_boolean_aux("not", constr_name_prefix)
+        self._add_code_line(
+            f"model.addConstr({binary} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{binary}')} )"
+        )
+        return binary
+
+    def _boolean_connective_to_binary(self, node, iterators, constr_name_prefix):
+        node_type = node["type"]
+        left = self._boolean_expr_to_binary(node["left"], iterators, constr_name_prefix)
+        right = self._boolean_expr_to_binary(node["right"], iterators, constr_name_prefix)
+        binary = self._new_implication_boolean_aux(node_type, constr_name_prefix)
+        if node_type == "and":
+            bounds = (f"{binary} <= {left}", f"{binary} <= {right}", f"{binary} >= {left} + {right} - 1")
+        else:
+            bounds = (f"{binary} >= {left}", f"{binary} >= {right}", f"{binary} <= {left} + {right}")
+        for index, bound in enumerate(bounds, 1):
+            self._add_code_line(
+                f"model.addConstr({bound}, name={self._format_name_expr(constr_name_prefix, f'_{node_type}{index}_{binary}')} )"
+            )
+        return binary
+
+    def _boolean_literal_to_binary(self, node, _iterators, constr_name_prefix):
+        binary = self._new_implication_boolean_aux("lit", constr_name_prefix)
+        value = 1 if node.get("value") else 0
+        self._add_code_line(
+            f"model.addConstr({binary} == {value}, name={self._format_name_expr(constr_name_prefix, f'_lit_{binary}')} )"
+        )
+        return binary
+
+    def _boolean_expr_to_binary(self, node, iterators, constr_name_prefix):
+        node = self._unwrap_asserted_boolean_node(self._normalize_boolean_aux_node(node))
         node_type = node.get("type")
-        if node_type == "not":
-            inner = self._boolean_expr_to_binary(node["value"], iterators, constr_name_prefix)
-            binary = self._new_implication_boolean_aux("not", constr_name_prefix)
-            self._add_code_line(
-                f"model.addConstr({binary} + {inner} == 1, name={self._format_name_expr(constr_name_prefix, f'_notlink_{binary}')} )"
-            )
-            return binary
-        if node_type in ("and", "or"):
-            left = self._boolean_expr_to_binary(node["left"], iterators, constr_name_prefix)
-            right = self._boolean_expr_to_binary(node["right"], iterators, constr_name_prefix)
-            binary = self._new_implication_boolean_aux(node_type, constr_name_prefix)
-            if node_type == "and":
-                bounds = (f"{binary} <= {left}", f"{binary} <= {right}", f"{binary} >= {left} + {right} - 1")
-            else:
-                bounds = (f"{binary} >= {left}", f"{binary} >= {right}", f"{binary} <= {left} + {right}")
-            for index, bound in enumerate(bounds, 1):
-                self._add_code_line(
-                    f"model.addConstr({bound}, name={self._format_name_expr(constr_name_prefix, f'_{node_type}{index}_{binary}')} )"
-                )
-            return binary
-        if node_type == "boolean_literal":
-            binary = self._new_implication_boolean_aux("lit", constr_name_prefix)
-            value = 1 if node.get("value") else 0
-            self._add_code_line(
-                f"model.addConstr({binary} == {value}, name={self._format_name_expr(constr_name_prefix, f'_lit_{binary}')} )"
-            )
-            return binary
-        raise ValueError(f"Unsupported boolean expression type for auxiliary binary: {node_type}")
+        if node_type in ("constraint", "binop") and node.get("sem_type") == "boolean":
+            return self._boolean_comparison_to_binary(node, iterators, constr_name_prefix)
+
+        handlers = {
+            "not": self._boolean_not_to_binary,
+            "and": self._boolean_connective_to_binary,
+            "or": self._boolean_connective_to_binary,
+            "boolean_literal": self._boolean_literal_to_binary,
+        }
+        handler = handlers.get(node_type)
+        if handler is None:
+            raise ValueError(f"Unsupported boolean expression type for auxiliary binary: {node_type}")
+        return handler(node, iterators, constr_name_prefix)
 
     def _constraint_implication_constraint(self, constraint_node, constr_name_prefix, current_iterators):
         """

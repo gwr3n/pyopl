@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Streamlined solver helper logic and improved boolean reification behavior.
+- Simplified Gurobi boolean-expression code generation to reduce control-flow complexity.
 - Renamed the IDE run-menu command to "Solve" for a more concise label.
 - Corrected solver-settings template links and wording in the user guide.
 
