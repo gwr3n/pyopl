@@ -907,18 +907,23 @@ python -m pyopl.pyopl_mcp
 
 ## Rhetor MCP
 
-Rhetor MCP exposes the Generative (GenAI) assistants and higher-level pipelines (generate, ask, insight) as MCP tools for IDEs and automation that want to request model/data synthesis, feedback, or an end‑to‑end insight workflow.
+Rhetor MCP exposes the Generative (GenAI) assistants, model discovery helpers, live Rhetor IDE editor access, and higher-level pipelines as MCP tools for IDEs and automation.
 
 - **Purpose**: Let external clients call GenAI-powered pipelines to generate OPL models/data, request feedback, list LLM models/providers, and run a combined generate→solve→summarize pipeline.
-- **Key tools**:
-  - **list_providers / list_models**: Enumerate supported LLM providers and available models.
-  - **list_methods**: Return available generative strategy identifiers (e.g., pyopl_generative, pyopl_chain_of_thought).
-  - **generate**: Produce `.mod` and `.dat` files from a natural-language prompt (writes files to provided paths).
-  - **ask**: Request feedback on an existing model/data pair.
-  - **insight**: Generate model/data from a prompt, solve it, and ask the assistant to produce a lay-language Markdown insight report (returns paths, stats, results, and markdown).
+- **Exposed tools**:
+  - **read_ide_editors_tool**: Read the current `model_text` and `data_text` from the running Rhetor IDE. Requires the Rhetor desktop IDE and its local MCP bridge to be running.
+  - **write_ide_editors_tool**: Replace `model_text`, `data_text`, or both in the running Rhetor IDE and return both editor contents. Omit an editor argument to leave it unchanged; at least one editor argument is required.
+  - **list_providers_tool**: Return canonical supported LLM provider identifiers, such as `openai`, `google`, and `ollama`.
+  - **list_models_tool**: List models for a provider. Accepts an optional `provider` and an optional `prefix` to filter model names. The `gemini` provider alias is normalized to `google`.
+  - **list_methods_tool**: Return `(display_name, method_id)` pairs for the available generative strategies, such as `pyopl_generative` and `pyopl_chain_of_thought`.
+  - **generate_tool**: Produce `.mod` and `.dat` files from a natural-language `prompt` at the supplied `model_file` and `data_file` paths. Accepts optional `llm_model`, `provider`, and `iterations` arguments and returns generation statistics and metadata.
+  - **ask_tool**: Send a feedback `prompt` about an existing model/data pair at `model_file` and `data_file` to the selected LLM provider. Returns text feedback or structured feedback metadata.
+  - **insight_tool**: Generate model/data from a `prompt`, solve it, and request a lay-language Markdown summary. Accepts optional `provider`, `llm_model`, `iterations`, and `solver` arguments and returns artifact paths, generation statistics, solver results, feedback, and Markdown.
 - **Provider and model config**: `provider` aliases normalized (e.g., `gemini` → `google`). Pass `llm_model` and `provider` args to select backend.
+- **Solver config**: `insight_tool` accepts `highs` (mapped to the SciPy/HiGHS backend), `scipy`, or `gurobi` through its `solver` argument. The default is `highs`.
 - **Prerequisites**:
   - Set credentials for remote providers (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`) or run an Ollama instance for `ollama` support.
+  - `read_ide_editors_tool` and `write_ide_editors_tool` require a running Rhetor IDE; the other tools can run directly through the stdio MCP server.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:
 ```json
 {
@@ -937,6 +942,8 @@ python -m pyopl.rhetor_mcp
 ```
 - **Behavioral notes**:
   - Long-running generation may use async/GraphChain backends when available; otherwise runs in worker threads.
-  - `insight` writes generated artifacts to a persistent temp directory (prefixed `pyopl_mcp_`) so the caller can inspect the `.mod`/`.dat` files afterwards.
+  - `generate_tool` writes generated artifacts to the paths supplied by the caller.
+  - `insight_tool` writes generated artifacts to a persistent temp directory (prefixed `pyopl_mcp_`) so the caller can inspect the `.mod`/`.dat` files afterwards. The caller is responsible for cleanup.
+  - `insight_tool` catches solver and feedback failures and includes an error payload in the returned `results` or `feedback` field.
 - **Files & internals**: See rhetor_mcp.py and the genai package for strategy implementations and model listing helpers.
 - **Security**: Keep API keys secret and prefer environment variables in CI/IDE launch configurations rather than embedding them in project files.
