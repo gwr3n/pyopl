@@ -36,7 +36,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypedDict
 
 import networkx as nx
 import numpy as np
@@ -81,6 +81,16 @@ class _NormalizedProblem:
     objective_offset: int
     columns: tuple[_Column, ...]
     rows: tuple[_Row, ...]
+
+
+class _LPRedundancyInputs(TypedDict):
+    c: list[float]
+    A_ub: list[list[float]] | None
+    b_ub: list[float] | None
+    A_eq: list[list[float]] | None
+    b_eq: list[float] | None
+    bounds: list[tuple[None, None]]
+    method: Literal["highs"]
 
 
 def compare(
@@ -1045,7 +1055,7 @@ def _lp_redundancy_inputs(
     other_rows: tuple[_Row, ...],
     variable_count: int,
     tolerance: float,
-) -> dict[str, object]:
+) -> _LPRedundancyInputs:
     inequality_rows = [other_row for other_row in other_rows if other_row.sense == "<="]
     equality_rows = [other_row for other_row in other_rows if other_row.sense == "="]
     return {
