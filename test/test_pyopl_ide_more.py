@@ -225,7 +225,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
         class Menu:
             def __init__(self):
-                self.labels = ["Open", "Solve Model", "Other"]
+                self.labels = ["Open", "Solve", "Other"]
                 self.configured = []
 
             def index(self, value):
@@ -247,10 +247,10 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
         self.assertEqual(OPLIDE._find_run_stop_menu_index(dummy), 1)
         OPLIDE._set_run_menu_running(dummy, True)
-        self.assertEqual(dummy.run_menu.labels[1], "Stop Model")
+        self.assertEqual(dummy.run_menu.labels[1], "Stop")
         self.assertEqual(dummy.run_menu.configured[-1][1]["accelerator"], "")
         OPLIDE._set_run_menu_running(dummy, False)
-        self.assertEqual(dummy.run_menu.labels[1], "Solve Model")
+        self.assertEqual(dummy.run_menu.labels[1], "Solve")
         self.assertEqual(dummy.run_menu.configured[-1][1]["accelerator"], "Cmd+R")
 
         self.assertIsNone(OPLIDE._find_run_stop_menu_index(SimpleNamespace()))

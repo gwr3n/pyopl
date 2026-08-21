@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Disabled GenAI composer inputs and model/data editors while Generate or Ask requests are active.
+- Restored the Solve menu's Stop lifecycle after the command was renamed and shortened its running label to "Stop".
 
 ### Changed
 

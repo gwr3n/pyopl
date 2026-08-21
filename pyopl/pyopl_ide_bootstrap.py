@@ -846,7 +846,7 @@ class OPLIDE(TkinterDnD.Tk):
                     label = self.run_menu.entrycget(i, "label")
                 except Exception:
                     continue
-                if label in ("Solve Model", "Stop Model"):
+                if label in ("Solve", "Stop"):
                     return i
         except Exception:
             return None
@@ -862,14 +862,14 @@ class OPLIDE(TkinterDnD.Tk):
             # Requirement: Stop has no shortcut (clear displayed accelerator)
             self.run_menu.entryconfigure(
                 idx,
-                label="Stop Model",
+                label="Stop",
                 command=self.stop_model,
                 accelerator="",
             )
         else:
             self.run_menu.entryconfigure(
                 idx,
-                label="Solve Model",
+                label="Solve",
                 command=self.run_model,
                 accelerator=self._accel("R"),
             )
