@@ -73,19 +73,49 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
-    def test_find_fold_regions_handles_nesting_strings_and_comments(self):
-        text = """subject to {
-                // ignored { brace }
-                forall(i in items) {
-                    label == "not a } brace";
-                }
-                /* ignored {
-                        brace } */
-                }
-                sameLine { ignored; }
-                """
+    def test_find_fold_regions_uses_explicit_section_markers(self):
+        text = """// ordinary comment
+// § Variables
+dvar float x;
+/* § Objective */
+minimize x;
+subject to {
+    // § Bounds
+    // ordinary comment with a } brace
+    forall(i in items) {
+        label == "// § not a marker";
+    }
+    x >= 0;
+}
+# § Data
+value = 1;
+"""
 
-        self.assertEqual(_find_fold_regions(text), {1: 8, 3: 5})
+        self.assertEqual(_find_fold_regions(text), {2: 3, 4: 6, 7: 12, 14: 15})
+
+    def test_find_fold_regions_ends_section_at_next_marker_in_same_block(self):
+        text = """subject to {
+    // § First
+    x >= 0;
+    # § Second
+    x <= 1;
+}
+"""
+
+        self.assertEqual(_find_fold_regions(text), {2: 3, 4: 5})
+
+    def test_find_fold_regions_ignores_unmarked_comments_and_inline_markers(self):
+        text = """subject to {
+    // first comment line
+    // second comment line
+    forall(i in items) {
+        label == "// § not a marker";
+    }
+    x >= 0; // § inline marker
+}
+"""
+
+        self.assertEqual(_find_fold_regions(text), {})
 
     def test_editor_gutter_toggles_folded_text_range(self):
         class FoldText:
@@ -109,7 +139,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
 
         self.assertTrue(gutter.toggle_fold(2))
         self.assertEqual(gutter.folded_lines, {2})
-        self.assertEqual(gutter.text_widget.added, [("CODE_FOLD", "3.0", "6.0")])
+        self.assertEqual(gutter.text_widget.added, [("CODE_FOLD", "3.0", "7.0")])
         self.assertTrue(gutter.toggle_fold(2))
         self.assertEqual(gutter.folded_lines, set())
         self.assertFalse(gutter.toggle_fold(99))

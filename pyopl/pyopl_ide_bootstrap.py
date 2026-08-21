@@ -103,73 +103,89 @@ MAX_HIGHLIGHT_CHARS = 10_000
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 
+_FOLD_TOKEN_RE = re.compile(
+    r'(?P<double_string>"(?:\\.|[^"\\])*")'
+    r"|(?P<single_string>'(?:\\.|[^'\\])*')"
+    r"|(?P<line_comment>//[^\n]*)"
+    r"|(?P<block_comment>/\*[\s\S]*?(?:\*/|\Z))"
+    r"|(?P<hash_comment>\#[^\n]*)"
+    r"|(?P<brace>[{}])"
+    r"|(?P<newline>\n)"
+    r"|(?P<other>.)"
+)
 
-def _find_fold_regions(text: str) -> dict[int, int]:
-    """Return brace-delimited fold regions as opening-line to closing-line."""
-    regions: dict[int, int] = {}
-    stack: list[int] = []
+
+def _is_section_marker(comment: str, prefix_length: int) -> bool:
+    return comment[prefix_length:].lstrip(" \t").startswith("§")
+
+
+def _collect_fold_structure(text: str) -> tuple[list[tuple[int, Optional[int]]], dict[int, int]]:
+    markers: list[tuple[int, Optional[int]]] = []
+    brace_stack: list[int] = []
+    brace_closing_lines: dict[int, int] = {}
+    next_brace_id = 0
     line = 1
-    index = 0
-    quote: Optional[str] = None
-    in_line_comment = False
-    in_block_comment = False
+    line_has_code = False
 
-    while index < len(text):
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-        if char == "\n":
+    for match in _FOLD_TOKEN_RE.finditer(text):
+        token_type = match.lastgroup
+        token = match.group()
+        if token_type == "newline":
             line += 1
-            in_line_comment = False
-            index += 1
-            continue
-        if in_line_comment:
-            index += 1
-            continue
-        if in_block_comment:
-            if char == "*" and next_char == "/":
-                in_block_comment = False
-                index += 2
-            else:
-                index += 1
-            continue
-        if quote is not None:
-            if char == "\\":
-                index += 2
-            elif char == quote:
-                quote = None
-                index += 1
-            else:
-                index += 1
-            continue
-        if char in ('"', "'"):
-            quote = char
-            index += 1
-            continue
-        if char == "/" and next_char == "/":
-            in_line_comment = True
-            index += 2
-            continue
-        if char == "/" and next_char == "*":
-            in_block_comment = True
-            index += 2
-            continue
-        if char == "{":
-            stack.append(line)
-        elif char == "}" and stack:
-            opening_line = stack.pop()
-            if opening_line < line:
-                regions[opening_line] = line
-        index += 1
+            line_has_code = False
+        elif token_type in ("double_string", "single_string"):
+            line_has_code = True
+        elif token_type in ("line_comment", "hash_comment", "block_comment"):
+            prefix_length = 1 if token_type == "hash_comment" else 2
+            if not line_has_code and _is_section_marker(token, prefix_length):
+                markers.append((line, brace_stack[-1] if brace_stack else None))
+            newline_count = token.count("\n")
+            line += newline_count
+            if newline_count:
+                line_has_code = False
+        elif token == "{":
+            next_brace_id += 1
+            brace_stack.append(next_brace_id)
+            line_has_code = True
+        elif token == "}" and brace_stack:
+            brace_closing_lines[brace_stack.pop()] = line
+            line_has_code = True
+        elif not token.isspace():
+            line_has_code = True
 
+    return markers, brace_closing_lines
+
+
+def _resolve_fold_regions(
+    markers: list[tuple[int, Optional[int]]],
+    brace_closing_lines: dict[int, int],
+    final_line: int,
+) -> dict[int, int]:
+    regions: dict[int, int] = {}
+    for marker_index, (marker_line, containing_brace) in enumerate(markers):
+        next_marker_line = markers[marker_index + 1][0] if marker_index + 1 < len(markers) else final_line + 1
+        brace_close_line = (
+            brace_closing_lines.get(containing_brace, final_line + 1) if containing_brace is not None else final_line + 1
+        )
+        closing_line = min(next_marker_line, brace_close_line) - 1
+        if closing_line > marker_line:
+            regions[marker_line] = closing_line
     return regions
 
 
+def _find_fold_regions(text: str) -> dict[int, int]:
+    """Return explicit section folds as marker-line to final collapsible line."""
+    markers, brace_closing_lines = _collect_fold_structure(text)
+    return _resolve_fold_regions(markers, brace_closing_lines, max(1, len(text.splitlines())))
+
+
 class _EditorGutter:
-    """Draw line numbers and brace-based folding controls beside a Text widget."""
+    """Draw line numbers and explicit section-folding controls beside a Text widget."""
 
     def __init__(self, owner: Any, text_widget: tk.Text, canvas: tk.Canvas) -> None:
         self.owner = owner
         self.text_widget = text_widget
+        self.scrollbar = cast(Any, text_widget).vbar
         self.canvas = canvas
         self.fold_regions: dict[int, int] = {}
         self.folded_lines: set[int] = set()
@@ -202,9 +218,9 @@ class _EditorGutter:
         for opening_line in sorted(self.folded_lines):
             closing_line = self.fold_regions.get(opening_line)
             if closing_line is not None:
-                self.text_widget.tag_add("CODE_FOLD", f"{opening_line + 1}.0", f"{closing_line}.0")
+                self.text_widget.tag_add("CODE_FOLD", f"{opening_line + 1}.0", f"{closing_line + 1}.0")
 
-    def schedule_redraw(self) -> None:
+    def schedule_redraw(self, _event: Optional[tk.Event] = None) -> None:
         if self._redraw_after_id is not None:
             return
         try:
@@ -265,6 +281,10 @@ class _EditorGutter:
     def configure_colors(self, background: str, foreground: str) -> None:
         self._foreground = foreground
         self.canvas.configure(background=background)
+        self.schedule_redraw()
+
+    def sync_scroll(self, first: float, last: float) -> None:
+        self.scrollbar.set(first, last)
         self.schedule_redraw()
 
 
@@ -1710,20 +1730,11 @@ class OPLIDE(TkinterDnD.Tk):
             (self.model_text, self.model_gutter),
             (self.data_text, self.data_gutter),
         ):
-            text_widget.configure(
-                yscrollcommand=lambda first, last, g=gutter, w=text_widget: self._sync_editor_scroll(
-                    w, g, first, last
-                )
-            )
-            text_widget.bind("<Configure>", lambda _event, g=gutter: g.schedule_redraw(), add="+")
+            text_widget.configure(yscrollcommand=gutter.sync_scroll)
+            text_widget.bind("<Configure>", gutter.schedule_redraw, add="+")
             gutter.refresh()
 
         self.editor_frame = editor_frame
-
-    @staticmethod
-    def _sync_editor_scroll(text_widget: Any, gutter: _EditorGutter, first: str, last: str) -> None:
-        text_widget.vbar.set(first, last)
-        gutter.schedule_redraw()
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
         """Create the output panel."""
