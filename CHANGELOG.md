@@ -2,16 +2,12 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Preserve syntax-error tracebacks in the IDE output history before the model compilation failure message.
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v2.1.0] - 2026-08-21
 
 ### Added
 
@@ -22,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve syntax-error tracebacks in the IDE output history before the model compilation failure message.
 - Prevented explicit MCP `null` editor updates from clearing or partially changing Rhetor IDE editor contents.
 - Hardened tuple-array handling and tuple validation across solver backends.
 - Solver results now report only variables declared in the PyOPL model, excluding linearisation auxiliaries.
@@ -33,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Renamed the IDE run-menu command to "Solve" for a more concise label.
 - Corrected solver-settings template links and wording in the user guide.
 
-## [2.0.0] - 2026-08-21
+## [v2.0.0] - 2026-08-21
 
 ### Added
 

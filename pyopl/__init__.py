@@ -8,7 +8,7 @@ from .genai.pyopl_generative import generative_feedback, generative_solve
 from .model_equivalence import compare_models
 from .pyopl_core import solve
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 __year__ = "2026"
 __author__ = "Roberto Rossi"
 __email__ = "robros@gmail.com"
