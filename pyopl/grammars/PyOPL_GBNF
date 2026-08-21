@@ -1,6 +1,9 @@
 root ::= _ ( model | data_file ) _
 
-_ ::= ([ \t\r\n])*
+_ ::= ( [ \t\r\n] | line_comment | hash_comment | block_comment )*
+line_comment ::= "//" [^\n]*
+hash_comment ::= "#" [^\n]*
+block_comment ::= "/*" ( [^*] | "*" [^/] )* "*/"
 
 
 // --- Tokens and atoms ---

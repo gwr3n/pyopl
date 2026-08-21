@@ -8,6 +8,10 @@ Reference: `pyopl/pyopl_core.py`
 
 The grammar supports:
 
+- Comments in model and data files:
+  - line comments beginning with `//`
+  - line comments beginning with `#`
+  - block comments delimited by `/*` and `*/`
 - Declarations:
   - decision variables (`dvar`) – scalar and indexed
   - parameters (`param` optional) – scalar (external or inline), indexed (external, inline array, or computed by expression with iterators)
@@ -53,6 +57,31 @@ Notes:
 ## BNF Grammar
 
 BNF is simplified for readability. Optional elements are in [brackets]. Alternatives use |. `*` means zero or more. `ε` denotes empty.
+
+### Lexical Whitespace and Comments
+
+Comments are discarded by the lexer and may appear anywhere whitespace is allowed in both model (`.mod`) and data (`.dat`) files.
+
+```
+<ignored> ::= (<whitespace> | <line_comment> | <hash_comment> | <block_comment>)*
+<line_comment> ::= '//' <characters_to_end_of_line>
+<hash_comment> ::= '#' <characters_to_end_of_line>
+<block_comment> ::= '/*' <characters_until_first_closing_delimiter> '*/'
+```
+
+`//` and `#` comments end at the next newline or the end of the file. Block comments may span lines and end at the first `*/`; nested block comments are not supported. Comment markers inside string literals are string content, not comments.
+
+#### IDE section markers (`§`)
+
+The section sign has no standalone role in the PyOPL compiler grammar. The IDE treats `§` as a folding marker only when it is the first non-whitespace character after a comment delimiter and the comment itself starts a line:
+
+```opl
+// § Variables
+/* § Objective */
+# § Data
+```
+
+The marker comment remains visible when its section is collapsed. Its section extends to the next marker, the end of the file, or the closing brace of the block containing it; the closing brace remains visible. A marker inside a string or after code on the same line, such as `x >= 0; // § Bounds`, does not create a section. Because all marker forms are ordinary comments, they are ignored during parsing and do not affect model or data semantics. A bare `§` outside a comment is an illegal character.
 
 ### Model Structure
 
