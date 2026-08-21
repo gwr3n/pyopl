@@ -322,6 +322,12 @@ class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
 
+class _DropTargetWidget(Protocol):
+    def drop_target_register(self, *dndtypes: str) -> Any: ...
+
+    def dnd_bind(self, sequence: str, func: Callable[[tk.Event], Any], add: Optional[str] = None) -> Any: ...
+
+
 @dataclass
 class _ForegroundOperation:
     kind: str
@@ -3174,10 +3180,12 @@ class OPLIDE(TkinterDnD.Tk):
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
         for widget in (self.model_text, self.data_text):
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<Drop>>", self._on_editor_files_dropped)
-        self.genai_attachment_listbox.drop_target_register(DND_FILES)
-        self.genai_attachment_listbox.dnd_bind("<<Drop>>", self._on_attachment_files_dropped)
+            drop_target = cast(_DropTargetWidget, widget)
+            drop_target.drop_target_register(DND_FILES)
+            drop_target.dnd_bind("<<Drop>>", self._on_editor_files_dropped)
+        attachment_drop_target = cast(_DropTargetWidget, self.genai_attachment_listbox)
+        attachment_drop_target.drop_target_register(DND_FILES)
+        attachment_drop_target.dnd_bind("<<Drop>>", self._on_attachment_files_dropped)
 
     def _dropped_paths(self, event: Any) -> list[str]:
         """Parse a platform-native Tk drop payload into filesystem paths."""
