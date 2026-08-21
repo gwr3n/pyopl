@@ -724,14 +724,15 @@ Solver specifics:
 - Gurobi (default): linear and mixed-integer models; uses indicator constraints for many logical patterns and big-M encodings with automatic tightening.
 - SciPy/HiGHS: linear programs and (if supported by your SciPy version) MIP. Integrality is passed to `linprog`; boolean/logic and implications are compiled via big-M with automatic tightening; some composite boolean antecedents for implications may be limited.
 
+Facilities for converting MPS/LP to OPL are available in repo [`mps-to-opl`](https://github.com/gwr3n/mps-to-opl).
+
 ---
 
 ## Limitations
-- Named ranges must be declared inline in the model with explicit bounds (e.g., `range T = 1..N;`). A bare `range T;` is parsed but not supported by code generation at loop sites.
 - Tuple types are data schemas and cannot be used as `dvar` types. Use scalar decision variables indexed by tuple sets instead.
 - Named tuple initialization (`#<field:value, ...>#`), tuple `key` fields, and sorted tuple sets are not yet supported.
 - SciPy/HiGHS backend:
-  - Composite boolean implication antecedents are supported via big‑M and auxiliaries; prefer simple forms for robustness.
+  - Some composite boolean implication antecedents are supported via big‑M and auxiliaries; prefer simple forms for robustness.
   - Capabilities for larger MIP models depend on your SciPy/HiGHS version.
 - Non-linear arithmetic over decision variables (e.g., `variable*variable`, `exp(x)` for decision variable `x`), piecewise linear, SOS, `<=>` bi-implication, global constraints, and user-defined functions are not supported.
 - Big-M tightening uses declared types, simple expression spans, and collected bounds; when information is insufficient, conservative fallback M is used.
