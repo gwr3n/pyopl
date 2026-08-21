@@ -5,7 +5,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 from pyopl import pyopl_ide_bootstrap
-from pyopl.pyopl_ide_bootstrap import OPLIDE, _FdLogRedirector, _ForegroundOperation, _QueueTextWriter
+from pyopl.pyopl_ide_bootstrap import (
+    OPLIDE,
+    _EditorGutter,
+    _FdLogRedirector,
+    _find_fold_regions,
+    _ForegroundOperation,
+    _QueueTextWriter,
+)
 
 
 class DummyVar:
@@ -66,6 +73,47 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_find_fold_regions_handles_nesting_strings_and_comments(self):
+        text = """subject to {
+                // ignored { brace }
+                forall(i in items) {
+                    label == "not a } brace";
+                }
+                /* ignored {
+                        brace } */
+                }
+                sameLine { ignored; }
+                """
+
+        self.assertEqual(_find_fold_regions(text), {1: 8, 3: 5})
+
+    def test_editor_gutter_toggles_folded_text_range(self):
+        class FoldText:
+            def __init__(self):
+                self.added = []
+
+            def tag_remove(self, *args):
+                pass
+
+            def tag_configure(self, *args, **kwargs):
+                pass
+
+            def tag_add(self, *args):
+                self.added.append(args)
+
+        gutter = _EditorGutter.__new__(_EditorGutter)
+        gutter.text_widget = FoldText()
+        gutter.fold_regions = {2: 6}
+        gutter.folded_lines = set()
+        gutter.schedule_redraw = mock.Mock()
+
+        self.assertTrue(gutter.toggle_fold(2))
+        self.assertEqual(gutter.folded_lines, {2})
+        self.assertEqual(gutter.text_widget.added, [("CODE_FOLD", "3.0", "6.0")])
+        self.assertTrue(gutter.toggle_fold(2))
+        self.assertEqual(gutter.folded_lines, set())
+        self.assertFalse(gutter.toggle_fold(99))
+
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
             def __init__(self):

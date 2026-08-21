@@ -104,6 +104,170 @@ GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 
 
+def _find_fold_regions(text: str) -> dict[int, int]:
+    """Return brace-delimited fold regions as opening-line to closing-line."""
+    regions: dict[int, int] = {}
+    stack: list[int] = []
+    line = 1
+    index = 0
+    quote: Optional[str] = None
+    in_line_comment = False
+    in_block_comment = False
+
+    while index < len(text):
+        char = text[index]
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if char == "\n":
+            line += 1
+            in_line_comment = False
+            index += 1
+            continue
+        if in_line_comment:
+            index += 1
+            continue
+        if in_block_comment:
+            if char == "*" and next_char == "/":
+                in_block_comment = False
+                index += 2
+            else:
+                index += 1
+            continue
+        if quote is not None:
+            if char == "\\":
+                index += 2
+            elif char == quote:
+                quote = None
+                index += 1
+            else:
+                index += 1
+            continue
+        if char in ('"', "'"):
+            quote = char
+            index += 1
+            continue
+        if char == "/" and next_char == "/":
+            in_line_comment = True
+            index += 2
+            continue
+        if char == "/" and next_char == "*":
+            in_block_comment = True
+            index += 2
+            continue
+        if char == "{":
+            stack.append(line)
+        elif char == "}" and stack:
+            opening_line = stack.pop()
+            if opening_line < line:
+                regions[opening_line] = line
+        index += 1
+
+    return regions
+
+
+class _EditorGutter:
+    """Draw line numbers and brace-based folding controls beside a Text widget."""
+
+    def __init__(self, owner: Any, text_widget: tk.Text, canvas: tk.Canvas) -> None:
+        self.owner = owner
+        self.text_widget = text_widget
+        self.canvas = canvas
+        self.fold_regions: dict[int, int] = {}
+        self.folded_lines: set[int] = set()
+        self._redraw_after_id: Optional[str] = None
+        self._foreground = "#7b8794"
+        self.canvas.bind("<Button-1>", self._on_click)
+        self.canvas.bind("<Configure>", lambda _event: self.schedule_redraw(), add="+")
+
+    def refresh(self) -> None:
+        text = self.text_widget.get("1.0", "end-1c")
+        self.fold_regions = _find_fold_regions(text)
+        self.folded_lines.intersection_update(self.fold_regions)
+        self._apply_folds()
+        self.schedule_redraw()
+
+    def toggle_fold(self, opening_line: int) -> bool:
+        if opening_line not in self.fold_regions:
+            return False
+        if opening_line in self.folded_lines:
+            self.folded_lines.remove(opening_line)
+        else:
+            self.folded_lines.add(opening_line)
+        self._apply_folds()
+        self.schedule_redraw()
+        return True
+
+    def _apply_folds(self) -> None:
+        self.text_widget.tag_remove("CODE_FOLD", "1.0", tk.END)
+        self.text_widget.tag_configure("CODE_FOLD", elide=True)
+        for opening_line in sorted(self.folded_lines):
+            closing_line = self.fold_regions.get(opening_line)
+            if closing_line is not None:
+                self.text_widget.tag_add("CODE_FOLD", f"{opening_line + 1}.0", f"{closing_line}.0")
+
+    def schedule_redraw(self) -> None:
+        if self._redraw_after_id is not None:
+            return
+        try:
+            self._redraw_after_id = self.owner.after_idle(self.redraw)
+        except Exception:
+            self._redraw_after_id = None
+
+    def redraw(self) -> None:
+        self._redraw_after_id = None
+        try:
+            self.canvas.delete("all")
+            index = self.text_widget.index("@0,0")
+            while True:
+                line_info = self.text_widget.dlineinfo(index)
+                if line_info is None:
+                    break
+                line = int(str(index).split(".", 1)[0])
+                y = int(line_info[1])
+                self.canvas.create_text(
+                    42,
+                    y,
+                    anchor="ne",
+                    text=str(line),
+                    font=(self.owner.editor_font_family, self.owner.current_font_size),
+                    fill=self._foreground,
+                )
+                if line in self.fold_regions:
+                    self._draw_fold_marker(line, y)
+                next_index = self.text_widget.index(f"{index}+1displaylines")
+                if next_index == index:
+                    break
+                index = next_index
+        except (tk.TclError, ValueError):
+            return
+
+    def _draw_fold_marker(self, line: int, y: int) -> None:
+        middle_y = y + max(5, self.current_line_height() // 2)
+        if line in self.folded_lines:
+            points = (7, middle_y - 4, 7, middle_y + 4, 12, middle_y)
+        else:
+            points = (5, middle_y - 3, 13, middle_y - 3, 9, middle_y + 2)
+        self.canvas.create_polygon(*points, fill=self._foreground, outline="")
+
+    def current_line_height(self) -> int:
+        try:
+            return int(tkfont.Font(font=self.text_widget.cget("font")).metrics("linespace"))
+        except Exception:
+            return self.owner.current_font_size + 4
+
+    def _on_click(self, event: tk.Event) -> None:
+        try:
+            line = int(self.text_widget.index(f"@0,{event.y}").split(".", 1)[0])
+        except (tk.TclError, ValueError):
+            return
+        if event.x <= 18:
+            self.toggle_fold(line)
+
+    def configure_colors(self, background: str, foreground: str) -> None:
+        self._foreground = foreground
+        self.canvas.configure(background=background)
+        self.schedule_redraw()
+
+
 # GenAI prompt payload shape (kept loose to avoid importing genai modules/types here).
 # Either:
 #   - str
@@ -1468,8 +1632,12 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Model editor
         self.model_frame = ttk.Frame(self.editor_notebook, style="Editor.TFrame")
+        model_editor_container = ttk.Frame(self.model_frame, style="Editor.TFrame")
+        model_editor_container.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        model_gutter_canvas = tk.Canvas(model_editor_container, width=48, highlightthickness=0, bd=0)
+        model_gutter_canvas.pack(side=tk.LEFT, fill=tk.Y)
         self.model_text = scrolledtext.ScrolledText(
-            self.model_frame,
+            model_editor_container,
             wrap=tk.NONE,
             undo=True,
             font=(self.editor_font_family, self.current_font_size),
@@ -1480,7 +1648,8 @@ class OPLIDE(TkinterDnD.Tk):
             bd=0,
         )
         self._replace_scrolled_text_vbar(self.model_text)
-        self.model_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        self.model_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        self.model_gutter = _EditorGutter(self, self.model_text, model_gutter_canvas)
 
         def _on_model_changed(event: tk.Event) -> None:
             self._on_text_change(self.model_text, False)
@@ -1495,8 +1664,12 @@ class OPLIDE(TkinterDnD.Tk):
         # Data editor
         # Use the same styled frame for consistent background
         self.data_frame = ttk.Frame(self.editor_notebook, style="Editor.TFrame")
+        data_editor_container = ttk.Frame(self.data_frame, style="Editor.TFrame")
+        data_editor_container.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        data_gutter_canvas = tk.Canvas(data_editor_container, width=48, highlightthickness=0, bd=0)
+        data_gutter_canvas.pack(side=tk.LEFT, fill=tk.Y)
         self.data_text = scrolledtext.ScrolledText(
-            self.data_frame,
+            data_editor_container,
             wrap=tk.NONE,
             undo=True,
             font=(self.editor_font_family, self.current_font_size),
@@ -1507,7 +1680,8 @@ class OPLIDE(TkinterDnD.Tk):
             bd=0,
         )
         self._replace_scrolled_text_vbar(self.data_text)
-        self.data_text.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        self.data_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
+        self.data_gutter = _EditorGutter(self, self.data_text, data_gutter_canvas)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
@@ -1532,7 +1706,24 @@ class OPLIDE(TkinterDnD.Tk):
         # Update caret/highlighting when switching tabs
         self.editor_notebook.bind("<<NotebookTabChanged>>", self.on_tab_changed)
 
+        for text_widget, gutter in (
+            (self.model_text, self.model_gutter),
+            (self.data_text, self.data_gutter),
+        ):
+            text_widget.configure(
+                yscrollcommand=lambda first, last, g=gutter, w=text_widget: self._sync_editor_scroll(
+                    w, g, first, last
+                )
+            )
+            text_widget.bind("<Configure>", lambda _event, g=gutter: g.schedule_redraw(), add="+")
+            gutter.refresh()
+
         self.editor_frame = editor_frame
+
+    @staticmethod
+    def _sync_editor_scroll(text_widget: Any, gutter: _EditorGutter, first: str, last: str) -> None:
+        text_widget.vbar.set(first, last)
+        gutter.schedule_redraw()
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
         """Create the output panel."""
@@ -3011,6 +3202,8 @@ class OPLIDE(TkinterDnD.Tk):
         """Update caret position and syntax highlighting on text change."""
         # Keep caret responsive immediately
         self._update_caret_position(text_widget)
+        gutter = self.data_gutter if is_data else self.model_gutter
+        gutter.refresh()
         # Debounce highlighting so we don't re-lex/parse on every keystroke
         self._schedule_highlight(text_widget, is_data)
 
@@ -3607,6 +3800,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def highlight(self, text_widget: tk.Text, is_data: bool = False, validate: bool = True) -> None:
         """Apply syntax highlighting to the given text widget."""
+        gutter = getattr(self, "data_gutter" if is_data else "model_gutter", None)
+        if gutter is not None:
+            gutter.refresh()
         if (not is_data) and (not validate):
             return
 
@@ -3749,6 +3945,8 @@ class OPLIDE(TkinterDnD.Tk):
 
         self.model_text.config(font=editor_font)
         self.data_text.config(font=editor_font)
+        self.model_gutter.schedule_redraw()
+        self.data_gutter.schedule_redraw()
         self.output_text.config(font=output_font)
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.config(font=editor_font)
@@ -5909,6 +6107,10 @@ class OPLIDE(TkinterDnD.Tk):
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.config(**editor_config)
+        for gutter_name in ("model_gutter", "data_gutter"):
+            gutter = getattr(self, gutter_name, None)
+            if gutter is not None:
+                gutter.configure_colors(colors["editor_bg"], colors["status_meta_fg"])
         output = getattr(self, "output_text", None)
         if output is not None:
             output.config(
