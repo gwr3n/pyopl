@@ -251,7 +251,7 @@ class _EditorGutter:
                 line = int(str(index).split(".", 1)[0])
                 y = int(line_info[1])
                 self.canvas.create_text(
-                    self.FOLDING_WIDTH - 6 if self.fold_regions else self.LINE_NUMBER_WIDTH - 4,
+                    self.LINE_NUMBER_WIDTH - 4,
                     y,
                     anchor="ne",
                     text=str(line),
@@ -269,10 +269,18 @@ class _EditorGutter:
 
     def _draw_fold_marker(self, line: int, y: int) -> None:
         middle_y = y + max(5, self.current_line_height() // 2)
+        marker_x = self.FOLDING_WIDTH - 12
         if line in self.folded_lines:
-            points = (7, middle_y - 4, 7, middle_y + 4, 12, middle_y)
+            points = (marker_x, middle_y - 4, marker_x, middle_y + 4, marker_x + 5, middle_y)
         else:
-            points = (5, middle_y - 3, 13, middle_y - 3, 9, middle_y + 2)
+            points = (
+                marker_x - 2,
+                middle_y - 3,
+                marker_x + 6,
+                middle_y - 3,
+                marker_x + 2,
+                middle_y + 2,
+            )
         self.canvas.create_polygon(*points, fill=self._foreground, outline="")
 
     def current_line_height(self) -> int:
@@ -286,7 +294,7 @@ class _EditorGutter:
             line = int(self.text_widget.index(f"@0,{event.y}").split(".", 1)[0])
         except (tk.TclError, ValueError):
             return
-        if event.x <= 18:
+        if self.fold_regions and event.x >= self.FOLDING_WIDTH - 18:
             self.toggle_fold(line)
 
     def configure_colors(self, background: str, foreground: str) -> None:
