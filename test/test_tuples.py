@@ -2,6 +2,7 @@ import os
 import unittest
 
 from pyopl.pyopl_core import OPLCompiler, OPLLexer, OPLParser, solve
+from pyopl.semantic_error import SemanticError
 
 
 def setUpModule():
@@ -11,6 +12,35 @@ def setUpModule():
 
 
 class TestTupleParsing(unittest.TestCase):
+
+    def test_rejects_scalar_tuple_typed_decision_variable(self):
+        code = """
+        tuple Point { int x; int y; };
+        dvar Point location;
+        minimize 0;
+        subject to {}
+        """
+
+        with self.assertRaisesRegex(
+            SemanticError,
+            r"Tuple type 'Point' cannot be used as a decision-variable type.*boolean, int, int\+, float, float\+",
+        ):
+            OPLCompiler().compile_model(code, solver="scipy")
+
+    def test_rejects_indexed_tuple_typed_decision_variable(self):
+        code = """
+        tuple Point { int x; int y; };
+        range Items = 1..3;
+        dvar Point location[Items];
+        minimize 0;
+        subject to {}
+        """
+
+        with self.assertRaisesRegex(
+            SemanticError,
+            r"Tuple type 'Point' cannot be used as a decision-variable type.*boolean, int, int\+, float, float\+",
+        ):
+            OPLCompiler().compile_model(code, solver="gurobi")
 
     def test_large_tuple_set_and_field_access(self):
         """

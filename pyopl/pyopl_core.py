@@ -1609,25 +1609,35 @@ class OPLParser(Parser):
         logger.debug(f"[DECL_LIST] Single declaration: {p.declaration}")
         return _list_with_item(p.declaration)
 
+    def _validate_dvar_type(self, var_type, lineno):
+        supported_types = ("boolean", "int", "int+", "float", "float+")
+        if var_type in supported_types:
+            return
+        try:
+            symbol_info = self.symbol_table.get_symbol(var_type)
+        except SemanticError:
+            symbol_info = None
+        supported = ", ".join(supported_types)
+        if symbol_info and symbol_info.get("type") == "tuple_type":
+            raise SemanticError(
+                f"Tuple type '{var_type}' cannot be used as a decision-variable type. "
+                f"Decision variables must use one of: {supported}.",
+                lineno=lineno,
+            )
+        raise SemanticError(
+            f"Unsupported decision-variable type '{var_type}'. Supported types are: {supported}.",
+            lineno=lineno,
+        )
+
     @_('DVAR type NAME ";"')  # type: ignore
     def declaration(self, p):
-        # Disallow string decision variables (unsupported in codegen)
-        if p.type == "string":
-            raise SemanticError(
-                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
-                lineno=p.lineno,
-            )
+        self._validate_dvar_type(p.type, p.lineno)
         self.symbol_table.add_symbol(p.NAME, p.type, is_dvar=True, lineno=p.lineno)
         return {"type": "dvar", "var_type": p.type, "name": p.NAME}
 
     @_('DVAR type NAME indexed_dimensions ";"')  # type: ignore
     def declaration(self, p):
-        # Disallow string decision variables (unsupported in codegen)
-        if p.type == "string":
-            raise SemanticError(
-                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
-                lineno=p.lineno,
-            )
+        self._validate_dvar_type(p.type, p.lineno)
         processed_dimensions = [
             self._normalize_declaration_dimension(
                 dim_spec,
@@ -1655,12 +1665,11 @@ class OPLParser(Parser):
 
     @_('DVAR type NAME dexpr_index_headers IN expression DOTDOT expression ";"')  # type: ignore
     def declaration(self, p):
-        if p.type == "string":
+        try:
+            self._validate_dvar_type(p.type, p.lineno)
+        except SemanticError:
             self._cleanup_iterator_header(p.dexpr_index_headers)
-            raise SemanticError(
-                "String decision variables are not supported. Use 'string' only for tuple fields or typed scalar sets.",
-                lineno=p.lineno,
-            )
+            raise
         iterators = p.dexpr_index_headers["iterators"]
         dimensions = [self._iterator_range_to_declaration_dimension(it["range"]) for it in iterators]
         self._cleanup_iterator_header(p.dexpr_index_headers)
