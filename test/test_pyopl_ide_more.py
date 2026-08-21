@@ -66,6 +66,52 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
+        class Widget:
+            def __init__(self):
+                self.state = "normal"
+
+            def configure(self, **kwargs):
+                if "state" in kwargs:
+                    self.state = kwargs["state"]
+
+            def grid(self):
+                pass
+
+            def grid_remove(self):
+                pass
+
+        widgets = [Widget() for _ in range(6)]
+        dummy = SimpleNamespace(
+            _active_operation=SimpleNamespace(kind="genai-generate"),
+            _genai_attachment_paths=[],
+            genai_panel_mode_var=DummyVar("generate"),
+            genai_prompt_title_var=DummyVar(),
+            genai_submit_label_var=DummyVar(),
+            genai_attachment_summary_var=DummyVar(),
+            genai_prompt_text=widgets[0],
+            genai_attach_output_check=widgets[1],
+            genai_generate_mode_button=widgets[2],
+            genai_ask_mode_button=widgets[3],
+            genai_attachment_listbox=widgets[4],
+            genai_submit_button=widgets[5],
+            interrupt_active_operation=mock.Mock(),
+            _submit_genai_request=mock.Mock(),
+        )
+        dummy._refresh_genai_mode_buttons = lambda: OPLIDE._refresh_genai_mode_buttons(dummy)
+
+        OPLIDE._refresh_genai_panel_state(dummy)
+
+        self.assertEqual([widget.state for widget in widgets[:5]], ["disabled"] * 5)
+        self.assertEqual(dummy.genai_submit_label_var.value, "Interrupt")
+        self.assertEqual(dummy.genai_submit_button.state, "normal")
+
+        dummy._active_operation = None
+        OPLIDE._refresh_genai_panel_state(dummy)
+
+        self.assertEqual([widget.state for widget in widgets], ["normal"] * 6)
+        self.assertEqual(dummy.genai_submit_label_var.value, "Generate")
+
     def test_editor_drop_routes_model_and_data_paths(self):
         dummy = SimpleNamespace(
             _ensure_no_active_operation=lambda _label: True,

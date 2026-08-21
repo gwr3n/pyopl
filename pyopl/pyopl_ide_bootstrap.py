@@ -1954,6 +1954,17 @@ class OPLIDE(TkinterDnD.Tk):
             self.genai_attachment_summary_var.set(f"{attachment_count} visual attachments")
 
         active = getattr(self, "_active_operation", None)
+        composer_state = "normal" if active is None else "disabled"
+        for widget_name in (
+            "genai_prompt_text",
+            "genai_attach_output_check",
+            "genai_generate_mode_button",
+            "genai_ask_mode_button",
+            "genai_attachment_listbox",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.configure(state=composer_state)
         if hasattr(self, "genai_submit_button"):
             if active is not None and active.kind.startswith("genai"):
                 self.genai_submit_label_var.set("Interrupt")
