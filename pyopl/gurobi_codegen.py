@@ -1404,6 +1404,13 @@ class GurobiCodeGenerator:
 
     @staticmethod
     def _normalize_boolean_aux_node(node):
+        if node.get("type") == "constraint" and node.get("op") == "==" and isinstance(node.get("left"), dict):
+            left = node["left"]
+            right = node.get("right")
+            if left.get("type") in ("and", "or", "not") and (
+                not isinstance(right, dict) or right.get("type") in ("boolean_literal", "number")
+            ):
+                return left
         if node.get("type") == "constraint":
             op = node.get("op")
             if op in ("==", "<", ">", "<=", ">="):
@@ -1416,13 +1423,6 @@ class GurobiCodeGenerator:
                 }
         if node.get("type") == "parenthesized_expression":
             return GurobiCodeGenerator._normalize_boolean_aux_node(node["expression"])
-        if node.get("type") == "constraint" and node.get("op") == "==" and isinstance(node.get("left"), dict):
-            left = node["left"]
-            right = node.get("right")
-            if left.get("type") in ("and", "or", "not") and (
-                not isinstance(right, dict) or right.get("type") == "boolean_literal"
-            ):
-                return left
         return node
 
     @staticmethod
@@ -1538,6 +1538,18 @@ class GurobiCodeGenerator:
 
     def _boolean_expr_to_binary(self, node, iterators, constr_name_prefix):
         node = self._normalize_boolean_aux_node(node)
+        if node.get("type") == "constraint":
+            left_node = self._unwrap_parenthesized(node.get("left", {}))
+            right_node = self._unwrap_parenthesized(node.get("right", {}))
+            if (
+                node.get("op") == "=="
+                and left_node.get("sem_type") == "boolean"
+                and (
+                    (right_node.get("type") == "number" and right_node.get("value") == 1)
+                    or (right_node.get("type") == "boolean_literal" and right_node.get("value") is True)
+                )
+            ):
+                return self._boolean_expr_to_binary(left_node, iterators, constr_name_prefix)
         if (
             node.get("type") in ("constraint", "binop")
             and node.get("sem_type") == "boolean"

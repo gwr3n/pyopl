@@ -32,6 +32,89 @@ except ImportError:
 
 
 class TestPyOPLProblems(unittest.TestCase):
+    def test_v2_features(self):
+        """Ensure the v2 feature showcase has consistent solver results."""
+        model_code = """
+        {string} Products = ...;
+        range Periods = 1..3;
+
+        tuple Site { string name; int capacity; }
+        tuple Lane { Site source; Site destination; float miles; }
+
+        {Site} Sites = ...;
+        {Lane} Lanes = ...;
+        float demand[Products][Periods] = ...;
+        float productionCost[Products][Periods] = ...;
+        float transportCost[Lanes] = ...;
+        {int} PeakPeriods = { t | t in Periods : t >= 2 };
+        {Site} LargeSites = ...;
+
+        dvar boolean open[Products];
+        dvar float+ production[Products][Periods];
+        dvar float+ shipped[Lanes];
+
+        dexpr float productCost[p in Products] =
+            sum(t in Periods) productionCost[p][t] * production[p][t];
+
+        minimize
+            sum(p in Products) productCost[p]
+            + sum(l in Lanes) transportCost[l] * shipped[l];
+
+        subject to {
+            forall(t in PeakPeriods)
+                sum(p in Products) production[p][t] <= sum(s in LargeSites) s.capacity;
+
+            forall(p in Products, t in Periods)
+                production[p][t] >= demand[p][t] * open[p];
+
+            (open["tea"] == 1) => (open["coffee"] == 1);
+
+            forall(l in Lanes)
+                shipped[l] <= l.miles;
+
+            (open["tea"] == 1 && open["coffee"] == 1) =>
+                sum(l in Lanes) shipped[l] >= 10;
+        }
+        """
+        data_code = """
+        Products = { "tea", "coffee" };
+        LargeSites = { <"north", 100> };
+        Sites = { <"north", 100>, <"south", 60> };
+        Lanes = {
+            <<"north", 100>, <"south", 60>, 12.5>,
+            <<"south", 60>, <"north", 100>, 8.0>
+        };
+        demand = [ [20, 18, 16], [15, 17, 19] ];
+        productionCost = [ [4.0, 4.2, 4.1], [3.5, 3.8, 3.7] ];
+        transportCost = [
+            <<"north", 100>, <"south", 60>, 12.5> 0.8,
+            <<"south", 60>, <"north", 100>, 8.0> 1.1
+        ];
+        """
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                results[solver] = solve(model_file, data_file, solver=solver)
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["scipy"]["objective_value"], 0.0)
+        self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
+        self.assertAlmostEqual(results["gurobi"]["objective_value"], 0.0, places=6)
+
     def test_stochastic_economic_lot_scheduling(self):
         """
         Test the stochastic economic lot scheduling problem with backorders and sequence-dependent setups, a complex MILP with 5 items, 4 periods, and 3 demand scenarios.
