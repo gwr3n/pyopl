@@ -267,6 +267,22 @@ class TestRhetorMCP(unittest.TestCase):
     def test_rhetor_tools_and_public_wrapper_delegate(self):
         self.assertEqual(_rhetor_mcp.list_methods_tool(), _rhetor_mcp.METHODS)
 
+        with patch.object(_rhetor_mcp, "_request_running_ide", return_value={"model_text": "m", "data_text": "d"}) as ide_mock:
+            self.assertEqual(_rhetor_mcp.read_ide_editors_tool(), {"model_text": "m", "data_text": "d"})
+            self.assertEqual(
+                _rhetor_mcp.write_ide_editors_tool(model_text="new model"),
+                {"model_text": "m", "data_text": "d"},
+            )
+        self.assertEqual(
+            ide_mock.call_args_list, [unittest.mock.call("GET"), unittest.mock.call("PUT", {"model_text": "new model"})]
+        )
+        with self.assertRaisesRegex(ValueError, "Supply model_text"):
+            _rhetor_mcp.write_ide_editors_tool()
+
+        with patch.object(_rhetor_mcp, "_request_running_ide", return_value={}) as ide_mock:
+            _rhetor_mcp.write_ide_editors_tool(model_text=None, data_text="new data")
+        ide_mock.assert_called_once_with("PUT", {"data_text": "new data"})
+
         with patch.object(_rhetor_mcp, "list_models", return_value=["m"]) as list_models_mock:
             self.assertEqual(_rhetor_mcp.list_models_tool("gemini", "g"), ["m"])
         list_models_mock.assert_called_once_with(provider="gemini", prefix="g")
@@ -282,6 +298,16 @@ class TestRhetorMCP(unittest.TestCase):
         with patch.object(rhetor_mcp.mcp, "run") as run_mock:
             rhetor_mcp.main()
         run_mock.assert_called_once_with()
+
+    def test_write_ide_editors_schema_allows_omission_but_not_null(self):
+        tools = asyncio.run(_rhetor_mcp.mcp.list_tools())
+        schema = next(tool.inputSchema for tool in tools if tool.name == "write_ide_editors_tool")
+
+        self.assertNotIn("required", schema)
+        self.assertEqual(schema["properties"]["model_text"]["type"], "string")
+        self.assertEqual(schema["properties"]["data_text"]["type"], "string")
+        self.assertNotIn("default", schema["properties"]["model_text"])
+        self.assertNotIn("default", schema["properties"]["data_text"])
 
     def test_insight_tool_success_and_error_paths(self):
         with (

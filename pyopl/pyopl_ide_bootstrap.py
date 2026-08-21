@@ -46,6 +46,7 @@ from .pyopl_core import (
 from .pyopl_core import (
     export_model as export_opl_model,
 )
+from .rhetor_ide_bridge import RhetorIDEBridge
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -472,6 +473,59 @@ class OPLIDE(tk.Tk):
         self._register_macos_quit_handler()
         self.after(0, self._stabilize_initial_side_panel_width)
         self.bind("<Configure>", self._on_window_resize, add="+")
+        self._ide_bridge = RhetorIDEBridge()
+        try:
+            self._ide_bridge.start()
+            self.after(50, self._poll_ide_bridge)
+        except OSError as exc:
+            logging.getLogger(__name__).warning("Could not start Rhetor IDE MCP bridge: %s", exc)
+
+    def _poll_ide_bridge(self) -> None:
+        """Dispatch pending MCP bridge requests on Tk's event thread."""
+        if getattr(self, "_shutting_down", False):
+            return
+        self._ide_bridge.process_pending(self._handle_ide_bridge_request)
+        self.after(50, self._poll_ide_bridge)
+
+    def _handle_ide_bridge_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Read or update the model and data editors for an MCP request."""
+        if path != "/editors":
+            raise ValueError(f"Unknown Rhetor IDE bridge path: {path}")
+        if method == "GET":
+            return {
+                "model_text": self._get_editor_text(self.model_text),
+                "data_text": self._get_editor_text(self.data_text),
+            }
+        if method != "PUT" or payload is None:
+            raise ValueError(f"Unsupported Rhetor IDE bridge method: {method}")
+
+        updates = (("model_text", self.model_text, False), ("data_text", self.data_text, True))
+        for field, _text_widget, _is_data in updates:
+            if field in payload and not isinstance(payload[field], str):
+                raise ValueError(f"{field} must be a string")
+
+        changed = []
+        for field, text_widget, is_data in updates:
+            if field not in payload:
+                continue
+            text = payload[field]
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert("1.0", text)
+            self._on_text_change(text_widget, is_data)
+            changed.append(field)
+        if not changed:
+            raise ValueError("Supply model_text, data_text, or both")
+        self.status_var.set("Updated from MCP")
+        return {
+            "updated": changed,
+            "model_text": self._get_editor_text(self.model_text),
+            "data_text": self._get_editor_text(self.data_text),
+        }
 
     def _initialize_preferences(self) -> tuple[Any, dict[str, Any]]:
         self._init_settings_storage()
@@ -6003,6 +6057,10 @@ class OPLIDE(tk.Tk):
         if self._has_unsaved_editor_changes() and not self._confirm_quit_with_unsaved_changes():
             return
         setattr(self, "_shutting_down", True)
+        try:
+            self._ide_bridge.stop()
+        except Exception:
+            pass
         try:
             self.stop_model()  # ensure no stray solver process
         except Exception:

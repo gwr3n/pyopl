@@ -66,6 +66,37 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_mcp_bridge_handler_reads_and_partially_updates_editors(self):
+        model = DummyText("old model")
+        data = DummyText("old data")
+        dummy = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            status_var=DummyVar(),
+            _get_editor_text=lambda widget: widget.get(),
+            _on_text_change=mock.Mock(),
+        )
+
+        self.assertEqual(
+            OPLIDE._handle_ide_bridge_request(dummy, "GET", "/editors", None),
+            {"model_text": "old model", "data_text": "old data"},
+        )
+        result = OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"data_text": "new data"})
+
+        self.assertEqual(result["updated"], ["data_text"])
+        self.assertEqual(model.value, "old model")
+        self.assertEqual(data.value, "new data")
+        dummy._on_text_change.assert_called_once_with(data, True)
+        self.assertEqual(dummy.status_var.get(), "Updated from MCP")
+
+        with self.assertRaisesRegex(ValueError, "must be a string"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": 1})
+
+        with self.assertRaisesRegex(ValueError, "data_text must be a string"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"data_text": None})
+        self.assertEqual(model.value, "old model")
+        self.assertEqual(data.value, "new data")
+
     def test_queue_text_writer_buffers_lines_and_ignores_queue_errors(self):
         """Solver-process text is forwarded line-by-line and queue failures are non-fatal."""
 

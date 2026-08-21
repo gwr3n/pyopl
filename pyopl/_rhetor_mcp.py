@@ -28,12 +28,15 @@ import asyncio
 import concurrent.futures
 import json
 import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Coroutine, Optional, TypeVar, Union
+from typing import Any, Callable, Coroutine, Optional, TypeVar, Union, cast
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from . import generative_feedback, generative_solve, solve
 from .genai._strategy_base import (
@@ -42,6 +45,7 @@ from .genai._strategy_base import (
     list_ollama_models,
     list_openai_models,
 )
+from .rhetor_ide_bridge import BRIDGE_INFO_PATH
 
 PathLike = Union[str, Path]
 T = TypeVar("T")
@@ -61,6 +65,72 @@ METHODS: list[tuple[str, str]] = [
 ]
 
 mcp = FastMCP("Rhetor MCP")
+_OMITTED_EDITOR_TEXT = cast(str, Field(default_factory=lambda: None))
+
+
+def _request_running_ide(method: str, payload: Optional[dict[str, str]] = None) -> dict[str, Any]:
+    """Send a request to the currently running Rhetor IDE."""
+    try:
+        connection = json.loads(BRIDGE_INFO_PATH.read_text(encoding="utf-8"))
+        host = connection["host"]
+        port = int(connection["port"])
+        token = connection["token"]
+        if host != "127.0.0.1":
+            raise ValueError("Rhetor IDE bridge must use the loopback interface")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("No running Rhetor IDE MCP bridge was found. Start the Rhetor IDE first.") from exc
+
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        f"http://{host}:{port}/editors",
+        data=body,
+        method=method,
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.load(exc).get("error", exc.reason)
+        except (ValueError, AttributeError):
+            detail = exc.reason
+        raise RuntimeError(f"Rhetor IDE rejected the request: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError("Could not connect to the running Rhetor IDE. Restart the IDE and try again.") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Rhetor IDE returned an invalid bridge response")
+    return result
+
+
+@mcp.tool()
+def read_ide_editors_tool() -> dict[str, str]:
+    """Read the current model and data text from the running Rhetor IDE.
+
+    The Rhetor desktop IDE must already be running. The returned dictionary
+    contains ``model_text`` and ``data_text`` with the editors' live contents.
+    """
+    return _request_running_ide("GET")
+
+
+@mcp.tool()
+def write_ide_editors_tool(
+    model_text: str = _OMITTED_EDITOR_TEXT,
+    data_text: str = _OMITTED_EDITOR_TEXT,
+) -> dict[str, Any]:
+    """Replace model and/or data text in the running Rhetor IDE.
+
+    Omit an argument to leave that editor unchanged. At least one argument is
+    required. The returned dictionary includes both editors after the update.
+    """
+    payload = {}
+    if isinstance(model_text, str):
+        payload["model_text"] = model_text
+    if isinstance(data_text, str):
+        payload["data_text"] = data_text
+    if not payload:
+        raise ValueError("Supply model_text, data_text, or both")
+    return _request_running_ide("PUT", payload)
 
 
 def _normalize_solver(solver: Optional[str]) -> str:

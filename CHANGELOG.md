@@ -9,12 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added MCP tools for reading and writing the live Rhetor IDE model and data editors.
 - Expanded tuple-array declarations and tuple comprehensions.
 - Added strict tuple schema validation and broader tuple feature coverage.
 - Added additional boolean reification coverage for Gurobi code generation.
 
 ### Fixed
 
+- Prevented explicit MCP `null` editor updates from clearing or partially changing Rhetor IDE editor contents.
 - Hardened tuple-array handling and tuple validation across solver backends.
 - Solver results now report only variables declared in the PyOPL model, excluding linearisation auxiliaries.
 
