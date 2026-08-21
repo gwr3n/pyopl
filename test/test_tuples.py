@@ -716,8 +716,6 @@ class TestNestedTupleParsing(unittest.TestCase):
         """
         obj_values = {}
         for solver in ("gurobi", "scipy"):
-            import tempfile
-
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(model_code)
                 tmp_mod.flush()

@@ -3256,9 +3256,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             else:
                 items = enumerate(data_value, start=1)
             data_value = {
-                key: value
-                if isinstance(value, dict)
-                else {field: value[index] for index, field in enumerate(field_names)}
+                key: value if isinstance(value, dict) else {field: value[index] for index, field in enumerate(field_names)}
                 for key, value in items
             }
         self._add_code_line(f"{array_name} = {repr(data_value)}")

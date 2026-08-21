@@ -3531,7 +3531,8 @@ class OPLCompiler:
                     "/": lambda: left / right,
                     "%": lambda: left % right,
                 }
-                operation = operations.get(value.get("op"))
+                operator = value.get("op")
+                operation = operations.get(operator) if isinstance(operator, str) else None
                 if operation is not None:
                     return operation()
         return value
@@ -3629,7 +3630,11 @@ class OPLCompiler:
         tuple_set_types = {"set_of_tuples", "set_of_tuples_external"}
         for decl in declarations:
             declaration_type = decl.get("type")
-            if declaration_type not in tuple_set_types | {"set_of_tuples_array_external", "tuple_array", "tuple_array_external"}:
+            if declaration_type not in tuple_set_types | {
+                "set_of_tuples_array_external",
+                "tuple_array",
+                "tuple_array_external",
+            }:
                 continue
             name = decl.get("name")
             tuple_type = decl.get("tuple_type")
@@ -4796,7 +4801,10 @@ class OPLCompiler:
     ) -> list[Any]:
         dimension_type = dimension.get("type")
         if dimension_type == "named_set_dimension":
-            value = working_data.get(dimension.get("name"), [])
+            dimension_name = dimension.get("name")
+            if not isinstance(dimension_name, str):
+                raise SemanticError("Named tuple array dimension is missing its name.")
+            value = working_data.get(dimension_name, [])
             if isinstance(value, dict) and "elements" in value:
                 value = value["elements"]
             return list(value or [])
@@ -4838,10 +4846,7 @@ class OPLCompiler:
                     return {field: value[index] for index, field in enumerate(field_names)}
                 if isinstance(value, dict):
                     return {key: normalize(child, depth + 1) for key, child in value.items()}
-                return {
-                    key: normalize(child, depth + 1)
-                    for key, child in zip(domains[depth], value, strict=True)
-                }
+                return {key: normalize(child, depth + 1) for key, child in zip(domains[depth], value, strict=True)}
 
             working_data[name] = normalize(working_data[name], 0)
 
