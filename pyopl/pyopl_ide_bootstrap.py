@@ -26,6 +26,7 @@ from typing import Any, Callable, Literal, Optional, Protocol, cast
 
 import ttkbootstrap as tb
 from platformdirs import user_config_dir
+from tkinterdnd2 import DND_FILES, TkinterDnD
 
 # Model discovery (provider-specific)
 from .genai.model_discovery import (
@@ -347,7 +348,7 @@ class _StatusVarProxy:
         return self._getter()
 
 
-class OPLIDE(tk.Tk):
+class OPLIDE(TkinterDnD.Tk):
     """
     Main class for the Rhetor IDE. Handles UI setup, event binding, and core logic.
     """
@@ -467,6 +468,7 @@ class OPLIDE(tk.Tk):
 
         # Global shortcuts
         self._bind_shortcuts()
+        self._setup_file_drop_targets()
 
         # Save settings on close
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2025,9 +2027,14 @@ class OPLIDE(tk.Tk):
             paths = ()
         if not paths:
             return
+        OPLIDE._add_genai_attachment_paths(self, [str(path) for path in paths])
+
+    def _add_genai_attachment_paths(self, paths: list[str]) -> None:
+        """Add supported visual paths to the docked GenAI composer."""
+        supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".pdf"}
         for path in paths:
             path_str = str(path)
-            if not path_str:
+            if not path_str or Path(path_str).suffix.lower() not in supported_suffixes:
                 continue
             if path_str.lower().endswith(".pdf"):
                 for rendered_path in self._render_genai_pdf_attachment(path_str):
@@ -3117,18 +3124,20 @@ class OPLIDE(tk.Tk):
             return
         fname = filedialog.askopenfilename(filetypes=[("Model files", "*.mod"), ("All files", "*.*")])
         if fname:
-            with open(fname, "r", encoding="utf-8") as f:
-                self.model_text.delete(1.0, tk.END)
-                self.model_text.insert(tk.END, f.read())
-            self.model_file = fname
-            self._model_saved_text = self._get_editor_text(self.model_text)
-            self.highlight(self.model_text)
-            self._update_caret_position(self.model_text)
+            self._open_model_path(fname)
 
-            # Update tab label and switch to Model tab
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(fname)}")
-            self.editor_notebook.select(self.model_frame)
-            self.on_tab_changed(None)
+    def _open_model_path(self, path: str) -> None:
+        """Open a model path into the model editor."""
+        with open(path, "r", encoding="utf-8") as model_handle:
+            self.model_text.delete(1.0, tk.END)
+            self.model_text.insert(tk.END, model_handle.read())
+        self.model_file = path
+        self._model_saved_text = self._get_editor_text(self.model_text)
+        self.highlight(self.model_text)
+        self._update_caret_position(self.model_text)
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(path)}")
+        self.editor_notebook.select(self.model_frame)
+        self.on_tab_changed(None)
 
     def open_data(self) -> None:
         """Open a data file into the data editor."""
@@ -3136,18 +3145,55 @@ class OPLIDE(tk.Tk):
             return
         fname = filedialog.askopenfilename(filetypes=[("Data files", "*.dat"), ("All files", "*.*")])
         if fname:
-            with open(fname, "r", encoding="utf-8") as f:
-                self.data_text.delete(1.0, tk.END)
-                self.data_text.insert(tk.END, f.read())
-            self.data_file = fname
-            self._data_saved_text = self._get_editor_text(self.data_text)
-            self.highlight(self.data_text, is_data=True)
-            self._update_caret_position(self.data_text)
+            self._open_data_path(fname)
 
-            # Update tab label and switch to Data tab
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(fname)}")
-            self.editor_notebook.select(self.data_frame)
-            self.on_tab_changed(None)
+    def _open_data_path(self, path: str) -> None:
+        """Open a data path into the data editor."""
+        with open(path, "r", encoding="utf-8") as data_handle:
+            self.data_text.delete(1.0, tk.END)
+            self.data_text.insert(tk.END, data_handle.read())
+        self.data_file = path
+        self._data_saved_text = self._get_editor_text(self.data_text)
+        self.highlight(self.data_text, is_data=True)
+        self._update_caret_position(self.data_text)
+        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(path)}")
+        self.editor_notebook.select(self.data_frame)
+        self.on_tab_changed(None)
+
+    def _setup_file_drop_targets(self) -> None:
+        """Register model/data editors and the attachment list for file drops."""
+        for widget in (self.model_text, self.data_text):
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<Drop>>", self._on_editor_files_dropped)
+        self.genai_attachment_listbox.drop_target_register(DND_FILES)
+        self.genai_attachment_listbox.dnd_bind("<<Drop>>", self._on_attachment_files_dropped)
+
+    def _dropped_paths(self, event: Any) -> list[str]:
+        """Parse a platform-native Tk drop payload into filesystem paths."""
+        data = str(getattr(event, "data", ""))
+        return [str(path) for path in self.tk.splitlist(data) if str(path)]
+
+    def _on_editor_files_dropped(self, event: tk.Event) -> str:
+        """Open dropped model and data files in their matching editors."""
+        if not self._ensure_no_active_operation("Open dropped files"):
+            return "break"
+        unsupported: list[str] = []
+        for path in self._dropped_paths(event):
+            suffix = Path(path).suffix.lower()
+            if suffix in (".mod", ".opl"):
+                self._open_model_path(path)
+            elif suffix == ".dat":
+                self._open_data_path(path)
+            else:
+                unsupported.append(os.path.basename(path))
+        if unsupported:
+            self.status_var.set(f"Ignored unsupported dropped file(s): {', '.join(unsupported)}")
+        return "break"
+
+    def _on_attachment_files_dropped(self, event: tk.Event) -> str:
+        """Add dropped image or PDF files to the GenAI attachment list."""
+        self._add_genai_attachment_paths(self._dropped_paths(event))
+        return "break"
 
     def compare_models(self) -> None:
         """Open a dialog for comparing two model/data file pairs."""

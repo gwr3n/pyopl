@@ -66,6 +66,34 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_editor_drop_routes_model_and_data_paths(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _dropped_paths=lambda _event: ["/tmp/my model.mod", "/tmp/input.dat"],
+            _open_model_path=mock.Mock(),
+            _open_data_path=mock.Mock(),
+            status_var=DummyVar(),
+        )
+
+        result = OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused"))
+
+        self.assertEqual(result, "break")
+        dummy._open_model_path.assert_called_once_with("/tmp/my model.mod")
+        dummy._open_data_path.assert_called_once_with("/tmp/input.dat")
+
+    def test_attachment_drop_filters_files_and_renders_pdf(self):
+        dummy = SimpleNamespace(
+            _genai_attachment_paths=[],
+            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png"]),
+            _refresh_genai_attachment_list=mock.Mock(),
+        )
+
+        OPLIDE._add_genai_attachment_paths(dummy, ["/tmp/sketch.png", "/tmp/notes.txt", "/tmp/formulation.pdf"])
+
+        self.assertEqual(dummy._genai_attachment_paths, ["/tmp/sketch.png", "/tmp/rendered/page_1.png"])
+        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/formulation.pdf")
+        dummy._refresh_genai_attachment_list.assert_called_once_with()
+
     def test_mcp_bridge_handler_reads_and_partially_updates_editors(self):
         model = DummyText("old model")
         data = DummyText("old data")

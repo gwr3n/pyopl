@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added drag-and-drop opening for model/data files and visual GenAI attachments in the IDE.
+
 ### Fixed
 
 ### Changed
