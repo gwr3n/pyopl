@@ -210,6 +210,19 @@ def _find_fold_regions(text: str) -> dict[int, int]:
     return _resolve_fold_regions(markers, brace_closing_lines, text.splitlines())
 
 
+def _remap_folded_lines(old_text: str, new_text: str, folded_lines: set[int]) -> set[int]:
+    old_lines = old_text.splitlines()
+    new_lines = new_text.splitlines()
+    remapped: set[int] = set()
+    matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
+    for old_start, new_start, size in matcher.get_matching_blocks():
+        for opening_line in folded_lines:
+            old_index = opening_line - 1
+            if old_start <= old_index < old_start + size:
+                remapped.add(new_start + old_index - old_start + 1)
+    return remapped
+
+
 class _EditorGutter:
     """Draw line numbers and explicit section-folding controls beside a Text widget."""
 
@@ -223,6 +236,7 @@ class _EditorGutter:
         self.canvas = canvas
         self.fold_regions: dict[int, int] = {}
         self.folded_lines: set[int] = set()
+        self._fold_text = ""
         self._redraw_after_id: Optional[str] = None
         self._foreground = "#7b8794"
         self.canvas.bind("<Button-1>", self._on_click)
@@ -230,8 +244,11 @@ class _EditorGutter:
 
     def refresh(self) -> None:
         text = self.text_widget.get("1.0", "end-1c")
+        if self._fold_text != text:
+            self.folded_lines = _remap_folded_lines(self._fold_text, text, self.folded_lines)
         self.fold_regions = _find_fold_regions(text)
         self.folded_lines.intersection_update(self.fold_regions)
+        self._fold_text = text
         self._update_width()
         self._apply_folds()
         self.schedule_redraw()

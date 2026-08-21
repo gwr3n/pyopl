@@ -203,6 +203,30 @@ minimize x;
         gutter._update_width()
         canvas.configure.assert_called_with(width=_EditorGutter.FOLDING_WIDTH)
 
+    def test_editor_gutter_preserves_fold_after_line_insertions_and_deletions(self):
+        original = "// heading\n// § Bounds\nx >= 0;\nx <= 1;\n"
+        cases = (
+            ("// new heading\n" + original.replace("x >= 0;", "// note\nx >= 0;"), {3: 6}, {3}),
+            (original.removeprefix("// heading\n"), {1: 3}, {1}),
+        )
+        for edited, expected_regions, expected_folded_lines in cases:
+            with self.subTest(edited=edited):
+                gutter = _EditorGutter.__new__(_EditorGutter)
+                gutter.text_widget = mock.Mock()
+                gutter.text_widget.get.return_value = edited
+                gutter.canvas = mock.Mock()
+                gutter.fold_regions = _find_fold_regions(original)
+                gutter.folded_lines = {2}
+                gutter._fold_text = original
+                gutter._apply_folds = mock.Mock()
+                gutter.schedule_redraw = mock.Mock()
+
+                gutter.refresh()
+
+                self.assertEqual(gutter.fold_regions, expected_regions)
+                self.assertEqual(gutter.folded_lines, expected_folded_lines)
+                gutter._apply_folds.assert_called_once_with()
+
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
             def __init__(self):
