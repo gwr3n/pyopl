@@ -1,6 +1,7 @@
 import io
 import unittest
 from contextlib import redirect_stdout
+from typing import Any
 
 from pyopl.pyopl_core import OPLCompiler
 from pyopl.scipy_codegen_csc import BOOL_EPS
@@ -16,7 +17,7 @@ except ImportError:
 
 def _solve_generated_model(model: str, solver: str) -> dict:
     _ast, code, _data = OPLCompiler().compile_model(model, solver=solver)
-    namespace = {"results_container": {}}
+    namespace: dict[str, Any] = {"results_container": {}}
     with redirect_stdout(io.StringIO()):
         exec(code, namespace)
     return namespace["results_container"][f"{solver}_output"]

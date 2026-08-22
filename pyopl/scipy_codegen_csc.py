@@ -7,6 +7,8 @@ from collections import defaultdict  # Needed for coefficient accumulation helpe
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
+from .affine_bounds import affine_interval, combine_intervals, scale_interval
+
 # === Local imports ===
 from .boolean_lowering import lower_implication
 from .comparison_policy import comparison_policy
@@ -1209,7 +1211,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         t = node.get("type")
         if t in ("name", "indexed_name", "number"):
             return self._linear_leaf_bounds(node)
-        if t == "unaryop" and node.get("op") == "-":
+        if t == "parenthesized_expression":
+            expression = node.get("expression")
+            return self._linear_bounds_safe(expression) if isinstance(expression, dict) else (None, None)
+        if t == "uminus":
             value = node.get("value")
             if not isinstance(value, dict):
                 return (None, None)
@@ -1235,17 +1240,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             except Exception:
                 variable_name = node.get("name")
 
-        if not hasattr(self, "_collected_lbs"):
+        if not isinstance(variable_name, str):
             return self._var_bounds_safe(node)
-
-        lower_bound = self._collected_lbs.get(variable_name)
-        upper_bound = self._collected_ubs.get(variable_name)
+        lower_bound = getattr(self, "_collected_lbs", {}).get(variable_name)
+        upper_bound = getattr(self, "_collected_ubs", {}).get(variable_name)
         if lower_bound is None and upper_bound is None and node_type == "indexed_name":
             base_symbol = node.get("name")
-            lower_bound = self._collected_lbs.get(base_symbol)
-            upper_bound = self._collected_ubs.get(base_symbol)
+            lower_bound = getattr(self, "_collected_lbs", {}).get(base_symbol)
+            upper_bound = getattr(self, "_collected_ubs", {}).get(base_symbol)
         if lower_bound is None and upper_bound is None:
-            return self._var_bounds_safe(node)
+            lower_bound, upper_bound = self._infer_var_bounds(variable_name)
 
         type_lower, type_upper = self._var_bounds_safe(node)
         if type_lower is not None:
@@ -1267,9 +1271,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             right_lower, right_upper = self._linear_bounds_safe(right)
             if left_lower is None or left_upper is None or right_lower is None or right_upper is None:
                 return (None, None)
-            if op == "+":
-                return (left_lower + right_lower, left_upper + right_upper)
-            return (left_lower - right_upper, left_upper - right_lower)
+            return combine_intervals((left_lower, left_upper), (right_lower, right_upper), op)
 
         if op == "*":
             return self._linear_scalar_product_bounds(left, right)
@@ -1290,9 +1292,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         if variable_lower is None or variable_upper is None:
             return (None, None)
-        if coefficient >= 0:
-            return (coefficient * variable_lower, coefficient * variable_upper)
-        return (coefficient * variable_upper, coefficient * variable_lower)
+        return scale_interval((variable_lower, variable_upper), coefficient)
 
     def _resolve_coefficient_index(self, variable: Any) -> int:
         if isinstance(variable, int):
@@ -1389,14 +1389,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 coef_dict, constant = self._eval_expr(constr["right"], env)
                 if not coef_dict and isinstance(constant, (int, float)):
                     return float(constant)
-            except Exception:
+            except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
                 pass
             return None
 
         def update_affine_bound(constr, env, rhs_val):
             try:
                 left_coef, left_const = self._eval_expr(constr["left"], env)
-            except Exception:
+            except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
                 return False
             if len(left_coef) != 1 or not isinstance(left_const, (int, float)):
                 return False
@@ -1421,7 +1421,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 vname = self._multi_indexed_var_name(left, env, self._eval_index_expr)
                 update_bounds(var_indices.get(vname), constr["op"], rhs_val)
                 return
-            except Exception:
+            except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
                 pass
             remapped = []
             for dimension in left["dimensions"]:
@@ -1460,7 +1460,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 ):
                     for inner in inner_constraints:
                         tighten_constraint(inner, env=env2)
-            except Exception:
+            except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
                 return
 
         def tighten_constraint(constr, env=None):
@@ -1889,7 +1889,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 range_decl = self._find_decl(dim_decl.get("name"), "range_declaration_inline")
                 if range_decl:
                     return int(self._eval_bound(range_decl["start"]))
-        except Exception:
+        except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
             pass
         return 1
 
@@ -3826,13 +3826,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         3. Aggregated symbol bounds (base name before first underscore) as fallback.
         Returns (lb, ub) where either can be None if unknown.
         """
-        try:
-            if hasattr(self, "var_indices") and vname in self.var_indices and hasattr(self, "bounds"):
-                idx = self.var_indices[vname]
+        if hasattr(self, "var_indices") and vname in self.var_indices and hasattr(self, "bounds"):
+            idx = self.var_indices[vname]
+            if isinstance(idx, int) and 0 <= idx < len(self.bounds):
                 lb, ub = self.bounds[idx]
                 return lb, ub
-        except Exception:
-            pass
         lb = getattr(self, "_collected_lbs", {}).get(vname)
         ub = getattr(self, "_collected_ubs", {}).get(vname)
         if lb is not None or ub is not None:
@@ -3852,21 +3850,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """Return the exact interval of an affine expression with finite variable bounds."""
         if not isinstance(constant, (int, float)):
             raise SemanticError(f"{context} requires a numeric affine expression")
-        lower = upper = float(constant)
-        for var_name, coefficient in coefficients.items():
+
+        def bound_for(var_name):
             if var_name not in self.var_indices:
                 raise SemanticError(f"Variable '{var_name}' not indexed")
             lb, ub = self._infer_var_bounds(var_name)
             if lb is None or ub is None:
                 raise SemanticError(f"{context} requires finite variable bounds for a valid big-M formulation")
-            coefficient = float(coefficient)
-            if coefficient >= 0:
-                lower += coefficient * lb
-                upper += coefficient * ub
-            else:
-                lower += coefficient * ub
-                upper += coefficient * lb
-        return lower, upper
+            return float(lb), float(ub)
+
+        try:
+            return affine_interval(coefficients, float(constant), bound_for)
+        except ValueError as exc:
+            raise SemanticError(f"{context} requires finite constants, coefficients, and variable bounds") from exc
 
     def _finite_integer_affine_bounds(self, coefficients, constant, context):
         """Validate a unit-integer affine expression and return its exact finite interval."""
@@ -4117,10 +4113,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _append_comparison_inequality_rows(self, expr_coef, expr_const, op, bname, ctx):
         oriented_coef = dict(expr_coef)
         oriented_const = expr_const
-        integer_valued = all(
-            self.integrality[self.var_indices[var_name]] != 0 and float(coef).is_integer()
-            for var_name, coef in expr_coef.items()
-        ) and float(expr_const).is_integer()
+        integer_valued = (
+            all(
+                self.integrality[self.var_indices[var_name]] != 0 and float(coef).is_integer()
+                for var_name, coef in expr_coef.items()
+            )
+            and float(expr_const).is_integer()
+        )
         separation = comparison_policy(integer_valued=integer_valued).strict_separation
         if op in (">=", ">"):
             oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
@@ -4877,12 +4876,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         base_operator = operator if variable_on_left else {">=": "<=", "<=": ">=", "==": "=="}[operator]
         if base_operator in (">=", "=="):
             current_lower = self._collected_lbs.get(base_symbol)
-            if current_lower is None or value < current_lower:
-                self._collected_lbs[base_symbol] = max(self._collected_lbs.get(base_symbol, -float("inf")), value)
+            self._collected_lbs[base_symbol] = value if current_lower is None else min(current_lower, value)
         if base_operator in ("<=", "=="):
             current_upper = self._collected_ubs.get(base_symbol)
-            if current_upper is None or value > current_upper:
-                self._collected_ubs[base_symbol] = min(self._collected_ubs.get(base_symbol, float("inf")), value)
+            self._collected_ubs[base_symbol] = value if current_upper is None else max(current_upper, value)
 
     def _collect_passive_constraint_bounds(self, constr, env, bool_expr_var) -> None:
         """Collect simple variable bounds for later big-M tightening without changing core constraint handling."""
@@ -4914,7 +4911,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self._collect_passive_bound_for_pair(left, right, op_sym, env, variable_on_left=True)
             elif self._is_var_reference_node(right) and self._is_number_node(left):
                 self._collect_passive_bound_for_pair(right, left, op_sym, env, variable_on_left=False)
-        except Exception:
+        except (KeyError, TypeError, ValueError, NotImplementedError, SemanticError):
             pass
 
     def _bool_tree_literal_constraint_parts(self, constr):

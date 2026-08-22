@@ -1437,7 +1437,7 @@ class OPLParser(Parser):
     def implication(self, p):
         return p.conditional
 
-    @_('conditional IMPLIES implication %prec IMPLIES')
+    @_("conditional IMPLIES implication %prec IMPLIES")
     def implication(self, p):
         if p.conditional.get("sem_type") != "boolean" or p.implication.get("sem_type") != "boolean":
             raise SemanticError("Implication requires boolean operands.")

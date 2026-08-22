@@ -1480,9 +1480,11 @@ class GurobiCodeGenerator:
         if node_type == "uminus":
             return self._expression_is_integer_valued(node.get("value"))
         if node_type == "binop":
-            return node.get("op") in ("+", "-", "*") and self._expression_is_integer_valued(
-                node.get("left")
-            ) and self._expression_is_integer_valued(node.get("right"))
+            return (
+                node.get("op") in ("+", "-", "*")
+                and self._expression_is_integer_valued(node.get("left"))
+                and self._expression_is_integer_valued(node.get("right"))
+            )
         return False
 
     def _emit_exact_equality_truth(self, flag_var, diff_expr, left_node, right_node, constr_name_prefix):
@@ -1672,11 +1674,7 @@ class GurobiCodeGenerator:
         antecedent = self._wrap_boolean_literal_as_constraint(constraint_node["antecedent"])
         consequent = self._wrap_boolean_literal_as_constraint(constraint_node["consequent"])
 
-        # Extract both raw nodes and string expressions
-        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = self._extract_implication_constraint(
-            antecedent, current_iterators
-        )
-        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
+        _cons_left, _cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
             consequent, current_iterators
         )
         # Robust big-M encoding for general linear implication: flag_var == 1 iff antecedent holds
@@ -1688,7 +1686,6 @@ class GurobiCodeGenerator:
         else:
             self._add_code_line(f"{flag_var} = model.addVar(vtype=GRB.BINARY, name='{flag_var}')  # 1 if antecedent true")
 
-        diff_expr = f"({ant_left_expr} - {ant_right_expr})"
         self._bind_implication_comparison_to_binary(flag_var, antecedent, current_iterators, constr_name_prefix)
 
         # 2. Enforce consequent only when flag_var == 1 (use bigM_cons)
