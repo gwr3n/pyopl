@@ -979,6 +979,7 @@ class OPLParser(Parser):
     # 6. Unary '!'
     # 7. Field access '.' (DOT)
     precedence = (
+        ("right", "IMPLIES"),
         ("right", "?"),  # conditional (lowest precedence among listed)
         ("left", "OR_OP"),
         ("left", "AND_OP"),
@@ -1432,10 +1433,25 @@ class OPLParser(Parser):
     def conditional(self, p):
         return p.logic_or
 
-    # Final expression alias
-    @_("conditional")
-    def expression(self, p):
+    @_("conditional %prec IMPLIES")
+    def implication(self, p):
         return p.conditional
+
+    @_('conditional IMPLIES implication %prec IMPLIES')
+    def implication(self, p):
+        if p.conditional.get("sem_type") != "boolean" or p.implication.get("sem_type") != "boolean":
+            raise SemanticError("Implication requires boolean operands.")
+        return {
+            "type": "implies",
+            "left": p.conditional,
+            "right": p.implication,
+            "sem_type": "boolean",
+        }
+
+    # Final expression alias
+    @_("implication")
+    def expression(self, p):
+        return p.implication
 
     def __init__(self) -> None:
         self.symbol_table = SymbolTable()
@@ -2026,17 +2042,6 @@ class OPLParser(Parser):
     def constraint_list(self, p):
         return _append_list_item(p.constraint_list, p.constraint)
 
-    # --- Constraint: either implication or regular constraint, both consume semicolon ---
-    @_('expression IMPLIES expression ";"')  # type: ignore
-    def constraint(self, p):
-        antecedent = self._coerce_implication_side(p.expression0)
-        consequent = self._coerce_implication_side(p.expression1)
-        return {
-            "type": "implication_constraint",
-            "antecedent": antecedent,
-            "consequent": consequent,
-        }
-
     @_('expression ";"')  # type: ignore
     def constraint(self, p):
         expr = p.expression
@@ -2201,6 +2206,16 @@ class OPLParser(Parser):
         lineno=None,
         validate_comparison_types=False,
     ):
+        if expr.get("type") == "implies":
+            constraint = {
+                "type": "implication_constraint",
+                "antecedent": self._coerce_implication_side(expr["left"]),
+                "consequent": self._coerce_implication_side(expr["right"]),
+            }
+            if label is not None:
+                constraint["label"] = label
+            return constraint
+
         if expr.get("type") == "constraint":
             if label is None:
                 return expr
@@ -2243,6 +2258,8 @@ class OPLParser(Parser):
     def _coerce_implication_side(self, expr):
         if expr.get("type") == "parenthesized_expression":
             return self._coerce_implication_side(expr["expression"])
+        if expr.get("type") == "implies":
+            return expr
         return self._coerce_expression_to_constraint(
             expr,
             invalid_message="Implication sides must be constraints or boolean expressions.",
@@ -5060,7 +5077,7 @@ class OPLCompiler:
         return self._fold_boolean_literals(node)
 
     def _fold_ground_boolean(self, node: dict[str, Any], env: dict[str, Any], dvars: set[str]) -> Any:
-        is_boolean = node.get("sem_type") == "boolean" or node.get("type") in ("and", "or", "not")
+        is_boolean = node.get("sem_type") == "boolean" or node.get("type") in ("and", "or", "not", "implies")
         if not is_boolean or self._expr_contains_dvar(node, dvars):
             return node
         try:

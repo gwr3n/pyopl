@@ -247,13 +247,13 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
 
         self.assertEqual(vector, [0.0])
 
-    def test_strict_comparison_uses_solver_feasibility_tolerance(self):
+    def test_strict_comparison_exceeds_solver_feasibility_tolerance(self):
         self.assertTrue(
             hasattr(scipy_codegen_csc, "SCIPY_FEASIBILITY_TOLERANCE"),
             "Strict inequalities need one named tolerance shared with the HiGHS solver options",
         )
         tolerance = scipy_codegen_csc.SCIPY_FEASIBILITY_TOLERANCE
-        self.assertEqual(scipy_codegen_csc.BOOL_EPS, tolerance)
+        self.assertGreater(scipy_codegen_csc.BOOL_EPS, tolerance)
         self.assertEqual(scipy_codegen_csc.LINEAR_ZERO_TOLERANCE, 1e-12)
 
         ast = self._ast([self._decl("x", "float")], [self._constraint(self._name("x"), "<", self._number(1))])

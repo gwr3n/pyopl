@@ -1,4 +1,3 @@
-import re
 import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
@@ -84,12 +83,9 @@ class TestImplicationBigMTightness(unittest.TestCase):
             code,
             f"Expected indicator constraint for negated antecedent. Code:\n{code}",
         )
-        # Big-M now appears on the consequent side; extract it from the (1 - implication_flag_c0) term
-        m = re.search(r"[<>]=\s*([0-9]+(?:\.[0-9]+)?)\s*\*\s*\(1 - implication_flag_c0\)", code)
-        self.assertIsNotNone(m, f"Could not find big-M consequent line. Code:\n{code}")
-        bigM = float(m.group(1))
-        self.assertLess(bigM, 1000, f"Expected tightened M < 1000, got {bigM}")
-        self.assertLessEqual(bigM, 10, f"Expected M <= 10 (span-based), got {bigM}")
+        self.assertIn("addGenConstrIndicator(implication_flag_c0, 1", code)
+        self.assertIn("_consequent", code)
+        self.assertNotIn("1000000.0", code)
 
     def test_scipy_bigM_tight(self):
         ast = self._ast()

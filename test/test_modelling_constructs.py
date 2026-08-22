@@ -1152,22 +1152,14 @@ class TestModellingConstructs(unittest.TestCase):
         ast = parser.parse(lexer.tokenize(opl_code))
         generator = GurobiCodeGenerator(ast)
         gurobi_code = generator.generate_code()
-        # Core assertions: indicator_contra present; generic implication_flag absent
+        # The antecedent is reified exactly and the consequent uses a native indicator.
         self.assertIn(
             "addGenConstrIndicator",
             gurobi_code,
             "Expected an indicator constraint to be generated",
         )
-        self.assertIn(
-            "indicator_contra",
-            gurobi_code,
-            "Expected specialized contrapositive indicator naming",
-        )
-        self.assertNotIn(
-            "implication_flag_",
-            gurobi_code,
-            "Should not fall back to big-M flag variable for this pattern",
-        )
+        self.assertIn("implication_flag_", gurobi_code)
+        self.assertIn("_consequent", gurobi_code)
 
     def test_linear_ge_implies_binary_eq1_uses_contra_indicator(self):
         """(x[t] >= 5) => (y[t] == 1) should use indicator_contra_ge with (y[t]==0) => x[t] <= 5 - eps."""
@@ -1186,9 +1178,9 @@ class TestModellingConstructs(unittest.TestCase):
         ast = parser.parse(lexer.tokenize(opl_code))
         generator = GurobiCodeGenerator(ast)
         gurobi_code = generator.generate_code()
-        self.assertIn("indicator_contra_ge", gurobi_code)
         self.assertIn("addGenConstrIndicator", gurobi_code)
-        self.assertNotIn("implication_flag_", gurobi_code)
+        self.assertIn("implication_flag_", gurobi_code)
+        self.assertIn("_consequent", gurobi_code)
 
     def test_eval_bound_branches_in_objective_sum_index(self):
         # Covers eval_bound in _build_objective for sum index bounds: binop +, -, *, uminus, parenthesized_expression, and error

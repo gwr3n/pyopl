@@ -400,16 +400,25 @@ Use the implication operator to model logical relationships:
 subject to {
   (x > 0) => (y == 1);
   (a + b >= z) => (u - v <= 5);
-  ((p == 1 && q == 1) == true) => (r <= 10);  // composite antecedent (Gurobi); SciPy: see limits
+  ((p == 1 && q == 1) == true) => (r <= 10);
+  (p == 1) => ((q == 1) => (r <= 10));
 }
 ```
-Solver notes:
+Implication is right-associative, so `A => B => C` means `A => (B => C)`. Both backends normalize nested implication as `!A || B`, and every comparison auxiliary is linked in both directions to its predicate.
+
+Numerical semantics:
+- Boolean and integer-affine predicates are represented exactly. Strict integer comparisons use a unit separation: `x > y` becomes `x >= y + 1`.
+- Continuous strict predicates use `STRICT_COMPARISON_EPSILON` from `pyopl.numerical_policy`. The margin is intentionally larger than solver feasibility tolerances.
+- Continuous values between a predicate boundary and its epsilon-separated complement form an infeasible dead zone. This is the standard MILP approximation needed because an open strict-inequality feasible set cannot be represented exactly by closed linear constraints.
+
+Backend notes:
 - Gurobi backend:
-  - Uses indicator constraints automatically for patterns like `(bin == 1) => (linear constraint)`, and specialized contrapositive forms like `(linear >= c) => (bin == 1)`.
-  - Falls back to a big-M encoding with a binary flag when an indicator is not applicable; big-M is tightened using cheap bound analysis.
+  - Uses complementary indicator constraints to reify antecedents and a native indicator to activate the consequent.
+  - Generic implication handling does not use an arbitrary fallback big-M.
 - SciPy/HiGHS backend:
-  - Supports linear antecedents and consequents with big-M encoding and automatic tightening.
-  - Composite boolean antecedents and reified forms are supported via auxiliary binaries; prefer a single linear comparison or `bin == 1` for robustness and performance.
+  - Uses sparse linear big-M rows with automatically inferred bounds.
+  - Rejects affine implication forms without finite variable bounds instead of generating an invalid or arbitrary formulation.
+  - Supports composite and nested Boolean antecedents and consequents through auxiliary binaries.
 
 ### Conditional Expressions
 Use conditional (ternary) expressions in objectives and constraints:
@@ -432,8 +441,8 @@ subject to {
 Boolean objectives are interpreted as integer (1 for true, 0 for false).
 
 ### Boolean Expression Trees in Constraints
-- Gurobi: complex boolean formulas (and/or/not) are compiled to auxiliary binaries with tight linking and can be combined with implications.
-- SciPy: supports boolean comparisons and compositions; compiles to linear constraints with auxiliary binaries. Some complex antecedent forms under implications may be restricted (see above).
+- Gurobi: complex boolean formulas (`and`, `or`, `not`, and nested implication) are compiled to exactly linked auxiliary binaries and native indicators.
+- SciPy: supports the same Boolean compositions and compiles them to sparse linear constraints with auxiliary binaries, provided required affine bounds are finite.
 
 ### Field Access
 Use dot notation to access tuple fields in constraints (including nested fields):

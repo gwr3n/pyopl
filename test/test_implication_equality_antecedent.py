@@ -56,24 +56,34 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
         self.assertLessEqual(max_flag_coef, 10, f"Expected tight bigM <=10, got {max_flag_coef}")
         self.assertLess(max_flag_coef, 1000, f"bigM seems too large {max_flag_coef}")
 
-    def test_unsupported_equality_consequent_error(self):
-        # (a == b) => (a == 1) should raise semantic error until supported
+    def test_equality_consequent_is_enforced(self):
         ast = {
-            "declarations": [self._decl_bool("a"), self._decl_bool("b")],
-            "objective": {"type": "minimize", "expression": self._num(0)},
+            "declarations": [self._decl_bool("a"), self._decl_bool("b"), self._decl_bool("y")],
+            "objective": {"type": "minimize", "expression": self._name("y")},
             "constraints": [
                 {
                     "type": "implication_constraint",
                     "antecedent": self._constraint(self._name("a"), "==", self._name("b")),
-                    "consequent": self._constraint(self._name("a"), "==", self._num(1)),
-                }
+                    "consequent": self._constraint(self._name("y"), "==", self._num(1)),
+                },
+                self._constraint(self._name("a"), "==", self._num(1)),
+                self._constraint(self._name("b"), "==", self._num(1)),
             ],
         }
-        with self.assertRaises(SemanticError):
-            gen = SciPyCSCCodeGenerator(ast)
-            gen._build_variables()
-            gen._build_objective()
-            gen._build_constraints()
+        gen = SciPyCSCCodeGenerator(ast)
+        problem = gen.build_problem()
+        constraints = [LinearConstraint(problem.A_ub, -float("inf"), problem.b_ub)]
+        if problem.A_eq:
+            constraints.append(LinearConstraint(problem.A_eq, problem.b_eq, problem.b_eq))
+        result = milp(
+            problem.c,
+            integrality=problem.integrality,
+            bounds=Bounds(*zip(*problem.bounds)),
+            constraints=constraints,
+        )
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.x[gen.var_indices["y"]], 1.0)
 
     def test_false_equality_antecedent_does_not_force_consequent(self):
         ast = {

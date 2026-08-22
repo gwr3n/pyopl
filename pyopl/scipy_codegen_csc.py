@@ -8,7 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 # === Local imports ===
+from .boolean_lowering import lower_implication
+from .comparison_policy import comparison_policy
 from .linear_problem import LinearProblem, ObjectiveSense
+from .numerical_policy import LINEAR_ZERO_TOLERANCE, SOLVER_FEASIBILITY_TOLERANCE, STRICT_COMPARISON_EPSILON
 from .scipy_codegen_base import SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 from .tuple_set_helper import TupleSetHelper
@@ -17,9 +20,8 @@ from .tuple_set_helper import TupleSetHelper
 # (none)
 
 
-SCIPY_FEASIBILITY_TOLERANCE = 1e-6
-BOOL_EPS = SCIPY_FEASIBILITY_TOLERANCE
-LINEAR_ZERO_TOLERANCE = 1e-12
+SCIPY_FEASIBILITY_TOLERANCE = SOLVER_FEASIBILITY_TOLERANCE
+BOOL_EPS = STRICT_COMPARISON_EPSILON
 
 
 @dataclass
@@ -183,11 +185,7 @@ class ExpressionEvaluator:
 
     def _rewrite_implies(self, expr: Dict[str, Any]) -> Dict[str, Any]:
         """Rewrite an 'implies' node as (not left) or right."""
-        return {
-            "type": "or",
-            "left": {"type": "not", "value": expr["left"]},
-            "right": expr["right"],
-        }
+        return lower_implication(expr["left"], expr["right"])
 
     def _get_handler(self, t: str) -> Any:
         """Return the handler method for a given expression type, or None if not found."""
@@ -4119,11 +4117,16 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _append_comparison_inequality_rows(self, expr_coef, expr_const, op, bname, ctx):
         oriented_coef = dict(expr_coef)
         oriented_const = expr_const
+        integer_valued = all(
+            self.integrality[self.var_indices[var_name]] != 0 and float(coef).is_integer()
+            for var_name, coef in expr_coef.items()
+        ) and float(expr_const).is_integer()
+        separation = comparison_policy(integer_valued=integer_valued).strict_separation
         if op in (">=", ">"):
             oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
             oriented_const = -oriented_const
         if op in ("<", ">"):
-            oriented_const += BOOL_EPS
+            oriented_const += separation
         lower, upper = self._finite_affine_bounds(
             oriented_coef,
             oriented_const,
@@ -4133,8 +4136,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         true_row[bname] = upper
         self._append_sparse_coef_row(ctx.state, true_row, upper - oriented_const, sense="ub")
         false_row = {var_name: -coef for var_name, coef in oriented_coef.items()}
-        false_row[bname] = lower - BOOL_EPS
-        self._append_sparse_coef_row(ctx.state, false_row, -BOOL_EPS + oriented_const, sense="ub")
+        false_row[bname] = lower - separation
+        self._append_sparse_coef_row(ctx.state, false_row, -separation + oriented_const, sense="ub")
 
     def _append_comparison_equality_rows(self, expr_coef, expr_const, op, bname, ctx):
         lower, upper = self._finite_integer_affine_bounds(
@@ -4655,8 +4658,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if node_type in ("and", "or"):
             return self._encode_boolean_composite(node, env, ctx, env_memo_key)
         if node_type == "implies":
-            not_left = {"type": "not", "value": node["left"]}
-            lowered = {"type": "or", "left": not_left, "right": node["right"]}
+            lowered = lower_implication(node["left"], node["right"])
             return self._bool_expr_var(lowered, env, ctx)
         raise SemanticError(f"Unsupported or non-resolvable boolean expression node type: {node_type} ({repr(node)})")
 
@@ -5195,9 +5197,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         append_ub_row(upper_row, -ant_const)
 
         consequent_op = consequent.get("op")
-        if consequent_op == "==":
-            raise SemanticError("Equality consequent not yet supported")
-        if consequent_op in ("<=", "<"):
+        if consequent_op in ("<=", "<", "=="):
             cons_coef, cons_const = expression_difference(
                 consequent.get("left"),
                 consequent.get("right"),
@@ -5209,17 +5209,23 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             )
         else:
             raise SemanticError("Unsupported consequent operator")
-        _cons_min, cons_max = self._finite_affine_bounds(
-            cons_coef,
-            cons_const,
-            "Equality implication consequent",
-        )
-        big_m = max(0.0, cons_max)
-        row = [0.0] * len(self.var_names)
-        for name, coef in cons_coef.items():
-            row[self.var_indices[name]] += coef
-        row[self.var_indices[flag_name]] += big_m
-        append_ub_row(row, big_m - cons_const)
+
+        def append_gated_side(coef, const):
+            _cons_min, cons_max = self._finite_affine_bounds(
+                coef,
+                const,
+                "Equality implication consequent",
+            )
+            big_m = max(0.0, cons_max)
+            row = [0.0] * len(self.var_names)
+            for name, value in coef.items():
+                row[self.var_indices[name]] += value
+            row[self.var_indices[flag_name]] += big_m
+            append_ub_row(row, big_m - const)
+
+        append_gated_side(cons_coef, cons_const)
+        if consequent_op == "==":
+            append_gated_side({name: -value for name, value in cons_coef.items()}, -cons_const)
 
     def _handle_implication_constraint(
         self,
@@ -5234,7 +5240,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             constr["antecedent"],
             constr["consequent"],
         )
-        if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not"):
+        if isinstance(ant_unwrapped, dict) and ant_unwrapped.get("type") in ("and", "or", "not", "implies"):
             antecedent_name = bool_expr_var(ant_unwrapped, env)
             ant_unwrapped = {
                 "type": "constraint",
@@ -5242,7 +5248,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 "left": {"type": "name", "value": antecedent_name, "sem_type": "boolean"},
                 "right": {"type": "number", "value": 1},
             }
-        if isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") in ("and", "or", "not"):
+        if isinstance(cons_unwrapped, dict) and cons_unwrapped.get("type") in ("and", "or", "not", "implies"):
             consequent_name = bool_expr_var(cons_unwrapped, env)
             cons_unwrapped = {
                 "type": "constraint",
@@ -5296,7 +5302,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise SemanticError("Implication antecedent must be boolean var == 1 or linear constraint")
         ant_op = ant_unwrapped.get("op")
         cons_op = cons_unwrapped.get("op")
-        supported_ops = {">=", ">", "<=", "<", "=="}
+        supported_ops = {">=", ">", "<=", "<", "==", "!="}
         if ant_op not in supported_ops or cons_op not in supported_ops:
             raise SemanticError("Unsupported implication comparison operator")
 

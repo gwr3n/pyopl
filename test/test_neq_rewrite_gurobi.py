@@ -1,5 +1,6 @@
 import unittest
 
+from pyopl.numerical_policy import STRICT_COMPARISON_EPSILON
 from pyopl.pyopl_core import GurobiCodeGenerator, OPLLexer, OPLParser
 
 
@@ -45,8 +46,8 @@ class TestNotEqualRewriteGurobi(unittest.TestCase):
         }
         """
         code = self.gen_code(opl)
-        self.assertIn("model.addConstr(x >= (1) + 1e-05", code)
-        self.assertIn("model.addConstr(x <= (5) - 1e-05", code)
+        self.assertIn(f"model.addConstr(x >= (1) + {STRICT_COMPARISON_EPSILON}", code)
+        self.assertIn(f"model.addConstr(x <= (5) - {STRICT_COMPARISON_EPSILON}", code)
         self.assertNotIn("model.addConstr(x > 1", code)
         self.assertNotIn("model.addConstr(x < 5", code)
 
@@ -58,8 +59,9 @@ class TestNotEqualRewriteGurobi(unittest.TestCase):
         subject to { b == 1 => x < 5; }
         """
         code = self.gen_code(opl)
-        self.assertIn("model.addGenConstrIndicator(b, 1, x <= (5) - 1e-05", code)
-        self.assertNotIn("model.addGenConstrIndicator(b, 1, x < 5", code)
+        self.assertIn("implication_flag_", code)
+        self.assertIn(f"x <= (5) - {STRICT_COMPARISON_EPSILON}", code)
+        self.assertNotIn("x < 5", code)
 
     def test_integer_neq_bigM_uses_difference_bounds(self):
         opl = """

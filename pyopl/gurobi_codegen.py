@@ -4,6 +4,9 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+from .boolean_lowering import lower_implication
+from .comparison_policy import comparison_policy
+from .numerical_policy import EQUALITY_COMPARISON_TOLERANCE, STRICT_COMPARISON_EPSILON
 from .semantic_error import SemanticError
 from .tuple_set_helper import TupleSetHelper
 
@@ -14,8 +17,8 @@ from .tuple_set_helper import TupleSetHelper
 logger = logging.getLogger(__name__)
 
 # Numerical tolerances (single source of truth)
-EPS = 1e-5  # strictness used to split >, < from >=, <=  (raised to exceed FeasibilityTol)
-EQ_TOL = 1e-6  # two-sided tolerance for equality reification
+EPS = STRICT_COMPARISON_EPSILON
+EQ_TOL = EQUALITY_COMPARISON_TOLERANCE
 
 
 @dataclass
@@ -1280,32 +1283,12 @@ class GurobiCodeGenerator:
         """Attempt to compute conservative bounds for a linear expression tree."""
         return self._linear_bounds_for_node(node)
 
-    def _emit_implication_consequent(self, cons_op, cons_left_expr, cons_right_expr, bigM_cons, flag_var, constr_name_prefix):
-        if cons_op == "==":
-            constraints = (
-                f"{cons_left_expr} - {cons_right_expr} <= {EQ_TOL} + {bigM_cons} * (1 - {flag_var})",
-                f"{cons_right_expr} - {cons_left_expr} <= {EQ_TOL} + {bigM_cons} * (1 - {flag_var})",
-                f"{cons_left_expr} - {cons_right_expr} >= -{EQ_TOL} - {bigM_cons} * (1 - {flag_var})",
-                f"{cons_right_expr} - {cons_left_expr} >= -{EQ_TOL} - {bigM_cons} * (1 - {flag_var})",
-            )
-            suffixes = ("_cons_eq1", "_cons_eq2", "_cons_eq3", "_cons_eq4")
-        elif cons_op == ">=":
-            constraints = (f"{cons_left_expr} - {cons_right_expr} >= -{bigM_cons} * (1 - {flag_var})",)
-            suffixes = ("_cons_ge",)
-        elif cons_op == ">":
-            constraints = (f"{cons_left_expr} - {cons_right_expr} >= {EPS} - {bigM_cons} * (1 - {flag_var})",)
-            suffixes = ("_cons_gt",)
-        elif cons_op == "<=":
-            constraints = (f"{cons_left_expr} - {cons_right_expr} <= {bigM_cons} * (1 - {flag_var})",)
-            suffixes = ("_cons_le",)
-        elif cons_op == "<":
-            constraints = (f"{cons_left_expr} - {cons_right_expr} <= -{EPS} + {bigM_cons} * (1 - {flag_var})",)
-            suffixes = ("_cons_lt",)
-        else:
-            raise ValueError(f"Unsupported consequent operator in implication: {cons_op}")
-
-        for constraint, suffix in zip(constraints, suffixes):
-            self._add_code_line(f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})")
+    def _emit_implication_consequent(self, cons_op, cons_left_expr, cons_right_expr, flag_var, constr_name_prefix):
+        comparison = self._gurobi_comparison_expr(cons_left_expr, cons_op, cons_right_expr)
+        self._add_code_line(
+            f"model.addGenConstrIndicator({flag_var}, 1, {comparison}, "
+            f"name={self._format_name_expr(constr_name_prefix, '_consequent')})"
+        )
 
     def _emit_specialized_implication_indicator(
         self,
@@ -1436,7 +1419,7 @@ class GurobiCodeGenerator:
         node_type = node.get("type")
         if node_type == "parenthesized_expression":
             return GurobiCodeGenerator._is_composite_boolean(node.get("expression"))
-        if node_type in ("and", "or", "not"):
+        if node_type in ("and", "or", "not", "implies"):
             return True
         if node_type != "constraint" or node.get("op") != "==":
             return False
@@ -1476,6 +1459,54 @@ class GurobiCodeGenerator:
         difference_upper = left_upper - right_lower
         return max(abs(difference_lower), abs(difference_upper), 1e-9)
 
+    def _difference_is_integer_valued(self, left_node, right_node):
+        return all(self._expression_is_integer_valued(node) for node in (left_node, right_node))
+
+    def _expression_is_integer_valued(self, node):
+        if not isinstance(node, dict):
+            return False
+        node_type = node.get("type")
+        if node_type == "number":
+            try:
+                return float(node.get("value", 0)).is_integer()
+            except (TypeError, ValueError):
+                return False
+        if node_type in ("name", "indexed_name"):
+            name = node.get("value") if node_type == "name" else node.get("name")
+            declaration = self._find_declaration_by_name(name)
+            return bool(declaration and declaration.get("var_type") in ("boolean", "int", "int+"))
+        if node_type == "parenthesized_expression":
+            return self._expression_is_integer_valued(node.get("expression"))
+        if node_type == "uminus":
+            return self._expression_is_integer_valued(node.get("value"))
+        if node_type == "binop":
+            return node.get("op") in ("+", "-", "*") and self._expression_is_integer_valued(
+                node.get("left")
+            ) and self._expression_is_integer_valued(node.get("right"))
+        return False
+
+    def _emit_exact_equality_truth(self, flag_var, diff_expr, left_node, right_node, constr_name_prefix):
+        negative_flag = self._new_implication_boolean_aux("eq_negative", constr_name_prefix)
+        positive_flag = self._new_implication_boolean_aux("eq_positive", constr_name_prefix)
+        policy = comparison_policy(integer_valued=self._difference_is_integer_valued(left_node, right_node))
+        separation = policy.strict_separation
+        self._add_code_line(
+            f"model.addConstr({flag_var} + {negative_flag} + {positive_flag} == 1, "
+            f"name={self._format_name_expr(constr_name_prefix, '_ant_eq_partition')})"
+        )
+        self._add_code_line(
+            f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} == 0, "
+            f"name={self._format_name_expr(constr_name_prefix, '_ant_eq_zero')})"
+        )
+        self._add_code_line(
+            f"model.addGenConstrIndicator({negative_flag}, 1, {diff_expr} <= -{separation}, "
+            f"name={self._format_name_expr(constr_name_prefix, '_ant_eq_negative')})"
+        )
+        self._add_code_line(
+            f"model.addGenConstrIndicator({positive_flag}, 1, {diff_expr} >= {separation}, "
+            f"name={self._format_name_expr(constr_name_prefix, '_ant_eq_positive')})"
+        )
+
     def _extract_implication_constraint(self, node, current_iterators):
         if node.get("type") == "constraint":
             left_node = self._unwrap_parenthesized(node["left"])
@@ -1499,40 +1530,47 @@ class GurobiCodeGenerator:
 
     def _bind_implication_comparison_to_binary(self, binary, comparison, iterators, constr_name_prefix):
         left, right, operator, left_expression, right_expression = self._extract_implication_constraint(comparison, iterators)
-        estimated_big_m = self._estimate_big_m_for_difference(left, right)
-        big_m = estimated_big_m if estimated_big_m is not None else 1e6
-        epsilon = 0
+        difference = f"({left_expression} - {right_expression})"
+        policy = comparison_policy(integer_valued=self._difference_is_integer_valued(left, right))
+        separation = policy.strict_separation
         if operator == ">=":
             constraints = (
-                (f"{left_expression} - {right_expression} >= -{big_m} * (1 - {binary})", f"_aux_ge_{binary}"),
-                (f"{left_expression} - {right_expression} <= {big_m} * {binary}", f"_aux_ge_relax_{binary}"),
+                (1, f"{difference} >= 0", f"_aux_ge_{binary}"),
+                (0, f"{difference} <= -{separation}", f"_aux_ge_not_{binary}"),
             )
         elif operator == ">":
             constraints = (
-                (f"{left_expression} - {right_expression} >= {epsilon} - {big_m} * (1 - {binary})", f"_aux_gt_{binary}"),
-                (f"{left_expression} - {right_expression} <= {big_m} * {binary}", f"_aux_gt_relax_{binary}"),
+                (1, f"{difference} >= {separation}", f"_aux_gt_{binary}"),
+                (0, f"{difference} <= 0", f"_aux_gt_not_{binary}"),
             )
         elif operator == "<=":
             constraints = (
-                (f"{left_expression} - {right_expression} <= {big_m} * (1 - {binary})", f"_aux_le_{binary}"),
-                (f"{left_expression} - {right_expression} >= -{big_m} * {binary}", f"_aux_le_relax_{binary}"),
+                (1, f"{difference} <= 0", f"_aux_le_{binary}"),
+                (0, f"{difference} >= {separation}", f"_aux_le_not_{binary}"),
             )
         elif operator == "<":
             constraints = (
-                (f"{left_expression} - {right_expression} <= -{epsilon} + {big_m} * (1 - {binary})", f"_aux_lt_{binary}"),
-                (f"{left_expression} - {right_expression} >= 0 - {big_m} * {binary}", f"_aux_lt_relax_{binary}"),
+                (1, f"{difference} <= -{separation}", f"_aux_lt_{binary}"),
+                (0, f"{difference} >= 0", f"_aux_lt_not_{binary}"),
             )
         elif operator == "==":
-            constraints = (
-                (f"{left_expression} - {right_expression} <= {epsilon} + {big_m} * (1 - {binary})", f"_aux_eq1_{binary}"),
-                (f"{right_expression} - {left_expression} <= {epsilon} + {big_m} * (1 - {binary})", f"_aux_eq2_{binary}"),
-                (f"{left_expression} - {right_expression} >= -{epsilon} - {big_m} * (1 - {binary})", f"_aux_eq3_{binary}"),
-                (f"{right_expression} - {left_expression} >= -{epsilon} - {big_m} * (1 - {binary})", f"_aux_eq4_{binary}"),
+            self._emit_exact_equality_truth(binary, difference, left, right, constr_name_prefix)
+            return
+        elif operator == "!=":
+            equality_flag = self._new_implication_boolean_aux("neq_equal", constr_name_prefix)
+            self._emit_exact_equality_truth(equality_flag, difference, left, right, constr_name_prefix)
+            self._add_code_line(
+                f"model.addConstr({binary} + {equality_flag} == 1, "
+                f"name={self._format_name_expr(constr_name_prefix, '_neq_complement')})"
             )
+            return
         else:
             raise ValueError(f"Unsupported comparison operator in boolean linearization: {operator}")
-        for constraint, suffix in constraints:
-            self._add_code_line(f"model.addConstr({constraint}, name={self._format_name_expr(constr_name_prefix, suffix)})")
+        for active_value, constraint, suffix in constraints:
+            self._add_code_line(
+                f"model.addGenConstrIndicator({binary}, {active_value}, {constraint}, "
+                f"name={self._format_name_expr(constr_name_prefix, suffix)})"
+            )
 
     def _new_implication_boolean_aux(self, prefix, constr_name_prefix):
         self._bool_aux_counter = getattr(self, "_bool_aux_counter", 0) + 1
@@ -1583,6 +1621,10 @@ class GurobiCodeGenerator:
             )
         return binary
 
+    def _boolean_implication_to_binary(self, node, iterators, constr_name_prefix):
+        lowered = lower_implication(node["left"], node["right"])
+        return self._boolean_expr_to_binary(lowered, iterators, constr_name_prefix)
+
     def _boolean_literal_to_binary(self, node, _iterators, constr_name_prefix):
         binary = self._new_implication_boolean_aux("lit", constr_name_prefix)
         value = 1 if node.get("value") else 0
@@ -1601,6 +1643,7 @@ class GurobiCodeGenerator:
             "not": self._boolean_not_to_binary,
             "and": self._boolean_connective_to_binary,
             "or": self._boolean_connective_to_binary,
+            "implies": self._boolean_implication_to_binary,
             "boolean_literal": self._boolean_literal_to_binary,
         }
         handler = handlers.get(node_type)
@@ -1629,9 +1672,6 @@ class GurobiCodeGenerator:
         antecedent = self._wrap_boolean_literal_as_constraint(constraint_node["antecedent"])
         consequent = self._wrap_boolean_literal_as_constraint(constraint_node["consequent"])
 
-        # Derive big-M for implication (use max of antecedent & consequent diff bounds) else fallback
-        bigM_default = 1e6
-
         # Extract both raw nodes and string expressions
         ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = self._extract_implication_constraint(
             antecedent, current_iterators
@@ -1639,28 +1679,6 @@ class GurobiCodeGenerator:
         cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
             consequent, current_iterators
         )
-        # Compute separate big-M values for antecedent and consequent
-        M_ant = self._estimate_big_m_for_difference(ant_left, ant_right)
-        M_cons = self._estimate_big_m_for_difference(cons_left, cons_right)
-        bigM_ant = M_ant if M_ant is not None else bigM_default
-        bigM_cons = M_cons if M_cons is not None else bigM_default
-        eps_sep = EQ_TOL  # epsilon for equality separation on >=/<=
-
-        if self._emit_specialized_implication_indicator(
-            ant_left,
-            ant_right,
-            ant_op,
-            ant_left_expr,
-            ant_right_expr,
-            cons_left,
-            cons_right,
-            cons_op,
-            cons_left_expr,
-            cons_right_expr,
-            constr_name_prefix,
-        ):
-            return
-
         # Robust big-M encoding for general linear implication: flag_var == 1 iff antecedent holds
         flag_var = f"implication_flag_{constr_name_prefix}"
         if current_iterators:
@@ -1670,60 +1688,14 @@ class GurobiCodeGenerator:
         else:
             self._add_code_line(f"{flag_var} = model.addVar(vtype=GRB.BINARY, name='{flag_var}')  # 1 if antecedent true")
 
-        eps = EPS
         diff_expr = f"({ant_left_expr} - {ant_right_expr})"
-        if ant_op == ">=":
-            # Robust split with bias against feasibility tolerance:
-            # flag=1 => diff >= -eps ; flag=0 => diff <= -2*eps
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= -{eps}, name={self._format_name_expr(constr_name_prefix, '_ant_ge_ind1')})"
-            )
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= -{2*eps}, name={self._format_name_expr(constr_name_prefix, '_ant_ge_ind0')})"
-            )
-        elif ant_op == ">":
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} >= {eps}, name={self._format_name_expr(constr_name_prefix, '_ant_gt_ind1')})"
-            )
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} <= 0.0, name={self._format_name_expr(constr_name_prefix, '_ant_gt_ind0')})"
-            )
-        elif ant_op == "<=":
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= {eps}, name={self._format_name_expr(constr_name_prefix, '_ant_le_ind1')})"
-            )
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= {2*eps}, name={self._format_name_expr(constr_name_prefix, '_ant_le_ind0')})"
-            )
-        elif ant_op == "<":
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 1, {diff_expr} <= -{eps}, name={self._format_name_expr(constr_name_prefix, '_ant_lt_ind1')})"
-            )
-            self._add_code_line(
-                f"model.addGenConstrIndicator({flag_var}, 0, {diff_expr} >= 0.0, name={self._format_name_expr(constr_name_prefix, '_ant_lt_ind0')})"
-            )
-        elif ant_op == "==":
-            self._add_code_line(
-                f"model.addConstr({diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq1')})"
-            )
-            self._add_code_line(
-                f"model.addConstr(-{diff_expr} <= {eps_sep} + {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq2')})"
-            )
-            self._add_code_line(
-                f"model.addConstr({diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq3')})"
-            )
-            self._add_code_line(
-                f"model.addConstr(-{diff_expr} >= -{eps_sep} - {bigM_ant} * (1 - {flag_var}), name={self._format_name_expr(constr_name_prefix, '_ant_eq4')})"
-            )
-        else:
-            raise ValueError(f"Unsupported antecedent operator in implication: {ant_op}")
+        self._bind_implication_comparison_to_binary(flag_var, antecedent, current_iterators, constr_name_prefix)
 
         # 2. Enforce consequent only when flag_var == 1 (use bigM_cons)
         self._emit_implication_consequent(
             cons_op,
             cons_left_expr,
             cons_right_expr,
-            bigM_cons,
             flag_var,
             constr_name_prefix,
         )
@@ -2735,7 +2707,7 @@ class GurobiCodeGenerator:
         while isinstance(node, dict) and node.get("type") == "parenthesized_expression":
             node = node.get("expression")
         return isinstance(node, dict) and (
-            node.get("type") in ("and", "or", "not")
+            node.get("type") in ("and", "or", "not", "implies")
             or (node.get("type") in ("binop", "constraint") and node.get("op") in (">=", "<=", "==", "!=", ">", "<"))
             or node.get("type") == "boolean_literal"
         )
@@ -2796,6 +2768,9 @@ class GurobiCodeGenerator:
                 f"model.addConstr({aux} <= {left} + {right}, name={self._format_name_expr(constr_name_prefix, '_or_link')})"
             )
             return aux
+        if t == "implies":
+            lowered = lower_implication(node["left"], node["right"])
+            return self._boolean_expr_to_binary_expr(lowered, current_iterators, constr_name_prefix)
         raise ValueError(f"Unsupported boolean expression type for Gurobi constraint: {t}")
 
     def _next_comparison_expr_name(self):
