@@ -496,7 +496,7 @@ class TestModellingConstructs(unittest.TestCase):
         model_text = """
             dvar boolean a;
             dvar boolean b;
-            dvar float x;
+            dvar int x;
             minimize x;
             subject to {
                 (a == 1) && (b == 0);
@@ -1152,17 +1152,12 @@ class TestModellingConstructs(unittest.TestCase):
         ast = parser.parse(lexer.tokenize(opl_code))
         generator = GurobiCodeGenerator(ast)
         gurobi_code = generator.generate_code()
-        # The antecedent is reified exactly and the consequent uses a native indicator.
-        self.assertIn(
-            "addGenConstrIndicator",
-            gurobi_code,
-            "Expected an indicator constraint to be generated",
-        )
-        self.assertIn("implication_flag_", gurobi_code)
-        self.assertIn("_consequent", gurobi_code)
+        self.assertIn("addGenConstrIndicator(y[t], 0, x[t] <= 0", gurobi_code)
+        self.assertIn("_indicator_contra", gurobi_code)
+        self.assertNotIn("implication_flag_", gurobi_code)
 
-    def test_linear_ge_implies_binary_eq1_uses_contra_indicator(self):
-        """(x[t] >= 5) => (y[t] == 1) should use indicator_contra_ge with (y[t]==0) => x[t] <= 5 - eps."""
+    def test_linear_ge_implies_binary_eq1_rejects_inexact_continuous_truth(self):
+        """A non-strict continuous antecedent has an open strict complement and cannot be reified exactly."""
         opl_code = """
         int T = 2;
         dvar float x[1..T];
@@ -1177,10 +1172,8 @@ class TestModellingConstructs(unittest.TestCase):
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(opl_code))
         generator = GurobiCodeGenerator(ast)
-        gurobi_code = generator.generate_code()
-        self.assertIn("addGenConstrIndicator", gurobi_code)
-        self.assertIn("implication_flag_", gurobi_code)
-        self.assertIn("_consequent", gurobi_code)
+        with self.assertRaisesRegex(SemanticError, "cannot be represented exactly"):
+            generator.generate_code()
 
     def test_eval_bound_branches_in_objective_sum_index(self):
         # Covers eval_bound in _build_objective for sum index bounds: binop +, -, *, uminus, parenthesized_expression, and error
@@ -1905,7 +1898,7 @@ class TestModellingConstructs(unittest.TestCase):
         FAIL and thereby signal the missing implementation.
         """
         model = """
-        dvar float x; dvar float y; dvar boolean b;
+        dvar int x; dvar int y; dvar boolean b;
         minimize x + y;
         subject to {
             x >= -20; x <= 20;

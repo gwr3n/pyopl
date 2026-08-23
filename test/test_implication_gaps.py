@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from typing import Any
 
 from pyopl.pyopl_core import OPLCompiler
-from pyopl.scipy_codegen_csc import BOOL_EPS
+from pyopl.scipy_codegen_csc import BOOL_EPS, SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 try:
@@ -24,7 +24,7 @@ def _solve_generated_model(model: str, solver: str) -> dict:
 
 
 class TestGurobiImplicationGaps(unittest.TestCase):
-    def test_unbounded_implication_does_not_use_arbitrary_big_m(self):
+    def test_unsupported_continuous_comparison_truth_is_rejected(self):
         model = """
         dvar float x;
         dvar float y;
@@ -34,9 +34,8 @@ class TestGurobiImplicationGaps(unittest.TestCase):
         }
         """
 
-        _ast, code, _data = OPLCompiler().compile_model(model, solver="gurobi")
-
-        self.assertNotIn("1000000.0", code)
+        with self.assertRaisesRegex(SemanticError, "cannot be represented exactly"):
+            OPLCompiler().compile_model(model, solver="gurobi")
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
     def test_true_integer_equality_antecedent_enforces_consequent(self):
@@ -79,25 +78,45 @@ class TestGurobiImplicationGaps(unittest.TestCase):
         self.assertGreaterEqual(result["solution"]["c"], 1.0 - 1e-9)
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
-    def test_non_strict_antecedent_inside_tolerance_dead_zone_is_infeasible(self):
+    def test_strict_positive_antecedent_allows_small_value_when_binary_is_one(self):
         result = _solve_generated_model(
             f"""
             dvar float x;
             dvar boolean y;
             minimize y;
             subject to {{
-                x == {-BOOL_EPS / 2};
-                (x >= 0) => (y == 1);
+                x >= 0;
+                x <= 1;
+                x == {BOOL_EPS / 2};
+                y == 1;
+                (x > 0) => (y == 1);
             }}
             """,
             "gurobi",
         )
 
-        self.assertEqual(result["status"], "INFEASIBLE")
+        self.assertEqual(result["status"], "OPTIMAL")
+
+    def test_strict_positive_antecedent_uses_exact_contrapositive(self):
+        model = """
+        dvar float x;
+        dvar boolean y;
+        minimize y;
+        subject to {
+            x >= 0;
+            x <= 7;
+            (x > 0) => (y == 1);
+        }
+        """
+
+        _ast, code, _data = OPLCompiler().compile_model(model, solver="gurobi")
+
+        self.assertIn("addGenConstrIndicator(y, 0, x <= 0", code)
+        self.assertNotIn("implication_flag_", code)
 
 
 class TestSciPyImplicationGaps(unittest.TestCase):
-    def test_unbounded_affine_implication_is_rejected(self):
+    def test_unsupported_continuous_comparison_truth_is_rejected(self):
         model = """
         dvar float x;
         dvar float y;
@@ -107,26 +126,54 @@ class TestSciPyImplicationGaps(unittest.TestCase):
         }
         """
 
-        with self.assertRaisesRegex(SemanticError, "finite variable bounds|big-M"):
+        with self.assertRaisesRegex(SemanticError, "cannot be represented exactly"):
             OPLCompiler().compile_model(model, solver="scipy")
 
-    def test_strict_antecedent_inside_tolerance_dead_zone_is_infeasible(self):
+    def test_strict_positive_antecedent_allows_small_value_when_binary_is_one(self):
         result = _solve_generated_model(
             f"""
             dvar float x;
             dvar boolean y;
             minimize y;
             subject to {{
-                x >= -1;
+                x >= 0;
                 x <= 1;
-                x == {-BOOL_EPS / 2};
-                (x < 0) => (y == 1);
+                x == {BOOL_EPS / 2};
+                y == 1;
+                (x > 0) => (y == 1);
             }}
             """,
             "scipy",
         )
 
-        self.assertEqual(result["status"], "INFEASIBLE")
+        self.assertEqual(result["status"], "OPTIMAL")
+
+    def test_strict_positive_antecedent_uses_finite_upper_bound(self):
+        model = """
+        dvar float x;
+        dvar boolean y;
+        minimize y;
+        subject to {
+            x >= 0;
+            x <= 7;
+            (x > 0) => (y == 1);
+        }
+        """
+
+        ast, _code, _data = OPLCompiler().compile_model(model, solver="scipy")
+        generator = SciPyCSCCodeGenerator(ast)
+        generator.generate_code()
+        x_index = generator.var_indices["x"]
+        y_index = generator.var_indices["y"]
+
+        self.assertTrue(
+            any(
+                abs(row[x_index] - 1.0) < 1e-9
+                and abs(row[y_index] + 7.0) < 1e-9
+                and abs(rhs) < 1e-9
+                for row, rhs in zip(generator.A_ub, generator.b_ub)
+            )
+        )
 
 
 class TestImplicationParserGaps(unittest.TestCase):
@@ -155,6 +202,35 @@ class TestImplicationParserGaps(unittest.TestCase):
 
 @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
 class TestImplicationBackendParity(unittest.TestCase):
+    def test_strict_affine_to_binary_patterns_match_exact_truth_table(self):
+        cases = (
+            ("(x > 0) => (y == 1);", BOOL_EPS / 2, 1, "OPTIMAL"),
+            ("(x > 0) => (y == 1);", BOOL_EPS / 2, 0, "INFEASIBLE"),
+            ("(x < 0) => (y == 0);", -BOOL_EPS / 2, 0, "OPTIMAL"),
+            ("(x < 0) => (y == 0);", -BOOL_EPS / 2, 1, "INFEASIBLE"),
+        )
+
+        for implication, x_value, y_value, expected_status in cases:
+            for solver in ("scipy", "gurobi"):
+                with self.subTest(implication=implication, x=x_value, y=y_value, solver=solver):
+                    result = _solve_generated_model(
+                        f"""
+                        dvar float x;
+                        dvar boolean y;
+                        minimize 0;
+                        subject to {{
+                            x >= -1;
+                            x <= 1;
+                            x == {x_value};
+                            y == {y_value};
+                            {implication}
+                        }}
+                        """,
+                        solver,
+                    )
+
+                    self.assertEqual(result["status"], expected_status)
+
     def test_boolean_implication_forms_have_matching_projected_solutions(self):
         cases = {
             "simple": "(a == 1) => (c == 1);",

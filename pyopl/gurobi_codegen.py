@@ -1354,24 +1354,38 @@ class GurobiCodeGenerator:
         cons_op,
         constr_name_prefix,
     ):
-        consequent_is_true = cons_right.get("type") == "boolean_literal" and cons_right.get("value") is True
-        consequent_is_one = cons_right.get("type") == "number" and float(cons_right.get("value", 0)) == 1.0
-        if cons_op != "==" or not self._is_binary_dvar_node(cons_left) or not (consequent_is_one or consequent_is_true):
+        if cons_op != "==":
             return False
-        if ant_op == ">" and ant_right.get("type") == "number":
+        if self._is_binary_dvar_node(cons_left):
+            target_expression = cons_left_expr
+            value_node = cons_right
+        elif self._is_binary_dvar_node(cons_right):
+            target_expression = cons_right_expr
+            value_node = cons_left
+        else:
+            return False
+        if value_node.get("type") == "boolean_literal":
+            consequent_value = int(bool(value_node.get("value")))
+        elif value_node.get("type") == "number":
+            try:
+                numeric_value = float(value_node.get("value", 0))
+            except (TypeError, ValueError):
+                return False
+            if numeric_value not in (0.0, 1.0):
+                return False
+            consequent_value = int(numeric_value)
+        else:
+            return False
+        if ant_op == ">":
             consequent_expr = f"{ant_left_expr} <= {ant_right_expr}"
             suffix = "_indicator_contra"
-        elif ant_op == ">=" and ant_right.get("type") == "number":
-            try:
-                adjusted = float(ant_right.get("value", 0)) - EPS
-                consequent_expr = f"{ant_left_expr} <= {adjusted}"
-            except Exception:
-                consequent_expr = f"{ant_left_expr} <= ({ant_right_expr} - {EPS})"
-            suffix = "_indicator_contra_ge"
+        elif ant_op == "<":
+            consequent_expr = f"{ant_left_expr} >= {ant_right_expr}"
+            suffix = "_indicator_contra"
         else:
             return False
         self._add_code_line(
-            f"model.addGenConstrIndicator({cons_left_expr}, 0, {consequent_expr}, name={self._format_name_expr(constr_name_prefix, suffix)})"
+            f"model.addGenConstrIndicator({target_expression}, {1 - consequent_value}, {consequent_expr}, name={self._format_name_expr(constr_name_prefix, suffix)})"
         )
         return True
 
@@ -1533,7 +1547,13 @@ class GurobiCodeGenerator:
     def _bind_implication_comparison_to_binary(self, binary, comparison, iterators, constr_name_prefix):
         left, right, operator, left_expression, right_expression = self._extract_implication_constraint(comparison, iterators)
         difference = f"({left_expression} - {right_expression})"
-        policy = comparison_policy(integer_valued=self._difference_is_integer_valued(left, right))
+        integer_valued = self._difference_is_integer_valued(left, right)
+        if not integer_valued:
+            raise SemanticError(
+                "Continuous comparison truth cannot be represented exactly as MILP; "
+                "use an exact bounded implication formulation"
+            )
+        policy = comparison_policy(integer_valued=True)
         separation = policy.strict_separation
         if operator == ">=":
             constraints = (
@@ -1663,6 +1683,20 @@ class GurobiCodeGenerator:
             constraint_node["consequent"]
         ):
             ant_bin = self._boolean_expr_to_binary(constraint_node["antecedent"], current_iterators, constr_name_prefix)
+            if not self._is_composite_boolean(constraint_node["consequent"]):
+                consequent = self._wrap_boolean_literal_as_constraint(constraint_node["consequent"])
+                _left, _right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
+                    consequent,
+                    current_iterators,
+                )
+                self._emit_implication_consequent(
+                    cons_op,
+                    cons_left_expr,
+                    cons_right_expr,
+                    ant_bin,
+                    constr_name_prefix,
+                )
+                return
             cons_bin = self._boolean_expr_to_binary(constraint_node["consequent"], current_iterators, constr_name_prefix)
             # PATCH: ensure name honors label (if any)
             self._add_code_line(
@@ -1674,9 +1708,26 @@ class GurobiCodeGenerator:
         antecedent = self._wrap_boolean_literal_as_constraint(constraint_node["antecedent"])
         consequent = self._wrap_boolean_literal_as_constraint(constraint_node["consequent"])
 
-        _cons_left, _cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
+        ant_left, ant_right, ant_op, ant_left_expr, ant_right_expr = self._extract_implication_constraint(
+            antecedent, current_iterators
+        )
+        cons_left, cons_right, cons_op, cons_left_expr, cons_right_expr = self._extract_implication_constraint(
             consequent, current_iterators
         )
+        if self._emit_specialized_implication_indicator(
+            ant_left,
+            ant_right,
+            ant_op,
+            ant_left_expr,
+            ant_right_expr,
+            cons_left,
+            cons_right,
+            cons_op,
+            cons_left_expr,
+            cons_right_expr,
+            constr_name_prefix,
+        ):
+            return
         # Robust big-M encoding for general linear implication: flag_var == 1 iff antecedent holds
         flag_var = f"implication_flag_{constr_name_prefix}"
         if current_iterators:

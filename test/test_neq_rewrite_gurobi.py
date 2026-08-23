@@ -59,7 +59,8 @@ class TestNotEqualRewriteGurobi(unittest.TestCase):
         subject to { b == 1 => x < 5; }
         """
         code = self.gen_code(opl)
-        self.assertIn("implication_flag_", code)
+        self.assertNotIn("implication_flag_", code)
+        self.assertIn("addGenConstrIndicator(b, 1", code)
         self.assertIn(f"x <= (5) - {STRICT_COMPARISON_EPSILON}", code)
         self.assertNotIn("x < 5", code)
 

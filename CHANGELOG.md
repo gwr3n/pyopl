@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added regression coverage for implication truth semantics, tolerance boundaries, nested syntax, and backend bound requirements.
+- Added regression coverage for exact continuous strict implications, nested syntax, and backend bound requirements.
 - Added a tracked roadmap for implication parity and shared numerical-policy constants.
 - Added right-associative nested implications and cross-backend parity tests for Boolean forms and all six integer comparison operators.
 - Added shared affine interval utilities and regression coverage for interval containment, non-finite inputs, indexed aggregation, and bound-analysis exception handling.
@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Made Gurobi equality and composite implication antecedents biconditional, removed generic arbitrary big-M fallback, and added SciPy equality consequents.
-- Unified implication normalization and comparison-separation policy across backends, including exact integer strictness and an explicit continuous epsilon dead zone.
+- Lowered strict affine-to-binary implications exactly using Gurobi contrapositives and SciPy finite-bound rows, removing the continuous epsilon dead zone for supported on/off patterns.
+- Rejected unsupported continuous comparison truth reification instead of silently approximating it with an epsilon-separated feasible set.
 - Hardened SciPy big-M bound derivation for parser unary/parenthesized expressions, conservative indexed fallback bounds, non-finite values, and partially initialized metadata.
 
 ### Changed

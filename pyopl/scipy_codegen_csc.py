@@ -4120,6 +4120,11 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             )
             and float(expr_const).is_integer()
         )
+        if not integer_valued:
+            raise SemanticError(
+                "Continuous comparison truth cannot be represented exactly as MILP; "
+                "use an exact bounded implication formulation"
+            )
         separation = comparison_policy(integer_valued=integer_valued).strict_separation
         if op in (">=", ">"):
             oriented_coef = {var_name: -coef for var_name, coef in oriented_coef.items()}
@@ -5126,6 +5131,48 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return
         raise SemanticError("Unsupported implication consequent form")
 
+    def _try_handle_strict_affine_to_binary_implication(self, antecedent, consequent, env, append_ub_row):
+        if antecedent.get("op") not in (">", "<"):
+            return False
+        target_node = self._implication_boolean_equality_variable(consequent, 1)
+        target_value = 1
+        if target_node is None:
+            target_node = self._implication_boolean_equality_variable(consequent, 0)
+            target_value = 0
+        if target_node is None or not self._is_boolean_decision_variable(target_node):
+            return False
+
+        left_coef, left_const = self._eval_expr(antecedent.get("left"), dict(env or {}))
+        right_coef, right_const = self._eval_expr(antecedent.get("right"), dict(env or {}))
+        if not isinstance(left_const, (int, float)) or not isinstance(right_const, (int, float)):
+            raise SemanticError("Strict implication antecedent requires a numeric affine expression")
+        coefficients = dict(left_coef)
+        for variable_name, coefficient in right_coef.items():
+            coefficients[variable_name] = coefficients.get(variable_name, 0.0) - coefficient
+        constant = float(left_const) - float(right_const)
+        if antecedent.get("op") == "<":
+            coefficients = {variable_name: -coefficient for variable_name, coefficient in coefficients.items()}
+            constant = -constant
+
+        _lower, upper = self._finite_affine_bounds(
+            coefficients,
+            constant,
+            "Strict affine-to-binary implication",
+        )
+        upper = max(0.0, upper)
+        row = [0.0] * len(self.var_names)
+        for variable_name, coefficient in coefficients.items():
+            row[self.var_indices[variable_name]] += coefficient
+        target_name = self._implication_variable_name(target_node, env)
+        if target_value == 1:
+            row[self.var_indices[target_name]] -= upper
+            rhs = -constant
+        else:
+            row[self.var_indices[target_name]] += upper
+            rhs = upper - constant
+        append_ub_row(row, rhs)
+        return True
+
     def _handle_equality_antecedent_implication(
         self,
         antecedent,
@@ -5302,6 +5349,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         supported_ops = {">=", ">", "<=", "<", "==", "!="}
         if ant_op not in supported_ops or cons_op not in supported_ops:
             raise SemanticError("Unsupported implication comparison operator")
+
+        if self._try_handle_strict_affine_to_binary_implication(
+            ant_unwrapped,
+            cons_unwrapped,
+            env,
+            append_ub_row,
+        ):
+            return
 
         if ant_op != "==":
             antecedent_comparison = {

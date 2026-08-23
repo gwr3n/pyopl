@@ -458,8 +458,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         model = """
         range I = 1..2;
         float w[I] = [1, 2];
-        dvar float+ x[I];
-        dvar float+ y[I];
+        dvar int+ x[I];
+        dvar int+ y[I];
         minimize sum(i in I) x[i];
         subject to {
             forall(i in I) x[i] <= 5;
@@ -482,7 +482,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         model = """
         range I = 1..3;
         dvar boolean b;
-        dvar float+ x[I];
+        dvar int+ x[I];
         minimize b;
         subject to {
             forall(i in I) x[i] <= 5;
@@ -1206,8 +1206,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         ast = {
             "declarations": [
                 {"type": "dvar", "var_type": "boolean", "name": "b"},
-                {"type": "dvar", "var_type": "float+", "name": "x"},
-                {"type": "dvar", "var_type": "float", "name": "y"},
+                {"type": "dvar", "var_type": "int+", "name": "x"},
+                {"type": "dvar", "var_type": "int", "name": "y"},
             ],
             "constraints": [],
         }

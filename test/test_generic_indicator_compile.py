@@ -72,13 +72,13 @@ subject to {
   forall(i in Indicators) {
     indicator_row:
       if (indicatorSense[i] == "E")
-        (x[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
+        (xBinary[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
           sum(e in indicatorMatrix[i]) e.val * x[e.v] == indicatorRhs[i];
       else if (indicatorSense[i] == "L")
-        (x[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
+        (xBinary[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
           sum(e in indicatorMatrix[i]) e.val * x[e.v] <= indicatorRhs[i];
       else
-        (x[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
+        (xBinary[indicatorBinaryVar[i]] == indicatorActiveValue[i]) =>
           sum(e in indicatorMatrix[i]) e.val * x[e.v] >= indicatorRhs[i];
   }
 }

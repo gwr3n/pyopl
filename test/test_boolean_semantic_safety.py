@@ -109,7 +109,7 @@ class TestBooleanSemanticSafety(unittest.TestCase):
             [self._constraint(self._name("q", "boolean"), "==", comparison)],
         )
 
-        with self.assertRaisesRegex(SemanticError, "finite.*bounds|big-M"):
+        with self.assertRaisesRegex(SemanticError, "cannot be represented exactly"):
             self._build(ast)
 
     def test_zero_antecedent_equality_enforces_both_sides(self):
