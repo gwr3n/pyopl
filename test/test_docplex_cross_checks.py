@@ -16,7 +16,7 @@ OPLRUN = os.environ.get("OPLRUN", "")
 
 def build_docplex_model(model_path, data_path):
     """Export OPL with Studio 22.1.1, then load the LP into DOcplex."""
-    from docplex.mp.model_reader import ModelReader
+    from docplex.mp.model_reader import ModelReader  # type: ignore[import-untyped]
 
     with tempfile.NamedTemporaryFile("w", suffix=".lp", delete=False) as lp_file:
         lp_path = lp_file.name
@@ -177,15 +177,13 @@ class TestDocplexCrossChecks(unittest.TestCase):
                 ):
                     docplex_model_code = docplex_model_code.replace(declaration, declaration[:-1] + " = ...;")
             docplex_mod_file.write(docplex_model_code)
-            docplex_dat_file.write(
-                """Stores = { "StoreA", "StoreB", "StoreC" };
+            docplex_dat_file.write("""Stores = { "StoreA", "StoreB", "StoreC" };
 holding_cost = 0.5;
 transport_cost = [2.0, 3.0, 1.5];
 capacity = [100, 80, 60];
 init_inv = [10, 5, 8];
 demand = [[10, 12, 8], [5, 7, 6], [8, 9, 7]];
-"""
-            )
+""")
             docplex_model_path = docplex_mod_file.name
             docplex_data_path = docplex_dat_file.name
         try:
@@ -228,11 +226,6 @@ maximize sum (i in Items) (value[i] * x[i]);
 subject to {
     sum (i in Items) (weight[i] * x[i]) <= C;
 }
-"""
-        data_code = """
-weight = [2, 3, 4, 5, 5];
-value = [2, 3, 4, 5, 5];
-C = 10;
 """
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as model_file,
@@ -1517,9 +1510,7 @@ subject to {
         <3, 5, 5.0>
         };
         """
-        docplex_model_code = model_code.replace("int to;", "int destination;").replace(
-            "a.to", "a.destination"
-        )
+        docplex_model_code = model_code.replace("int to;", "int destination;").replace("a.to", "a.destination")
 
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as mod_file,
@@ -1573,9 +1564,7 @@ subject to {
                     literals[target.id] = ast.literal_eval(node.value)
         model_code = literals["model_code"]
         data_code = literals["data_code"]
-        docplex_model_code = model_code.replace("string to;", "string destination;").replace(
-            "a.to", "a.destination"
-        )
+        docplex_model_code = model_code.replace("string to;", "string destination;").replace("a.to", "a.destination")
 
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as mod_file,
@@ -3355,9 +3344,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3432,8 +3419,7 @@ subject to {
             with open(docplex_model_path, "w") as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
             with open(docplex_data_path, "w") as docplex_dat_file:
-                docplex_dat_file.write(
-                    """
+                docplex_dat_file.write("""
                     Employees = { "Alex", "Bri", "Casey", "Drew", "Evan" };
                     Shifts = { "Morning", "Midday", "Evening" };
                     demand = [ 2, 2, 1 ];
@@ -3444,8 +3430,7 @@ subject to {
                       [ 0, 3, 2 ],
                       [ 3, 0, 2 ]
                     ];
-                    """
-                )
+                    """)
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3455,9 +3440,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3526,9 +3509,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3603,9 +3584,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3666,9 +3645,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3723,9 +3700,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -3781,9 +3756,7 @@ subject to {
                     for name, value in result["solution"].items():
                         if name.startswith("x") and "maxagg" not in name:
                             index = int(re.search(r"\d+", name).group())
-                            fixed_model.add_constraint(
-                                fixed_model.get_var_by_name(f"x({index})") == value
-                            )
+                            fixed_model.add_constraint(fixed_model.get_var_by_name(f"x({index})") == value)
                     candidate = fixed_model.solve(log_output=False)
                     self.assertIsNotNone(candidate)
                     self.assertTrue(candidate.is_valid_solution())
@@ -3846,9 +3819,7 @@ subject to {
                         if name.startswith("x") or name == "y":
                             index_match = re.search(r"\d+", name)
                             variable_name = f"x({index_match.group()})" if index_match else "y"
-                            fixed_model.add_constraint(
-                                fixed_model.get_var_by_name(variable_name) == value
-                            )
+                            fixed_model.add_constraint(fixed_model.get_var_by_name(variable_name) == value)
                     candidate = fixed_model.solve(log_output=False)
                     self.assertIsNotNone(candidate)
                     self.assertTrue(candidate.is_valid_solution())
@@ -3951,9 +3922,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4000,9 +3969,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4054,9 +4021,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4105,9 +4070,7 @@ subject to {
                 with self.subTest(solver=solver):
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4157,9 +4120,7 @@ subject to {
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], 275.0, places=6)
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4229,9 +4190,7 @@ subject to {
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], 342.5, places=6)
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4318,10 +4277,7 @@ subject to {
                 "explicit": build_docplex_model(docplex_explicit_path, data_path),
                 "conditional": build_docplex_model(docplex_conditional_path, data_path),
             }
-            docplex_solutions = {
-                formulation: model.solve(log_output=False)
-                for formulation, model in docplex_models.items()
-            }
+            docplex_solutions = {formulation: model.solve(log_output=False) for formulation, model in docplex_models.items()}
             for solution in docplex_solutions.values():
                 self.assertIsNotNone(solution)
             self.assertAlmostEqual(
@@ -4344,7 +4300,9 @@ subject to {
                         candidate = fixed_model.solve(log_output=False)
                         self.assertIsNotNone(candidate)
                         self.assertTrue(candidate.is_valid_solution())
-                        self.assertAlmostEqual(candidate.objective_value, docplex_solutions[formulation].objective_value, places=6)
+                        self.assertAlmostEqual(
+                            candidate.objective_value, docplex_solutions[formulation].objective_value, places=6
+                        )
         finally:
             for path in (
                 explicit_path,
@@ -4411,9 +4369,7 @@ subject to {
                     self.assertEqual(result["status"], "OPTIMAL")
                     self.assertAlmostEqual(result["objective_value"], 25.0, places=6)
                     self.assertAlmostEqual(result["objective_value"], docplex_objective, places=6)
-                    candidate = docplex_model.new_solution(
-                        map_solution_variables(docplex_model, result["solution"])
-                    )
+                    candidate = docplex_model.new_solution(map_solution_variables(docplex_model, result["solution"]))
                     self.assertTrue(candidate.is_valid_solution())
                     self.assertAlmostEqual(
                         candidate.get_value(docplex_model.objective_expr),
@@ -4474,9 +4430,7 @@ subject to {
                     for name, value in result["solution"].items():
                         if name.startswith("color_"):
                             index = int(re.search(r"\d+", name).group())
-                            fixed_model.add_constraint(
-                                fixed_model.get_var_by_name(f"color({index})") == value
-                            )
+                            fixed_model.add_constraint(fixed_model.get_var_by_name(f"color({index})") == value)
                         elif name == "maxColor":
                             fixed_model.add_constraint(fixed_model.get_var_by_name(name) == value)
                     candidate = fixed_model.solve(log_output=False)
@@ -4488,7 +4442,7 @@ subject to {
                 if os.path.exists(path):
                     os.remove(path)
 
-    def test_food_blending_problem(self):
+    def test_food_blending_inline_problem(self):
         """Compare the food blending LP with DOcplex and CPLEX."""
         if find_spec("cplex") is None:
             self.skipTest("DOcplex OPL cross-check requires the cplex runtime")

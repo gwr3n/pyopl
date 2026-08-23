@@ -1313,6 +1313,7 @@ class GurobiCodeGenerator:
             cons_left,
             cons_left_expr,
             cons_right,
+            cons_right_expr,
             cons_op,
             constr_name_prefix,
         ):
@@ -1351,6 +1352,7 @@ class GurobiCodeGenerator:
         cons_left,
         cons_left_expr,
         cons_right,
+        cons_right_expr,
         cons_op,
         constr_name_prefix,
     ):

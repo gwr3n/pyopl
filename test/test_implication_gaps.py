@@ -168,9 +168,7 @@ class TestSciPyImplicationGaps(unittest.TestCase):
 
         self.assertTrue(
             any(
-                abs(row[x_index] - 1.0) < 1e-9
-                and abs(row[y_index] + 7.0) < 1e-9
-                and abs(rhs) < 1e-9
+                abs(row[x_index] - 1.0) < 1e-9 and abs(row[y_index] + 7.0) < 1e-9 and abs(rhs) < 1e-9
                 for row, rhs in zip(generator.A_ub, generator.b_ub)
             )
         )

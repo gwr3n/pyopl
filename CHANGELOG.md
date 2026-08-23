@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed right-hand binary consequent generation for specialized Gurobi implication indicators and cleaned up DOcplex cross-check lint failures.
 - Made Gurobi equality and composite implication antecedents biconditional, removed generic arbitrary big-M fallback, and added SciPy equality consequents.
 - Lowered strict affine-to-binary implications exactly using Gurobi contrapositives and SciPy finite-bound rows, removing the continuous epsilon dead zone for supported on/off patterns.
 - Rejected unsupported continuous comparison truth reification instead of silently approximating it with an epsilon-separated feasible set.
