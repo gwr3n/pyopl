@@ -971,8 +971,33 @@ class TestPyOPLIDETyping(unittest.TestCase):
         session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
         artifacts = dummy._output_session_artifacts[session_id]
 
-        self.assertEqual(artifacts["model_text"], "dvar int x;")
-        self.assertEqual(artifacts["data_text"], "x = 3;")
+        self.assertEqual(artifacts["model_hash"], OPLIDE._session_snapshot_hash("dvar int x;"))
+        self.assertEqual(artifacts["data_hash"], OPLIDE._session_snapshot_hash("x = 3;"))
+        self.assertEqual(dummy._model_snapshots, {artifacts["model_hash"]: "dvar int x;"})
+        self.assertEqual(dummy._data_snapshots, {artifacts["data_hash"]: "x = 3;"})
+
+    def test_output_session_snapshots_are_deduplicated(self):
+        dummy = SimpleNamespace(_output_session_artifacts={}, _model_snapshots={}, _data_snapshots={})
+
+        OPLIDE._record_output_session_artifacts(dummy, "s1", model_text="same model", data_text="same data")
+        OPLIDE._record_output_session_artifacts(dummy, "s2", model_text="same model", data_text="same data")
+
+        self.assertEqual(dummy._output_session_artifacts["s1"], dummy._output_session_artifacts["s2"])
+        self.assertEqual(len(dummy._model_snapshots), 1)
+        self.assertEqual(len(dummy._data_snapshots), 1)
+
+    def test_prune_session_snapshots_keeps_only_referenced_content(self):
+        dummy = SimpleNamespace(_output_session_artifacts={}, _model_snapshots={}, _data_snapshots={})
+        OPLIDE._record_output_session_artifacts(dummy, "s1", model_text="old model", data_text="shared data")
+        OPLIDE._record_output_session_artifacts(dummy, "s2", model_text="new model", data_text="shared data")
+        old_model_hash = OPLIDE._session_snapshot_hash("old model")
+
+        dummy._output_session_artifacts.pop("s1")
+        OPLIDE._prune_session_snapshots(dummy)
+
+        self.assertNotIn(old_model_hash, dummy._model_snapshots)
+        self.assertEqual(set(dummy._model_snapshots.values()), {"new model"})
+        self.assertEqual(set(dummy._data_snapshots.values()), {"shared data"})
 
     def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
         dummy = SimpleNamespace(

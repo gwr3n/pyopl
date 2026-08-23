@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Deduplicated output-session model and data snapshots through content-addressed SHA-256 stores in `.pyopl_session`.
+
 ### Removed
 
 ## [v2.3.0] - 2026-08-23

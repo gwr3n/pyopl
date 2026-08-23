@@ -570,8 +570,8 @@ minimize x;
         self.assertEqual(dummy.status_var.value, "Model restored from session")
         self.assertEqual(dummy.highlight.call_count, 2)
 
-    def test_load_session_restores_history_artifacts_files_and_tabs(self):
-        """Session loading restores output history, normalized artifacts, editor files, and tab labels."""
+    def test_load_session_restores_content_addressed_artifacts_files_and_tabs(self):
+        """Session loading restores output history, snapshot stores, editor files, and tab labels."""
         with tempfile.TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "model.mod"
             data_path = Path(tmpdir) / "data.dat"
@@ -584,7 +584,12 @@ minimize x;
                         "output_sessions": {"s1": "output"},
                         "output_session_ids": ["s1"],
                         "output_session_display": {"s1": "2026-01-01 10:00:00 • Solve"},
-                        "output_session_artifacts": {"s1": {"model_text": 123, "data_text": None}, "bad": "skip"},
+                        "model_snapshots": {"sha256:model": "saved model"},
+                        "data_snapshots": {"sha256:data": "saved data"},
+                        "output_session_artifacts": {
+                            "s1": {"model_hash": "sha256:model", "data_hash": "sha256:data"},
+                            "bad": "skip",
+                        },
                         "current_output_session_id": "s1",
                         "viewing_output_session_id": "s1",
                         "model_file": str(model_path),
@@ -635,6 +640,8 @@ minimize x;
                 _output_session_label={},
                 _output_session_timestamp={},
                 _output_session_artifacts={},
+                _model_snapshots={},
+                _data_snapshots={},
                 _current_output_session_id=None,
                 _viewing_output_session_id=None,
                 request_listbox=listbox,
@@ -653,7 +660,11 @@ minimize x;
         self.assertEqual(dummy._output_sessions, {"s1": "output"})
         self.assertEqual(dummy._output_session_timestamp["s1"], "2026-01-01 10:00:00")
         self.assertEqual(dummy._output_session_label["s1"], "Solve")
-        self.assertEqual(dummy._output_session_artifacts, {"s1": {"model_text": "123", "data_text": ""}})
+        self.assertEqual(
+            dummy._output_session_artifacts,
+            {"s1": {"model_hash": "sha256:model", "data_hash": "sha256:data"}},
+        )
+        self.assertEqual(OPLIDE._get_output_session_artifacts(dummy, "s1"), {"model_text": "saved model", "data_text": "saved data"})
         self.assertEqual(listbox.items, ["2026-01-01 10:00:00 • Solve"])
         self.assertEqual(listbox.selected, 0)
         self.assertEqual(output_text.value, "output")

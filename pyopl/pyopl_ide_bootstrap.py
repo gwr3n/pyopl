@@ -1,5 +1,6 @@
 # --- Standard Library Imports ---
 import difflib
+import hashlib
 import json
 import logging
 import math
@@ -692,6 +693,8 @@ class OPLIDE(TkinterDnD.Tk):
         self._output_session_label: dict[str, str] = {}
         self._output_session_timestamp: dict[str, str] = {}
         self._output_session_artifacts: dict[str, dict[str, str]] = {}
+        self._model_snapshots: dict[str, str] = {}
+        self._data_snapshots: dict[str, str] = {}
         self._fold_view_states: dict[str, dict[str, Any]] = {}
         self._current_output_session_id: Optional[str] = None
         self._viewing_output_session_id: Optional[str] = None
@@ -1558,20 +1561,46 @@ class OPLIDE(TkinterDnD.Tk):
         model_text: Any = _SESSION_ARTIFACT_UNSET,
         data_text: Any = _SESSION_ARTIFACT_UNSET,
     ) -> None:
-        """Associate a session with its persisted model/data snapshot content."""
+        """Associate a session with content-addressed model/data snapshots."""
         if not session_id:
             return
         if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
             self._output_session_artifacts = {}
+        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
+            self._model_snapshots = {}
+        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
+            self._data_snapshots = {}
         artifact = dict(self._output_session_artifacts.get(session_id, {}))
         if model_text is not _SESSION_ARTIFACT_UNSET:
-            artifact["model_text"] = str(model_text)
+            content = str(model_text)
+            content_hash = OPLIDE._session_snapshot_hash(content)
+            self._model_snapshots[content_hash] = content
+            artifact["model_hash"] = content_hash
         if data_text is not _SESSION_ARTIFACT_UNSET:
-            artifact["data_text"] = str(data_text)
+            content = str(data_text)
+            content_hash = OPLIDE._session_snapshot_hash(content)
+            self._data_snapshots[content_hash] = content
+            artifact["data_hash"] = content_hash
         self._output_session_artifacts[session_id] = artifact
 
+    @staticmethod
+    def _session_snapshot_hash(content: str) -> str:
+        return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+    def _prune_session_snapshots(self) -> None:
+        model_hashes = {artifact.get("model_hash") for artifact in self._output_session_artifacts.values()}
+        data_hashes = {artifact.get("data_hash") for artifact in self._output_session_artifacts.values()}
+        self._model_snapshots = {
+            content_hash: content
+            for content_hash, content in self._model_snapshots.items()
+            if content_hash in model_hashes
+        }
+        self._data_snapshots = {
+            content_hash: content for content_hash, content in self._data_snapshots.items() if content_hash in data_hashes
+        }
+
     def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
-        """Snapshot the current editor state inline for a session when possible."""
+        """Snapshot the current editor state for a session when possible."""
         if not session_id:
             return
         if not hasattr(self, "model_text") or not hasattr(self, "data_text"):
@@ -1584,7 +1613,15 @@ class OPLIDE(TkinterDnD.Tk):
         """Return the stored model/data snapshot content for a session."""
         if not session_id:
             return {}
-        return dict(self._output_session_artifacts.get(session_id, {}))
+        artifact = self._output_session_artifacts.get(session_id, {})
+        resolved: dict[str, str] = {}
+        model_hash = artifact.get("model_hash")
+        data_hash = artifact.get("data_hash")
+        if model_hash in getattr(self, "_model_snapshots", {}):
+            resolved["model_text"] = self._model_snapshots[model_hash]
+        if data_hash in getattr(self, "_data_snapshots", {}):
+            resolved["data_text"] = self._data_snapshots[data_hash]
+        return resolved
 
     def _show_session_model_preview(self) -> None:
         """Preview the selected session's model/data snapshot in a read-only window."""
@@ -3155,6 +3192,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._output_session_label.pop(session_id, None)
         self._output_session_timestamp.pop(session_id, None)
         self._output_session_artifacts.pop(session_id, None)
+        OPLIDE._prune_session_snapshots(self)
         if self._current_output_session_id == session_id:
             self._current_output_session_id = None
         if self._viewing_output_session_id == session_id:
@@ -5153,6 +5191,10 @@ class OPLIDE(TkinterDnD.Tk):
             self._output_session_timestamp = {}
         if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
             self._output_session_artifacts = {}
+        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
+            self._model_snapshots = {}
+        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
+            self._data_snapshots = {}
         if not hasattr(self, "_output_session_label") or self._output_session_label is None:
             self._output_session_label = {}
         label = OPLIDE._label_for_output_session(self, header)
@@ -5263,6 +5305,7 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             self._store_fold_state(self.model_file, getattr(self, "model_gutter", None), touch=False)
             self._store_fold_state(self.data_file, getattr(self, "data_gutter", None), touch=False)
+            OPLIDE._prune_session_snapshots(self)
             path = self._session_file_path()
             tmp_path = path + ".tmp"
             payload = {
@@ -5272,6 +5315,8 @@ class OPLIDE(TkinterDnD.Tk):
                 "output_session_label": self._output_session_label,
                 "output_session_timestamp": self._output_session_timestamp,
                 "output_session_artifacts": self._output_session_artifacts,
+                "model_snapshots": self._model_snapshots,
+                "data_snapshots": self._data_snapshots,
                 "current_output_session_id": self._current_output_session_id,
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
@@ -5320,12 +5365,21 @@ class OPLIDE(TkinterDnD.Tk):
         self._output_session_display = session.get("output_session_display", {}) or {}
         self._output_session_label = session.get("output_session_label", {}) or {}
         self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
+        self._model_snapshots = {
+            str(content_hash): str(content)
+            for content_hash, content in (session.get("model_snapshots", {}) or {}).items()
+        }
+        self._data_snapshots = {
+            str(content_hash): str(content)
+            for content_hash, content in (session.get("data_snapshots", {}) or {}).items()
+        }
         raw_artifacts = session.get("output_session_artifacts", {}) or {}
         self._output_session_artifacts = {
-            str(sid): {key: str(artifact.get(key) or "") for key in ("model_text", "data_text") if key in artifact}
+            str(sid): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
             for sid, artifact in raw_artifacts.items()
             if isinstance(artifact, dict)
         }
+        OPLIDE._prune_session_snapshots(self)
         self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
         self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
 
