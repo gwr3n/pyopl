@@ -691,6 +691,15 @@ minimize x;
         configured_tags = {args[0] for args, _kwargs in text.tags}
         self.assertTrue({"diff_header", "diff_add", "diff_remove", "diff_context"}.issubset(configured_tags))
 
+    def test_expose_selected_diff_preview_invalidates_selected_text(self):
+        selected = mock.Mock()
+        selected.winfo_exists.return_value = True
+        notebook = SimpleNamespace(select=mock.Mock(return_value="data-frame"))
+
+        OPLIDE._expose_selected_diff_preview(notebook, {"model-frame": mock.Mock(), "data-frame": selected})
+
+        selected.event_generate.assert_called_once_with("<Expose>", when="tail")
+
     def test_append_solver_log_text_and_stop_timer_cover_red_paths(self):
         """Solver log append and run-timer stop handle visible widgets and cancellation."""
         log_text = ExistingDummyText()

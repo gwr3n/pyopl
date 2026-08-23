@@ -1679,6 +1679,7 @@ class OPLIDE(TkinterDnD.Tk):
             notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
             current_model = self.model_text.get("1.0", tk.END)
             current_data = self.data_text.get("1.0", tk.END)
+            preview_texts: dict[str, tk.Text] = {}
             for label, current_text, selected_text, is_present in (
                 ("Model", current_model, selected_model, has_model),
                 ("Data", current_data, selected_data, has_data),
@@ -1689,6 +1690,14 @@ class OPLIDE(TkinterDnD.Tk):
                 text_widget = self._create_diff_preview_text(frame)
                 self._populate_diff_preview_text(text_widget, selected_text, current_text)
                 notebook.add(frame, text=label)
+                preview_texts[str(frame)] = text_widget
+            notebook.bind(
+                "<<NotebookTabChanged>>",
+                lambda _event: self.after_idle(
+                    lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)
+                ),
+                add="+",
+            )
             ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
         except Exception:
             pass
@@ -2642,6 +2651,16 @@ class OPLIDE(TkinterDnD.Tk):
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
         return text_widget
+
+    @staticmethod
+    def _expose_selected_diff_preview(notebook: ttk.Notebook, preview_texts: dict[str, tk.Text]) -> None:
+        """Invalidate the selected preview so Tk redraws it after a tab switch."""
+        try:
+            text_widget = preview_texts.get(str(notebook.select()))
+            if text_widget is not None and text_widget.winfo_exists():
+                text_widget.event_generate("<Expose>", when="tail")
+        except tk.TclError:
+            pass
 
     def _configure_diff_preview_tags(self, text_widget: tk.Text) -> None:
         """Apply VS Code-like diff colors to the preview text widget."""

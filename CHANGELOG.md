@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Invalidated newly selected session diff previews so their text paints without requiring mouse entry on macOS.
+
 ### Changed
 
 - Deduplicated output-session model and data snapshots through content-addressed SHA-256 stores in `.pyopl_session`.
