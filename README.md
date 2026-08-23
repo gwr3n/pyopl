@@ -58,7 +58,7 @@ cd pyopl
 pip install .
 ```
 
-Dependencies are managed via `pyproject.toml` and are listed in [`requirements.txt`](./requirements.txt)
+Dependencies are managed in `pyproject.toml`. Install development tools with `pip install -e ".[dev]"`.
 
 PyOPL requires Python 3.10+
 

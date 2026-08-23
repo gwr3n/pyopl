@@ -40,6 +40,20 @@ dependencies = [
   "networkx>=3.4",
 ]
 
+[project.optional-dependencies]
+dev = [
+  "black",
+  "ruff",
+  "flake8",
+  "mypy",
+  "scipy-stubs",
+  "coverage[toml]",
+  "build",
+  "twine",
+  "lizard",
+  "docplex>=2.32.264",
+]
+
 [project.urls]
 Homepage = "https://gwr3n.github.io/rhetor/"
 

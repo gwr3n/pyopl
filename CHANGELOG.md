@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Consolidated runtime and development dependency declarations in `pyproject.toml`; CI and documentation now install from package metadata.
+
 ### Removed
+
+- Removed the duplicate `requirements.txt` dependency manifest.
 
 ## [v2.2.0] - 2026-08-21
 
