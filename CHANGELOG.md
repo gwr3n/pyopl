@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a tracked roadmap for implication parity and shared numerical-policy constants.
 - Added right-associative nested implications and cross-backend parity tests for Boolean forms and all six integer comparison operators.
 - Added shared affine interval utilities and regression coverage for interval containment, non-finite inputs, indexed aggregation, and bound-analysis exception handling.
+- Added DOcplex cross-check coverage with environment-gated CPLEX runner configuration and a generic reproducibility roadmap for the dedicated tests.
 
 ### Fixed
 
