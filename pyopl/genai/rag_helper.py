@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
 _MODEL_LOAD_LOCK = threading.Lock()
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
 @lru_cache(maxsize=None)
@@ -61,7 +62,7 @@ def rank_problem_descriptions(
     query: str,
     models_dir: Path | str | Iterable[Path | str],
     top_k: int = 10,
-    model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> List[Dict[str, Any]]:
     """
     Rank problem description .txt files under models_dir by semantic similarity to the query.

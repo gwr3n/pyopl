@@ -30,6 +30,7 @@ from platformdirs import user_config_dir
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
+from .genai.exemplar_ranking_worker import ExemplarRankingWorker
 from .genai._strategy_base import GenAIStrategyBase
 from .genai.rag_helper import rank_problem_descriptions
 
@@ -622,17 +623,6 @@ def _compare_models_wrapper(
         q.put(("success", result))
     except Exception as exc:
         q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
-
-
-def _rank_exemplars_wrapper(query: str, models_dirs: list[str], q: multiprocessing.Queue) -> None:
-    """Rank exemplar descriptions outside the Tk process."""
-    try:
-        from .genai.rag_helper import rank_problem_descriptions
-
-        hits = rank_problem_descriptions(query=query, models_dir=models_dirs, top_k=0)
-        q.put(("success", hits))
-    except Exception as exc:
-        q.put(("error", f"{type(exc).__name__}: {exc}"))
 
 
 class _CodeGenerator(Protocol):
@@ -3633,13 +3623,13 @@ class OPLIDE(TkinterDnD.Tk):
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
 
+        ranking_worker = ExemplarRankingWorker(models_dirs)
         result: dict[str, Any] = {
             "exemplars": exemplars,
             "generation": 0,
             "search_after_id": None,
             "poll_after_id": None,
-            "process": None,
-            "queue": None,
+            "worker_ready": False,
         }
 
         def show_entries(entries: list[dict[str, Any]]) -> None:
@@ -3660,59 +3650,48 @@ class OPLIDE(TkinterDnD.Tk):
                 except tk.TclError:
                     pass
                 result["poll_after_id"] = None
-            process = result["process"]
-            result["process"] = None
-            if process is not None:
-                try:
-                    if process.is_alive():
-                        process.terminate()
-                    process.join(timeout=1.0)
-                except Exception:
-                    pass
-            search_queue = result["queue"]
-            result["queue"] = None
-            if search_queue is not None:
-                try:
-                    search_queue.close()
-                    search_queue.cancel_join_thread()
-                except Exception:
-                    pass
+            ranking_worker.close()
 
-        def poll_search(generation: int) -> None:
+        def poll_search() -> None:
             result["poll_after_id"] = None
-            process = result["process"]
-            search_queue = result["queue"]
-            if process is None or search_queue is None:
+            if not dialog.winfo_exists():
                 return
-            try:
-                kind, payload = search_queue.get_nowait()
-            except queue.Empty:
-                if process.is_alive():
-                    result["poll_after_id"] = dialog.after(50, lambda: poll_search(generation))
-                    return
-                kind, payload = "error", "Exemplar search process exited unexpectedly."
-            cleanup_search()
-            if generation != result["generation"] or not dialog.winfo_exists():
-                return
-            if kind == "success" and isinstance(payload, list):
-                exemplar_by_description = {
-                    Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars
-                }
-                ranked = [
-                    exemplar_by_description[Path(hit["path"]).resolve()]
-                    for hit in payload
-                    if isinstance(hit, dict)
-                    and "path" in hit
-                    and Path(hit["path"]).resolve() in exemplar_by_description
-                ]
-                show_entries(ranked)
-            else:
-                logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
-                show_entries([])
+            while True:
+                try:
+                    kind, generation, payload = ranking_worker.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == "ready":
+                    result["worker_ready"] = True
+                    continue
+                if kind == "startup_error":
+                    empty_var.set("Semantic search is unavailable.")
+                    logging.getLogger(__name__).debug("Exemplar search startup failed: %s", payload)
+                    continue
+                if generation != result["generation"]:
+                    continue
+                if kind == "success" and isinstance(payload, list):
+                    exemplar_by_description = {
+                        Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars
+                    }
+                    ranked = [
+                        exemplar_by_description[Path(hit["path"]).resolve()]
+                        for hit in payload
+                        if isinstance(hit, dict)
+                        and "path" in hit
+                        and Path(hit["path"]).resolve() in exemplar_by_description
+                    ]
+                    show_entries(ranked)
+                else:
+                    logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
+                    show_entries([])
+            if ranking_worker.is_alive():
+                result["poll_after_id"] = dialog.after(50, poll_search)
+            elif not result["worker_ready"]:
+                empty_var.set("Semantic search is unavailable.")
 
         def run_search() -> None:
             result["search_after_id"] = None
-            cleanup_search()
             result["generation"] += 1
             generation = result["generation"]
             query = search_var.get()
@@ -3720,16 +3699,7 @@ class OPLIDE(TkinterDnD.Tk):
                 show_entries(exemplars)
                 return
             empty_var.set("Searching...")
-
-            search_queue = multiprocessing.Queue()
-            process = multiprocessing.Process(
-                target=_rank_exemplars_wrapper,
-                args=(query, [str(path) for path in models_dirs], search_queue),
-            )
-            result["queue"] = search_queue
-            result["process"] = process
-            process.start()
-            result["poll_after_id"] = dialog.after(50, lambda: poll_search(generation))
+            ranking_worker.submit(generation, query)
 
         def schedule_search(_event: Any = None) -> None:
             search_after_id = result["search_after_id"]
@@ -3772,6 +3742,8 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.bind("<Escape>", close_dialog)
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         show_entries(exemplars)
+        ranking_worker.start()
+        result["poll_after_id"] = dialog.after(50, poll_search)
         search_entry.focus_set()
 
     def open_file(self) -> None:

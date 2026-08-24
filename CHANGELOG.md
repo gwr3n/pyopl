@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Isolated exemplar embedding searches from the Tk process, cleaned up active search workers when the dialog closes, and debounced searches while typing to prevent native shutdown crashes.
+- Isolated exemplar embedding searches in a dialog-scoped worker that preloads the model once, reuses it across searches, and shuts down with the dialog to prevent native shutdown crashes.
 
 ### Changed
 

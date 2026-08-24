@@ -2,6 +2,7 @@
 import asyncio
 import concurrent.futures
 import json
+import queue
 import sys
 import tempfile
 import threading
@@ -13,6 +14,7 @@ from typing import Any, Dict, cast
 from unittest.mock import patch
 
 import pyopl.genai._strategy_base as strategy_base
+import pyopl.genai.exemplar_ranking_worker as exemplar_ranking_worker
 import pyopl.genai.feedback_validation as feedback_validation
 from pyopl.genai import (
     genai_pricing,
@@ -270,6 +272,29 @@ class TestFeedbackValidation(unittest.TestCase):
 
 
 class TestGenAIStrategyBaseHelpers(unittest.TestCase):
+    def test_exemplar_ranking_worker_preloads_once_and_serves_multiple_queries(self) -> None:
+        commands = queue.Queue()
+        results = queue.Queue()
+        commands.put(("rank", 1, "first"))
+        commands.put(("rank", 2, "second"))
+        commands.put(("stop", None, None))
+
+        with (
+            patch.object(rag_helper, "_load_model", return_value=object()) as load_model,
+            patch.object(
+                rag_helper,
+                "rank_problem_descriptions",
+                side_effect=lambda query, **_kwargs: [{"path": f"{query}.txt"}],
+            ) as rank,
+        ):
+            exemplar_ranking_worker._run_ranking_worker(["models"], commands, results)
+
+        self.assertEqual(results.get_nowait(), ("ready", None, None))
+        self.assertEqual(results.get_nowait(), ("success", 1, [{"path": "first.txt"}]))
+        self.assertEqual(results.get_nowait(), ("success", 2, [{"path": "second.txt"}]))
+        load_model.assert_called_once_with(rag_helper.DEFAULT_EMBEDDING_MODEL)
+        self.assertEqual(rank.call_count, 2)
+
     def test_embedding_model_is_loaded_once_for_concurrent_callers(self) -> None:
         load_count = 0
         callers_ready = threading.Barrier(4)
