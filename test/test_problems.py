@@ -6472,19 +6472,19 @@ class TestPyOPLProblems(unittest.TestCase):
         self.pyopl_vs_cplex_output(KNAPSACK_MOD, KNAPSACK_DAT, cplex_obj)
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "pyopl or gurobi not available")
-    def test_knapsackp_pyopl_vs_cplex_output(self):
+    def test_multi_knapsack_pyopl_vs_cplex_output(self):
         """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for knapsackp.mod/dat."""
         # CPLEX reference solution
         cplex_obj = 498.0
 
-        KNAPSACKP_MOD = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.mod")
-        KNAPSACKP_DAT = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.dat")
+        KNAPSACKP_MOD = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.mod")
+        KNAPSACKP_DAT = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.dat")
 
         self.pyopl_vs_cplex_output(KNAPSACKP_MOD, KNAPSACKP_DAT, cplex_obj)
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "pyopl or gurobi not available")
     def test_inventory_routing_pyopl_vs_cplex_output(self):
-        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for knapsackp.mod/dat."""
+        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for multi_knapsack.mod/dat."""
         # CPLEX reference solution
         cplex_obj = 103.0
 

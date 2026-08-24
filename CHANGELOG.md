@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolated exemplar embedding searches from the Tk process, cleaned up active search workers when the dialog closes, and debounced searches while typing to prevent native shutdown crashes.
+
 ### Changed
 
 ### Removed

@@ -64,8 +64,27 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._setup_menu(dummy)
 
         file_labels = [entry[1]["label"] for entry in FakeMenu.instances[1].entries if entry[0] == "command"]
+        open_index = file_labels.index("Open...")
+        self.assertEqual(file_labels[open_index + 1], "Retrieve Exemplar...")
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
+
+    def test_rank_exemplars_preserves_rag_order(self):
+        low = Path("/tmp/low.txt")
+        high = Path("/tmp/high.txt")
+        exemplars = [
+            {"name": "low", "description_path": low},
+            {"name": "high", "description_path": high},
+        ]
+        with mock.patch.object(
+            pyopl_ide_bootstrap,
+            "rank_problem_descriptions",
+            return_value=[{"path": str(high)}, {"path": str(low)}],
+        ) as rank:
+            ranked = OPLIDE._rank_exemplars("assignment", exemplars, [Path("/tmp/opl_models")])
+
+        self.assertEqual([entry["name"] for entry in ranked], ["high", "low"])
+        rank.assert_called_once_with(query="assignment", models_dir=[Path("/tmp/opl_models")], top_k=0)
 
     def test_file_menu_quit_entry_is_platform_appropriate(self):
         class FakeMenu:

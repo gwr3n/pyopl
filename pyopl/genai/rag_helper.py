@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -8,10 +9,11 @@ from typing import Any, Dict, Iterable, List
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
 logger = logging.getLogger(__name__)
+_MODEL_LOAD_LOCK = threading.Lock()
 
 
 @lru_cache(maxsize=None)
-def _load_model(model_name: str):
+def _load_model_cached(model_name: str):
     try:
         from sentence_transformers import SentenceTransformer
 
@@ -19,6 +21,11 @@ def _load_model(model_name: str):
     except Exception as e:
         logging.warning("RAG disabled (embedding model load failed): %s", e)
         return None
+
+
+def _load_model(model_name: str):
+    with _MODEL_LOAD_LOCK:
+        return _load_model_cached(model_name)
 
 
 def _iter_description_files(models_dir: Path) -> List[Path]:

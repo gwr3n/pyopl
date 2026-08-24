@@ -1,8 +1,10 @@
 # mypy: disable-error-code="attr-defined,name-defined,call-arg"
 import asyncio
+import concurrent.futures
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from importlib import import_module
 from pathlib import Path
@@ -268,6 +270,31 @@ class TestFeedbackValidation(unittest.TestCase):
 
 
 class TestGenAIStrategyBaseHelpers(unittest.TestCase):
+    def test_embedding_model_is_loaded_once_for_concurrent_callers(self) -> None:
+        load_count = 0
+        callers_ready = threading.Barrier(4)
+
+        class FakeSentenceTransformer:
+            def __init__(self, _model_name: str) -> None:
+                nonlocal load_count
+                load_count += 1
+
+        def load() -> object:
+            callers_ready.wait()
+            return rag_helper._load_model("test-model")
+
+        rag_helper._load_model_cached.cache_clear()
+        fake_module = SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
+        with (
+            patch.dict(sys.modules, {"sentence_transformers": fake_module}),
+            concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor,
+        ):
+            models = list(executor.map(lambda _index: load(), range(4)))
+        rag_helper._load_model_cached.cache_clear()
+
+        self.assertEqual(load_count, 1)
+        self.assertTrue(all(model is models[0] for model in models))
+
     def test_extract_json_from_fence_and_prose(self) -> None:
         fenced = 'prefix```json\n{"model": {"name": "x"}, "ok": true}\n```suffix'
         prose = 'Here is the answer: {"outer": {"inner": 3}, "items": [1, 2]}. Done.'

@@ -30,6 +30,8 @@ from platformdirs import user_config_dir
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
+from .genai._strategy_base import GenAIStrategyBase
+from .genai.rag_helper import rank_problem_descriptions
 
 # Model discovery (provider-specific)
 from .genai.model_discovery import (
@@ -622,6 +624,17 @@ def _compare_models_wrapper(
         q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
 
 
+def _rank_exemplars_wrapper(query: str, models_dirs: list[str], q: multiprocessing.Queue) -> None:
+    """Rank exemplar descriptions outside the Tk process."""
+    try:
+        from .genai.rag_helper import rank_problem_descriptions
+
+        hits = rank_problem_descriptions(query=query, models_dir=models_dirs, top_k=0)
+        q.put(("success", hits))
+    except Exception as exc:
+        q.put(("error", f"{type(exc).__name__}: {exc}"))
+
+
 class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
@@ -1038,6 +1051,7 @@ class OPLIDE(TkinterDnD.Tk):
         filemenu.add_command(label="New Model", command=self.new_model, accelerator=self._accel("N"))
         filemenu.add_separator()
         filemenu.add_command(label="Open...", command=self.open_file, accelerator=self._accel("O"))
+        filemenu.add_command(label="Retrieve Exemplar...", command=self.retrieve_exemplar)
         filemenu.add_separator()
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
@@ -3547,6 +3561,219 @@ class OPLIDE(TkinterDnD.Tk):
             self._update_caret_position(self.data_text)
 
     # --- File Operations ---
+    @staticmethod
+    def _available_exemplars(models_dirs: Optional[list[Path]] = None) -> list[dict[str, Any]]:
+        """Return complete exemplar triplets from the packaged and local model roots."""
+        roots = models_dirs if models_dirs is not None else GenAIStrategyBase.default_models_dirs()
+        exemplars: dict[Path, dict[str, Any]] = {}
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for description_path in sorted(root.rglob("*.txt")):
+                if not description_path.is_file():
+                    continue
+                model_path, data_path = GenAIStrategyBase.find_pair_in_folder(description_path)
+                if model_path is None or data_path is None:
+                    continue
+                resolved_description = description_path.resolve()
+                exemplars.setdefault(
+                    resolved_description,
+                    {
+                        "name": description_path.parent.name or description_path.stem,
+                        "description_path": description_path,
+                        "model_path": model_path,
+                        "data_path": data_path,
+                    },
+                )
+        return sorted(exemplars.values(), key=lambda exemplar: str(exemplar["name"]).casefold())
+
+    @staticmethod
+    def _rank_exemplars(query: str, exemplars: list[dict[str, Any]], models_dirs: list[Path]) -> list[dict[str, Any]]:
+        """Sort complete exemplars with the same semantic ranking used by RAG."""
+        if not query.strip():
+            return exemplars
+        hits = rank_problem_descriptions(query=query, models_dir=models_dirs, top_k=0)
+        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
+        return [
+            exemplar_by_description[Path(hit["path"]).resolve()]
+            for hit in hits
+            if Path(hit["path"]).resolve() in exemplar_by_description
+        ]
+
+    def retrieve_exemplar(self) -> None:
+        """Show searchable packaged and local exemplars and load the selected pair."""
+        if not self._ensure_no_active_operation("Retrieve Exemplar"):
+            return
+
+        models_dirs = GenAIStrategyBase.default_models_dirs()
+        exemplars = self._available_exemplars(models_dirs)
+        dialog = tk.Toplevel(self)
+        dialog.title("Retrieve Exemplar")
+        dialog.geometry("640x480")
+        dialog.minsize(480, 320)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.rowconfigure(2, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        ttk.Label(dialog, text="Search exemplars").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(dialog, textvariable=search_var)
+        search_entry.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+
+        list_frame = ttk.Frame(dialog)
+        list_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        exemplar_list = tk.Listbox(list_frame, exportselection=False)
+        exemplar_list.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=exemplar_list.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        exemplar_list.configure(yscrollcommand=scrollbar.set)
+        empty_var = tk.StringVar()
+        ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
+
+        result: dict[str, Any] = {
+            "exemplars": exemplars,
+            "generation": 0,
+            "search_after_id": None,
+            "poll_after_id": None,
+            "process": None,
+            "queue": None,
+        }
+
+        def show_entries(entries: list[dict[str, Any]]) -> None:
+            result["exemplars"] = entries
+            exemplar_list.delete(0, tk.END)
+            for exemplar in entries:
+                exemplar_list.insert(tk.END, str(exemplar["name"]))
+            empty_var.set("No matching exemplars." if not entries else "")
+            if entries:
+                exemplar_list.selection_set(0)
+                exemplar_list.activate(0)
+
+        def cleanup_search() -> None:
+            poll_after_id = result["poll_after_id"]
+            if poll_after_id is not None:
+                try:
+                    dialog.after_cancel(poll_after_id)
+                except tk.TclError:
+                    pass
+                result["poll_after_id"] = None
+            process = result["process"]
+            result["process"] = None
+            if process is not None:
+                try:
+                    if process.is_alive():
+                        process.terminate()
+                    process.join(timeout=1.0)
+                except Exception:
+                    pass
+            search_queue = result["queue"]
+            result["queue"] = None
+            if search_queue is not None:
+                try:
+                    search_queue.close()
+                    search_queue.cancel_join_thread()
+                except Exception:
+                    pass
+
+        def poll_search(generation: int) -> None:
+            result["poll_after_id"] = None
+            process = result["process"]
+            search_queue = result["queue"]
+            if process is None or search_queue is None:
+                return
+            try:
+                kind, payload = search_queue.get_nowait()
+            except queue.Empty:
+                if process.is_alive():
+                    result["poll_after_id"] = dialog.after(50, lambda: poll_search(generation))
+                    return
+                kind, payload = "error", "Exemplar search process exited unexpectedly."
+            cleanup_search()
+            if generation != result["generation"] or not dialog.winfo_exists():
+                return
+            if kind == "success" and isinstance(payload, list):
+                exemplar_by_description = {
+                    Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars
+                }
+                ranked = [
+                    exemplar_by_description[Path(hit["path"]).resolve()]
+                    for hit in payload
+                    if isinstance(hit, dict)
+                    and "path" in hit
+                    and Path(hit["path"]).resolve() in exemplar_by_description
+                ]
+                show_entries(ranked)
+            else:
+                logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
+                show_entries([])
+
+        def run_search() -> None:
+            result["search_after_id"] = None
+            cleanup_search()
+            result["generation"] += 1
+            generation = result["generation"]
+            query = search_var.get()
+            if not query.strip():
+                show_entries(exemplars)
+                return
+            empty_var.set("Searching...")
+
+            search_queue = multiprocessing.Queue()
+            process = multiprocessing.Process(
+                target=_rank_exemplars_wrapper,
+                args=(query, [str(path) for path in models_dirs], search_queue),
+            )
+            result["queue"] = search_queue
+            result["process"] = process
+            process.start()
+            result["poll_after_id"] = dialog.after(50, lambda: poll_search(generation))
+
+        def schedule_search(_event: Any = None) -> None:
+            search_after_id = result["search_after_id"]
+            if search_after_id is not None:
+                dialog.after_cancel(search_after_id)
+            result["search_after_id"] = dialog.after(250, run_search)
+
+        def retrieve(_event: Any = None) -> None:
+            selection = exemplar_list.curselection()
+            if not selection:
+                return
+            exemplar = result["exemplars"][selection[0]]
+            self._open_model_path(str(exemplar["model_path"]))
+            self._open_data_path(str(exemplar["data_path"]))
+            self.status_var.set(f"Retrieved exemplar: {exemplar['name']}")
+            close_dialog()
+
+        def close_dialog(_event: Any = None) -> None:
+            search_after_id = result["search_after_id"]
+            if search_after_id is not None:
+                try:
+                    dialog.after_cancel(search_after_id)
+                except tk.TclError:
+                    pass
+                result["search_after_id"] = None
+            cleanup_search()
+            if getattr(self, "_exemplar_search_cleanup", None) is close_dialog:
+                self._exemplar_search_cleanup = None
+            dialog.destroy()
+
+        self._exemplar_search_cleanup = close_dialog
+
+        actions = ttk.Frame(dialog)
+        actions.grid(row=4, column=0, sticky="e", padx=12, pady=(4, 12))
+        ttk.Button(actions, text="Retrieve", command=retrieve).grid(row=0, column=0)
+        ttk.Button(actions, text="Cancel", command=close_dialog).grid(row=0, column=1, padx=(8, 0))
+        search_entry.bind("<KeyRelease>", schedule_search)
+        exemplar_list.bind("<Double-Button-1>", retrieve)
+        dialog.bind("<Return>", retrieve)
+        dialog.bind("<Escape>", close_dialog)
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        show_entries(exemplars)
+        search_entry.focus_set()
+
     def open_file(self) -> None:
         """Open a model or data file into the matching editor."""
         if not self._ensure_no_active_operation("Open File"):
@@ -7032,6 +7259,9 @@ class OPLIDE(TkinterDnD.Tk):
         if self._has_unsaved_editor_changes() and not self._confirm_quit_with_unsaved_changes():
             return
         setattr(self, "_shutting_down", True)
+        exemplar_search_cleanup = getattr(self, "_exemplar_search_cleanup", None)
+        if callable(exemplar_search_cleanup):
+            exemplar_search_cleanup()
         try:
             self._ide_bridge.stop()
         except Exception:
