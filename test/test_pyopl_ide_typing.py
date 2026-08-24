@@ -13,6 +13,15 @@ from pyopl import pyopl_ide_bootstrap
 from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
+class _ImmediateThread:
+    def __init__(self, *, target, daemon):
+        self.target = target
+        self.daemon = daemon
+
+    def start(self):
+        self.target()
+
+
 class TestPyOPLIDETyping(unittest.TestCase):
     def test_save_exemplar_menu_item_follows_export_model(self):
         class FakeMenu:
@@ -151,7 +160,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._append_output.assert_not_called()
         self.assertIn("Model exported to LP", stdout.getvalue())
 
-    def test_save_exemplar_writes_triplet_from_editors_and_session(self):
+    def test_save_exemplar_writes_reviewed_triplet_without_session_transcript(self):
         class DummyText:
             def __init__(self, value):
                 self.value = value
@@ -173,23 +182,46 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _save_session=save_session,
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _validate_exemplar_draft=OPLIDE._validate_exemplar_draft,
                 _write_exemplar=OPLIDE._write_exemplar,
                 _ask_short_text=mock.Mock(return_value="fleet"),
+                _review_exemplar_draft=mock.Mock(
+                    side_effect=lambda draft, _root: OPLIDE._with_reviewed_exemplar_description(
+                        draft,
+                        "Reviewed fleet assignment problem.",
+                    )
+                ),
+                genai_provider="openai",
+                genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
             )
 
             with (
                 mock.patch.object(Path, "cwd", return_value=root),
                 mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(
+                    pyopl_ide_bootstrap,
+                    "distill_exemplar_description",
+                    return_value="Generated fleet assignment problem.",
+                ) as distill,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
             ):
                 OPLIDE.save_exemplar(dummy)
 
             exemplar = root / "opl_models" / "fleet"
             self.assertEqual((exemplar / "fleet.mod").read_text(encoding="utf-8"), "model content\n")
             self.assertEqual((exemplar / "fleet.dat").read_text(encoding="utf-8"), "data content\n")
-            self.assertEqual((exemplar / "fleet.txt").read_text(encoding="utf-8"), '{"complete": true}\n')
+            self.assertEqual((exemplar / "fleet.txt").read_text(encoding="utf-8"), "Reviewed fleet assignment problem.")
+            distill.assert_called_once_with(
+                model="model content\n",
+                data="data content\n",
+                source_session='{"complete": true}\n',
+                provider="openai",
+                model_name="test-model",
+            )
             showerror.assert_not_called()
             dummy._ask_short_text.assert_called_once_with("Save Exemplar", "Exemplar name:")
-            dummy.status_var.set.assert_called_once_with(f"Saved exemplar to {exemplar.resolve()}")
+            self.assertEqual(dummy.status_var.set.call_args_list[-1], mock.call(f"Saved exemplar to {exemplar.resolve()}"))
 
     def test_save_exemplar_reprompts_for_existing_folder(self):
         with TemporaryDirectory() as tmpdir:
@@ -205,19 +237,195 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _save_session=mock.Mock(),
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _validate_exemplar_draft=OPLIDE._validate_exemplar_draft,
                 _write_exemplar=OPLIDE._write_exemplar,
                 _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
+                _review_exemplar_draft=mock.Mock(side_effect=lambda draft, _root: draft),
+                genai_provider="openai",
+                genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
             )
 
             with (
                 mock.patch.object(Path, "cwd", return_value=root),
                 mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(
+                    pyopl_ide_bootstrap,
+                    "distill_exemplar_description",
+                    return_value="description",
+                ),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
             ):
                 OPLIDE.save_exemplar(dummy)
 
             self.assertEqual(dummy._ask_short_text.call_count, 2)
             showerror.assert_called_once()
             self.assertTrue((root / "opl_models" / "replacement" / "replacement.mod").is_file())
+
+    def test_save_exemplar_cancelled_review_writes_nothing(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("session", encoding="utf-8")
+            dummy = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "model"),
+                data_text=SimpleNamespace(get=lambda *_args: ""),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _validate_exemplar_draft=OPLIDE._validate_exemplar_draft,
+                _write_exemplar=mock.Mock(),
+                _ask_short_text=mock.Mock(return_value="cancelled"),
+                _review_exemplar_draft=mock.Mock(return_value=None),
+                genai_provider="openai",
+                genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
+            )
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap, "distill_exemplar_description", return_value="description"),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
+            ):
+                OPLIDE.save_exemplar(dummy)
+
+            dummy._write_exemplar.assert_not_called()
+            self.assertFalse((root / "opl_models").exists())
+
+    def test_save_exemplar_requires_genai_selection_before_session_save(self):
+        with TemporaryDirectory() as tmpdir:
+            dummy = SimpleNamespace(
+                _ask_short_text=mock.Mock(return_value="fleet"),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _save_session=mock.Mock(),
+                genai_provider=None,
+                genai_model=None,
+            )
+            with (
+                mock.patch.object(Path, "cwd", return_value=Path(tmpdir)),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                OPLIDE.save_exemplar(dummy)
+
+            dummy._save_session.assert_not_called()
+            self.assertIn("Select a GenAI provider", showerror.call_args.args[1])
+
+    def test_save_exemplar_distillation_failure_writes_nothing(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("session", encoding="utf-8")
+            dummy = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "model"),
+                data_text=SimpleNamespace(get=lambda *_args: "data"),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _write_exemplar=mock.Mock(),
+                _ask_short_text=mock.Mock(return_value="failed"),
+                genai_provider="openai",
+                genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
+            )
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(
+                    pyopl_ide_bootstrap,
+                    "distill_exemplar_description",
+                    side_effect=RuntimeError("generation failed"),
+                ),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
+            ):
+                OPLIDE.save_exemplar(dummy)
+
+            dummy._write_exemplar.assert_not_called()
+            self.assertFalse((root / "opl_models").exists())
+
+    def test_save_exemplar_revalidates_destination_after_review(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("session", encoding="utf-8")
+
+            def create_competing_destination(draft, models_root):
+                (models_root / draft.name).mkdir(parents=True)
+                return draft
+
+            dummy = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "model"),
+                data_text=SimpleNamespace(get=lambda *_args: "data"),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _validate_exemplar_draft=OPLIDE._validate_exemplar_draft,
+                _write_exemplar=mock.Mock(),
+                _ask_short_text=mock.Mock(return_value="race"),
+                _review_exemplar_draft=mock.Mock(side_effect=create_competing_destination),
+                genai_provider="openai",
+                genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
+            )
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap, "distill_exemplar_description", return_value="description"),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
+            ):
+                OPLIDE.save_exemplar(dummy)
+
+            dummy._write_exemplar.assert_not_called()
+            self.assertIn("already exists", showerror.call_args.args[1])
+
+    def test_save_exemplar_returns_before_distillation_runs(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("session", encoding="utf-8")
+            worker = mock.Mock()
+            dummy = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "model"),
+                data_text=SimpleNamespace(get=lambda *_args: "data"),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _ask_short_text=mock.Mock(return_value="async"),
+                genai_provider="openai",
+                genai_model="test-model",
+            )
+            thread = mock.Mock()
+            thread.start = worker
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap, "distill_exemplar_description") as distill,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE.save_exemplar(dummy)
+
+            worker.assert_called_once_with()
+            distill.assert_not_called()
+            self.assertTrue(dummy._exemplar_save_pending)
+            self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
+    def test_reviewed_exemplar_description_preserves_model_and_data(self):
+        draft = pyopl_ide_bootstrap.ExemplarDraft(
+            name="fleet",
+            model="original model",
+            data="original data",
+            description="generated description",
+            source_session="session",
+        )
+
+        reviewed = OPLIDE._with_reviewed_exemplar_description(draft, "edited description")
+
+        self.assertEqual(reviewed.description, "edited description")
+        self.assertEqual(reviewed.model, "original model")
+        self.assertEqual(reviewed.data, "original data")
 
     def test_save_exemplar_name_validation_rejects_folders_and_cancel_does_nothing(self):
         root = Path("/tmp/workspace/opl_models")

@@ -35,6 +35,7 @@ from .genai.model_discovery import (
     list_ollama_models,
     list_openai_models,
 )
+from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
@@ -5208,8 +5209,123 @@ class OPLIDE(TkinterDnD.Tk):
             shutil.rmtree(temporary, ignore_errors=True)
             raise
 
+    @staticmethod
+    def _validate_exemplar_draft(draft: ExemplarDraft, models_root: Path) -> tuple[Path, str]:
+        destination, file_stem = OPLIDE._resolve_exemplar_destination(models_root, draft.name)
+        if destination.exists():
+            raise ValueError(f"The exemplar folder already exists:\n{destination}\n\nChoose another name.")
+        if not draft.description.strip():
+            raise ValueError("The description cannot be empty.")
+        if not draft.model.strip():
+            raise ValueError("The model cannot be empty.")
+        try:
+            draft.description.encode("utf-8")
+            draft.model.encode("utf-8")
+            draft.data.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("The description, model, and data must be valid UTF-8 text.") from exc
+        return destination, file_stem
+
+    @staticmethod
+    def _with_reviewed_exemplar_description(draft: ExemplarDraft, description: str) -> ExemplarDraft:
+        return draft.with_reviewed_content(description=description, model=draft.model, data=draft.data)
+
+    def _review_exemplar_draft(self, draft: ExemplarDraft, models_root: Path) -> Optional[ExemplarDraft]:
+        dialog = tk.Toplevel(self)
+        dialog.title(f"Review Exemplar: {draft.name}")
+        dialog.geometry("920x680")
+        dialog.minsize(640, 440)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.rowconfigure(0, weight=1)
+        dialog.columnconfigure(0, weight=1)
+
+        notebook = ttk.Notebook(dialog)
+        notebook.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
+        editors: dict[str, tk.Text] = {}
+        for label, value in (
+            ("Description", draft.description),
+            ("Model", draft.model),
+            ("Data", draft.data),
+        ):
+            frame = ttk.Frame(notebook)
+            frame.rowconfigure(0, weight=1)
+            frame.columnconfigure(0, weight=1)
+            editor = scrolledtext.ScrolledText(frame, wrap="word" if label == "Description" else "none", undo=True)
+            editor.grid(row=0, column=0, sticky="nsew")
+            editor.insert("1.0", value)
+            if label != "Description":
+                for token, color in TOKEN_COLORS.items():
+                    editor.tag_configure(token, foreground=color)
+                editor.tag_configure("ERROR", background="#e06c75", foreground="black")
+                editor.tag_configure(
+                    "COMMENT",
+                    font=(self.editor_font_family, self.current_font_size, "italic"),
+                )
+                self.highlight(editor, is_data=label == "Data", validate=True)
+                editor.configure(state="disabled")
+            notebook.add(frame, text=label)
+            editors[label] = editor
+
+        actions = ttk.Frame(dialog)
+        actions.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 12))
+        actions.columnconfigure(0, weight=1)
+        validation_var = tk.StringVar(value="")
+        ttk.Label(actions, textvariable=validation_var).grid(row=0, column=0, sticky="w")
+        result: dict[str, Optional[ExemplarDraft]] = {"draft": None}
+
+        def reviewed_draft() -> ExemplarDraft:
+            return self._with_reviewed_exemplar_description(
+                draft,
+                editors["Description"].get("1.0", "end-1c"),
+            )
+
+        def refresh_accept_state(_event: Any = None) -> None:
+            try:
+                self._validate_exemplar_draft(reviewed_draft(), models_root)
+            except ValueError as exc:
+                validation_var.set(str(exc).splitlines()[0])
+                accept_button.state(["disabled"])
+            else:
+                validation_var.set("")
+                accept_button.state(["!disabled"])
+
+        def accept(_event: Any = None) -> None:
+            candidate = reviewed_draft()
+            try:
+                self._validate_exemplar_draft(candidate, models_root)
+            except ValueError as exc:
+                validation_var.set(str(exc).splitlines()[0])
+                return
+            result["draft"] = candidate
+            dialog.destroy()
+
+        def cancel(_event: Any = None) -> None:
+            result["draft"] = None
+            dialog.destroy()
+
+        accept_button = ttk.Button(actions, text="Accept & Save", command=accept)
+        accept_button.grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="Cancel", command=cancel).grid(row=0, column=2, padx=(8, 0))
+        editors["Description"].bind("<<Modified>>", refresh_accept_state, add="+")
+        editors["Description"].bind("<KeyRelease>", refresh_accept_state, add="+")
+        dialog.bind("<Escape>", cancel)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        refresh_accept_state()
+        editors["Description"].focus_set()
+        dialog.wait_window()
+        return result["draft"]
+
     def save_exemplar(self) -> None:
-        """Save the current editors and complete session as a local RAG exemplar."""
+        """Distill and review the current session before saving a local RAG exemplar."""
+        if getattr(self, "_exemplar_save_pending", False):
+            messagebox.showinfo(
+                "Save Exemplar",
+                "An exemplar description is already being generated.",
+                parent=self,
+            )
+            return
+
         models_root = Path.cwd() / "opl_models"
         while True:
             name = self._ask_short_text("Save Exemplar", "Exemplar name:")
@@ -5229,13 +5345,77 @@ class OPLIDE(TkinterDnD.Tk):
                 continue
             break
 
+        provider = getattr(self, "genai_provider", None)
+        model_name = getattr(self, "genai_model", None)
+        if not provider or not model_name:
+            messagebox.showerror(
+                "Save Exemplar",
+                "Select a GenAI provider and model before saving an exemplar.",
+                parent=self,
+            )
+            return
+
         try:
             self._save_session()
             session_path = Path(self._session_file_path())
-            description = session_path.read_text(encoding="utf-8")
+            source_session = session_path.read_text(encoding="utf-8")
             model = self.model_text.get("1.0", "end-1c")
             data = self.data_text.get("1.0", "end-1c")
-            self._write_exemplar(destination, file_stem, model, data, description)
+            self.status_var.set("Generating exemplar description...")
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).exception("Failed to save exemplar")
+            self.status_var.set(f"Failed to save exemplar: {detail}")
+            messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
+            return
+
+        self._exemplar_save_pending = True
+
+        def prepare_draft() -> None:
+            try:
+                description = distill_exemplar_description(
+                    model=model,
+                    data=data,
+                    source_session=source_session,
+                    provider=provider,
+                    model_name=model_name,
+                )
+                draft = ExemplarDraft(
+                    name=file_stem,
+                    model=model,
+                    data=data,
+                    description=description,
+                    source_session=source_session,
+                )
+            except Exception as exc:
+                self.after(0, OPLIDE._finish_exemplar_preparation_error, self, exc)
+                return
+            self.after(0, OPLIDE._finish_exemplar_preparation, self, draft, models_root)
+
+        threading.Thread(target=prepare_draft, daemon=True).start()
+
+    def _finish_exemplar_preparation_error(self, exc: Exception) -> None:
+        self._exemplar_save_pending = False
+        detail = f"{type(exc).__name__}: {exc}"
+        logging.getLogger(__name__).error("Failed to prepare exemplar: %s", detail)
+        self.status_var.set(f"Failed to save exemplar: {detail}")
+        messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
+
+    def _finish_exemplar_preparation(self, draft: ExemplarDraft, models_root: Path) -> None:
+        self._exemplar_save_pending = False
+        try:
+            reviewed = self._review_exemplar_draft(draft, models_root)
+            if reviewed is None:
+                self.status_var.set("Exemplar save cancelled")
+                return
+            destination, file_stem = self._validate_exemplar_draft(reviewed, models_root)
+            self._write_exemplar(
+                destination,
+                file_stem,
+                reviewed.model,
+                reviewed.data,
+                reviewed.description,
+            )
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             logging.getLogger(__name__).exception("Failed to save exemplar")

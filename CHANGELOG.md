@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a three-tab review gate for saving GenAI-distilled exemplar descriptions with syntax-highlighted model and data previews.
+
 ### Fixed
 
 ### Changed
+
+- Changed `Save Exemplar...` to generate descriptions without blocking the IDE, require explicit acceptance before atomically saving a triplet, and avoid storing raw session transcripts as exemplar descriptions.
 
 ### Removed
 
