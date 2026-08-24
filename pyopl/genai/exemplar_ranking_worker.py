@@ -2,16 +2,23 @@ from __future__ import annotations
 
 import multiprocessing
 import queue
+import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 
 from .rag_helper import DEFAULT_EMBEDDING_MODEL
 
 
+class _WorkerQueue(Protocol):
+    def get(self) -> Any: ...
+
+    def put(self, item: Any) -> None: ...
+
+
 def _run_ranking_worker(
     models_dirs: list[str],
-    command_queue: multiprocessing.Queue,
-    result_queue: multiprocessing.Queue,
+    command_queue: _WorkerQueue,
+    result_queue: _WorkerQueue,
 ) -> None:
     try:
         from .rag_helper import _load_model, rank_problem_descriptions
@@ -68,7 +75,7 @@ class ExemplarRankingWorker:
     def is_alive(self) -> bool:
         return self._process is not None and self._process.is_alive()
 
-    def close(self) -> None:
+    def close(self, *, wait: bool = True) -> None:
         process = self._process
         commands = self._commands
         results = self._results
@@ -76,11 +83,33 @@ class ExemplarRankingWorker:
         self._commands = None
         self._results = None
 
+        if not wait:
+            if process is not None:
+                try:
+                    if process.is_alive():
+                        process.terminate()
+                except Exception:
+                    pass
+            threading.Thread(
+                target=self._cleanup,
+                args=(process, commands, results, False),
+                daemon=True,
+            ).start()
+            return
+        self._cleanup(process, commands, results, True)
+
+    @staticmethod
+    def _cleanup(
+        process: Optional[multiprocessing.Process],
+        commands: Optional[multiprocessing.Queue],
+        results: Optional[multiprocessing.Queue],
+        graceful: bool,
+    ) -> None:
         if process is not None:
             try:
-                if process.is_alive() and commands is not None:
+                if graceful and process.is_alive() and commands is not None:
                     commands.put(("stop", None, None))
-                process.join(timeout=5.0)
+                process.join(timeout=5.0 if graceful else 1.0)
                 if process.is_alive():
                     process.terminate()
                     process.join(timeout=1.0)

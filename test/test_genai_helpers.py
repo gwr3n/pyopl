@@ -273,8 +273,8 @@ class TestFeedbackValidation(unittest.TestCase):
 
 class TestGenAIStrategyBaseHelpers(unittest.TestCase):
     def test_exemplar_ranking_worker_preloads_once_and_serves_multiple_queries(self) -> None:
-        commands = queue.Queue()
-        results = queue.Queue()
+        commands: queue.Queue[tuple[str, int | None, str | None]] = queue.Queue()
+        results: queue.Queue[tuple[str, int | None, Any]] = queue.Queue()
         commands.put(("rank", 1, "first"))
         commands.put(("rank", 2, "second"))
         commands.put(("stop", None, None))

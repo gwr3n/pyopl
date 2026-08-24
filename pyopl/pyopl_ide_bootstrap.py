@@ -29,10 +29,9 @@ import ttkbootstrap as tb
 from platformdirs import user_config_dir
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from .genai._strategy_base import GenAIStrategyBase
 from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
 from .genai.exemplar_ranking_worker import ExemplarRankingWorker
-from .genai._strategy_base import GenAIStrategyBase
-from .genai.rag_helper import rank_problem_descriptions
 
 # Model discovery (provider-specific)
 from .genai.model_discovery import (
@@ -41,6 +40,7 @@ from .genai.model_discovery import (
     list_openai_models,
 )
 from .genai.pyopl_generative import generative_feedback
+from .genai.rag_helper import rank_problem_descriptions
 
 # --- Local Imports ---
 from .model_equivalence import ModelComparisonResult, compare_models
@@ -711,6 +711,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_window: Optional[tk.Toplevel] = None
         self._genai_diff_preview_notebook: Optional[ttk.Notebook] = None
         self._genai_diff_preview_texts: dict[str, tk.Text] = {}
+        self._exemplar_search_cleanup: Optional[Callable[[Any], None]] = None
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -3590,6 +3591,30 @@ class OPLIDE(TkinterDnD.Tk):
             if Path(hit["path"]).resolve() in exemplar_by_description
         ]
 
+    @staticmethod
+    def _classify_exemplar_search_result(
+        message: tuple[str, Optional[int], Any],
+        current_generation: int,
+        exemplars: list[dict[str, Any]],
+    ) -> tuple[str, Any]:
+        kind, generation, payload = message
+        if kind == "ready":
+            return "ready", None
+        if kind == "startup_error":
+            return "startup_error", payload
+        if generation != current_generation:
+            return "ignore", None
+        if kind != "success" or not isinstance(payload, list):
+            return "error", payload
+
+        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
+        ranked = [
+            exemplar_by_description[Path(hit["path"]).resolve()]
+            for hit in payload
+            if isinstance(hit, dict) and "path" in hit and Path(hit["path"]).resolve() in exemplar_by_description
+        ]
+        return "success", ranked
+
     def retrieve_exemplar(self) -> None:
         """Show searchable packaged and local exemplars and load the selected pair."""
         if not self._ensure_no_active_operation("Retrieve Exemplar"):
@@ -3650,7 +3675,7 @@ class OPLIDE(TkinterDnD.Tk):
                 except tk.TclError:
                     pass
                 result["poll_after_id"] = None
-            ranking_worker.close()
+            ranking_worker.close(wait=False)
 
         def poll_search() -> None:
             result["poll_after_id"] = None
@@ -3658,31 +3683,22 @@ class OPLIDE(TkinterDnD.Tk):
                 return
             while True:
                 try:
-                    kind, generation, payload = ranking_worker.get_nowait()
+                    message = ranking_worker.get_nowait()
                 except queue.Empty:
                     break
-                if kind == "ready":
+                action, payload = self._classify_exemplar_search_result(
+                    message,
+                    result["generation"],
+                    exemplars,
+                )
+                if action == "ready":
                     result["worker_ready"] = True
-                    continue
-                if kind == "startup_error":
+                elif action == "startup_error":
                     empty_var.set("Semantic search is unavailable.")
                     logging.getLogger(__name__).debug("Exemplar search startup failed: %s", payload)
-                    continue
-                if generation != result["generation"]:
-                    continue
-                if kind == "success" and isinstance(payload, list):
-                    exemplar_by_description = {
-                        Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars
-                    }
-                    ranked = [
-                        exemplar_by_description[Path(hit["path"]).resolve()]
-                        for hit in payload
-                        if isinstance(hit, dict)
-                        and "path" in hit
-                        and Path(hit["path"]).resolve() in exemplar_by_description
-                    ]
-                    show_entries(ranked)
-                else:
+                elif action == "success":
+                    show_entries(payload)
+                elif action == "error":
                     logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
                     show_entries([])
             if ranking_worker.is_alive():

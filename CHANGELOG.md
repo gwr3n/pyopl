@@ -10,10 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added focused regression coverage for SciPy CSC variable-domain resolution, iterator unrolling, bound evaluation, expression emission, and Boolean dispatch helpers.
+- Add searchable exemplar retrieval with isolated embedding searches.
 
 ### Fixed
 
 - Isolated exemplar embedding searches in a dialog-scoped worker that preloads the model once, reuses it across searches, and shuts down with the dialog to prevent native shutdown crashes.
+- Made immediate cancellation of exemplar retrieval close the dialog without waiting for the embedding worker to load.
+- Corrected queue, callback, and test-mock annotations so the full project passes mypy.
+- Simplified exemplar search polling by separating worker-result classification from UI dispatch.
 
 ### Changed
 

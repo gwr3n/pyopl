@@ -86,6 +86,34 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual([entry["name"] for entry in ranked], ["high", "low"])
         rank.assert_called_once_with(query="assignment", models_dir=[Path("/tmp/opl_models")], top_k=0)
 
+    def test_classify_exemplar_search_result_handles_worker_messages(self):
+        low = {"name": "low", "description_path": Path("/tmp/low.txt")}
+        high = {"name": "high", "description_path": Path("/tmp/high.txt")}
+        exemplars = [low, high]
+
+        cases = [
+            (("ready", None, None), 2, ("ready", None)),
+            (("startup_error", None, "load failed"), 2, ("startup_error", "load failed")),
+            (("success", 1, []), 2, ("ignore", None)),
+            (("error", 2, "ranking failed"), 2, ("error", "ranking failed")),
+            (
+                (
+                    "success",
+                    2,
+                    [{"path": "/tmp/high.txt"}, "invalid", {"missing": "path"}, {"path": "/tmp/low.txt"}],
+                ),
+                2,
+                ("success", [high, low]),
+            ),
+        ]
+
+        for message, current_generation, expected in cases:
+            with self.subTest(message=message):
+                self.assertEqual(
+                    OPLIDE._classify_exemplar_search_result(message, current_generation, exemplars),
+                    expected,
+                )
+
     def test_file_menu_quit_entry_is_platform_appropriate(self):
         class FakeMenu:
             instances = []

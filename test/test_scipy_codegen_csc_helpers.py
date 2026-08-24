@@ -60,14 +60,12 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         )
 
     def test_variable_domain_detail_reports_range_and_set_membership(self) -> None:
-        generator = make_generator(
-            """
+        generator = make_generator("""
             range I = 2..4;
             dvar float x;
             minimize 0;
             subject to { }
-            """
-        )
+            """)
         generator.data_dict["Cities"] = {"elements": ["Paris", "Rome"]}
 
         self.assertIsNone(
@@ -118,14 +116,12 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         self.assertIsNone(generator._variable_domain_set_values("MissingCities"))
 
     def test_unroll_named_iterator_resolves_ranges_and_set_declarations(self) -> None:
-        generator = make_generator(
-            """
+        generator = make_generator("""
             range I = 2..4;
             dvar float x;
             minimize 0;
             subject to { }
-            """
-        )
+            """)
         generator.ast["declarations"].extend(
             [
                 {"type": "set_declaration", "name": "DataSet", "value": ["fallback"]},
@@ -151,71 +147,72 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
 
     def test_unroll_indexed_iterator_walks_mapping_and_sequence_domains(self) -> None:
         generator = make_generator()
-        generator._eval_index_expr = lambda dimension, env: ({}, dimension["value"])
+        with mock.patch.object(
+            generator,
+            "_eval_index_expr",
+            side_effect=lambda dim_expr, env: ({}, dim_expr["value"]),
+        ):
+            generator.data_dict["ByKey"] = {2: ["B", "C"]}
+            self.assertEqual(
+                generator._unroll_indexed_iterator(
+                    {"name": "ByKey", "dimensions": [{"value": 2}]},
+                    {},
+                ),
+                ["B", "C"],
+            )
 
-        generator.data_dict["ByKey"] = {2: ["B", "C"]}
-        self.assertEqual(
-            generator._unroll_indexed_iterator(
-                {"name": "ByKey", "dimensions": [{"value": 2}]},
-                {},
-            ),
-            ["B", "C"],
-        )
+            generator.data_dict["ByPosition"] = ["A", "B", "C"]
+            self.assertEqual(
+                generator._unroll_indexed_iterator(
+                    {"name": "ByPosition", "dimensions": ["ignored", {"value": 2.0}]},
+                    {},
+                ),
+                ["B"],
+            )
 
-        generator.data_dict["ByPosition"] = ["A", "B", "C"]
-        self.assertEqual(
-            generator._unroll_indexed_iterator(
-                {"name": "ByPosition", "dimensions": ["ignored", {"value": 2.0}]},
-                {},
-            ),
-            ["B"],
-        )
-
-        generator.data_dict["Scalar"] = 7
-        self.assertEqual(
-            generator._unroll_indexed_iterator(
-                {"name": "Scalar", "dimensions": [{"value": 1}]},
-                {},
-            ),
-            [],
-        )
-        generator.data_dict["WholeDomain"] = ("A", "B")
-        self.assertEqual(generator._unroll_indexed_iterator({"name": "WholeDomain"}, {}), ["A", "B"])
+            generator.data_dict["Scalar"] = 7
+            self.assertEqual(
+                generator._unroll_indexed_iterator(
+                    {"name": "Scalar", "dimensions": [{"value": 1}]},
+                    {},
+                ),
+                [],
+            )
+            generator.data_dict["WholeDomain"] = ("A", "B")
+            self.assertEqual(generator._unroll_indexed_iterator({"name": "WholeDomain"}, {}), ["A", "B"])
 
     def test_unroll_iterators_handles_supported_range_types(self) -> None:
-        generator = make_generator(
-            """
+        generator = make_generator("""
             range I = 2..3;
             dvar float x;
             minimize 0;
             subject to { }
-            """
-        )
+            """)
         generator.ast["declarations"].append({"type": "typed_set", "name": "S", "value": ["A", "B"]})
         indexed_range = {"type": "indexed_set", "name": "Nested", "dimensions": [{"value": 1}]}
-        generator._unroll_indexed_iterator = mock.Mock(return_value=["indexed"])
         env = {"outer": 9}
 
-        loop_vars, loop_ranges = generator._unroll_iterators(
-            [
-                {
-                    "iterator": "i",
-                    "range": {
-                        "type": "range_specifier",
-                        "start": {"type": "number", "value": 1},
-                        "end": {"type": "number", "value": 2},
+        with mock.patch.object(generator, "_unroll_indexed_iterator", return_value=["indexed"]) as unroll_indexed:
+            loop_vars, loop_ranges = generator._unroll_iterators(
+                [
+                    {
+                        "iterator": "i",
+                        "range": {
+                            "type": "range_specifier",
+                            "start": {"type": "number", "value": 1},
+                            "end": {"type": "number", "value": 2},
+                        },
                     },
-                },
-                {"iterator": "j", "range": {"type": "named_range", "name": "I"}},
-                {"iterator": "k", "range": {"type": "named_set", "name": "S"}},
-                {"iterator": "m", "range": indexed_range},
-            ],
-            env,
-        )
+                    {"iterator": "j", "range": {"type": "named_range", "name": "I"}},
+                    {"iterator": "k", "range": {"type": "named_set", "name": "S"}},
+                    {"iterator": "m", "range": indexed_range},
+                ],
+                env,
+            )
 
         self.assertEqual(loop_vars, ["i", "j", "k", "m"])
         self.assertEqual(loop_ranges, [[1, 2], [2, 3], ["A", "B"], ["indexed"]])
-        generator._unroll_indexed_iterator.assert_called_once_with(indexed_range, env)
+        unroll_indexed.assert_called_once_with(indexed_range, env)
         with self.assertRaisesRegex(SemanticError, "Unsupported iterator range type type: unknown"):
             generator._unroll_iterators([{"iterator": "bad", "range": {"type": "unknown"}}], env)
 
@@ -228,7 +225,12 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
                     "type": "minl",
                     "args": [
                         {"type": "number", "value": 4},
-                        {"type": "binop", "op": "-", "left": {"type": "number", "value": 1}, "right": {"type": "number", "value": 3}},
+                        {
+                            "type": "binop",
+                            "op": "-",
+                            "left": {"type": "number", "value": 1},
+                            "right": {"type": "number", "value": 3},
+                        },
                     ],
                 }
             ),
@@ -338,15 +340,11 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         )
         self.assertEqual(generator._traverse_function_call({"type": "funcall", "name": "sqrt", "args": []}), "")
         self.assertEqual(
-            generator._traverse_function_call(
-                {"type": "funcall", "name": "custom", "args": [{"type": "number", "value": 1}]}
-            ),
+            generator._traverse_function_call({"type": "funcall", "name": "custom", "args": [{"type": "number", "value": 1}]}),
             "",
         )
         self.assertEqual(
-            generator._traverse_aggregate(
-                {"type": "minl", "args": [{"type": "number", "value": 4}, nested_argument]}
-            ),
+            generator._traverse_aggregate({"type": "minl", "args": [{"type": "number", "value": 4}, nested_argument]}),
             "min(4, (3 + x))",
         )
         self.assertEqual(
