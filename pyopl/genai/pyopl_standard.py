@@ -26,6 +26,7 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
+from .feedback_validation import generative_feedback as generative_feedback
 from .genai_pricing import estimate_costs as _estimate_costs
 
 # --- Logging Setup ---
@@ -729,44 +730,4 @@ def generative_solve(
         return assessment_text.strip()
 
 
-def generative_feedback(
-    prompt,
-    model_file,
-    data_file,
-    model_name=MODEL_NAME,
-    mode=Grammar.BNF,
-    temperature: Optional[float] = None,
-    stop: Optional[list[str]] = None,
-    llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,
-):
-    """Provide feedback on a given PyOPL model and data file based on a user prompt."""
-    provider = _infer_provider(llm_provider, model_name)
-    grammar_implementation = _get_grammar_implementation(mode)
-
-    with open(model_file, "r") as fh:
-        model_code = fh.read()
-    with open(data_file, "r") as fh:
-        data_code = fh.read()
-
-    _notify(progress, "Generating feedback from LLM")
-    user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
-
-    content: str = _llm_generate_text(
-        provider=provider,
-        model_name=model_name,
-        input_text=user_prompt,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=temperature,  # FIX: honor caller’s temperature
-        stop=stop,
-        progress=progress,
-        capture_usage=False,
-        response_json=True,  # feedback returns JSON
-    )
-    if not content:
-        raise RuntimeError("Empty model response.")
-    try:
-        _notify(progress, "Feedback received; parsing")
-        return _json_loads_relaxed(content)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
+__all__ = ["generative_feedback"]

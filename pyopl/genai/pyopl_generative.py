@@ -28,6 +28,7 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
+from .feedback_validation import generative_feedback as generative_feedback
 from .genai_pricing import estimate_costs as _estimate_costs
 
 # --- Logging Setup ---
@@ -976,89 +977,4 @@ def generative_solve(
         return assessment_text.strip()
 
 
-def generative_feedback(
-    prompt: PromptInput,
-    model_file,
-    data_file,
-    model_name=MODEL_NAME,
-    mode=Grammar.BNF,
-    temperature: Optional[float] = None,
-    stop: Optional[list[str]] = None,
-    llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,
-):
-    """Provide feedback on a given PyOPL model and data file based on a user prompt.
-
-    Args:
-        prompt (PromptInput): User question or request for feedback about the model/data.
-        model_file (str): Path to the PyOPL model file (.mod).
-        data_file (str): Path to the PyOPL data file (.dat).
-        model_name (str): LLM model name, e.g. "gpt-5".
-        mode (Grammar): Grammar implementation to use: Grammar.NONE, Grammar.BNF, or Grammar.CODE.
-        temperature (float|None): Sampling temperature; if None, use model default.
-        stop (list[str]|None): List of stop sequences; if None, no stop sequences.
-        llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).
-
-    Raises:
-        RuntimeError: If feedback generation fails irrecoverably.
-
-    Returns:
-        dict: A dictionary with keys:
-              - "feedback": string with the feedback message
-              - "revised_model": (optional) string with revised PyOPL model if changes are proposed
-              - "revised_data": (optional) string with revised PyOPL data if changes are proposed
-    """
-    provider = _infer_provider(llm_provider, model_name)
-    grammar_implementation = _get_grammar_implementation(mode)
-
-    prompt_text, prompt_images = _normalize_prompt_input(prompt)
-
-    with open(model_file, "r") as fh:
-        model_code = fh.read()
-    with open(data_file, "r") as fh:
-        data_code = fh.read()
-
-    _notify(progress, "Generating feedback from LLM")
-    user_prompt = _build_feedback_prompt(prompt_text, grammar_implementation, model_code, data_code)
-
-    content: str = _llm_generate_text(
-        provider=provider,
-        model_name=model_name,
-        input_text=user_prompt,
-        images=prompt_images,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0.0 if temperature is not None else None,
-        stop=stop,
-        progress=progress,
-        capture_usage=False,
-    )
-    if not content:
-        raise RuntimeError("Empty model response.")
-    try:
-        _notify(progress, "Feedback received; parsing")
-        parsed = _json_loads_relaxed(content)
-
-        # Normalize common string-escaping issues: some LLMs return JSON
-        # where newline/tab sequences are double-escaped (literal "\\n").
-        # If we detect that pattern (escaped sequences present but no real
-        # newlines), attempt a safe unescape for the common fields so the
-        # UI receives readable text.
-        def _maybe_unescape(s: Any) -> Any:
-            if not isinstance(s, str):
-                return s
-            # Only attempt when we see escaped sequences but no real ones
-            if "\\n" in s and "\n" not in s:
-                try:
-                    return s.encode("utf-8").decode("unicode_escape")
-                except Exception:
-                    return s.replace("\\n", "\n").replace("\\t", "\t")
-            return s
-
-        if isinstance(parsed, dict):
-            for key in ("feedback", "revised_model", "revised_data", "assessment", "message"):
-                if key in parsed:
-                    parsed[key] = _maybe_unescape(parsed[key])
-        return parsed
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
+__all__ = ["generative_feedback"]

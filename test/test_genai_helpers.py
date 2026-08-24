@@ -11,6 +11,7 @@ from typing import Any, Dict, cast
 from unittest.mock import patch
 
 import pyopl.genai._strategy_base as strategy_base
+import pyopl.genai.feedback_validation as feedback_validation
 from pyopl.genai import (
     genai_pricing,
     model_discovery,
@@ -30,6 +31,240 @@ STRATEGY_MODULE_NAMES = [
     "pyopl.genai.pyopl_chain_of_experts",
     "pyopl.genai.pyopl_cafa",
 ]
+
+
+class TestFeedbackValidation(unittest.TestCase):
+    def _files(self, directory: str) -> tuple[Path, Path]:
+        model_file = Path(directory) / "model.mod"
+        data_file = Path(directory) / "data.dat"
+        model_file.write_text("original model", encoding="utf-8")
+        data_file.write_text("original data", encoding="utf-8")
+        return model_file, data_file
+
+    def test_feedback_without_revisions_skips_compilation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    return_value=json.dumps({"feedback": "looks good"}),
+                ),
+                patch.object(feedback_validation.OPLCompiler, "compile_model") as compile_model,
+            ):
+                result = feedback_validation.generative_feedback(
+                    "review",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                )
+
+        self.assertEqual(result, {"feedback": "looks good"})
+        compile_model.assert_not_called()
+
+    def test_model_only_revision_compiles_with_original_data(self) -> None:
+        responses = iter(
+            [
+                json.dumps({"feedback": "updated", "revised_model": "revised model"}),
+                json.dumps({"aligned": True, "assessment": "request satisfied"}),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    side_effect=lambda **_kwargs: next(responses),
+                ),
+                patch.object(feedback_validation.OPLCompiler, "compile_model") as compile_model,
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change model",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                )
+
+        compile_model.assert_called_once_with("revised model", "original data")
+        self.assertEqual(result, {"feedback": "updated", "revised_model": "revised model"})
+
+    def test_failed_compile_repairs_and_returns_changed_companion(self) -> None:
+        responses = iter(
+            [
+                json.dumps({"feedback": "updated", "revised_model": "invalid model"}),
+                json.dumps({"model": "fixed model", "data": "fixed data"}),
+                json.dumps({"aligned": True, "assessment": "request satisfied"}),
+            ]
+        )
+        compile_results = iter([RuntimeError("syntax bad"), None])
+
+        def compile_model(_model: str, _data: str) -> None:
+            result = next(compile_results)
+            if result:
+                raise result
+
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    side_effect=lambda **_kwargs: next(responses),
+                ),
+                patch.object(feedback_validation.OPLCompiler, "compile_model", side_effect=compile_model),
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change model",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                    validation_iterations=2,
+                )
+
+        self.assertEqual(
+            result,
+            {
+                "feedback": "updated",
+                "revised_model": "fixed model",
+                "revised_data": "fixed data",
+            },
+        )
+
+    def test_exhausted_validation_withholds_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    return_value=json.dumps({"feedback": "updated", "revised_data": "invalid data"}),
+                ),
+                patch.object(
+                    feedback_validation.OPLCompiler,
+                    "compile_model",
+                    side_effect=RuntimeError("syntax bad"),
+                ),
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change data",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                    validation_iterations=1,
+                )
+
+        self.assertNotIn("revised_model", result)
+        self.assertNotIn("revised_data", result)
+        self.assertIn("withheld because validation failed", result["feedback"])
+        self.assertIn("syntax bad", result["feedback"])
+
+    def test_failed_alignment_repairs_and_revalidates(self) -> None:
+        responses = iter(
+            [
+                json.dumps({"feedback": "updated", "revised_data": "candidate data"}),
+                json.dumps({"aligned": False, "assessment": "request not satisfied"}),
+                json.dumps({"model": "original model", "data": "aligned data"}),
+                json.dumps({"aligned": True, "assessment": "request satisfied"}),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    side_effect=lambda **_kwargs: next(responses),
+                ),
+                patch.object(feedback_validation.OPLCompiler, "compile_model") as compile_model,
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change data",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                    validation_iterations=2,
+                )
+
+        self.assertEqual(compile_model.call_count, 2)
+        self.assertEqual(result, {"feedback": "updated", "revised_data": "aligned data"})
+
+    def test_malformed_alignment_response_withholds_revision(self) -> None:
+        responses = iter(
+            [
+                json.dumps({"feedback": "updated", "revised_model": "candidate model"}),
+                json.dumps({"aligned": "yes", "assessment": "invalid schema"}),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    side_effect=lambda **_kwargs: next(responses),
+                ),
+                patch.object(feedback_validation.OPLCompiler, "compile_model"),
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change model",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                    validation_iterations=1,
+                )
+
+        self.assertNotIn("revised_model", result)
+        self.assertIn("Alignment response requires", result["feedback"])
+
+    def test_malformed_feedback_payload_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with patch.object(
+                feedback_validation._BASE,
+                "llm_generate_text",
+                return_value=json.dumps({"feedback": 42}),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "field 'feedback'.*string"):
+                    feedback_validation.generative_feedback(
+                        "review",
+                        model_file,
+                        data_file,
+                        mode=Grammar.NONE,
+                    )
+
+    def test_malformed_repair_payload_withholds_revision(self) -> None:
+        responses = iter(
+            [
+                json.dumps({"feedback": "updated", "revised_model": "invalid model"}),
+                json.dumps({"model": "fixed model"}),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            model_file, data_file = self._files(directory)
+            with (
+                patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    side_effect=lambda **_kwargs: next(responses),
+                ),
+                patch.object(
+                    feedback_validation.OPLCompiler,
+                    "compile_model",
+                    side_effect=RuntimeError("syntax bad"),
+                ),
+            ):
+                result = feedback_validation.generative_feedback(
+                    "change model",
+                    model_file,
+                    data_file,
+                    mode=Grammar.NONE,
+                    validation_iterations=2,
+                )
+
+        self.assertNotIn("revised_model", result)
+        self.assertIn("Revision repair failed", result["feedback"])
+        self.assertIn("field 'data'", result["feedback"])
 
 
 class TestGenAIStrategyBaseHelpers(unittest.TestCase):
@@ -674,7 +909,7 @@ class TestStrategyModuleHelpers(unittest.TestCase):
                 self.assertEqual(ollama.call_args.kwargs["num_predict"], 3)
                 self.assertEqual(ollama.call_args.kwargs["enforce_json"], enforce_json_by_module.get(module_name, True))
 
-    def test_common_assessment_and_feedback_prompts_include_inputs(self) -> None:
+    def test_common_assessment_prompts_include_inputs(self) -> None:
         for module_name in STRATEGY_MODULE_NAMES:
             module = import_module(module_name)
             with self.subTest(module=module_name):
@@ -682,13 +917,16 @@ class TestStrategyModuleHelpers(unittest.TestCase):
                 final = module._build_final_assessment_prompt(
                     "user problem", "grammar ref", "model code", "data code", "syntax issue"
                 )
-                feedback = module._build_feedback_prompt("why infeasible?", "grammar ref", "model code", "data code")
 
                 self.assertIn("user problem", alignment)
                 self.assertIn("model code", final)
                 self.assertIn("SYNTAX ERRORS", final)
-                self.assertIn("why infeasible?", feedback)
-                self.assertIn("grammar ref", feedback)
+
+    def test_canonical_feedback_prompt_includes_inputs(self) -> None:
+        feedback = feedback_validation._build_feedback_prompt("why infeasible?", "grammar ref", "model code", "data code")
+
+        self.assertIn("why infeasible?", feedback)
+        self.assertIn("grammar ref", feedback)
 
 
 class TestGraphChainHelpers(unittest.TestCase):
@@ -1239,12 +1477,17 @@ class TestStrategySolveLoops(unittest.TestCase):
         for module_name in STRATEGY_MODULE_NAMES:
             module = import_module(module_name)
             with self.subTest(module=module_name), tempfile.TemporaryDirectory() as td:
+                self.assertIs(module.generative_feedback, feedback_validation.generative_feedback)
                 model_file = Path(td) / "model.mod"
                 data_file = Path(td) / "data.dat"
                 model_file.write_text("dvar int x;", encoding="utf-8")
                 data_file.write_text("x=1;", encoding="utf-8")
 
-                with patch.object(module, "_llm_generate_text", return_value=json.dumps({"feedback": "looks ok"})):
+                with patch.object(
+                    feedback_validation._BASE,
+                    "llm_generate_text",
+                    return_value=json.dumps({"feedback": "looks ok"}),
+                ):
                     feedback = module.generative_feedback(
                         "review this",
                         str(model_file),

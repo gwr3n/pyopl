@@ -798,6 +798,25 @@ assessment = generative_solve(prompt, model_file, data_file, "gpt-5", llm_provid
 print("Assessment of alignment:", assessment)
 ```
 
+Feedback on an existing model/data pair uses one shared implementation across all strategies. If feedback proposes revised model or data content, PyOPL combines partial revisions with the unchanged companion file, compiles the complete candidate, checks alignment with the request and original files, and attempts bounded repair before returning the revision. Revisions that still fail validation are withheld.
+
+```python
+from pyopl import generative_feedback
+
+result = generative_feedback(
+  "Add the missing capacity constraint without changing the objective.",
+  model_file,
+  data_file,
+  validation_iterations=3,
+)
+
+print(result["feedback"])
+if "revised_model" in result:
+  print(result["revised_model"])
+```
+
+Validation is enabled by default. Advanced callers can set `validate_revisions=False` to receive unvalidated proposals or `alignment_check=False` to require compilation only.
+
 Notes and tips:
 - These assistants generate text; compile and solve using the usual API (`solve(...)`) and fix any semantic errors the compiler reports.
 - Retrieval grounding uses:

@@ -100,6 +100,11 @@ def generative_feedback(
     stop: Optional[List[str]] = ...,
     llm_provider: Optional[str] = ...,
     progress: Optional[Callable[[str], None]] = ...,
+    *,
+    validate_revisions: bool = ...,
+    alignment_check: bool = ...,
+    validation_iterations: int = ...,
+    syntax_error_reporting: str = ...,
 ) -> Dict[str, str]: ...
 def list_models(llm_provider: Optional[str] = ..., model_name: str = ...) -> List[str]: ...
 def list_openai_models(prefix: Optional[str] = "gpt") -> List[str]: ...

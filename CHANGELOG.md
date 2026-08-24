@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added compile, alignment, and bounded repair validation for model/data revisions proposed by `generative_feedback`.
+
 ### Fixed
 
 - Documented and scoped the Rhetor IDE bridge URL opening to its validated HTTP loopback endpoint for security scanning.
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Centralized `generative_feedback` so every GenAI strategy exposes one validated implementation.
 - Deduplicated output-session model and data snapshots through content-addressed SHA-256 stores in `.pyopl_session`.
 - Simplified IDE session-history restoration by isolating snapshot and artifact normalization.
 

@@ -26,7 +26,10 @@ from ._strategy_base import (
 from ._strategy_base import (
     LLMProvider as _BaseLLMProvider,
 )
+from .feedback_validation import generative_feedback as generative_feedback
 from .genai_pricing import estimate_costs as _estimate_costs
+
+__all__ = ["generative_feedback"]
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -864,70 +867,6 @@ def generative_solve(
         }
     else:
         return assessment_text.strip()
-
-
-def generative_feedback(
-    prompt,
-    model_file,
-    data_file,
-    model_name=MODEL_NAME,
-    mode=Grammar.BNF,
-    temperature: Optional[float] = None,
-    stop: Optional[list[str]] = None,
-    llm_provider: Optional[str] = LLM_PROVIDER,
-    progress: Optional[Callable[[str], None]] = None,
-):
-    """Provide feedback on a given PyOPL model and data file based on a user prompt.
-
-    Args:
-        prompt (str): User question or request regarding the model and data.
-        model_file (str): Path to the PyOPL model file (.mod).
-        data_file (str): Path to the PyOPL data file (.dat).
-        model_name (str): LLM model name, e.g. "gpt-5".
-        mode (Grammar): Grammar implementation to use: Grammar.NONE, Grammar.BNF, or Grammar.CODE.
-        temperature (float|None): Sampling temperature; if None, use model default.
-        stop (list[str]|None): List of stop sequences; if None, no stop sequences.
-        llm_provider (str|None): "openai" (default), "google", or "ollama".
-        progress (callable|None): Optional function that receives progress messages (str).
-
-    Raises:
-        RuntimeError: If feedback generation fails irrecoverably.
-
-    Returns:
-        dict: A dictionary with keys:
-              - "feedback": string with the feedback message
-              - "revised_model": (optional) string with revised PyOPL model if changes are proposed
-              - "revised_data": (optional) string with revised PyOPL data if changes are proposed
-    """
-    provider = _infer_provider(llm_provider, model_name)
-    grammar_implementation = _get_grammar_implementation(mode)
-
-    with open(model_file, "r") as fh:
-        model_code = fh.read()
-    with open(data_file, "r") as fh:
-        data_code = fh.read()
-
-    _notify(progress, "Generating feedback from LLM")
-    user_prompt = _build_feedback_prompt(prompt, grammar_implementation, model_code, data_code)
-
-    content: str = _llm_generate_text(
-        provider=provider,
-        model_name=model_name,
-        input_text=user_prompt,
-        max_tokens=MAX_OUTPUT_TOKENS,
-        temperature=0.0 if temperature is not None else None,
-        stop=stop,
-        progress=progress,
-        capture_usage=False,
-        expected_json=True,
-    )
-    if not content:
-        raise RuntimeError("Empty model response.")
-    try:
-        _notify(progress, "Feedback received; parsing")
-        return _json_loads_relaxed(content)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse feedback response as JSON: {e}\nResponse: {content}")
 
 
 # ---------- Prompt builders ----------
