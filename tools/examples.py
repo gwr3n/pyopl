@@ -20,10 +20,10 @@ def run_knapsack(solver):
     print(result)
 
 
-def run_knapsackp(solver):
+def run_multi_knapsack(solver):
     """Run the Knapsack problem variant using the selected solver."""
-    model = _model_path("knapsack/knapsackp.mod")
-    data = _model_path("knapsack/knapsackp.dat")
+    model = _model_path("multi_knapsack/multi_knapsack.mod")
+    data = _model_path("multi_knapsack/multi_knapsack.dat")
     solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
@@ -218,7 +218,7 @@ class Example(Enum):
     """Enumeration of available example problems."""
 
     KNAPSACK = auto()  # Classic 0-1 Knapsack Problem
-    KNAPSACKP = auto()  # Multi-Resource Knapsack Problem with Partitioned Capacities
+    MULTI_KNAPSACK = auto()  # Multi-Resource Knapsack Problem with Partitioned Capacities
     LOT_SIZING = auto()  # Lot Sizing Problem (single item)
     TSP = auto()  # Traveling Salesman Problem (TSP)
     VEHICLE_ROUTING = auto()  # Vehicle Routing Problem (single vehicle)
@@ -244,7 +244,7 @@ class Example(Enum):
 # List of available examples and their functions (all now take solver argument)
 EXAMPLES = {
     Example.KNAPSACK: run_knapsack,
-    Example.KNAPSACKP: run_knapsackp,
+    Example.MULTI_KNAPSACK: run_multi_knapsack,
     Example.LOT_SIZING: run_lot_sizing,
     Example.TSP: run_tsp,
     Example.VEHICLE_ROUTING: run_vehicle_routing,

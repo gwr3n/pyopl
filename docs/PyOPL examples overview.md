@@ -46,9 +46,9 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 
 ---
 
-## Knapsack Problems (`knapsack`)
-**Files:** `knapsack.mod`, `knapsackp.mod`, `knapsack.dat`, `knapsackp.dat`
-- **Description:** Selects items to maximize value without exceeding capacity. The `knapsackp` variant handles multiple resources.
+## Knapsack Problems (`knapsack`, `multi_knapsack`)
+**Files:** `knapsack.mod`, `multi_knapsack.mod`, `knapsack.dat`, `multi_knapsack.dat`
+- **Description:** Selects items to maximize value without exceeding capacity. The `multi_knapsack` variant handles multiple resources.
 - **Features:** Binary selection variables, capacity/resource constraints, value maximization.
 
 ---
