@@ -1591,9 +1591,7 @@ class OPLIDE(TkinterDnD.Tk):
         model_hashes = {artifact.get("model_hash") for artifact in self._output_session_artifacts.values()}
         data_hashes = {artifact.get("data_hash") for artifact in self._output_session_artifacts.values()}
         self._model_snapshots = {
-            content_hash: content
-            for content_hash, content in self._model_snapshots.items()
-            if content_hash in model_hashes
+            content_hash: content for content_hash, content in self._model_snapshots.items() if content_hash in model_hashes
         }
         self._data_snapshots = {
             content_hash: content for content_hash, content in self._data_snapshots.items() if content_hash in data_hashes
@@ -1617,9 +1615,9 @@ class OPLIDE(TkinterDnD.Tk):
         resolved: dict[str, str] = {}
         model_hash = artifact.get("model_hash")
         data_hash = artifact.get("data_hash")
-        if model_hash in getattr(self, "_model_snapshots", {}):
+        if isinstance(model_hash, str) and model_hash in getattr(self, "_model_snapshots", {}):
             resolved["model_text"] = self._model_snapshots[model_hash]
-        if data_hash in getattr(self, "_data_snapshots", {}):
+        if isinstance(data_hash, str) and data_hash in getattr(self, "_data_snapshots", {}):
             resolved["data_text"] = self._data_snapshots[data_hash]
         return resolved
 
@@ -1657,9 +1655,7 @@ class OPLIDE(TkinterDnD.Tk):
                 preview_texts[str(frame)] = text_widget
             notebook.bind(
                 "<<NotebookTabChanged>>",
-                lambda _event: self.after_idle(
-                    lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)
-                ),
+                lambda _event: self.after_idle(lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)),
                 add="+",
             )
             ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
@@ -1702,9 +1698,7 @@ class OPLIDE(TkinterDnD.Tk):
                 preview_texts[str(frame)] = text_widget
             notebook.bind(
                 "<<NotebookTabChanged>>",
-                lambda _event: self.after_idle(
-                    lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)
-                ),
+                lambda _event: self.after_idle(lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)),
                 add="+",
             )
             ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
@@ -5410,12 +5404,10 @@ class OPLIDE(TkinterDnD.Tk):
         self._output_session_label = session.get("output_session_label", {}) or {}
         self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
         self._model_snapshots = {
-            str(content_hash): str(content)
-            for content_hash, content in (session.get("model_snapshots", {}) or {}).items()
+            str(content_hash): str(content) for content_hash, content in (session.get("model_snapshots", {}) or {}).items()
         }
         self._data_snapshots = {
-            str(content_hash): str(content)
-            for content_hash, content in (session.get("data_snapshots", {}) or {}).items()
+            str(content_hash): str(content) for content_hash, content in (session.get("data_snapshots", {}) or {}).items()
         }
         raw_artifacts = session.get("output_session_artifacts", {}) or {}
         self._output_session_artifacts = {

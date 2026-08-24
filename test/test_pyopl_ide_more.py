@@ -664,7 +664,9 @@ minimize x;
             dummy._output_session_artifacts,
             {"s1": {"model_hash": "sha256:model", "data_hash": "sha256:data"}},
         )
-        self.assertEqual(OPLIDE._get_output_session_artifacts(dummy, "s1"), {"model_text": "saved model", "data_text": "saved data"})
+        self.assertEqual(
+            OPLIDE._get_output_session_artifacts(dummy, "s1"), {"model_text": "saved model", "data_text": "saved data"}
+        )
         self.assertEqual(listbox.items, ["2026-01-01 10:00:00 • Solve"])
         self.assertEqual(listbox.selected, 0)
         self.assertEqual(output_text.value, "output")
