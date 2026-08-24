@@ -5397,24 +5397,27 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             logging.getLogger(__name__).exception("Failed to restore session state from .pyopl_session")
 
+    @staticmethod
+    def _normalize_session_snapshots(raw_snapshots: Any) -> dict[str, str]:
+        return {str(content_hash): str(content) for content_hash, content in (raw_snapshots or {}).items()}
+
+    @staticmethod
+    def _normalize_session_artifacts(raw_artifacts: Any) -> dict[str, dict[str, str]]:
+        return {
+            str(session_id): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
+            for session_id, artifact in (raw_artifacts or {}).items()
+            if isinstance(artifact, dict)
+        }
+
     def _restore_session_history(self, session: dict[str, Any]) -> None:
         self._output_sessions = session.get("output_sessions", {}) or {}
         self._output_session_ids = session.get("output_session_ids", []) or []
         self._output_session_display = session.get("output_session_display", {}) or {}
         self._output_session_label = session.get("output_session_label", {}) or {}
         self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
-        self._model_snapshots = {
-            str(content_hash): str(content) for content_hash, content in (session.get("model_snapshots", {}) or {}).items()
-        }
-        self._data_snapshots = {
-            str(content_hash): str(content) for content_hash, content in (session.get("data_snapshots", {}) or {}).items()
-        }
-        raw_artifacts = session.get("output_session_artifacts", {}) or {}
-        self._output_session_artifacts = {
-            str(sid): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
-            for sid, artifact in raw_artifacts.items()
-            if isinstance(artifact, dict)
-        }
+        self._model_snapshots = OPLIDE._normalize_session_snapshots(session.get("model_snapshots"))
+        self._data_snapshots = OPLIDE._normalize_session_snapshots(session.get("data_snapshots"))
+        self._output_session_artifacts = OPLIDE._normalize_session_artifacts(session.get("output_session_artifacts"))
         OPLIDE._prune_session_snapshots(self)
         self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
         self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
