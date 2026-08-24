@@ -59,6 +59,383 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
             7,
         )
 
+    def test_variable_domain_detail_reports_range_and_set_membership(self) -> None:
+        generator = make_generator(
+            """
+            range I = 2..4;
+            dvar float x;
+            minimize 0;
+            subject to { }
+            """
+        )
+        generator.data_dict["Cities"] = {"elements": ["Paris", "Rome"]}
+
+        self.assertIsNone(
+            generator._variable_domain_detail(
+                {"type": "range_index", "start": {"type": "number", "value": 2}, "end": {"type": "number", "value": 4}},
+                3,
+            )
+        )
+        self.assertEqual(
+            generator._variable_domain_detail(
+                {"type": "range_index", "start": {"type": "number", "value": 2}, "end": {"type": "number", "value": 4}},
+                5,
+            ),
+            "5 not in [2..4]",
+        )
+        self.assertIsNone(generator._variable_domain_detail({"type": "named_range_dimension", "name": "I"}, 2))
+        self.assertEqual(
+            generator._variable_domain_detail({"type": "named_range_dimension", "name": "I"}, 1),
+            "1 not in [2..4]",
+        )
+        self.assertIsNone(generator._variable_domain_detail({"type": "named_set_dimension", "name": "Cities"}, "Paris"))
+        self.assertEqual(
+            generator._variable_domain_detail({"type": "named_set_dimension", "name": "Cities"}, "Tokyo"),
+            "Tokyo not in Cities",
+        )
+
+    def test_variable_domain_set_values_resolves_data_and_declarations(self) -> None:
+        generator = make_generator()
+        generator.data_dict["DataCities"] = {"elements": ["Paris", "Rome"]}
+        generator.data_dict["RawCities"] = ["Oslo", "Lima"]
+        generator.ast["declarations"].extend(
+            [
+                {"type": "typed_set", "name": "TypedCities", "value": ["Tokyo"]},
+                {"type": "typed_set", "name": "EmptyCities", "value": None},
+                {
+                    "type": "set_of_tuples",
+                    "name": "Arcs",
+                    "value": [{"elements": [1, "A"]}, {"elements": [2, "B"]}],
+                },
+            ]
+        )
+
+        self.assertEqual(generator._variable_domain_set_values("DataCities"), ["Paris", "Rome"])
+        self.assertEqual(generator._variable_domain_set_values("RawCities"), ["Oslo", "Lima"])
+        self.assertEqual(generator._variable_domain_set_values("TypedCities"), ["Tokyo"])
+        self.assertEqual(generator._variable_domain_set_values("EmptyCities"), [])
+        self.assertEqual(generator._variable_domain_set_values("Arcs"), [(1, "A"), (2, "B")])
+        self.assertIsNone(generator._variable_domain_set_values("MissingCities"))
+
+    def test_unroll_named_iterator_resolves_ranges_and_set_declarations(self) -> None:
+        generator = make_generator(
+            """
+            range I = 2..4;
+            dvar float x;
+            minimize 0;
+            subject to { }
+            """
+        )
+        generator.ast["declarations"].extend(
+            [
+                {"type": "set_declaration", "name": "DataSet", "value": ["fallback"]},
+                {"type": "set_declaration", "name": "FallbackSet", "value": ["declared"]},
+                {"type": "typed_set", "name": "TypedSet", "value": ["typed"]},
+                {"type": "typed_set_external", "name": "ExternalSet", "value": None},
+                {"type": "set_of_tuples", "name": "Arcs", "tuple_type": "Arc", "value": []},
+            ]
+        )
+        generator.data_dict["DataSet"] = ["from-data"]
+
+        self.assertEqual(generator._unroll_named_iterator("I"), [2, 3, 4])
+        self.assertEqual(generator._unroll_named_iterator("DataSet"), ["from-data"])
+        self.assertEqual(generator._unroll_named_iterator("FallbackSet"), ["declared"])
+        self.assertEqual(generator._unroll_named_iterator("TypedSet"), ["typed"])
+        with mock.patch("pyopl.scipy_codegen_csc.TupleSetHelper.get_tuple_set", return_value=[(1, "A")]) as get_tuple_set:
+            self.assertEqual(generator._unroll_named_iterator("Arcs"), [(1, "A")])
+        get_tuple_set.assert_called_once_with("Arcs", generator.ast, generator.data_dict)
+        with self.assertRaisesRegex(SemanticError, "External set 'ExternalSet' has no data provided"):
+            generator._unroll_named_iterator("ExternalSet")
+        with self.assertRaisesRegex(SemanticError, "Not found: range or set 'MissingSet'"):
+            generator._unroll_named_iterator("MissingSet")
+
+    def test_unroll_indexed_iterator_walks_mapping_and_sequence_domains(self) -> None:
+        generator = make_generator()
+        generator._eval_index_expr = lambda dimension, env: ({}, dimension["value"])
+
+        generator.data_dict["ByKey"] = {2: ["B", "C"]}
+        self.assertEqual(
+            generator._unroll_indexed_iterator(
+                {"name": "ByKey", "dimensions": [{"value": 2}]},
+                {},
+            ),
+            ["B", "C"],
+        )
+
+        generator.data_dict["ByPosition"] = ["A", "B", "C"]
+        self.assertEqual(
+            generator._unroll_indexed_iterator(
+                {"name": "ByPosition", "dimensions": ["ignored", {"value": 2.0}]},
+                {},
+            ),
+            ["B"],
+        )
+
+        generator.data_dict["Scalar"] = 7
+        self.assertEqual(
+            generator._unroll_indexed_iterator(
+                {"name": "Scalar", "dimensions": [{"value": 1}]},
+                {},
+            ),
+            [],
+        )
+        generator.data_dict["WholeDomain"] = ("A", "B")
+        self.assertEqual(generator._unroll_indexed_iterator({"name": "WholeDomain"}, {}), ["A", "B"])
+
+    def test_unroll_iterators_handles_supported_range_types(self) -> None:
+        generator = make_generator(
+            """
+            range I = 2..3;
+            dvar float x;
+            minimize 0;
+            subject to { }
+            """
+        )
+        generator.ast["declarations"].append({"type": "typed_set", "name": "S", "value": ["A", "B"]})
+        indexed_range = {"type": "indexed_set", "name": "Nested", "dimensions": [{"value": 1}]}
+        generator._unroll_indexed_iterator = mock.Mock(return_value=["indexed"])
+        env = {"outer": 9}
+
+        loop_vars, loop_ranges = generator._unroll_iterators(
+            [
+                {
+                    "iterator": "i",
+                    "range": {
+                        "type": "range_specifier",
+                        "start": {"type": "number", "value": 1},
+                        "end": {"type": "number", "value": 2},
+                    },
+                },
+                {"iterator": "j", "range": {"type": "named_range", "name": "I"}},
+                {"iterator": "k", "range": {"type": "named_set", "name": "S"}},
+                {"iterator": "m", "range": indexed_range},
+            ],
+            env,
+        )
+
+        self.assertEqual(loop_vars, ["i", "j", "k", "m"])
+        self.assertEqual(loop_ranges, [[1, 2], [2, 3], ["A", "B"], ["indexed"]])
+        generator._unroll_indexed_iterator.assert_called_once_with(indexed_range, env)
+        with self.assertRaisesRegex(SemanticError, "Unsupported iterator range type type: unknown"):
+            generator._unroll_iterators([{"iterator": "bad", "range": {"type": "unknown"}}], env)
+
+    def test_eval_bound_collection_selects_minimum_and_maximum(self) -> None:
+        generator = make_generator()
+
+        self.assertEqual(
+            generator._eval_bound_collection(
+                {
+                    "type": "minl",
+                    "args": [
+                        {"type": "number", "value": 4},
+                        {"type": "binop", "op": "-", "left": {"type": "number", "value": 1}, "right": {"type": "number", "value": 3}},
+                    ],
+                }
+            ),
+            -2,
+        )
+        self.assertEqual(
+            generator._eval_bound_collection(
+                {"type": "maxl", "args": [{"type": "number", "value": 4}, {"type": "number", "value": 9}]}
+            ),
+            9,
+        )
+        with self.assertRaisesRegex(SemanticError, "Unsupported expr in index bound type: minl"):
+            generator._eval_bound_collection({"type": "minl", "args": []})
+
+    def test_eval_dynamic_bound_collection_uses_environment_values(self) -> None:
+        generator = make_generator()
+        env = {"start": 6}
+
+        self.assertEqual(
+            generator._eval_dynamic_bound_collection(
+                {
+                    "type": "minl",
+                    "args": [
+                        {"type": "name", "value": "start"},
+                        {"type": "number", "value": 4},
+                    ],
+                },
+                env,
+            ),
+            4,
+        )
+        self.assertEqual(
+            generator._eval_dynamic_bound_collection(
+                {
+                    "type": "maxl",
+                    "args": [
+                        {"type": "number", "value": 3},
+                        {
+                            "type": "binop",
+                            "op": "+",
+                            "left": {"type": "name", "value": "start"},
+                            "right": {"type": "number", "value": 2},
+                        },
+                    ],
+                },
+                env,
+            ),
+            8,
+        )
+        with self.assertRaisesRegex(SemanticError, "Unsupported expr in index bound type: maxl"):
+            generator._eval_dynamic_bound_collection({"type": "maxl", "args": []}, env)
+
+    def test_emit_python_calls_and_aggregates(self) -> None:
+        generator = make_generator()
+        env = {"i": "2"}
+        nested_argument = {
+            "type": "binop",
+            "op": "+",
+            "left": {"type": "number", "value": 3},
+            "right": {"type": "name_reference_index", "name": "i"},
+        }
+
+        self.assertEqual(
+            generator._emit_python_call({"type": "funcall", "name": "sqrt", "args": [nested_argument]}, env),
+            "math.sqrt((3 + 2))",
+        )
+        self.assertEqual(
+            generator._emit_python_call({"type": "funcall", "name": "abs", "args": [{"type": "number", "value": -4}]}, env),
+            "abs(-4)",
+        )
+        unknown_call = {"type": "funcall", "name": "custom", "args": [{"type": "number", "value": 1}]}
+        self.assertEqual(generator._emit_python_call(unknown_call, env), str(unknown_call))
+        invalid_call = {"type": "funcall", "name": "sqrt", "args": []}
+        self.assertEqual(generator._emit_python_call(invalid_call, env), str(invalid_call))
+
+        self.assertEqual(
+            generator._emit_python_aggregate(
+                {"type": "minl", "args": [{"type": "number", "value": 4}, {"type": "name_reference_index", "name": "i"}]},
+                env,
+            ),
+            "min(4, 2)",
+        )
+        self.assertEqual(
+            generator._emit_python_aggregate({"type": "maxl", "args": [{"type": "number", "value": 4}]}, env),
+            "max(4)",
+        )
+        self.assertEqual(generator._emit_python_aggregate({"type": "minl", "args": []}, env), "min()")
+
+    def test_traverse_function_calls_and_aggregates(self) -> None:
+        generator = make_generator()
+        nested_argument = {
+            "type": "binop",
+            "op": "+",
+            "left": {"type": "number", "value": 3},
+            "right": {"type": "name", "value": "x"},
+        }
+
+        self.assertEqual(
+            generator._traverse_function_call({"type": "funcall", "name": "sqrt", "args": [nested_argument]}),
+            "math.sqrt((3 + x))",
+        )
+        self.assertEqual(
+            generator._traverse_function_call(
+                {"type": "funcall", "name": "round", "args": [{"type": "number", "value": 2.5}]}
+            ),
+            "round(2.5)",
+        )
+        self.assertEqual(generator._traverse_function_call({"type": "funcall", "name": "sqrt", "args": []}), "")
+        self.assertEqual(
+            generator._traverse_function_call(
+                {"type": "funcall", "name": "custom", "args": [{"type": "number", "value": 1}]}
+            ),
+            "",
+        )
+        self.assertEqual(
+            generator._traverse_aggregate(
+                {"type": "minl", "args": [{"type": "number", "value": 4}, nested_argument]}
+            ),
+            "min(4, (3 + x))",
+        )
+        self.assertEqual(
+            generator._traverse_aggregate({"type": "maxl", "args": [{"type": "number", "value": 9}]}),
+            "max(9)",
+        )
+        self.assertEqual(generator._traverse_aggregate({"type": "minl", "args": []}), "min()")
+
+    def test_encode_bool_expr_var_dispatches_all_paths(self) -> None:
+        generator = make_generator()
+
+        cached_context = mock.Mock(subtree_var_cache={"cached": "subtree"}, expr_memo={})
+        self.assertEqual(generator._encode_bool_expr_var({}, {}, cached_context, "cached", "env"), "subtree")
+        memo_context = mock.Mock(subtree_var_cache={}, expr_memo={"env": "memo"})
+        self.assertEqual(generator._encode_bool_expr_var({}, {}, memo_context, "struct", "env"), "memo")
+
+        with self.assertRaisesRegex(SemanticError, "Invalid boolean expr node"):
+            generator._encode_bool_expr_var([], {}, mock.Mock(subtree_var_cache={}, expr_memo={}), "struct", "env")
+
+        aux_context = mock.Mock(subtree_var_cache={}, expr_memo={})
+        aux_node = {"type": "aux_var", "sem_type": "boolean", "name": "aux"}
+        self.assertEqual(generator._encode_bool_expr_var(aux_node, {}, aux_context, "aux", "env"), "aux")
+        self.assertEqual(aux_context.subtree_var_cache["aux"], "aux")
+
+        with mock.patch.object(generator, "_bool_expr_var", return_value="parenthesized") as bool_expr_var:
+            result = generator._encode_bool_expr_var(
+                {"type": "parenthesized_expression", "expression": {"type": "name"}},
+                {},
+                mock.Mock(subtree_var_cache={}, expr_memo={}),
+                "struct",
+                "env",
+            )
+        self.assertEqual(result, "parenthesized")
+        bool_expr_var.assert_called_once()
+
+        dispatch_context = mock.Mock(subtree_var_cache={}, expr_memo={})
+        with mock.patch.object(generator, "_try_encode_constraint_comparison", return_value="comparison"):
+            self.assertEqual(generator._encode_bool_expr_var({}, {}, dispatch_context, "struct", "env"), "comparison")
+
+        none_encoders = (
+            "_try_encode_constraint_comparison",
+            "_try_encode_boolean_not_equal",
+            "_try_encode_boolean_binop",
+            "_try_encode_atomic_boolean_constraint",
+            "_try_encode_boolean_negation",
+        )
+        with mock.patch.multiple(generator, **{name: mock.DEFAULT for name in none_encoders}) as encoders:
+            for encoder in encoders.values():
+                encoder.return_value = None
+            with mock.patch.object(generator, "_encode_boolean_composite", return_value="composite"):
+                self.assertEqual(
+                    generator._encode_bool_expr_var(
+                        {"type": "and"},
+                        {},
+                        mock.Mock(subtree_var_cache={}, expr_memo={}),
+                        "struct",
+                        "env",
+                    ),
+                    "composite",
+                )
+
+        with mock.patch.multiple(generator, **{name: mock.DEFAULT for name in none_encoders}) as encoders:
+            for encoder in encoders.values():
+                encoder.return_value = None
+            with mock.patch.object(generator, "_bool_expr_var", return_value="lowered") as bool_expr_var:
+                self.assertEqual(
+                    generator._encode_bool_expr_var(
+                        {"type": "implies", "left": {}, "right": {}},
+                        {},
+                        mock.Mock(subtree_var_cache={}, expr_memo={}),
+                        "struct",
+                        "env",
+                    ),
+                    "lowered",
+                )
+            bool_expr_var.assert_called_once()
+
+        with mock.patch.multiple(generator, **{name: mock.DEFAULT for name in none_encoders}) as encoders:
+            for encoder in encoders.values():
+                encoder.return_value = None
+            with self.assertRaisesRegex(SemanticError, "Unsupported or non-resolvable boolean expression"):
+                generator._encode_bool_expr_var(
+                    {"type": "unknown"},
+                    {},
+                    mock.Mock(subtree_var_cache={}, expr_memo={}),
+                    "struct",
+                    "env",
+                )
+
     def test_model_building_rejects_unresolved_iterator_filter(self) -> None:
         generator = make_generator("""
             range I = 1..2;

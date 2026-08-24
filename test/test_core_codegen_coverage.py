@@ -455,6 +455,20 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(len(gen2.A_eq), 1)
         self.assertEqual(len(gen2.A_ub), 2)
 
+    def test_scipy_csc_linearize_or_not_equal_expands_strict_branches(self):
+        gen = SciPyCSCCodeGenerator({"declarations": []})
+        comparison = _cmp(_name("x"), "!=", _num(3))
+        calls = []
+        gen._linearize_or = lambda comparisons, env=None: calls.append((comparisons, env))
+
+        env = {"i": 1}
+        gen._linearize_or_not_equal(comparison, env)
+
+        self.assertEqual([call[0][0]["op"] for call in calls], ["<", ">"])
+        self.assertEqual([call[0][0]["left"] for call in calls], [comparison["left"]] * 2)
+        self.assertEqual([call[0][0]["right"] for call in calls], [comparison["right"]] * 2)
+        self.assertEqual([call[1] for call in calls], [env, env])
+
     def test_scipy_csc_accumulate_sum_helpers(self):
         gen = SciPyCSCCodeGenerator({"declarations": []})
         gen.var_indices = {"x_1": 0, "x_2": 1, "z": 2}

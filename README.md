@@ -246,7 +246,7 @@ No thresholds exceeded: `cyclomatic_complexity > 15`, `length > 1000`, `nloc > 1
 
 | Total nloc | Avg. NLOC | Avg. CCN | Avg. token | Function count | Warning count | Function rate | NLOC rate |
 |-----------:|----------:|---------:|-----------:|---------------:|--------------:|--------------:|----------:|
-| 23,032     | 13.5      | 4.6      | 107.6      | 1,635          | 0             | 0.00          | 0.00      |
+| 23,692     | 13.4      | 4.6      | 107.3      | 1,687          | 0             | 0.00          | 0.00      |
 
 
 
