@@ -88,7 +88,8 @@ def _request_running_ide(method: str, payload: Optional[dict[str, str]] = None) 
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=15) as response:
+        # The URL uses a fixed HTTP scheme and a separately validated loopback host.
+        with urllib.request.urlopen(request, timeout=15) as response:  # nosec B310
             result = json.load(response)
     except urllib.error.HTTPError as exc:
         try:

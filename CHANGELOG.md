@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documented and scoped the Rhetor IDE bridge URL opening to its validated HTTP loopback endpoint for security scanning.
 - Narrowed optional session snapshot hashes before dictionary lookup to satisfy static type checking.
 - Invalidated newly selected session preview, session diff, and GenAI review tabs so their text paints without requiring mouse entry on macOS.
 - Named unsaved model and data artifacts with a shared solve-time `tmp_YYYY-MM-DD_HH-MM-SS` basename.
