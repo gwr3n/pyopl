@@ -151,7 +151,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._append_output.assert_not_called()
         self.assertIn("Model exported to LP", stdout.getvalue())
 
-    def test_save_exemplar_writes_nested_triplet_from_editors_and_session(self):
+    def test_save_exemplar_writes_triplet_from_editors_and_session(self):
         class DummyText:
             def __init__(self, value):
                 self.value = value
@@ -174,20 +174,21 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _write_exemplar=OPLIDE._write_exemplar,
+                _ask_short_text=mock.Mock(return_value="fleet"),
             )
 
             with (
                 mock.patch.object(Path, "cwd", return_value=root),
-                mock.patch.object(pyopl_ide_bootstrap.simpledialog, "askstring", return_value="routing/fleet"),
                 mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
             ):
                 OPLIDE.save_exemplar(dummy)
 
-            exemplar = root / "opl_models" / "routing" / "fleet"
+            exemplar = root / "opl_models" / "fleet"
             self.assertEqual((exemplar / "fleet.mod").read_text(encoding="utf-8"), "model content\n")
             self.assertEqual((exemplar / "fleet.dat").read_text(encoding="utf-8"), "data content\n")
             self.assertEqual((exemplar / "fleet.txt").read_text(encoding="utf-8"), '{"complete": true}\n')
             showerror.assert_not_called()
+            dummy._ask_short_text.assert_called_once_with("Save Exemplar", "Exemplar name:")
             dummy.status_var.set.assert_called_once_with(f"Saved exemplar to {exemplar.resolve()}")
 
     def test_save_exemplar_reprompts_for_existing_folder(self):
@@ -205,31 +206,28 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _write_exemplar=OPLIDE._write_exemplar,
+                _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
             )
 
             with (
                 mock.patch.object(Path, "cwd", return_value=root),
-                mock.patch.object(
-                    pyopl_ide_bootstrap.simpledialog, "askstring", side_effect=["existing", "replacement"]
-                ) as askstring,
                 mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
             ):
                 OPLIDE.save_exemplar(dummy)
 
-            self.assertEqual(askstring.call_count, 2)
+            self.assertEqual(dummy._ask_short_text.call_count, 2)
             showerror.assert_called_once()
             self.assertTrue((root / "opl_models" / "replacement" / "replacement.mod").is_file())
 
-    def test_save_exemplar_path_validation_rejects_escape_and_cancel_does_nothing(self):
+    def test_save_exemplar_name_validation_rejects_folders_and_cancel_does_nothing(self):
         root = Path("/tmp/workspace/opl_models")
-        for invalid_name in ("", "../outside", "nested/../outside", "/absolute", "bad:name"):
+        for invalid_name in ("", "../outside", "nested/fleet", r"nested\fleet", "/absolute", "bad:name"):
             with self.subTest(name=invalid_name):
                 with self.assertRaises(ValueError):
                     OPLIDE._resolve_exemplar_destination(root, invalid_name)
 
-        dummy = SimpleNamespace(_save_session=mock.Mock())
-        with mock.patch.object(pyopl_ide_bootstrap.simpledialog, "askstring", return_value=None):
-            OPLIDE.save_exemplar(dummy)
+        dummy = SimpleNamespace(_save_session=mock.Mock(), _ask_short_text=mock.Mock(return_value=None))
+        OPLIDE.save_exemplar(dummy)
         dummy._save_session.assert_not_called()
 
     def test_write_exemplar_removes_temporary_folder_after_failure(self):

@@ -22,7 +22,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Literal, Optional, Protocol, cast
 
 import ttkbootstrap as tb
@@ -5147,23 +5147,24 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _resolve_exemplar_destination(models_root: Path, name: str) -> tuple[Path, str]:
-        """Resolve a safe nested exemplar path beneath models_root."""
+        """Resolve a safe exemplar name beneath models_root."""
         entered_name = name.strip()
-        if not entered_name or entered_name.startswith(("/", "\\")):
-            raise ValueError("Enter a relative exemplar name.")
+        if not entered_name:
+            raise ValueError("Enter an exemplar name.")
+        if "/" in entered_name or "\\" in entered_name:
+            raise ValueError("The exemplar name cannot contain folder separators.")
+        if entered_name in {".", ".."}:
+            raise ValueError("The exemplar name cannot be '.' or '..'.")
 
-        components = re.split(r"[\\/]", entered_name)
         invalid_characters = re.compile(r'[<>:"|?*\x00-\x1f]')
-        if any(not component or component in {".", ".."} for component in components):
-            raise ValueError("Use non-empty folder names without '.' or '..'.")
-        if any(invalid_characters.search(component) for component in components):
-            raise ValueError('Folder names cannot contain < > : " | ? * or control characters.')
+        if invalid_characters.search(entered_name):
+            raise ValueError('The exemplar name cannot contain < > : " | ? * or control characters.')
 
         root = models_root.resolve()
-        destination = root.joinpath(*components).resolve()
+        destination = (root / entered_name).resolve()
         if destination == root or root not in destination.parents:
             raise ValueError("The exemplar must be saved beneath the opl_models folder.")
-        return destination, components[-1]
+        return destination, entered_name
 
     @staticmethod
     def _write_exemplar(destination: Path, file_stem: str, model: str, data: str, description: str) -> None:
@@ -5183,11 +5184,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Save the current editors and complete session as a local RAG exemplar."""
         models_root = Path.cwd() / "opl_models"
         while True:
-            name = simpledialog.askstring(
-                "Save Exemplar",
-                "Exemplar folder name (nested paths are allowed):",
-                parent=self,
-            )
+            name = self._ask_short_text("Save Exemplar", "Exemplar name:")
             if name is None:
                 return
             try:
