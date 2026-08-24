@@ -22,7 +22,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Any, Callable, Literal, Optional, Protocol, cast
 
 import ttkbootstrap as tb
@@ -993,9 +993,10 @@ class OPLIDE(TkinterDnD.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
-        filemenu.add_command(label="Export model...", command=self.export_model)
+        filemenu.add_command(label="Export Model...", command=self.export_model)
+        filemenu.add_command(label="Save Exemplar...", command=self.save_exemplar)
         filemenu.add_separator()
-        filemenu.add_command(label="Compare models", command=self.compare_models)
+        filemenu.add_command(label="Compare Models...", command=self.compare_models)
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self._on_close)
         menubar.add_cascade(label="File", menu=filemenu)
@@ -5143,6 +5144,81 @@ class OPLIDE(TkinterDnD.Tk):
             self.status_var.set(f"Unexpected error during export: {detail}")
             messagebox.showerror("Export model", f"Unexpected error:\n{detail}")
             self.status_var.set(f"Export failed: {detail}")
+
+    @staticmethod
+    def _resolve_exemplar_destination(models_root: Path, name: str) -> tuple[Path, str]:
+        """Resolve a safe nested exemplar path beneath models_root."""
+        entered_name = name.strip()
+        if not entered_name or entered_name.startswith(("/", "\\")):
+            raise ValueError("Enter a relative exemplar name.")
+
+        components = re.split(r"[\\/]", entered_name)
+        invalid_characters = re.compile(r'[<>:"|?*\x00-\x1f]')
+        if any(not component or component in {".", ".."} for component in components):
+            raise ValueError("Use non-empty folder names without '.' or '..'.")
+        if any(invalid_characters.search(component) for component in components):
+            raise ValueError('Folder names cannot contain < > : " | ? * or control characters.')
+
+        root = models_root.resolve()
+        destination = root.joinpath(*components).resolve()
+        if destination == root or root not in destination.parents:
+            raise ValueError("The exemplar must be saved beneath the opl_models folder.")
+        return destination, components[-1]
+
+    @staticmethod
+    def _write_exemplar(destination: Path, file_stem: str, model: str, data: str, description: str) -> None:
+        """Write an exemplar triplet and expose it only after all files succeed."""
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{file_stem}-", dir=destination.parent))
+        try:
+            (temporary / f"{file_stem}.mod").write_text(model, encoding="utf-8")
+            (temporary / f"{file_stem}.dat").write_text(data, encoding="utf-8")
+            (temporary / f"{file_stem}.txt").write_text(description, encoding="utf-8")
+            temporary.rename(destination)
+        except Exception:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+
+    def save_exemplar(self) -> None:
+        """Save the current editors and complete session as a local RAG exemplar."""
+        models_root = Path.cwd() / "opl_models"
+        while True:
+            name = simpledialog.askstring(
+                "Save Exemplar",
+                "Exemplar folder name (nested paths are allowed):",
+                parent=self,
+            )
+            if name is None:
+                return
+            try:
+                destination, file_stem = self._resolve_exemplar_destination(models_root, name)
+            except ValueError as exc:
+                messagebox.showerror("Save Exemplar", str(exc), parent=self)
+                continue
+            if destination.exists():
+                messagebox.showerror(
+                    "Save Exemplar",
+                    f"The exemplar folder already exists:\n{destination}\n\nChoose another name.",
+                    parent=self,
+                )
+                continue
+            break
+
+        try:
+            self._save_session()
+            session_path = Path(self._session_file_path())
+            description = session_path.read_text(encoding="utf-8")
+            model = self.model_text.get("1.0", "end-1c")
+            data = self.data_text.get("1.0", "end-1c")
+            self._write_exemplar(destination, file_stem, model, data, description)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).exception("Failed to save exemplar")
+            self.status_var.set(f"Failed to save exemplar: {detail}")
+            messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
+            return
+
+        self.status_var.set(f"Saved exemplar to {destination}")
 
     # --- GenAI actions ---
     def _clear_output(self, header: str = "") -> str:

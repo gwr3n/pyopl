@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added a File menu command for saving the current model, data, and complete session as a working-directory RAG exemplar triplet.
 - Added compile, alignment, and bounded repair validation for model/data revisions proposed by `generative_feedback`.
 
 ### Fixed
