@@ -10,8 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added regression coverage for fully indexed Gurobi constraint names used in IIS reporting.
+- Added standard Cut, Copy, and Paste Edit-menu commands, plus `Ctrl/Cmd+/` and `Ctrl/Cmd+.` shortcuts for toggling hash comments and `§` paragraph markers in the model and data editors.
+- Added Edit-menu commands and `Ctrl/Cmd+]` and `Ctrl/Cmd+[` shortcuts for indenting and unindenting editor lines.
 
 ### Fixed
+
+- Made comment and paragraph operations atomic for undo and preserve active multi-line selections.
+- Ensured generated hash comments always begin at column zero while preserving indentation when uncommented.
+- Ensured line-based editor commands respect Tk's end-exclusive multi-line selections.
+- Preserved commented content indentation when removing paragraph markers.
 
 ### Changed
 

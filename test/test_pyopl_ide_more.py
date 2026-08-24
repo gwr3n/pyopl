@@ -73,7 +73,152 @@ class ExistingDummyText(DummyText):
         self.tags.append((args, kwargs))
 
 
+class EditorText(DummyText):
+    def __init__(self, value, insert_line=1, selection=None):
+        super().__init__(value)
+        self.insert_line = insert_line
+        self.selection = selection
+        self.selection_ranges = []
+
+    def index(self, index):
+        if index == "insert":
+            return f"{self.insert_line}.0"
+        if index == "sel.first":
+            if self.selection is None:
+                raise pyopl_ide_bootstrap.tk.TclError()
+            return self._selection_index(self.selection[0])
+        if index == "sel.last":
+            if self.selection is None:
+                raise pyopl_ide_bootstrap.tk.TclError()
+            return self._selection_index(self.selection[1])
+        return index
+
+    @staticmethod
+    def _selection_index(value):
+        return str(value) if "." in str(value) else f"{value}.0"
+
+    def get(self, start, end):
+        lines = self.value.split("\n")
+        first_line = int(start.split(".")[0]) - 1
+        last_line = int(end.split(".")[0])
+        return "\n".join(lines[first_line:last_line])
+
+    def delete(self, start, end):
+        lines = self.value.split("\n")
+        lines[int(start.split(".")[0]) - 1] = ""
+        self.value = "\n".join(lines)
+
+    def insert(self, start, text):
+        lines = self.value.split("\n")
+        lines[int(start.split(".")[0]) - 1] = text
+        self.value = "\n".join(lines)
+
+    def replace(self, start, end, text):
+        lines = self.value.split("\n")
+        first_line = int(start.split(".")[0]) - 1
+        last_line = int(end.split(".")[0])
+        lines[first_line:last_line] = text.split("\n")
+        self.value = "\n".join(lines)
+
+    def tag_add(self, tag, start, end):
+        if tag == "sel":
+            self.selection_ranges.append((start, end))
+
+
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_standard_edit_event_targets_focused_widget(self):
+        focused_widget = mock.Mock()
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.focus_get = mock.Mock(return_value=focused_widget)
+
+        ide._generate_edit_event("<<Copy>>")
+
+        focused_widget.event_generate.assert_called_once_with("<<Copy>>")
+
+    def test_editor_toggle_shortcuts_do_not_replace_standard_copy(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.bind_all = mock.Mock()
+
+        with mock.patch.object(pyopl_ide_bootstrap.sys, "platform", "darwin"):
+            ide._bind_shortcuts()
+
+        bindings = {call.args[0]: call.args[1] for call in ide.bind_all.call_args_list}
+        self.assertIs(bindings["<Control-slash>"].__func__, OPLIDE._toggle_comment)
+        self.assertIs(bindings["<Command-slash>"].__func__, OPLIDE._toggle_comment)
+        self.assertIs(bindings["<Control-period>"].__func__, OPLIDE._toggle_paragraph)
+        self.assertIs(bindings["<Command-period>"].__func__, OPLIDE._toggle_paragraph)
+        self.assertIs(bindings["<Control-bracketright>"].__func__, OPLIDE._indent_lines)
+        self.assertIs(bindings["<Command-bracketright>"].__func__, OPLIDE._indent_lines)
+        self.assertIs(bindings["<Control-bracketleft>"].__func__, OPLIDE._unindent_lines)
+        self.assertIs(bindings["<Command-bracketleft>"].__func__, OPLIDE._unindent_lines)
+        self.assertNotIn("<Control-c>", bindings)
+        self.assertNotIn("<Command-c>", bindings)
+
+    def test_selected_editor_lines_respect_end_exclusive_selection(self):
+        ide = OPLIDE.__new__(OPLIDE)
+
+        for selection, expected in [(("1.0", "3.0"), (1, 2)), (("1.0", "3.1"), (1, 3))]:
+            with self.subTest(selection=selection):
+                text_widget = EditorText("alpha\nbeta\ngamma", selection=selection)
+                self.assertEqual(ide._selected_editor_line_numbers(text_widget), expected)
+
+        text_widget = EditorText("alpha\nbeta\ngamma", insert_line=2)
+        self.assertEqual(ide._selected_editor_line_numbers(text_widget), (2, 2))
+
+    def test_toggle_comment_uses_hash_and_selected_lines(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.model_text = EditorText("  alpha\n// beta\n# gamma", selection=("1.0", "2.1"))
+        ide.data_text = EditorText("")
+        ide._get_active_text_widget = lambda: ide.model_text
+        ide._on_text_change = mock.Mock()
+
+        ide._toggle_comment()
+        self.assertEqual(ide.model_text.value, "#   alpha\n# // beta\n# gamma")
+        self.assertEqual(ide.model_text.selection_ranges, [("1.0", "2.end")])
+        ide._toggle_comment()
+        self.assertEqual(ide.model_text.value, "  alpha\n// beta\n# gamma")
+
+    def test_toggle_paragraph_comments_and_toggles_section_marker(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.model_text = EditorText("alpha\n# beta\n# § gamma", insert_line=1)
+        ide.data_text = EditorText("")
+        ide._get_active_text_widget = lambda: ide.model_text
+        ide._on_text_change = mock.Mock()
+
+        ide._toggle_paragraph()
+        self.assertEqual(ide.model_text.value, "# § alpha\n# beta\n# § gamma")
+        ide.model_text.selection = ("1.0", "3.1")
+        ide._toggle_paragraph()
+        self.assertEqual(ide.model_text.value, "# alpha\n# § beta\n# gamma")
+
+        ide.model_text.value = "#   § spaced"
+        ide.model_text.selection = None
+        ide._toggle_paragraph()
+        self.assertEqual(ide.model_text.value, "# spaced")
+
+        ide.model_text.value = "  indented"
+        ide._toggle_paragraph()
+        self.assertEqual(ide.model_text.value, "# §   indented")
+        ide._toggle_paragraph()
+        self.assertEqual(ide.model_text.value, "#   indented")
+
+    def test_indent_and_unindent_selected_lines(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.model_text = EditorText("alpha\n  beta\n\tgammma", selection=("1.0", "3.1"))
+        ide.data_text = EditorText("")
+        ide._get_active_text_widget = lambda: ide.model_text
+        ide._on_text_change = mock.Mock()
+
+        ide._indent_lines()
+        self.assertEqual(ide.model_text.value, "    alpha\n      beta\n    \tgammma")
+        ide._unindent_lines()
+        self.assertEqual(ide.model_text.value, "alpha\n  beta\n\tgammma")
+
+        ide.model_text.selection = None
+        ide.model_text.insert_line = 3
+        ide._unindent_lines()
+        self.assertEqual(ide.model_text.value, "alpha\n  beta\ngammma")
+
     def test_format_solve_results_includes_solution_iis_stats_and_message(self):
         output = _format_solve_results(
             {

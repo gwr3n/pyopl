@@ -1061,8 +1061,20 @@ class OPLIDE(TkinterDnD.Tk):
         editmenu.add_command(label="Undo", command=self._undo, accelerator=self._accel("Z"))
         editmenu.add_command(label="Redo", command=self._redo, accelerator=f"Shift+{self._accel('Z')}")
         editmenu.add_separator()
+        editmenu.add_command(label="Cut", command=lambda: self._generate_edit_event("<<Cut>>"), accelerator=self._accel("X"))
+        editmenu.add_command(label="Copy", command=lambda: self._generate_edit_event("<<Copy>>"), accelerator=self._accel("C"))
+        editmenu.add_command(
+            label="Paste", command=lambda: self._generate_edit_event("<<Paste>>"), accelerator=self._accel("V")
+        )
+        editmenu.add_separator()
         editmenu.add_command(label="Find...", command=self._open_find_replace_dialog, accelerator=self._accel("F"))
         editmenu.add_command(label="Replace...", command=lambda: self._open_find_replace_dialog(replace=True))
+        editmenu.add_separator()
+        editmenu.add_command(label="Toggle Comment", command=self._toggle_comment, accelerator=self._accel("/"))
+        editmenu.add_command(label="Toggle Paragraph", command=self._toggle_paragraph, accelerator=self._accel("."))
+        editmenu.add_separator()
+        editmenu.add_command(label="Indent", command=self._indent_lines, accelerator=self._accel("]"))
+        editmenu.add_command(label="Unindent", command=self._unindent_lines, accelerator=self._accel("["))
         menubar.add_cascade(label="Edit", menu=editmenu)
 
         # Run
@@ -4307,6 +4319,15 @@ class OPLIDE(TkinterDnD.Tk):
         idx = self.editor_notebook.index(self.editor_notebook.select())
         return self.model_text if idx == 0 else self.data_text
 
+    def _generate_edit_event(self, virtual_event: str) -> None:
+        """Send a standard edit event to the focused widget."""
+        try:
+            widget = self.focus_get()
+        except Exception:
+            widget = None
+        if widget is not None:
+            widget.event_generate(virtual_event)
+
     def _undo(self) -> None:
         """Undo in the active editor."""
         tw = self._get_active_text_widget()
@@ -4324,6 +4345,94 @@ class OPLIDE(TkinterDnD.Tk):
         except tk.TclError:
             pass
         self._on_text_change(tw, is_data=(tw is self.data_text))
+
+    @staticmethod
+    def _commented_line_parts(line: str) -> Optional[tuple[str, str]]:
+        """Return indentation and content after a leading hash comment."""
+        match = re.match(r"([ \t]*)# ?(.*)", line)
+        return (match.group(1), match.group(2)) if match else None
+
+    def _selected_editor_line_numbers(self, text_widget: tk.Text) -> tuple[int, int]:
+        """Return the first and last lines touched by the selection or caret."""
+        try:
+            first, last = text_widget.index("sel.first"), text_widget.index("sel.last")
+        except tk.TclError:
+            first = last = text_widget.index(tk.INSERT)
+        first_line = int(first.split(".")[0])
+        last_line, last_column = (int(part) for part in last.split("."))
+        if last_line > first_line and last_column == 0:
+            last_line -= 1
+        return first_line, last_line
+
+    def _transform_editor_lines(self, transform: Callable[[str], str]) -> None:
+        text_widget = self._get_active_text_widget()
+        try:
+            text_widget.index("sel.first")
+            has_selection = True
+        except tk.TclError:
+            has_selection = False
+        first_line, last_line = self._selected_editor_line_numbers(text_widget)
+        start = f"{first_line}.0"
+        end = f"{last_line}.end"
+        lines = text_widget.get(start, end).split("\n")
+        replacement = "\n".join(transform(line) for line in lines)
+        if replacement != "\n".join(lines):
+            text_widget.replace(start, end, replacement)
+        if has_selection:
+            text_widget.tag_add("sel", start, end)
+        self._on_text_change(text_widget, is_data=(text_widget is self.data_text))
+
+    def _toggle_comment(self, event: Optional[tk.Event] = None) -> str:
+        """Comment or uncomment the selected editor lines using hash comments."""
+        text_widget = self._get_active_text_widget()
+        first_line, last_line = self._selected_editor_line_numbers(text_widget)
+        lines = [text_widget.get(f"{line_number}.0", f"{line_number}.end") for line_number in range(first_line, last_line + 1)]
+        uncomment = bool(lines) and all(self._commented_line_parts(line) is not None for line in lines)
+
+        def transform(line: str) -> str:
+            if uncomment:
+                parts = self._commented_line_parts(line)
+                if parts is None:
+                    return line
+                indentation, content = parts
+                return indentation + content
+            return "# " + line
+
+        self._transform_editor_lines(transform)
+        return "break"
+
+    def _toggle_paragraph(self, event: Optional[tk.Event] = None) -> str:
+        """Add or remove a section marker on the selected editor lines."""
+
+        def transform(line: str) -> str:
+            parts = self._commented_line_parts(line)
+            if parts is None:
+                return "# § " + line
+            indentation, content = parts
+            marker_content = content.lstrip(" \t")
+            if marker_content.startswith("§"):
+                return indentation + "#" + marker_content[1:]
+            return indentation + "# §" + (" " if content else "") + content
+
+        self._transform_editor_lines(transform)
+        return "break"
+
+    def _indent_lines(self, event: Optional[tk.Event] = None) -> str:
+        """Indent the selected editor lines by one level."""
+        self._transform_editor_lines(lambda line: "    " + line)
+        return "break"
+
+    def _unindent_lines(self, event: Optional[tk.Event] = None) -> str:
+        """Unindent the selected editor lines by one level."""
+
+        def transform(line: str) -> str:
+            if line.startswith("\t"):
+                return line[1:]
+            spaces = len(line) - len(line.lstrip(" "))
+            return line[min(spaces, 4) :]
+
+        self._transform_editor_lines(transform)
+        return "break"
 
     def _start_run_timer(self, base_msg: str = "Solving model...") -> None:
         """Start updating the status bar with elapsed solve time (every second)."""
@@ -6956,6 +7065,10 @@ class OPLIDE(TkinterDnD.Tk):
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
         self.bind_all("<Control-e>", self._genai_solve_and_explain_shortcut)
         self.bind_all("<Control-f>", self._find_shortcut)
+        self.bind_all("<Control-slash>", self._toggle_comment)
+        self.bind_all("<Control-period>", self._toggle_paragraph)
+        self.bind_all("<Control-bracketright>", self._indent_lines)
+        self.bind_all("<Control-bracketleft>", self._unindent_lines)
         self.bind_all("<Control-q>", self._close_shortcut)
 
         if sys.platform == "darwin":
@@ -6967,6 +7080,10 @@ class OPLIDE(TkinterDnD.Tk):
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
             self.bind_all("<Command-e>", self._genai_solve_and_explain_shortcut)
             self.bind_all("<Command-f>", self._find_shortcut)
+            self.bind_all("<Command-slash>", self._toggle_comment)
+            self.bind_all("<Command-period>", self._toggle_paragraph)
+            self.bind_all("<Command-bracketright>", self._indent_lines)
+            self.bind_all("<Command-bracketleft>", self._unindent_lines)
 
     def _close_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for closing the IDE."""
