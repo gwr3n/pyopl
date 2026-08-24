@@ -361,6 +361,22 @@ minimize x;
         dummy._open_model_path.assert_called_once_with("/tmp/my model.mod")
         dummy._open_data_path.assert_called_once_with("/tmp/input.dat")
 
+    def test_open_model_shortcut_opens_model_and_stops_event(self):
+        dummy = SimpleNamespace(open_model=mock.Mock())
+
+        result = OPLIDE._open_model_shortcut(dummy)
+
+        self.assertEqual(result, "break")
+        dummy.open_model.assert_called_once_with()
+
+    def test_open_data_shortcut_opens_data_and_stops_event(self):
+        dummy = SimpleNamespace(open_data=mock.Mock())
+
+        result = OPLIDE._open_data_shortcut(dummy)
+
+        self.assertEqual(result, "break")
+        dummy.open_data.assert_called_once_with()
+
     def test_attachment_drop_filters_files_and_renders_pdf(self):
         dummy = SimpleNamespace(
             _genai_attachment_paths=[],

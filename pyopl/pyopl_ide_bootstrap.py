@@ -1036,10 +1036,8 @@ class OPLIDE(TkinterDnD.Tk):
         # File
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="New Model", command=self.new_model, accelerator=self._accel("N"))
-        filemenu.add_command(label="Clear Session", command=self.new_session)
         filemenu.add_separator()
-        filemenu.add_command(label="Open Model...", command=self.open_model)
-        filemenu.add_command(label="Open Data...", command=self.open_data)
+        filemenu.add_command(label="Open...", command=self.open_file, accelerator=self._accel("O"))
         filemenu.add_separator()
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
@@ -1048,7 +1046,14 @@ class OPLIDE(TkinterDnD.Tk):
         filemenu.add_separator()
         filemenu.add_command(label="Compare Models...", command=self.compare_models)
         filemenu.add_separator()
-        filemenu.add_command(label="Exit", command=self._on_close)
+        filemenu.add_command(label="Clear Session...", command=self.new_session)
+        if sys.platform != "darwin":
+            filemenu.add_separator()
+            filemenu.add_command(
+                label="Exit" if sys.platform == "win32" else "Quit",
+                command=self._on_close,
+                accelerator=self._accel("Q"),
+            )
         menubar.add_cascade(label="File", menu=filemenu)
 
         # Edit
@@ -3530,6 +3535,27 @@ class OPLIDE(TkinterDnD.Tk):
             self._update_caret_position(self.data_text)
 
     # --- File Operations ---
+    def open_file(self) -> None:
+        """Open a model or data file into the matching editor."""
+        if not self._ensure_no_active_operation("Open File"):
+            return
+        fname = filedialog.askopenfilename(
+            filetypes=[
+                ("Model files", ("*.mod", "*.opl")),
+                ("Data files", "*.dat"),
+                ("All files", "*.*"),
+            ]
+        )
+        if not fname:
+            return
+        suffix = Path(fname).suffix.lower()
+        if suffix in (".mod", ".opl"):
+            self._open_model_path(fname)
+        elif suffix == ".dat":
+            self._open_data_path(fname)
+        else:
+            self.status_var.set(f"Ignored unsupported file: {os.path.basename(fname)}")
+
     def open_model(self) -> None:
         """Open a model file into the model editor."""
         if not self._ensure_no_active_operation("Open Model"):
@@ -6924,6 +6950,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Bind keyboard shortcuts."""
         self.bind_all("<Control-s>", self.save_current_buffer)
         self.bind_all("<Control-n>", self._new_model_shortcut)
+        self.bind_all("<Control-o>", self._open_file_shortcut)
         self.bind_all("<Control-r>", self._run_model_shortcut)
         self.bind_all("<Control-g>", self._genai_generate_shortcut)
         self.bind_all("<Control-i>", self._genai_feedback_shortcut)
@@ -6934,6 +6961,7 @@ class OPLIDE(TkinterDnD.Tk):
         if sys.platform == "darwin":
             self.bind_all("<Command-s>", self.save_current_buffer)
             self.bind_all("<Command-n>", self._new_model_shortcut)
+            self.bind_all("<Command-o>", self._open_file_shortcut)
             self.bind_all("<Command-r>", self._run_model_shortcut)
             self.bind_all("<Command-g>", self._genai_generate_shortcut)
             self.bind_all("<Command-i>", self._genai_feedback_shortcut)
@@ -6948,6 +6976,21 @@ class OPLIDE(TkinterDnD.Tk):
     def _new_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         """Keyboard shortcut handler for creating a new model."""
         self.new_model()
+        return "break"
+
+    def _open_file_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        """Keyboard shortcut handler for opening a model or data file."""
+        self.open_file()
+        return "break"
+
+    def _open_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        """Compatibility handler for opening a model directly."""
+        self.open_model()
+        return "break"
+
+    def _open_data_shortcut(self, event: Optional[tk.Event] = None) -> str:
+        """Compatibility handler for opening data directly."""
+        self.open_data()
         return "break"
 
     def _find_shortcut(self, event: Optional[tk.Event] = None) -> str:

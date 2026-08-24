@@ -67,6 +67,61 @@ class TestPyOPLIDETyping(unittest.TestCase):
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
 
+    def test_file_menu_quit_entry_is_platform_appropriate(self):
+        class FakeMenu:
+            instances = []
+
+            def __init__(self, *_args, **_kwargs):
+                self.entries = []
+                self.instances.append(self)
+
+            def add_command(self, **kwargs):
+                self.entries.append(("command", kwargs))
+
+            def add_separator(self):
+                self.entries.append(("separator", {}))
+
+            def add_cascade(self, **kwargs):
+                self.entries.append(("cascade", kwargs))
+
+            def add_radiobutton(self, **kwargs):
+                self.entries.append(("radiobutton", kwargs))
+
+            def add_checkbutton(self, **kwargs):
+                self.entries.append(("checkbutton", kwargs))
+
+        class Dummy:
+            solver = mock.Mock()
+            display_solver_progress_var = mock.Mock()
+            font_size_var = mock.Mock()
+            theme_var = mock.Mock()
+
+            def __getattr__(self, name):
+                if name == "_accel":
+                    return lambda key: f"Ctrl+{key}"
+                value = mock.Mock()
+                setattr(self, name, value)
+                return value
+
+        for platform, expected_label in (("darwin", None), ("win32", "Exit"), ("linux", "Quit")):
+            FakeMenu.instances = []
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.tk, "Menu", FakeMenu),
+                mock.patch.object(pyopl_ide_bootstrap.sys, "platform", platform),
+            ):
+                OPLIDE._setup_menu(Dummy())
+
+            file_entries = FakeMenu.instances[1].entries
+            quit_entries = [
+                entry[1] for entry in file_entries if entry[0] == "command" and entry[1]["label"] in {"Exit", "Quit"}
+            ]
+            if expected_label is None:
+                self.assertEqual(quit_entries, [])
+            else:
+                self.assertEqual(len(quit_entries), 1)
+                self.assertEqual(quit_entries[0]["label"], expected_label)
+                self.assertEqual(quit_entries[0]["accelerator"], "Ctrl+Q")
+
     def test_start_solver_process_loads_settings_from_working_directory(self):
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
         dummy = SimpleNamespace(

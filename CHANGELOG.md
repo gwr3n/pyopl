@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Made the Rhetor File menu platform-appropriate by using the native macOS application-menu Quit command and retaining File-menu termination commands on Windows and Linux.
+- Added platform-aware `Ctrl/Cmd+M` and `Ctrl/Cmd+D` accelerators and keyboard shortcuts for opening model and data files.
+
 ### Removed
 
 ## [v2.4.1] - 2026-08-24
