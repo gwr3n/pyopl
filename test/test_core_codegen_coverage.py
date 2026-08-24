@@ -194,6 +194,28 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen._traverse_expression({"type": "name", "value": "i"}, {"i": 1}), "i")
         self.assertEqual(gen._traverse_expression({"type": "name", "value": "p"}, {}), "p")
 
+    def test_gurobi_forall_label_names_include_all_indices_for_iis_mapping(self):
+        model = """
+        int N = 2;
+        int B = 2;
+        range Items = 1..N;
+        range Bins = 1..B;
+        dvar boolean assign[Items][Bins];
+        minimize 0;
+        subject to {
+            forall(i in Items, b in Bins)
+                FitWidth: assign[i][b] <= 0;
+        }
+        """
+
+        _, code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+
+        self.assertIn(
+            "name=('FitWidth' + '[' + ','.join(str(v) for v in [i, b]) + ']')",
+            code,
+        )
+        self.assertIn("constraint.ConstrName", code)
+
     def test_gurobi_function_expression_helpers(self):
         gen = GurobiCodeGenerator({"declarations": [], "objective": {}, "constraints": []})
 
