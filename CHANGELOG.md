@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Invalidated newly selected session diff previews so their text paints without requiring mouse entry on macOS.
+- Invalidated newly selected session preview, session diff, and GenAI review tabs so their text paints without requiring mouse entry on macOS.
+- Named unsaved model and data artifacts with a shared solve-time `tmp_YYYY-MM-DD_HH-MM-SS` basename.
 
 ### Changed
 

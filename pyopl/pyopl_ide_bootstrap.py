@@ -1643,6 +1643,7 @@ class OPLIDE(TkinterDnD.Tk):
             window.columnconfigure(0, weight=1)
             notebook = ttk.Notebook(window)
             notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+            preview_texts: dict[str, tk.Text] = {}
             for label, content, is_present in (("Model", model_text, has_model), ("Data", data_text, has_data)):
                 if not is_present:
                     continue
@@ -1653,6 +1654,14 @@ class OPLIDE(TkinterDnD.Tk):
                 text_widget.insert(tk.END, content)
                 text_widget.configure(state="disabled")
                 notebook.add(frame, text=label)
+                preview_texts[str(frame)] = text_widget
+            notebook.bind(
+                "<<NotebookTabChanged>>",
+                lambda _event: self.after_idle(
+                    lambda: OPLIDE._expose_selected_diff_preview(notebook, preview_texts)
+                ),
+                add="+",
+            )
             ttk.Button(window, text="Close", command=window.destroy).grid(row=1, column=0, sticky="e", padx=10, pady=(0, 10))
         except Exception:
             pass
@@ -2742,6 +2751,13 @@ class OPLIDE(TkinterDnD.Tk):
         window.columnconfigure(0, weight=1)
         notebook = ttk.Notebook(window)
         notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 8))
+        notebook.bind(
+            "<<NotebookTabChanged>>",
+            lambda _event: self.after_idle(
+                lambda: OPLIDE._expose_selected_diff_preview(notebook, self._genai_diff_preview_texts)
+            ),
+            add="+",
+        )
         footer = ttk.Frame(window)
         footer.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 10))
         footer.columnconfigure(0, weight=1)
@@ -2770,7 +2786,7 @@ class OPLIDE(TkinterDnD.Tk):
             text_widget = self._create_diff_preview_text(frame)
             self._populate_diff_preview_text(text_widget, original, revised)
             notebook.add(frame, text=label)
-            self._genai_diff_preview_texts[label.lower()] = text_widget
+            self._genai_diff_preview_texts[str(frame)] = text_widget
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
@@ -2825,6 +2841,8 @@ class OPLIDE(TkinterDnD.Tk):
         model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
         model_ext = model_ext or ".mod"
         model_base_name = strip_ts_suffix(model_base_name)
+        if model_base_name == "temp_model":
+            model_base_name = "tmp"
         model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
         model_tgt = OPLIDE._unique_revision_path(model_base, model_ext)
         model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
@@ -4770,8 +4788,9 @@ class OPLIDE(TkinterDnD.Tk):
         data_file_override: Optional[str],
         operation: _ForegroundOperation,
     ) -> Optional[tuple[str, str]]:
-        model_file = model_file_override or self.model_file or os.path.join(tmp_dir, "temp_model.mod")
-        data_file = data_file_override or self.data_file or os.path.join(tmp_dir, "temp_data.dat")
+        temp_model_file, temp_data_file = OPLIDE._temporary_model_data_paths(tmp_dir)
+        model_file = model_file_override or self.model_file or temp_model_file
+        data_file = data_file_override or self.data_file or temp_data_file
         try:
             with open(model_file, "w", encoding="utf-8") as file_obj:
                 file_obj.write(model_code)
@@ -4783,6 +4802,12 @@ class OPLIDE(TkinterDnD.Tk):
             self._finish_foreground_operation(operation)
             return None
         return model_file, data_file
+
+    @staticmethod
+    def _temporary_model_data_paths(tmp_dir: str, timestamp: Optional[datetime] = None) -> tuple[str, str]:
+        safe_timestamp = (timestamp or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+        base_path = os.path.join(tmp_dir, f"tmp_{safe_timestamp}")
+        return base_path + ".mod", base_path + ".dat"
 
     def _start_solver_process(
         self,

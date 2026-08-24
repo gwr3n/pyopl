@@ -1,6 +1,7 @@
 import os
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -304,6 +305,39 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._show_solver_log_textbox.assert_called_once()
         dummy._start_run_timer.assert_called_once_with("Solving model...")
         dummy.after.assert_called_once()
+
+    def test_save_run_model_files_uses_shared_solve_timestamp_for_unsaved_files(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
+        dummy = SimpleNamespace(
+            model_file=None,
+            data_file=None,
+            status_var=mock.Mock(),
+            _append_output=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.object(pyopl_ide_bootstrap, "datetime") as datetime_mock:
+                datetime_mock.now.return_value = datetime(2026, 8, 24, 0, 47, 51)
+                result = OPLIDE._save_run_model_files(
+                    dummy,
+                    "dvar int x;",
+                    "limit = 1;",
+                    tmpdir,
+                    None,
+                    None,
+                    operation,
+                )
+
+            self.assertEqual(
+                result,
+                (
+                    str(Path(tmpdir) / "tmp_2026-08-24_00-47-51.mod"),
+                    str(Path(tmpdir) / "tmp_2026-08-24_00-47-51.dat"),
+                ),
+            )
+            self.assertEqual(Path(result[0]).read_text(encoding="utf-8"), "dvar int x;")
+            self.assertEqual(Path(result[1]).read_text(encoding="utf-8"), "limit = 1;")
 
     def test_poll_solver_streams_logs_to_temporary_textbox(self):
         class DummyProcess:
@@ -1082,6 +1116,24 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     )
                 ],
             )
+
+    def test_pending_unsaved_genai_revisions_use_tmp_timestamp_basename(self):
+        dummy = SimpleNamespace(model_text=SimpleNamespace(get=lambda *_args: "model"))
+
+        with TemporaryDirectory() as tmpdir:
+            model_target, data_target = OPLIDE._write_pending_revision_files(
+                dummy,
+                tmpdir,
+                "revised model",
+                "revised data",
+                str(Path(tmpdir) / "temp_model.mod"),
+                str(Path(tmpdir) / "temp_data.dat"),
+                "2026-08-24_00-47-51",
+                False,
+            )
+
+            self.assertEqual(Path(model_target).name, "tmp_2026-08-24_00-47-51.mod")
+            self.assertEqual(Path(data_target).name, "tmp_2026-08-24_00-47-51.dat")
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
