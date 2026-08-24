@@ -34,16 +34,17 @@ def build_distillation_prompt(
     few_shots = _STRATEGY.render_few_shots_section(list(examples))
     return (
         "Write only a concise plain-text description of the current optimization problem.\n"
-        "Describe the decisions, constraints, objective, and important data relationships. "
+        "Describe the decisions, constraints, objective, and input data. "
         "Do not reproduce OPL syntax or mention the session, an LLM, examples, or prompting. "
+        "Do not include information about the optimal solution or its value. "
         "Generalize implementation-specific names where practical. "
         f"Keep the response within {DESCRIPTION_MAX_CHARS} characters.\n\n"
+        f"<current_model>\n{model}\n</current_model>\n\n"
+        f"<current_data>\n{data}\n</current_data>\n\n"
+        f"<current_session>\n{source_session}\n</current_session>\n\n"
         "The examples below are style references only. Do not copy their problem details or let "
         "them change the meaning of the current model, data, and session information.\n\n"
         f"{few_shots}"
-        f"<current_model>\n{model}\n</current_model>\n\n"
-        f"<current_data>\n{data}\n</current_data>\n\n"
-        f"<current_session>\n{source_session}\n</current_session>\n"
     )
 
 
