@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.4.1] - 2026-08-24
+
+### Added
+
 - Added a three-tab review gate for saving GenAI-distilled exemplar descriptions with syntax-highlighted model and data previews.
 
 ### Fixed
