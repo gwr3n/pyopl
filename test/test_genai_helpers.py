@@ -336,6 +336,35 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertIn("few_shot_examples", rendered)
         self.assertIn("model", rendered)
 
+    def test_default_models_dirs_adds_optional_working_directory_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            packaged = root / "package" / "opl_models"
+            working = root / "workspace"
+            local_models = working / "opl_models"
+            packaged.mkdir(parents=True)
+            local_models.mkdir(parents=True)
+
+            with (
+                patch.object(strategy_base, "files", return_value=root / "package"),
+                patch.object(strategy_base.Path, "cwd", return_value=working),
+            ):
+                models_dirs = GenAIStrategyBase.default_models_dirs()
+
+        self.assertEqual(models_dirs, [packaged, local_models])
+
+    def test_base_default_gather_passes_all_model_roots_to_ranker(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        roots = [Path("packaged"), Path("workspace") / "opl_models"]
+
+        with (
+            patch.object(base, "default_models_dirs", return_value=roots),
+            patch.object(strategy_base, "rag_rank", return_value=[]) as rank,
+        ):
+            self.assertEqual(base.gather_few_shots("query"), [])
+
+        rank.assert_called_once_with(query="query", models_dir=roots, top_k=base.FEW_SHOT_TOP_K)
+
     def test_base_image_payload_helpers(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             image_path = Path(td) / "tiny.png"
@@ -671,6 +700,58 @@ class TestRagHelper(unittest.TestCase):
             self.assertEqual(rag_helper.rank_problem_descriptions("query", root), [])
             (root / "empty.txt").write_text("   ", encoding="utf-8")
             self.assertEqual(rag_helper.rank_problem_descriptions("query", root), [])
+
+    def test_description_files_from_roots_are_recursive_and_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            nested = root / "opl_models" / "category"
+            nested.mkdir(parents=True)
+            description = nested / "sample.txt"
+            description.write_text("sample", encoding="utf-8")
+
+            descriptions = rag_helper._iter_description_files_from_roots([root / "opl_models", nested])
+
+        self.assertEqual(descriptions, [description])
+
+    def test_rank_problem_descriptions_combines_roots_and_ignores_missing_optional_root(self) -> None:
+        class FakeModel:
+            def encode(self, texts, **kwargs):
+                if texts == ["query"]:
+                    return [[1.0, 0.0]]
+                return [[0.2, 0.0], [0.9, 0.0]]
+
+        class FakeScores:
+            def __init__(self, values):
+                self.values = values
+
+            def cpu(self):
+                return self
+
+            def tolist(self):
+                return self.values
+
+        fake_torch = SimpleNamespace(matmul=lambda doc_embs, query_emb: FakeScores([row[0] for row in doc_embs]))
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            packaged = root / "packaged"
+            local = root / "workspace" / "opl_models" / "nested"
+            packaged.mkdir()
+            local.mkdir(parents=True)
+            packaged_description = packaged / "packaged.txt"
+            local_description = local / "local.txt"
+            packaged_description.write_text("packaged", encoding="utf-8")
+            local_description.write_text("local", encoding="utf-8")
+
+            with (
+                patch.object(rag_helper, "_load_model", return_value=FakeModel()),
+                patch.dict(sys.modules, {"torch": fake_torch}),
+            ):
+                ranked = rag_helper.rank_problem_descriptions(
+                    "query", [packaged, root / "missing", root / "workspace" / "opl_models"], top_k=1
+                )
+
+        self.assertEqual(ranked[0]["path"], str(local_description))
 
     def test_rank_problem_descriptions_returns_ranked_previews(self) -> None:
         class FakeModel:

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded default GenAI RAG retrieval to recursively include model/data/description triplets from an optional working-directory `opl_models` folder.
 - Centralized `generative_feedback` so every GenAI strategy exposes one validated implementation.
 - Deduplicated output-session model and data snapshots through content-addressed SHA-256 stores in `.pyopl_session`.
 - Simplified IDE session-history restoration by isolating snapshot and artifact normalization.

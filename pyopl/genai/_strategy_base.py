@@ -247,6 +247,22 @@ class GenAIStrategyBase:
 
         return (mod if mod and mod.exists() else None, dat if dat and dat.exists() else None)
 
+    @staticmethod
+    def default_models_dirs() -> List[Path]:
+        """Return packaged and optional working-directory RAG model roots."""
+        try:
+            packaged_dir = Path(str(files("pyopl") / "opl_models"))
+            if not packaged_dir.exists():
+                packaged_dir = Path(__file__).parent / "opl_models"
+        except Exception:
+            packaged_dir = Path(__file__).parent / "opl_models"
+
+        models_dirs = [packaged_dir]
+        working_dir = Path.cwd() / "opl_models"
+        if working_dir.is_dir() and working_dir.resolve() != packaged_dir.resolve():
+            models_dirs.append(working_dir)
+        return models_dirs
+
     def gather_few_shots(
         self,
         problem_description: str,
@@ -257,22 +273,15 @@ class GenAIStrategyBase:
     ) -> List[Dict[str, str]]:
         top_k = self.FEW_SHOT_TOP_K if k is None else int(k)
 
-        # Resolve default models_dir from package data with a concrete Path
         if models_dir is None:
-            try:
-                pkg_dir = files("pyopl") / "opl_models"
-                base_dir = Path(str(pkg_dir))
-                if not base_dir.exists():
-                    base_dir = Path(__file__).parent / "opl_models"
-            except Exception:
-                base_dir = Path(__file__).parent / "opl_models"
+            search_dirs = self.default_models_dirs()
         else:
-            base_dir = Path(models_dir)
+            search_dirs = Path(models_dir)
 
         examples: List[Dict[str, str]] = []
         try:
             self.notify(progress, f"[RAG] Retrieving few-shot examples (k={top_k})")
-            hits = rag_rank(query=problem_description, models_dir=str(base_dir), top_k=top_k)
+            hits = rag_rank(query=problem_description, models_dir=search_dirs, top_k=top_k)
             self.notify(progress, f"[RAG] Found {len(hits)} few-shot candidates: {[Path(hit['path']).name for hit in hits]}")
         except Exception as e:
             self._logger.debug(f"Few-shot retrieval skipped: {e}")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 # --- Logging Setup ---
 # Use module-level logger, and set DEBUG level for development
@@ -28,6 +28,14 @@ def _iter_description_files(models_dir: Path) -> List[Path]:
     return sorted([p for p in models_dir.rglob("*.txt") if p.is_file()])
 
 
+def _iter_description_files_from_roots(models_dirs: Iterable[Path]) -> List[Path]:
+    descriptions: Dict[Path, Path] = {}
+    for models_dir in models_dirs:
+        for path in _iter_description_files(models_dir):
+            descriptions.setdefault(path.resolve(), path)
+    return sorted(descriptions.values())
+
+
 def _read_text(path: Path, max_chars: int = 100_000) -> str:
     """
     Read text content safely with UTF-8, truncating very large files.
@@ -44,7 +52,7 @@ def _read_text(path: Path, max_chars: int = 100_000) -> str:
 
 def rank_problem_descriptions(
     query: str,
-    models_dir: Path | str,
+    models_dir: Path | str | Iterable[Path | str],
     top_k: int = 10,
     model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
 ) -> List[Dict[str, Any]]:
@@ -53,16 +61,23 @@ def rank_problem_descriptions(
 
     Args:
         query: The problem description to search with.
-        models_dir: Root folder containing subfolders with .txt descriptions.
+        models_dir: One or more root folders containing .txt descriptions.
         top_k: Number of top matches to return.
         model_name: Sentence embedding model to use.
     """
-    models_dir = Path(models_dir)
+    if isinstance(models_dir, (str, Path)):
+        models_dirs = [Path(models_dir)]
+        if not models_dirs[0].exists():
+            raise FileNotFoundError(f"Models directory not found: {models_dirs[0]}")
+    else:
+        unique_dirs: Dict[Path, Path] = {}
+        for root in models_dir:
+            path = Path(root)
+            if path.exists():
+                unique_dirs.setdefault(path.resolve(), path)
+        models_dirs = list(unique_dirs.values())
 
-    if not models_dir.exists():
-        raise FileNotFoundError(f"Models directory not found: {models_dir}")
-
-    files_t = _iter_description_files(models_dir)
+    files_t = _iter_description_files_from_roots(models_dirs)
     if not files_t:
         return []
 
