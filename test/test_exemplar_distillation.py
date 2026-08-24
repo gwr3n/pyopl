@@ -7,8 +7,7 @@ from pyopl.genai import exemplar_distillation
 class TestExemplarDistillation(unittest.TestCase):
     def test_prompt_contains_three_style_examples_and_current_inputs(self):
         examples = [
-            {"description": f"description {index}", "model": f"model {index}", "data": f"data {index}"}
-            for index in range(3)
+            {"description": f"description {index}", "model": f"model {index}", "data": f"data {index}"} for index in range(3)
         ]
 
         prompt = exemplar_distillation.build_distillation_prompt(

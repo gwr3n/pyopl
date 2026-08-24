@@ -6,7 +6,6 @@ from typing import Callable, Optional, Sequence
 
 from ._strategy_base import GenAIStrategyBase, LLMProvider
 
-
 DESCRIPTION_MAX_CHARS = 1200
 FEW_SHOT_COUNT = 3
 _LOGGER = logging.getLogger(__name__)

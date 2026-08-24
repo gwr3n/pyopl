@@ -29,13 +29,14 @@ import ttkbootstrap as tb
 from platformdirs import user_config_dir
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
+
 # Model discovery (provider-specific)
 from .genai.model_discovery import (
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
 )
-from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
 from .genai.pyopl_generative import generative_feedback
 
 # --- Local Imports ---
