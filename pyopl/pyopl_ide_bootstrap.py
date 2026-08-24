@@ -225,6 +225,54 @@ def _remap_folded_lines(old_text: str, new_text: str, folded_lines: set[int]) ->
     return remapped
 
 
+def _format_iis(iis: dict) -> list[str]:
+    lines = ["\nIrreducible Infeasible Subsystem (IIS):\n"]
+    iis_constraints = iis.get("constraints", [])
+    if iis_constraints:
+        lines.append("  Constraints:\n")
+        for item in iis_constraints:
+            name = item.get("name", item) if isinstance(item, dict) else item
+            lines.append(f"    {name}\n")
+    iis_bounds = iis.get("bounds", [])
+    if iis_bounds:
+        lines.append("  Variable bounds:\n")
+        for item in iis_bounds:
+            if isinstance(item, dict):
+                lines.append(f"    {item.get('name', 'unknown')} ({item.get('kind', 'bound')})\n")
+            else:
+                lines.append(f"    {item}\n")
+    if iis.get("error"):
+        lines.append(f"  IIS error: {iis['error']}\n")
+    return lines
+
+
+def _format_solve_results(results: dict, solver_choice: str) -> str:
+    lines = [f"\nSolver: {solver_choice}\n", "\nStatus: " + results.get("status", "UNKNOWN") + "\n"]
+    if "objective_value" in results and results["objective_value"] is not None:
+        lines.append(f"Objective: {results['objective_value']}\n")
+    solution = results.get("solution")
+    if solution:
+        lines.append("Solution:\n")
+        for key, value in solution.items():
+            lines.append(f"  {key}: {value}\n")
+    iis = results.get("iis")
+    if isinstance(iis, dict):
+        lines.extend(_format_iis(iis))
+    stats = results.get("stats")
+    if stats:
+        lines.append("\nSolver Statistics (from 'stats' field):\n")
+        if isinstance(stats, dict):
+            for stat_key, stat_value in stats.items():
+                lines.append(f"  {stat_key}: {stat_value}\n")
+        else:
+            lines.append(str(stats) + "\n")
+    else:
+        lines.append("\nNo detailed solver statistics available from pyopl.solve.\n")
+    if "message" in results:
+        lines.append(f"\nMessage: {results['message']}\n")
+    return "".join(lines)
+
+
 class _EditorGutter:
     """Draw line numbers and explicit section-folding controls beside a Text widget."""
 
@@ -5061,29 +5109,9 @@ class OPLIDE(TkinterDnD.Tk):
         solver_choice: Optional[str] = None,
     ) -> None:
         """Format and display solver results in the output pane."""
-        solver_choice = solver_choice or getattr(self, "_current_solver_choice", "gurobi")
-        buf = []
-        buf.append(f"\nSolver: {solver_choice}\n")
-        buf.append("\nStatus: " + results.get("status", "UNKNOWN") + "\n")
-        if "objective_value" in results and results["objective_value"] is not None:
-            buf.append(f"Objective: {results['objective_value']}\n")
-        if "solution" in results and results["solution"]:
-            buf.append("Solution:\n")
-            for k, v in results["solution"].items():
-                buf.append(f"  {k}: {v}\n")
-        if "stats" in results and results["stats"]:
-            buf.append("\nSolver Statistics (from 'stats' field):\n")
-            if isinstance(results["stats"], dict):
-                for stat_key, stat_value in results["stats"].items():
-                    buf.append(f"  {stat_key}: {stat_value}\n")
-            else:
-                buf.append(str(results["stats"]) + "\n")
-        else:
-            buf.append("\nNo detailed solver statistics available from pyopl.solve.\n")
-        if "message" in results:
-            buf.append(f"Message: {results['message']}\n")
-
-        self._append_output("".join(buf), session_id)
+        selected_solver = solver_choice or str(getattr(self, "_current_solver_choice", "gurobi"))
+        output = _format_solve_results(results, selected_solver)
+        self._append_output(output, session_id)
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
 

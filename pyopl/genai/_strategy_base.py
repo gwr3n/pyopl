@@ -276,7 +276,7 @@ class GenAIStrategyBase:
         if models_dir is None:
             search_dirs = self.default_models_dirs()
         else:
-            search_dirs = Path(models_dir)
+            search_dirs = [Path(models_dir)]
 
         examples: List[Dict[str, str]] = []
         try:

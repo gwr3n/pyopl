@@ -136,6 +136,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
         self.assertIn("globals().get('_pyopl_solver_settings', {})", gurobi_code)
         self.assertIn("model.setParam(_param_name, _param_value)", gurobi_code)
+        self.assertIn("for constraint in model.getGenConstrs():", gurobi_code)
+        self.assertIn("if constraint.IISGenConstr:", gurobi_code)
+        self.assertIn("'kind': 'general_constraint'", gurobi_code)
         self.assertIn("solver_options.update", scipy_code)
         self.assertIn("options=solver_options", scipy_code)
         self.assertIn("status_str = 'TIME_LIMIT'", scipy_code)

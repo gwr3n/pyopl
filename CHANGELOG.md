@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added a File menu command for saving the current model, data, and complete session as a working-directory RAG exemplar triplet.
 - Added compile, alignment, and bounded repair validation for model/data revisions proposed by `generative_feedback`.
+- Added Gurobi IIS diagnostics for infeasible solves, including conflicting linear and general constraints and variable bounds in the IDE output.
 
 ### Fixed
 
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Narrowed optional session snapshot hashes before dictionary lookup to satisfy static type checking.
 - Invalidated newly selected session preview, session diff, and GenAI review tabs so their text paints without requiring mouse entry on macOS.
 - Named unsaved model and data artifacts with a shared solve-time `tmp_YYYY-MM-DD_HH-MM-SS` basename.
+- Added visual separation between solver statistics and the top-level solver message in IDE output.
 
 ### Changed
 

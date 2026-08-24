@@ -192,6 +192,52 @@ class GurobiCodeGenerator:
         self.indent_level += 1
         self._add_code_line("print('Model is infeasible')")
         self._add_code_line("results['status'] = 'INFEASIBLE'")
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("model.computeIIS()")
+        self._add_code_line("iis = {'constraints': [], 'bounds': []}")
+        self._add_code_line("for constraint in model.getConstrs():")
+        self.indent_level += 1
+        self._add_code_line("if constraint.IISConstr:")
+        self.indent_level += 1
+        self._add_code_line("iis['constraints'].append({'name': constraint.ConstrName, 'kind': 'constraint'})")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("for constraint in model.getGenConstrs():")
+        self.indent_level += 1
+        self._add_code_line("if constraint.IISGenConstr:")
+        self.indent_level += 1
+        self._add_code_line("iis['constraints'].append({'name': constraint.GenConstrName, 'kind': 'general_constraint'})")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("for variable in model.getVars():")
+        self.indent_level += 1
+        self._add_code_line("if variable.IISLB:")
+        self.indent_level += 1
+        self._add_code_line("iis['bounds'].append({'name': variable.VarName, 'kind': 'lower_bound'})")
+        self.indent_level -= 1
+        self._add_code_line("if variable.IISUB:")
+        self.indent_level += 1
+        self._add_code_line("iis['bounds'].append({'name': variable.VarName, 'kind': 'upper_bound'})")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("results['iis'] = iis")
+        self._add_code_line("print('IIS constraints:')")
+        self._add_code_line("for item in iis['constraints']:")
+        self.indent_level += 1
+        self._add_code_line("print(f\"  {item['name']}\")")
+        self.indent_level -= 1
+        self._add_code_line("print('IIS bounds:')")
+        self._add_code_line("for item in iis['bounds']:")
+        self.indent_level += 1
+        self._add_code_line("print(f\"  {item['name']} ({item['kind']})\")")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("except Exception as iis_error:")
+        self.indent_level += 1
+        self._add_code_line("results['iis'] = {'constraints': [], 'bounds': [], 'error': str(iis_error)}")
+        self._add_code_line("print(f'IIS computation failed: {iis_error}')")
+        self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("elif model.status == GRB.UNBOUNDED:")
         self.indent_level += 1

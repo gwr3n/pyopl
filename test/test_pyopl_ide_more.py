@@ -11,6 +11,7 @@ from pyopl.pyopl_ide_bootstrap import (
     _FdLogRedirector,
     _find_fold_regions,
     _ForegroundOperation,
+    _format_solve_results,
     _QueueTextWriter,
 )
 
@@ -73,6 +74,42 @@ class ExistingDummyText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_format_solve_results_includes_solution_iis_stats_and_message(self):
+        output = _format_solve_results(
+            {
+                "status": "INFEASIBLE",
+                "objective_value": 3,
+                "solution": {"x": 1},
+                "iis": {
+                    "constraints": [{"name": "limit"}],
+                    "bounds": [{"name": "x", "kind": "lower"}, "y"],
+                    "error": "details unavailable",
+                },
+                "stats": {"nodes": 4},
+                "message": "Finished",
+            },
+            "gurobi",
+        )
+
+        self.assertEqual(
+            output,
+            "\nSolver: gurobi\n"
+            "\nStatus: INFEASIBLE\n"
+            "Objective: 3\n"
+            "Solution:\n"
+            "  x: 1\n"
+            "\nIrreducible Infeasible Subsystem (IIS):\n"
+            "  Constraints:\n"
+            "    limit\n"
+            "  Variable bounds:\n"
+            "    x (lower)\n"
+            "    y\n"
+            "  IIS error: details unavailable\n"
+            "\nSolver Statistics (from 'stats' field):\n"
+            "  nodes: 4\n"
+            "\nMessage: Finished\n",
+        )
+
     def test_find_fold_regions_uses_explicit_section_markers(self):
         text = """// ordinary comment
 // § Variables
