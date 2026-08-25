@@ -93,7 +93,7 @@ def _build_repair_prompt(
         "Include concise comments explaining variables, parameters, and constraints, "
         "aligned to the user's question and the problem (literate style).\n"
     )
-    
+
     return (
         "<role>\nYou repair proposed PyOPL model and data revisions.\n</role>\n\n"
         "<task>\nReturn the complete corrected candidate model and data. Make only changes needed to resolve "
