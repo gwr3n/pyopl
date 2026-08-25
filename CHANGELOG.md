@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Added `pyopl.batch_solve` for solving ZIP archives containing one model and multiple data instances.
+
 ### Added
 
 ### Fixed
 
-- Shut down the exemplar-ranking model process gracefully when closing its dialog, avoiding leaked loky semaphore warnings on Python 3.13.
+- Allowed batch ZIP archives to contain their single `.mod` file below the archive root while continuing to ignore filesystem metadata entries.
 
 ### Changed
+
+- Added `--solver highs|gurobi` to batch solving, defaulting to HiGHS for consistency with the main PyOPL CLI.
+- Expanded batch Markdown reports so each solver statistic is rendered in its own column.
+- Integrated batch solving into the main `pyopl` CLI as `batch-solve` and removed its standalone CLI entry point.
+- Shut down the exemplar-ranking model process gracefully when closing its dialog, avoiding leaked loky semaphore warnings on Python 3.13.
 
 ### Removed
 

@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import unittest
+import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,16 @@ class TestCLI(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             pyopl_cli.main(["--help"])
         self.assertEqual(cm.exception.code, 0)
+
+    def test_cli_batch_help_describes_archive_contents(self):
+        out_buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stdout(out_buf):
+            pyopl_cli.main(["batch-solve", "--help"])
+
+        self.assertEqual(cm.exception.code, 0)
+        help_text = " ".join(out_buf.getvalue().split())
+        self.assertIn("exactly one .mod file and one or more .dat files", help_text)
+        self.assertIn("highs.json or gurobi.json", help_text)
 
     def test_cli_solve_lot_sizing_highs_json(self):
         model = Path("pyopl/opl_models/lot_sizing/lot_sizing.mod")
@@ -51,6 +62,19 @@ class TestCLI(unittest.TestCase):
             ret = pyopl_cli.main(argv)
         self.assertNotEqual(ret, 0)
         self.assertIn("model file not found", err_buf.getvalue())
+
+    def test_cli_batch_solve(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            archive = Path(tmp_dir) / "batch.zip"
+            with zipfile.ZipFile(archive, "w") as batch_archive:
+                batch_archive.writestr("model.mod", "model")
+                batch_archive.writestr("data.dat", "data")
+
+            with patch("pyopl.pyopl_cli.batch_solve", return_value={}) as batch_mock:
+                ret = pyopl_cli.main(["batch-solve", str(archive), "--solver", "gurobi"])
+
+        self.assertEqual(ret, 0)
+        batch_mock.assert_called_once_with(str(archive), solver="gurobi")
 
     def test_cli_loads_solver_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

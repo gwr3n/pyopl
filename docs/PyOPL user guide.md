@@ -888,6 +888,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
 - Subcommands:
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it). For a solve, pass a settings object from a file with `--solver-settings <file.json>`.
+  - `batch-solve <archive.zip>`: solve every data instance in a batch archive with `--solver highs|gurobi` (default: `highs`). Writes `.json` and `.md` reports beside the archive.
   - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/google/ollama).
@@ -910,6 +911,10 @@ python -m pyopl solve model.mod data.dat --solver gurobi --solver-settings gurob
 # Export the compiled SciPy/HiGHS model to LP or MPS
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out lp --out-file tmp/lot_sizing.lp
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out mps --out-file tmp/lot_sizing.mps
+
+# Solve all data instances in a batch archive
+python -m pyopl batch-solve knapsack.zip --solver highs
+python -m pyopl batch-solve knapsack.zip --solver gurobi
 
 # Compare two concrete model instances
 python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --out-file tmp/comparison.json

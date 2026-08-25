@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import generative_feedback, generative_solve, solve
+from .batch_solve import batch_solve
 from .genai._strategy_base import (
     list_gemini_models,
     list_ollama_models,
@@ -150,6 +151,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
     p_solve.add_argument("--solver-settings", help="Path to a JSON object containing backend-native solver settings")
 
+    # batch-solve subcommand
+    p_batch = subparsers.add_parser(
+        "batch-solve",
+        help="Solve all instances in a ZIP archive",
+        description=(
+            "Solve a batch ZIP archive containing exactly one .mod file and one or more .dat files. "
+            "The archive may also include highs.json or gurobi.json for solver settings."
+        ),
+    )
+    p_batch.add_argument(
+        "archive",
+        help="ZIP containing one .mod file, one or more .dat files, and optional highs.json or gurobi.json",
+    )
+    p_batch.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
+
     # compare subcommand
     p_compare = subparsers.add_parser("compare", help="Compare two models for MILP equivalence")
     p_compare.add_argument("left_model", help="Path to the left model (.mod)")
@@ -241,6 +257,16 @@ def _handle_solve(args: argparse.Namespace) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             return 2
         print(f"Error during solve/export: {exc}", file=sys.stderr)
+        return 1
+
+
+def _handle_batch_solve(args: argparse.Namespace) -> int:
+    try:
+        with redirect_stdout(sys.stderr):
+            batch_solve(args.archive, solver=args.solver)
+        return 0
+    except Exception as exc:
+        print(f"Error during batch solve: {exc}", file=sys.stderr)
         return 1
 
 
@@ -462,6 +488,9 @@ def _dispatch_command(args: argparse.Namespace) -> int:
     # HANDLE OTHER SUBCOMMANDS
     if args.command == "solve":
         return _handle_solve(args)
+
+    if args.command == "batch-solve":
+        return _handle_batch_solve(args)
 
     if args.command == "compare":
         return _handle_compare(args)
