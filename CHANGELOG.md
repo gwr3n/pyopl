@@ -17,10 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v2.4.4] - 2026-08-25
 
-- Added `pyopl.batch_solve` for solving ZIP archives containing one model and multiple data instances.
-
 ### Added
 
+- Added `pyopl.batch_solve` for solving ZIP archives containing one model and multiple data instances.
 - Added `batch-compare` and `pyopl.batch_compare` for comparing matching data instances across two batch ZIP archives with abstract or concrete model equivalence.
 
 ### Fixed
