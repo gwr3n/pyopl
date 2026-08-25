@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Displayed the same `PyOPL: compiling model...` status message before both Gurobi and SciPy compilation.
+
 ### Changed
 
 ### Removed

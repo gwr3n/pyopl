@@ -6019,6 +6019,7 @@ def solve_with_gurobi(
     if data_file:
         logger.info(f"--- Using Data File: {data_file} ---")
 
+    print("PyOPL: compiling model...")
     loaded_ast, loaded_gurobi_code, loaded_data_dict = load_opl_model(model_file, data_file)
 
     if loaded_ast and loaded_gurobi_code:
@@ -6134,7 +6135,7 @@ def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[
     if data_file:
         logger.info(f"--- Using Data File: {data_file} ---")
 
-    print("PyOPL: compiling model.")
+    print("PyOPL: compiling model...")
     loaded_ast, loaded_scipy_code, loaded_data_dict = load_opl_model(model_file, data_file, solver="scipy")
 
     if loaded_ast and loaded_scipy_code:

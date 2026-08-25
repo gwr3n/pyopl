@@ -1,7 +1,10 @@
 import unittest
 from collections import defaultdict
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from pyopl.gurobi_codegen import EPS, GurobiCodeGenerator
 from pyopl.pyopl_core import (
@@ -23,6 +26,7 @@ from pyopl.pyopl_core import (
     _string_label_value_pair,
     _unquote_string_literal,
     export_model,
+    solve_with_gurobi,
     solve_with_scipy,
 )
 from pyopl.scipy_codegen import SciPyCodeGenerator
@@ -43,6 +47,20 @@ def _cmp(left, op, right):
 
 
 class TestCoreHelperCoverage(unittest.TestCase):
+    def test_solver_backends_report_compilation(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("", encoding="utf-8")
+
+            for solve_backend in (solve_with_gurobi, solve_with_scipy):
+                with self.subTest(solve_backend=solve_backend.__name__):
+                    output = StringIO()
+                    with patch("pyopl.pyopl_core.load_opl_model", return_value=(None, None, None)):
+                        with redirect_stdout(output):
+                            solve_backend(model_path)
+
+                    self.assertEqual(output.getvalue(), "PyOPL: compiling model...\n")
+
     def test_parser_error_hint_specializes_unexpected_in(self):
         msg = _parser_error_with_hint("IN", "in")
 
