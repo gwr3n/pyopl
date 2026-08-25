@@ -3624,8 +3624,8 @@ class OPLIDE(TkinterDnD.Tk):
         exemplars = self._available_exemplars(models_dirs)
         dialog = tk.Toplevel(self)
         dialog.title("Retrieve Exemplar")
-        dialog.geometry("640x480")
-        dialog.minsize(480, 320)
+        dialog.geometry("760x480")
+        dialog.minsize(600, 320)
         dialog.transient(self)
         dialog.grab_set()
         dialog.rowconfigure(2, weight=1)
@@ -3636,8 +3636,14 @@ class OPLIDE(TkinterDnD.Tk):
         search_entry = ttk.Entry(dialog, textvariable=search_var)
         search_entry.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
 
-        list_frame = ttk.Frame(dialog)
-        list_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        content_frame = ttk.Frame(dialog)
+        content_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
+        content_frame.rowconfigure(0, weight=1)
+        content_frame.columnconfigure(0, weight=1, minsize=180)
+        content_frame.columnconfigure(1, weight=2, minsize=180)
+
+        list_frame = ttk.Frame(content_frame)
+        list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
         exemplar_list = tk.Listbox(list_frame, exportselection=False)
@@ -3645,6 +3651,21 @@ class OPLIDE(TkinterDnD.Tk):
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=exemplar_list.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         exemplar_list.configure(yscrollcommand=scrollbar.set)
+
+        description_frame = ttk.Frame(content_frame)
+        description_frame.grid(row=0, column=1, sticky="nsew")
+        description_frame.rowconfigure(1, weight=1)
+        description_frame.columnconfigure(0, weight=1)
+        ttk.Label(description_frame, text="Problem description").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        description_text = tk.Text(description_frame, width=35, wrap="word", state="disabled")
+        description_text.grid(row=1, column=0, sticky="nsew")
+        description_scrollbar = ttk.Scrollbar(
+            description_frame,
+            orient="vertical",
+            command=description_text.yview,
+        )
+        description_scrollbar.grid(row=1, column=1, sticky="ns")
+        description_text.configure(yscrollcommand=description_scrollbar.set)
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
 
@@ -3666,6 +3687,26 @@ class OPLIDE(TkinterDnD.Tk):
             if entries:
                 exemplar_list.selection_set(0)
                 exemplar_list.activate(0)
+            update_description()
+
+        def update_description(_event: Any = None) -> None:
+            selection = exemplar_list.curselection()
+            description = ""
+            if selection:
+                entries = result["exemplars"]
+                if selection[0] < len(entries):
+                    description_path = Path(entries[selection[0]]["description_path"])
+                    try:
+                        description = description_path.read_text(encoding="utf-8")
+                    except (OSError, UnicodeError):
+                        logging.getLogger(__name__).debug(
+                            "Unable to read exemplar description: %s",
+                            description_path,
+                        )
+            description_text.configure(state="normal")
+            description_text.delete("1.0", tk.END)
+            description_text.insert("1.0", description)
+            description_text.configure(state="disabled")
 
         def cleanup_search() -> None:
             poll_after_id = result["poll_after_id"]
@@ -3753,6 +3794,7 @@ class OPLIDE(TkinterDnD.Tk):
         ttk.Button(actions, text="Retrieve", command=retrieve).grid(row=0, column=0)
         ttk.Button(actions, text="Cancel", command=close_dialog).grid(row=0, column=1, padx=(8, 0))
         search_entry.bind("<KeyRelease>", schedule_search)
+        exemplar_list.bind("<<ListboxSelect>>", update_description)
         exemplar_list.bind("<Double-Button-1>", retrieve)
         dialog.bind("<Return>", retrieve)
         dialog.bind("<Escape>", close_dialog)

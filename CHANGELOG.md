@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated the Retrieve Exemplar dialog to show the selected problem description in a read-only pane and give the exemplar list a more compact column width.
+
 ### Removed
 
 ## [v2.4.2] - 2026-08-24
