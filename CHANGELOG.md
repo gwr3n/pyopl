@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Returned solver statistics and any available incumbent solution when Gurobi or SciPy/HiGHS reaches its time limit, with a clear `TIME_LIMIT` status and message.
+
 ### Changed
 
 ### Removed

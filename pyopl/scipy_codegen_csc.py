@@ -2931,9 +2931,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("stats['mip_dual_bound'] = getattr(res, 'mip_dual_bound', None)")
         self._add_code_line("stats['mip_gap'] = getattr(res, 'mip_gap', None)")
         self._add_code_line("stats['time'] = end_time - start_time")
-        self._add_code_line("if res.success and res.status == 0:")
+        self._add_code_line("has_incumbent = res.x is not None and res.fun is not None")
+        self._add_code_line("if (res.success and res.status == 0) or (status_str == 'TIME_LIMIT' and has_incumbent):")
+        self.indent_level += 1
+        self._add_code_line("if status_str == 'TIME_LIMIT':")
+        self.indent_level += 1
+        self._add_code_line("print('Incumbent solution found:')")
+        self.indent_level -= 1
+        self._add_code_line("else:")
         self.indent_level += 1
         self._add_code_line("print('Optimal solution found:')")
+        self.indent_level -= 1
         self._add_code_line("solution = {}")
         self._add_code_line("for name in original_var_names:")
         self.indent_level += 1
@@ -2958,6 +2966,10 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['objective_value'] = objective_value")
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
+        self._add_code_line("if status_str == 'TIME_LIMIT':")
+        self.indent_level += 1
+        self._add_code_line(f"{self.results_varname}['message'] = res.message")
+        self.indent_level -= 1
         self.indent_level -= 1  # Dedent here so else is at the same level as if
         self._add_code_line("else:")
         self.indent_level += 1

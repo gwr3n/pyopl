@@ -153,6 +153,19 @@ class GurobiCodeGenerator:
         self._add_code_line("")
         # Results capture
         self._add_code_line("results = {}")
+        self._add_code_line("stats = {'Status': model.status}")
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("stats['MIPGap'] = model.MIPGap")
+        self.indent_level -= 1
+        self._add_code_line("except (AttributeError, gp.GurobiError):")
+        self.indent_level += 1
+        self._add_code_line("stats['MIPGap'] = None")
+        self.indent_level -= 1
+        self._add_code_line("stats['Runtime'] = model.Runtime")
+        self._add_code_line("stats['NodeCount'] = model.NodeCount")
+        self._add_code_line("stats['IterCount'] = model.IterCount")
+        self._add_code_line("results['stats'] = stats")
         self._add_code_line("if model.status == GRB.OPTIMAL:")
         self.indent_level += 1
         self._add_code_line("print('Optimal solution found:')")
@@ -169,19 +182,28 @@ class GurobiCodeGenerator:
         self._add_code_line("results['solution'] = solution")
         self._add_code_line("results['objective_value'] = model.ObjVal")
         self._add_code_line("results['status'] = 'OPTIMAL'")
-        self._add_code_line("stats = {}")
-        self._add_code_line("try:")
-        self.indent_level += 1
-        self._add_code_line("stats['MIPGap'] = model.MIPGap")
         self.indent_level -= 1
-        self._add_code_line("except AttributeError:")
+        self._add_code_line("elif model.status == GRB.TIME_LIMIT:")
         self.indent_level += 1
-        self._add_code_line("stats['MIPGap'] = None")
+        self._add_code_line("print('Time limit reached')")
+        self._add_code_line("results['status'] = 'TIME_LIMIT'")
+        self._add_code_line("results['message'] = 'Time limit reached.'")
+        self._add_code_line("if model.SolCount > 0:")
+        self.indent_level += 1
+        self._add_code_line("print('Incumbent solution found:')")
+        self._add_code_line("solution = {}")
+        self._add_code_line("for v in model.getVars():")
+        self.indent_level += 1
+        self._add_code_line("if v.VarName in _pyopl_original_var_names:")
+        self.indent_level += 1
+        self._add_code_line("print(f'{v.VarName}: {v.X}')")
+        self._add_code_line("solution[v.VarName] = v.X")
         self.indent_level -= 1
-        self._add_code_line("stats['Runtime'] = model.Runtime")
-        self._add_code_line("stats['NodeCount'] = model.NodeCount")
-        self._add_code_line("stats['IterCount'] = model.IterCount")
-        self._add_code_line("results['stats'] = stats")
+        self.indent_level -= 1
+        self._add_code_line("print(f'Objective value: {model.ObjVal}')")
+        self._add_code_line("results['solution'] = solution")
+        self._add_code_line("results['objective_value'] = model.ObjVal")
+        self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("elif model.status == GRB.INF_OR_UNBD:")
         self.indent_level += 1
