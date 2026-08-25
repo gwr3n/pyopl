@@ -74,13 +74,13 @@ def map_solution_variables(docplex_model, pyopl_solution):
     "DOcplex cross-checks require CPLEX_STUDIO and OPLRUN environment variables",
 )
 class TestDocplexCrossChecks(unittest.TestCase):
-    def test_knapsackp_pyopl_vs_cplex_output(self):
+    def test_multi_knapsack_pyopl_vs_cplex_output(self):
         """Compare the multi-resource knapsack model with DOcplex and CPLEX."""
         if find_spec("cplex") is None:
             self.skipTest("DOcplex OPL cross-check requires the cplex runtime")
 
-        model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.mod")
-        data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsackp.dat")
+        model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.mod")
+        data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.dat")
         results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as docplex_mod_file,
