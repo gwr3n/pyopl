@@ -53,11 +53,15 @@ def _markdown_value(value: Any) -> str:
 
 
 def _make_markdown(records: list[dict[str, Any]]) -> str:
+    report_columns = {"data", "solver", "status", "objective_value", "message"}
+    include_message = any(record.get("solver") != "gurobi" for record in records)
     stat_names = sorted(
-        {str(name) for record in records for name in record.get("stats", {})},
+        {str(name) for record in records for name in record.get("stats", {}) if str(name) not in report_columns},
         key=str.lower,
     )
-    columns = ["data", "solver", "status", "objective_value", "message", *stat_names]
+    columns = ["data", "solver", "status", "objective_value", *stat_names]
+    if include_message:
+        columns.insert(4, "message")
     lines = [
         "# Batch solve results",
         "",
@@ -67,10 +71,10 @@ def _make_markdown(records: list[dict[str, Any]]) -> str:
     for record in records:
         stats = record.get("stats", {})
         values = [
-            (
-                _markdown_value(stats.get(column))
-                if column in stat_names and isinstance(stats, dict)
-                else _markdown_value(record.get(column))
+            _markdown_value(
+                stats.get(column)
+                if column == "message" and not record.get(column) and isinstance(stats, dict)
+                else stats.get(column) if column in stat_names and isinstance(stats, dict) else record.get(column)
             )
             for column in columns
         ]
@@ -86,6 +90,39 @@ def _extract_safely(batch_archive: zipfile.ZipFile, destination: Path) -> None:
         if destination_root not in member_path.parents and member_path != destination_root:
             raise ValueError(f"Archive member escapes extraction directory: {member.filename}")
     batch_archive.extractall(destination)
+
+
+def _solver_configuration(members: list[Path], extraction_root: Path, solver_name: str) -> dict[str, Any]:
+    settings: dict[str, Any] = {}
+    for member in members:
+        if _CONFIG_NAMES.get(member.name.lower()) != solver_name:
+            continue
+        try:
+            settings = json.loads((extraction_root / member).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid solver configuration '{member}': {error}") from error
+        if not isinstance(settings, dict):
+            raise ValueError(f"Solver configuration '{member}' must contain a JSON object")
+    return settings
+
+
+def _solve_data_file(
+    model_path: Path, data_path: Path, data_name: str, solver_name: str, settings: dict[str, Any]
+) -> dict[str, Any]:
+    public_solver = "highs" if solver_name == "scipy" else solver_name
+    try:
+        result = solve(str(model_path), str(data_path), solver=solver_name, solver_settings=settings)
+        return {"data": data_name, "solver": public_solver, **_json_safe(result)}
+    except Exception as error:
+        return {
+            "data": data_name,
+            "solver": public_solver,
+            "status": "ERROR",
+            "message": str(error),
+            "solution": {},
+            "objective_value": None,
+            "stats": {},
+        }
 
 
 def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
@@ -110,37 +147,19 @@ def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
                 raise ValueError("Batch archive must contain at least one .dat file")
             _extract_safely(batch_archive, extraction_root)
             model_path = extraction_root / models[0]
-            settings: dict[str, Any] = {}
-            for member in members:
-                config_solver = _CONFIG_NAMES.get(member.name.lower())
-                if config_solver != solver_name:
-                    continue
-                config_path = extraction_root / member
-                try:
-                    settings = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError) as error:
-                    raise ValueError(f"Invalid solver configuration '{member.name}': {error}") from error
-                if not isinstance(settings, dict):
-                    raise ValueError(f"Solver configuration '{member.name}' must contain a JSON object")
+            settings = _solver_configuration(members, extraction_root, solver_name)
 
         records: list[dict[str, Any]] = []
         for data_file in sorted(data_files, key=lambda path: str(path).lower()):
-            data_path = extraction_root / data_file
-            public_solver = "highs" if solver_name == "scipy" else solver_name
-            try:
-                result = solve(str(model_path), str(data_path), solver=solver_name, solver_settings=settings)
-                record = {"data": data_file.as_posix(), "solver": public_solver, **_json_safe(result)}
-            except Exception as error:
-                record = {
-                    "data": data_file.as_posix(),
-                    "solver": public_solver,
-                    "status": "ERROR",
-                    "message": str(error),
-                    "solution": {},
-                    "objective_value": None,
-                    "stats": {},
-                }
-            records.append(record)
+            records.append(
+                _solve_data_file(
+                    model_path,
+                    extraction_root / data_file,
+                    data_file.as_posix(),
+                    solver_name,
+                    settings,
+                )
+            )
 
     report = {"archive": archive.name, "model": models[0].as_posix(), "instances": records}
     json_path = archive.with_suffix(".json")

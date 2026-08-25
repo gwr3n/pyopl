@@ -63,7 +63,11 @@ class TestBatchSolve(unittest.TestCase):
             def fake_solve(model, data, solver, solver_settings):
                 if data.endswith("b.dat"):
                     raise ValueError("invalid data")
-                return {"status": "OPTIMAL", "objective_value": 4, "stats": {"runtime": 0.1}}
+                return {
+                    "status": "OPTIMAL",
+                    "objective_value": 4,
+                    "stats": {"runtime": 0.1, "message": "solver message", "status": 0},
+                }
 
             with patch("pyopl.batch_solve.solve", side_effect=fake_solve) as solve_mock:
                 report = batch_solve(archive)
@@ -77,7 +81,8 @@ class TestBatchSolve(unittest.TestCase):
             markdown = (root / "knapsack.md").read_text(encoding="utf-8")
             self.assertIn("| data | solver | status |", markdown)
             self.assertIn("| data | solver | status | objective_value | message | runtime |", markdown)
-            self.assertIn("| a.dat | highs | OPTIMAL | 4 |  | 0.1 |", markdown)
+            self.assertIn("| a.dat | highs | OPTIMAL | 4 | solver message | 0.1 |", markdown)
+            self.assertEqual(markdown.splitlines()[2].count("message"), 1)
             self.assertNotIn('{"runtime":0.1}', markdown)
 
     def test_selects_gurobi_solver_and_configuration(self):
@@ -93,6 +98,8 @@ class TestBatchSolve(unittest.TestCase):
                 report = batch_solve(archive, solver="gurobi")
 
             self.assertEqual(report["instances"][0]["solver"], "gurobi")
+            markdown = (archive.with_suffix(".md")).read_text(encoding="utf-8")
+            self.assertNotIn("| message |", markdown.splitlines()[2])
             solve_mock.assert_called_once_with(
                 unittest.mock.ANY,
                 unittest.mock.ANY,

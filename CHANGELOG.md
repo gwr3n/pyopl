@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `--solver highs|gurobi` to batch solving, defaulting to HiGHS for consistency with the main PyOPL CLI.
 - Expanded batch Markdown reports so each solver statistic is rendered in its own column.
+- Avoided repeating `status` and `message` when solver statistics contain those fields.
 - Integrated batch solving into the main `pyopl` CLI as `batch-solve` and removed its standalone CLI entry point.
 - Shut down the exemplar-ranking model process gracefully when closing its dialog, avoiding leaked loky semaphore warnings on Python 3.13.
 
