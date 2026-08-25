@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Returned SciPy/HiGHS MIP node count, dual bound, and optimality gap in solver statistics and displayed them in the solve progress summary.
+
 ### Fixed
 
 ### Changed

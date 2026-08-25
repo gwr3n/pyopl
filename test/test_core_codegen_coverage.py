@@ -23,6 +23,7 @@ from pyopl.pyopl_core import (
     _string_label_value_pair,
     _unquote_string_literal,
     export_model,
+    solve_with_scipy,
 )
 from pyopl.scipy_codegen import SciPyCodeGenerator
 from pyopl.scipy_codegen_base import SciPyCodeGeneratorBase
@@ -124,6 +125,23 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
+    def test_scipy_solve_returns_mip_statistics(self):
+        model = """
+        dvar int+ x;
+        maximize x;
+        subject to { x <= 3; }
+        """
+
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "mip.mod"
+            model_path.write_text(model, encoding="utf-8")
+            result = solve_with_scipy(model_path, solver_settings={"disp": False})
+
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["stats"]["mip_node_count"], 0)
+        self.assertEqual(result["stats"]["mip_gap"], 0.0)
+        self.assertIsNotNone(result["stats"]["mip_dual_bound"])
+
     def test_generated_solvers_apply_injected_settings(self):
         ast = {
             "declarations": [{"type": "dvar", "var_type": "float+", "name": "x"}],
@@ -143,6 +161,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("options=solver_options", scipy_code)
         self.assertIn("status_str = 'TIME_LIMIT'", scipy_code)
         self.assertIn("results['stats'] = stats", scipy_code)
+        self.assertIn("stats['mip_node_count']", scipy_code)
+        self.assertIn("stats['mip_dual_bound']", scipy_code)
+        self.assertIn("stats['mip_gap']", scipy_code)
 
     def test_scipy_codegen_factory_rejects_unknown_mode(self):
         ast = {

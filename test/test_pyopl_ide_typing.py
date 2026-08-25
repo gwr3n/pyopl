@@ -1048,11 +1048,40 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         scipy_stats = OPLIDE._solver_progress_stats(
             dummy,
-            {"objective_value": 3.0, "runtime": 1.2, "iterations": 4, "nodes": 9, "solutions": 2},
+            {
+                "objective_value": 3.0,
+                "dual_bound": 2.5,
+                "gap": 0.1,
+                "runtime": 1.2,
+                "iterations": 4,
+                "nodes": 9,
+                "solutions": 2,
+            },
         )
-        self.assertEqual([label for label, _value in scipy_stats], ["Objective", "Runtime", "Iterations"])
+        self.assertEqual(
+            [label for label, _value in scipy_stats],
+            ["Objective", "Dual Bound", "Gap", "Nodes", "Runtime", "Iterations"],
+        )
 
-        OPLIDE._finish_solver_progress(dummy, {"objective_value": 3.0}, status="complete")
+        OPLIDE._finish_solver_progress(
+            dummy,
+            {
+                "objective_value": 3.0,
+                "stats": {
+                    "mip_dual_bound": 2.5,
+                    "mip_gap": 0.1,
+                    "mip_node_count": 9,
+                    "time": 1.2,
+                    "nit": 4,
+                },
+            },
+            status="complete",
+        )
+
+        summary = dummy._update_solver_progress_stats.call_args.args[0]
+        self.assertEqual(summary["dual_bound"], 2.5)
+        self.assertEqual(summary["gap"], 0.1)
+        self.assertEqual(summary["nodes"], 9)
 
         self.assertEqual(window.geometry_values[-1], "520x220")
         self.assertTrue(canvas.removed)

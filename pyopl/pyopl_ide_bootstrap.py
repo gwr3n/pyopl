@@ -4988,6 +4988,9 @@ class OPLIDE(TkinterDnD.Tk):
 
         stats = [
             ("Objective", sample.get("objective_value", sample.get("upper_bound"))),
+            ("Dual Bound", sample.get("dual_bound")),
+            ("Gap", sample.get("gap")),
+            ("Nodes", sample.get("nodes")),
             ("Runtime", sample.get("runtime")),
             ("Iterations", sample.get("iterations")),
         ]
@@ -5038,9 +5041,10 @@ class OPLIDE(TkinterDnD.Tk):
             if isinstance(stats, dict):
                 sample.update(
                     {
-                        "gap": stats.get("MIPGap", sample.get("gap")),
+                        "dual_bound": stats.get("ObjBound", stats.get("mip_dual_bound")),
+                        "gap": stats.get("MIPGap", stats.get("mip_gap", sample.get("gap"))),
                         "runtime": stats.get("Runtime", stats.get("time")),
-                        "nodes": stats.get("NodeCount"),
+                        "nodes": stats.get("NodeCount", stats.get("mip_node_count")),
                         "iterations": stats.get("IterCount", stats.get("nit")),
                     }
                 )

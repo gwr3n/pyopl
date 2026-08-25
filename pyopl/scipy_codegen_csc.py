@@ -2927,6 +2927,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("stats['message'] = res.message")
         self._add_code_line("stats['nit'] = getattr(res, 'nit', None)")
         self._add_code_line("stats['crossover_nit'] = getattr(res, 'crossover_nit', None)")
+        self._add_code_line("stats['mip_node_count'] = getattr(res, 'mip_node_count', None)")
+        self._add_code_line("stats['mip_dual_bound'] = getattr(res, 'mip_dual_bound', None)")
+        self._add_code_line("stats['mip_gap'] = getattr(res, 'mip_gap', None)")
         self._add_code_line("stats['time'] = end_time - start_time")
         self._add_code_line("if res.success and res.status == 0:")
         self.indent_level += 1
