@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.4.4] - 2026-08-25
+
 - Added `pyopl.batch_solve` for solving ZIP archives containing one model and multiple data instances.
 
 ### Added
