@@ -1,6 +1,6 @@
 [project]
 name = "rhetor"
-version = "2.4.4"
+version = "2.4.5"
 description = "A Python library for parsing and solving OPL-like mathematical programming models using multiple solvers."
 authors = [
   { name = "Roberto Rossi", email = "robros@gmail.com" },
