@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.4.3] - 2026-08-25
+
+### Added
+
 - Added focused regression coverage for SciPy CSC variable-domain resolution, iterator unrolling, bound evaluation, expression emission, and Boolean dispatch helpers.
 - Add searchable exemplar retrieval with isolated embedding searches.
 
