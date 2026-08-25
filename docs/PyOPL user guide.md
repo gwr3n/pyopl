@@ -778,7 +778,7 @@ To enable GenAI features, set at least one of the following environment variable
 
 In the IDE, **File > Save Exemplar...** uses the selected GenAI provider and model to distill the current session, model, and data into a concise problem description. Three retrieved exemplar triplets are supplied as style references when available.
 
-The proposed description opens in an editable review tab. The Model and Data tabs provide syntax-highlighted, read-only previews of the exact content that will be saved. Nothing is written until **Accept & Save** is selected; cancelling, closing the window, or pressing Escape discards the draft. The saved `.txt` contains the reviewed problem description rather than the raw session transcript.
+The proposed description opens in an editable review tab. The Model and Data tabs provide syntax-highlighted, read-only previews of the exact content that will be saved. Nothing is written until **Accept & Save** is selected; cancelling, closing the window, or pressing Escape discards the draft. The saved `.md` contains the reviewed problem description rather than the raw session transcript.
 
 Typical usage (Python):
 ```python
@@ -918,7 +918,7 @@ python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.
 python -m pyopl compare left.mod right.mod --strategy abstract
 
 # Generate insight (GenAI) and save to Markdown
-python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.txt)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
+python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.md)" --provider openai --llm-model gpt-5.4 --out-file tmp/lot_insight.md
 ```
 
 Notes:

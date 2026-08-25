@@ -31,9 +31,9 @@ def _load_model(model_name: str):
 
 def _iter_description_files(models_dir: Path) -> List[Path]:
     """
-    Find all .txt files recursively under models_dir.
+    Find all .md files recursively under models_dir.
     """
-    return sorted([p for p in models_dir.rglob("*.txt") if p.is_file()])
+    return sorted([p for p in models_dir.rglob("*.md") if p.is_file()])
 
 
 def _iter_description_files_from_roots(models_dirs: Iterable[Path]) -> List[Path]:
@@ -65,11 +65,11 @@ def rank_problem_descriptions(
     model_name: str = DEFAULT_EMBEDDING_MODEL,
 ) -> List[Dict[str, Any]]:
     """
-    Rank problem description .txt files under models_dir by semantic similarity to the query.
+    Rank problem description .md files under models_dir by semantic similarity to the query.
 
     Args:
         query: The problem description to search with.
-        models_dir: One or more root folders containing .txt descriptions.
+        models_dir: One or more root folders containing .md descriptions.
         top_k: Number of top matches to return.
         model_name: Sentence embedding model to use.
     """

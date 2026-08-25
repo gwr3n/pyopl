@@ -284,14 +284,14 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
             patch.object(
                 rag_helper,
                 "rank_problem_descriptions",
-                side_effect=lambda query, **_kwargs: [{"path": f"{query}.txt"}],
+                side_effect=lambda query, **_kwargs: [{"path": f"{query}.md"}],
             ) as rank,
         ):
             exemplar_ranking_worker._run_ranking_worker(["models"], commands, results)
 
         self.assertEqual(results.get_nowait(), ("ready", None, None))
-        self.assertEqual(results.get_nowait(), ("success", 1, [{"path": "first.txt"}]))
-        self.assertEqual(results.get_nowait(), ("success", 2, [{"path": "second.txt"}]))
+        self.assertEqual(results.get_nowait(), ("success", 1, [{"path": "first.md"}]))
+        self.assertEqual(results.get_nowait(), ("success", 2, [{"path": "second.md"}]))
         load_model.assert_called_once_with(rag_helper.DEFAULT_EMBEDDING_MODEL)
         self.assertEqual(rank.call_count, 2)
 
@@ -349,7 +349,7 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
     def test_find_pair_in_folder_prefers_matching_stems_then_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             folder = Path(td)
-            desc = folder / "problem.txt"
+            desc = folder / "problem.md"
             desc.write_text("description", encoding="utf-8")
             (folder / "fallback.mod").write_text("model", encoding="utf-8")
             (folder / "fallback.dat").write_text("data", encoding="utf-8")
@@ -372,7 +372,7 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            desc = root / "sample.txt"
+            desc = root / "sample.md"
             mod = root / "sample.mod"
             dat = root / "sample.dat"
             desc.write_text("description", encoding="utf-8")
@@ -731,8 +731,8 @@ class TestRagHelper(unittest.TestCase):
             root = Path(td)
             nested = root / "nested"
             nested.mkdir()
-            first = root / "a.txt"
-            second = nested / "b.txt"
+            first = root / "a.md"
+            second = nested / "b.md"
             ignored = root / "c.mod"
             first.write_text(" abc ", encoding="utf-8")
             second.write_text("123456", encoding="utf-8")
@@ -750,7 +750,7 @@ class TestRagHelper(unittest.TestCase):
                 rag_helper.rank_problem_descriptions("query", root / "missing")
 
             self.assertEqual(rag_helper.rank_problem_descriptions("query", root), [])
-            (root / "empty.txt").write_text("   ", encoding="utf-8")
+            (root / "empty.md").write_text("   ", encoding="utf-8")
             self.assertEqual(rag_helper.rank_problem_descriptions("query", root), [])
 
     def test_description_files_from_roots_are_recursive_and_deduplicated(self) -> None:
@@ -758,7 +758,7 @@ class TestRagHelper(unittest.TestCase):
             root = Path(td)
             nested = root / "opl_models" / "category"
             nested.mkdir(parents=True)
-            description = nested / "sample.txt"
+            description = nested / "sample.md"
             description.write_text("sample", encoding="utf-8")
 
             descriptions = rag_helper._iter_description_files_from_roots([root / "opl_models", nested])
@@ -790,8 +790,8 @@ class TestRagHelper(unittest.TestCase):
             local = root / "workspace" / "opl_models" / "nested"
             packaged.mkdir()
             local.mkdir(parents=True)
-            packaged_description = packaged / "packaged.txt"
-            local_description = local / "local.txt"
+            packaged_description = packaged / "packaged.md"
+            local_description = local / "local.md"
             packaged_description.write_text("packaged", encoding="utf-8")
             local_description.write_text("local", encoding="utf-8")
 
@@ -826,8 +826,8 @@ class TestRagHelper(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            low = root / "low.txt"
-            high = root / "high.txt"
+            low = root / "low.md"
+            high = root / "high.md"
             low.write_text("low\nmatch", encoding="utf-8")
             high.write_text("high match", encoding="utf-8")
 
@@ -933,7 +933,7 @@ class TestStrategyModuleHelpers(unittest.TestCase):
     def test_chain_of_experts_prompt_builders_include_context(self) -> None:
         coe = import_module("pyopl.genai.pyopl_chain_of_experts")
         comments = [{"expert": "Modeling Expert", "comment": "Use binary assignment variables"}]
-        few_shots = [{"description": "sample", "model": "dvar int x;", "data": "x=1;", "desc_path": "a.txt"}]
+        few_shots = [{"description": "sample", "model": "dvar int x;", "data": "x=1;", "desc_path": "a.md"}]
 
         knowledge = coe._format_few_shots_knowledge(few_shots)
         conductor = coe._build_conductor_prompt(
@@ -995,7 +995,7 @@ class TestStrategyModuleHelpers(unittest.TestCase):
             with self.subTest(module=module_name), tempfile.TemporaryDirectory() as td:
                 folder = Path(td)
                 text_path = folder / "note.txt"
-                desc_path = folder / "problem.txt"
+                desc_path = folder / "problem.md"
                 mod_path = folder / "problem.mod"
                 dat_path = folder / "problem.dat"
                 text_path.write_text("abcdef", encoding="utf-8")

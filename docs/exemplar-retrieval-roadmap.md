@@ -8,7 +8,7 @@ Add a File-menu workflow for finding and loading reusable OPL exemplars from the
 
 - Added `Retrieve Exemplar...` immediately after `Open...` in the File menu.
 - Added a modal popup with a search field, scrollable model list, Retrieve button, and Cancel behavior.
-- Discover complete exemplar triplets (`.txt` description, `.mod` model, and `.dat` data) recursively in both supported roots.
+- Discover complete exemplar triplets (`.md` description, `.mod` model, and `.dat` data) recursively in both supported roots.
 - Show all discovered exemplars alphabetically when the popup opens.
 - Reuse `rank_problem_descriptions`, the existing semantic RAG scorer, to order results for non-empty searches.
 - Run semantic ranking in a background thread and ignore stale results when the user changes the query quickly.

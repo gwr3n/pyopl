@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Updated the Retrieve Exemplar dialog to show the selected problem description in a read-only pane and give the exemplar list a more compact column width.
+- Changed exemplar description files from `.txt` to `.md` across packaged exemplars, retrieval, and newly saved triplets.
 
 ### Removed
 

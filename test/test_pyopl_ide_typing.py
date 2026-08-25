@@ -70,8 +70,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
 
     def test_rank_exemplars_preserves_rag_order(self):
-        low = Path("/tmp/low.txt")
-        high = Path("/tmp/high.txt")
+        low = Path("/tmp/low.md")
+        high = Path("/tmp/high.md")
         exemplars = [
             {"name": "low", "description_path": low},
             {"name": "high", "description_path": high},
@@ -87,8 +87,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
         rank.assert_called_once_with(query="assignment", models_dir=[Path("/tmp/opl_models")], top_k=0)
 
     def test_classify_exemplar_search_result_handles_worker_messages(self):
-        low = {"name": "low", "description_path": Path("/tmp/low.txt")}
-        high = {"name": "high", "description_path": Path("/tmp/high.txt")}
+        low = {"name": "low", "description_path": Path("/tmp/low.md")}
+        high = {"name": "high", "description_path": Path("/tmp/high.md")}
         exemplars = [low, high]
 
         cases = [
@@ -100,7 +100,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 (
                     "success",
                     2,
-                    [{"path": "/tmp/high.txt"}, "invalid", {"missing": "path"}, {"path": "/tmp/low.txt"}],
+                    [{"path": "/tmp/high.md"}, "invalid", {"missing": "path"}, {"path": "/tmp/low.md"}],
                 ),
                 2,
                 ("success", [high, low]),
@@ -313,7 +313,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             exemplar = root / "opl_models" / "fleet"
             self.assertEqual((exemplar / "fleet.mod").read_text(encoding="utf-8"), "model content\n")
             self.assertEqual((exemplar / "fleet.dat").read_text(encoding="utf-8"), "data content\n")
-            self.assertEqual((exemplar / "fleet.txt").read_text(encoding="utf-8"), "Reviewed fleet assignment problem.")
+            self.assertEqual((exemplar / "fleet.md").read_text(encoding="utf-8"), "Reviewed fleet assignment problem.")
             distill.assert_called_once_with(
                 model="model content\n",
                 data="data content\n",

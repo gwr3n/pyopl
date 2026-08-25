@@ -3560,7 +3560,7 @@ class OPLIDE(TkinterDnD.Tk):
         for root in roots:
             if not root.is_dir():
                 continue
-            for description_path in sorted(root.rglob("*.txt")):
+            for description_path in sorted(root.rglob("*.md")):
                 if not description_path.is_file():
                     continue
                 model_path, data_path = GenAIStrategyBase.find_pair_in_folder(description_path)
@@ -5596,7 +5596,7 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             (temporary / f"{file_stem}.mod").write_text(model, encoding="utf-8")
             (temporary / f"{file_stem}.dat").write_text(data, encoding="utf-8")
-            (temporary / f"{file_stem}.txt").write_text(description, encoding="utf-8")
+            (temporary / f"{file_stem}.md").write_text(description, encoding="utf-8")
             temporary.rename(destination)
         except Exception:
             shutil.rmtree(temporary, ignore_errors=True)

@@ -110,7 +110,7 @@ def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
 
 def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path]]:
     """
-    Given a description .txt path, locate associated .mod and .dat in the same folder.
+    Given a description .md path, locate associated .mod and .dat in the same folder.
     Preference order:
       1) Same stem: <stem>.mod and <stem>.dat
       2) First *.mod and first *.dat in folder (sorted)

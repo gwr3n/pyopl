@@ -13,7 +13,7 @@ The saved exemplar remains a triplet:
 
 - `<name>.mod`: OPL model
 - `<name>.dat`: OPL data
-- `<name>.txt`: concise natural-language problem description
+- `<name>.md`: concise natural-language problem description
 
 The raw session transcript is input to distillation but is not saved as the description.
 
@@ -58,7 +58,7 @@ The prompt should require the model to:
 
 - Return only a concise plain-text problem description.
 - Describe decisions, constraints, objective, and important data relationships.
-- Match the style of the existing `.txt` examples.
+- Match the style of the existing `.md` examples.
 - Avoid reproducing OPL syntax.
 - Avoid mentioning the session, LLM, or prompting process.
 - Generalize implementation-specific names where practical.
@@ -106,7 +106,7 @@ Implement a modal `tk.Toplevel` using the existing `ttk.Notebook` patterns.
 - Editable text widget.
 - Initially selected when the window opens.
 - Displays the LLM-distilled description.
-- Provides the value that will be written to `<name>.txt`.
+- Provides the value that will be written to `<name>.md`.
 
 ### Model tab
 
@@ -142,7 +142,7 @@ Optionally run the existing parser/compiler validation against edited model and 
 
 ## Phase 6: Preserve Provenance Correctly
 
-The session transcript should be provided to the distillation prompt but should not be written into the `.txt` description. RAG retrieval expects `.txt` files to contain problem descriptions; storing full transcripts would reduce retrieval quality.
+The session transcript should be provided to the distillation prompt but should not be written into the `.md` description. RAG retrieval expects `.md` files to contain problem descriptions; storing full transcripts would reduce retrieval quality.
 
 If provenance is needed later, add a separate metadata mechanism rather than changing the triplet contract. Possible metadata includes source session ID, creation time, selected provider/model, and validation status.
 
@@ -170,7 +170,7 @@ Update the user documentation to explain that:
 - `Save Exemplar...` first generates a description for review.
 - The description, model, and data can be reviewed and edited in separate tabs.
 - Nothing is saved until `Accept & Save` is selected.
-- The `.txt` file contains the distilled problem description, not the raw session transcript.
+- The `.md` file contains the distilled problem description, not the raw session transcript.
 
 Add the completed behavior to the `Unreleased` section of `CHANGELOG.md` under `Changed` or `Added`.
 

@@ -75,7 +75,7 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 ---
 
 ## P-Dispersion Problem (`p-dispersion`)
-**Files:** `p-dispersion.mod`, `p-dispersion.txt`
+**Files:** `p-dispersion.mod`, `p-dispersion.md`
 - **Description:** Selects exactly p locations from a set of candidates to maximize the minimum pairwise distance among the selected locations.
 - **Features:** Binary selection variables, cardinality constraint (sum of selections equals p), auxiliary minimum-distance variable, pairwise distance constraints (big-M/indicator), max–min objective.
 
@@ -96,7 +96,7 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 ---
 
 ## Set Covering Problem (`set_covering`)
-**Files:** `set_covering.mod`, `set_covering.txt`
+**Files:** `set_covering.mod`, `set_covering.md`
 - **Description:** Selects a minimum-cost collection of sets so that every element is covered by at least one chosen set.
 - **Features:** Binary selection variables, coverage constraints (each element covered ≥ 1), cost minimization.
 
@@ -110,14 +110,14 @@ This document provides a summary of the OPL (Optimization Programming Language) 
 ---
 
 ## Stochastic Production Problem (`stochastic_production`)
-**Files:** `stochastic_production.mod`, `stochastic_production.txt`
+**Files:** `stochastic_production.mod`, `stochastic_production.md`
 - **Description:** Plans production over time under demand uncertainty using scenario-based stochastic programming to minimize expected total cost.
 - **Features:** Scenario probabilities, nonanticipativity constraints on first-stage decisions, production and inventory variables, capacity limits, per-scenario demand balance, expected-cost minimization.
 
 ---
 
 ## Stochastic Scheduling Problem (`stochastic_scheduling`)
-**Files:** `stochastic_scheduling.mod`, `stochastic_scheduling.txt`
+**Files:** `stochastic_scheduling.mod`, `stochastic_scheduling.md`
 - **Description:** Schedules jobs on machines under uncertainty using scenario-based stochastic programming to minimize expected performance (e.g., makespan or tardiness).
 - **Features:** Scenario probabilities, nonanticipativity on first-stage sequencing/scheduling decisions, machine capacity (no-overlap) and precedence constraints, per-scenario timing constraints, expected-objective minimization.
 
