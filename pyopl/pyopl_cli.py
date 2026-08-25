@@ -263,7 +263,15 @@ def _handle_solve(args: argparse.Namespace) -> int:
 def _handle_batch_solve(args: argparse.Namespace) -> int:
     try:
         with redirect_stdout(sys.stderr):
-            batch_solve(args.archive, solver=args.solver)
+            report = batch_solve(args.archive, solver=args.solver)
+        failed = any(
+            "ERROR" in str(instance.get("status", "")).upper()
+            or "FAIL" in str(instance.get("status", "")).upper()
+            for instance in report.get("instances", [])
+        )
+        if failed:
+            print("Batch solve completed with failed instances; see generated reports", file=sys.stderr)
+            return 1
         return 0
     except Exception as exc:
         print(f"Error during batch solve: {exc}", file=sys.stderr)

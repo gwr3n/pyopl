@@ -9,6 +9,20 @@ from pyopl.batch_solve import batch_solve
 
 
 class TestBatchSolve(unittest.TestCase):
+    def test_rejects_non_zip_extension_without_overwriting_input(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "batch.json"
+            with zipfile.ZipFile(archive, "w") as batch_archive:
+                batch_archive.writestr("model.mod", "model")
+                batch_archive.writestr("data.dat", "data")
+            original_contents = archive.read_bytes()
+
+            with self.assertRaisesRegex(ValueError, r"\.zip extension"):
+                batch_solve(archive)
+
+            self.assertEqual(archive.read_bytes(), original_contents)
+            self.assertTrue(zipfile.is_zipfile(archive))
+
     def test_accepts_single_top_level_directory(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             archive = Path(temporary_directory) / "wrapped.zip"

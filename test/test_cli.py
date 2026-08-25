@@ -76,6 +76,15 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(ret, 0)
         batch_mock.assert_called_once_with(str(archive), solver="gurobi")
 
+    def test_cli_batch_solve_returns_nonzero_for_failed_instance(self):
+        for status in ("ERROR", "FAILED", "EXECUTION_ERROR"):
+            with self.subTest(status=status):
+                report = {"instances": [{"data": "data.dat", "status": status}]}
+                with patch("pyopl.pyopl_cli.batch_solve", return_value=report):
+                    ret = pyopl_cli.main(["batch-solve", "batch.zip"])
+
+                self.assertNotEqual(ret, 0)
+
     def test_cli_loads_solver_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             model = Path(tmp_dir) / "model.mod"

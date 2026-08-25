@@ -128,6 +128,8 @@ def _solve_data_file(
 def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
     """Solve every ``.dat`` file in *zip_path* and write sibling reports."""
     archive = Path(zip_path)
+    if archive.suffix.lower() != ".zip":
+        raise ValueError("Batch archive must have a .zip extension")
     if not archive.is_file():
         raise FileNotFoundError(f"Batch archive not found: {archive}")
     try:
