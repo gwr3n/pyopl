@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Copied retrieved exemplars to name-prefixed, timestamped files under `tmp` so editing and saving cannot overwrite their sources.
+
 ### Changed
 
 ### Removed
