@@ -889,6 +889,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it). For a solve, pass a settings object from a file with `--solver-settings <file.json>`.
   - `batch-solve <archive.zip>`: solve every data instance in a batch archive with `--solver highs|gurobi` (default: `highs`). Writes `.json` and `.md` reports beside the archive.
+  - `batch-compare <left.zip> <right.zip>`: compare data instances with matching filenames across two batch archives using `--strategy abstract|concrete` (default: `abstract`). Each archive must contain exactly one model. Writes paired `.json` and `.md` reports beside the left archive.
   - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/google/ollama).
@@ -915,6 +916,10 @@ python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing
 # Solve all data instances in a batch archive
 python -m pyopl batch-solve knapsack.zip --solver highs
 python -m pyopl batch-solve knapsack.zip --solver gurobi
+
+# Compare matching data instances in two archives
+python -m pyopl batch-compare baseline.zip candidate.zip --strategy abstract
+python -m pyopl batch-compare baseline.zip candidate.zip --strategy concrete
 
 # Compare two concrete model instances
 python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --out-file tmp/comparison.json

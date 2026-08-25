@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `batch-compare` and `pyopl.batch_compare` for comparing matching data instances across two batch ZIP archives with abstract or concrete model equivalence.
+
 ### Fixed
 
 - Allowed batch ZIP archives to contain their single `.mod` file below the archive root while continuing to ignore filesystem metadata entries.

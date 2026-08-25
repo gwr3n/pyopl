@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import generative_feedback, generative_solve, solve
+from .batch_compare import batch_compare
 from .batch_solve import batch_solve
 from .genai._strategy_base import (
     list_gemini_models,
@@ -166,6 +167,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_batch.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
 
+    # batch-compare subcommand
+    p_batch_compare = subparsers.add_parser(
+        "batch-compare",
+        help="Compare matching instances in two ZIP archives",
+        description=(
+            "Compare matching .dat files in two batch ZIP archives. Each archive must contain exactly one .mod file "
+            "and one or more .dat files. Reports are written beside the left archive."
+        ),
+    )
+    p_batch_compare.add_argument("left_archive", help="Left batch ZIP archive")
+    p_batch_compare.add_argument("right_archive", help="Right batch ZIP archive")
+    p_batch_compare.add_argument(
+        "--strategy",
+        choices=["concrete", "abstract"],
+        default="abstract",
+        help="Comparison strategy (default abstract)",
+    )
+
     # compare subcommand
     p_compare = subparsers.add_parser("compare", help="Compare two models for MILP equivalence")
     p_compare.add_argument("left_model", help="Path to the left model (.mod)")
@@ -265,8 +284,7 @@ def _handle_batch_solve(args: argparse.Namespace) -> int:
         with redirect_stdout(sys.stderr):
             report = batch_solve(args.archive, solver=args.solver)
         failed = any(
-            "ERROR" in str(instance.get("status", "")).upper()
-            or "FAIL" in str(instance.get("status", "")).upper()
+            "ERROR" in str(instance.get("status", "")).upper() or "FAIL" in str(instance.get("status", "")).upper()
             for instance in report.get("instances", [])
         )
         if failed:
@@ -275,6 +293,19 @@ def _handle_batch_solve(args: argparse.Namespace) -> int:
         return 0
     except Exception as exc:
         print(f"Error during batch solve: {exc}", file=sys.stderr)
+        return 1
+
+
+def _handle_batch_compare(args: argparse.Namespace) -> int:
+    try:
+        with redirect_stdout(sys.stderr):
+            report = batch_compare(args.left_archive, args.right_archive, strategy=args.strategy)
+        if any(str(instance.get("status", "")).upper() == "ERROR" for instance in report.get("instances", [])):
+            print("Batch comparison completed with errors; see generated reports", file=sys.stderr)
+            return 1
+        return 0
+    except Exception as exc:
+        print(f"Error during batch comparison: {exc}", file=sys.stderr)
         return 1
 
 
@@ -499,6 +530,9 @@ def _dispatch_command(args: argparse.Namespace) -> int:
 
     if args.command == "batch-solve":
         return _handle_batch_solve(args)
+
+    if args.command == "batch-compare":
+        return _handle_batch_compare(args)
 
     if args.command == "compare":
         return _handle_compare(args)

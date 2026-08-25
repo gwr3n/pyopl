@@ -26,6 +26,16 @@ class TestCLI(unittest.TestCase):
         self.assertIn("exactly one .mod file and one or more .dat files", help_text)
         self.assertIn("highs.json or gurobi.json", help_text)
 
+    def test_cli_batch_compare_help_describes_archive_contents(self):
+        out_buf = io.StringIO()
+        with self.assertRaises(SystemExit) as cm, redirect_stdout(out_buf):
+            pyopl_cli.main(["batch-compare", "--help"])
+
+        self.assertEqual(cm.exception.code, 0)
+        help_text = " ".join(out_buf.getvalue().split())
+        self.assertIn("exactly one .mod file and one or more .dat files", help_text)
+        self.assertIn("--strategy {concrete,abstract}", help_text)
+
     def test_cli_solve_lot_sizing_highs_json(self):
         model = Path("pyopl/opl_models/lot_sizing/lot_sizing.mod")
         data = Path("pyopl/opl_models/lot_sizing/lot_sizing.dat")
@@ -84,6 +94,21 @@ class TestCLI(unittest.TestCase):
                     ret = pyopl_cli.main(["batch-solve", "batch.zip"])
 
                 self.assertNotEqual(ret, 0)
+
+    def test_cli_batch_compare(self):
+        report = {"instances": [{"data": "data.dat", "status": "different", "equivalent": False}]}
+        with patch("pyopl.pyopl_cli.batch_compare", return_value=report) as batch_mock:
+            ret = pyopl_cli.main(["batch-compare", "left.zip", "right.zip", "--strategy", "concrete"])
+
+        self.assertEqual(ret, 0)
+        batch_mock.assert_called_once_with("left.zip", "right.zip", strategy="concrete")
+
+    def test_cli_batch_compare_returns_nonzero_for_error(self):
+        report = {"instances": [{"data": "data.dat", "status": "ERROR", "equivalent": None}]}
+        with patch("pyopl.pyopl_cli.batch_compare", return_value=report):
+            ret = pyopl_cli.main(["batch-compare", "left.zip", "right.zip"])
+
+        self.assertNotEqual(ret, 0)
 
     def test_cli_loads_solver_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
