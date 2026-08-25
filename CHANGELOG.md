@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Guided GenAI feedback and repair revisions to label objectives and constraints, add concise literate comments, and preserve existing model and data content unless changes are necessary.
+
 ### Removed
 
 ## [v2.4.6] - 2026-08-25

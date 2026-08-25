@@ -32,16 +32,25 @@ def _grammar_mode(mode: Any) -> Grammar:
 
 
 def _build_feedback_prompt(question: str, grammar: str, model: str, data: str) -> str:
+    guidelines = (
+        "When revised content is necessary, label objective and constraints. "
+        "Include concise comments explaining variables, parameters, and constraints, "
+        "aligned to the user's question and the problem (literate style).\n"
+    )
+
     return (
         "<role>\nYou are an expert in mathematical optimization and PyOPL.\n</role>\n\n"
         "<task>\nAnswer the user's question about the provided PyOPL model and data. "
         "Provide critical, specific feedback. If revisions are necessary, propose the minimal changes.\n"
+        f"{guidelines}"
+        "Do not change existing parts of the model and data unless strictly necessary.\n"
         "</task>\n\n"
         f"<grammar_reference>\n{grammar}\n</grammar_reference>\n\n"
         f"<question>\n{question}\n</question>\n\n"
         f"<model>\n{model}\n</model>\n\n"
         f"<data>\n{data}\n</data>\n\n"
-        '<output_requirements>\nReturn only a JSON object with required string key "feedback" and optional '
+        "<output_requirements>\n"
+        'Return only a JSON object with required string key "feedback" and optional '
         'string keys "revised_model" and "revised_data". Return complete file contents, not diffs.\n'
         "</output_requirements>"
     )
@@ -79,10 +88,18 @@ def _build_repair_prompt(
     candidate_data: str,
     issue: str,
 ) -> str:
+    guidelines = (
+        "When revised content is necessary, label objective and constraints. "
+        "Include concise comments explaining variables, parameters, and constraints, "
+        "aligned to the user's question and the problem (literate style).\n"
+    )
+    
     return (
         "<role>\nYou repair proposed PyOPL model and data revisions.\n</role>\n\n"
         "<task>\nReturn the complete corrected candidate model and data. Make only changes needed to resolve "
-        "the validation issue while satisfying the user's request and preserving unrelated behavior.\n</task>\n\n"
+        "the validation issue while satisfying the user's request and preserving unrelated behavior.\n"
+        f"{guidelines}"
+        "Do not change existing parts of the model and data unless strictly necessary.\n</task>\n\n"
         f"<grammar_reference>\n{grammar}\n</grammar_reference>\n\n"
         f"<question>\n{question}\n</question>\n\n"
         f"<original_model>\n{original_model}\n</original_model>\n\n"
