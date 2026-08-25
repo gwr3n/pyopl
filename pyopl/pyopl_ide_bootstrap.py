@@ -3654,17 +3654,16 @@ class OPLIDE(TkinterDnD.Tk):
 
         description_frame = ttk.Frame(content_frame)
         description_frame.grid(row=0, column=1, sticky="nsew")
-        description_frame.rowconfigure(1, weight=1)
+        description_frame.rowconfigure(0, weight=1)
         description_frame.columnconfigure(0, weight=1)
-        ttk.Label(description_frame, text="Problem description").grid(row=0, column=0, sticky="w", pady=(0, 4))
         description_text = tk.Text(description_frame, width=35, wrap="word", state="disabled")
-        description_text.grid(row=1, column=0, sticky="nsew")
+        description_text.grid(row=0, column=0, sticky="nsew")
         description_scrollbar = ttk.Scrollbar(
             description_frame,
             orient="vertical",
             command=description_text.yview,
         )
-        description_scrollbar.grid(row=1, column=1, sticky="ns")
+        description_scrollbar.grid(row=0, column=1, sticky="ns")
         description_text.configure(yscrollcommand=description_scrollbar.set)
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
