@@ -712,6 +712,8 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_notebook: Optional[ttk.Notebook] = None
         self._genai_diff_preview_texts: dict[str, tk.Text] = {}
         self._exemplar_search_cleanup: Optional[Callable[[Any], None]] = None
+        self._model_requires_save_as = False
+        self._data_requires_save_as = False
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -1328,6 +1330,8 @@ class OPLIDE(TkinterDnD.Tk):
         self.data_text.delete(1.0, tk.END)
         self.model_file = None
         self.data_file = None
+        self._model_requires_save_as = False
+        self._data_requires_save_as = False
 
         # Reset tab labels
         self.editor_notebook.tab(self.model_frame, text="Model")
@@ -1375,6 +1379,8 @@ class OPLIDE(TkinterDnD.Tk):
                 pass
         self.model_file = None
         self.data_file = None
+        self._model_requires_save_as = False
+        self._data_requires_save_as = False
         self._mark_editor_baselines_saved()
         try:
             self.editor_notebook.tab(self.model_frame, text="Model")
@@ -3770,6 +3776,9 @@ class OPLIDE(TkinterDnD.Tk):
             exemplar = result["exemplars"][selection[0]]
             self._open_model_path(str(exemplar["model_path"]))
             self._open_data_path(str(exemplar["data_path"]))
+            self._model_requires_save_as = True
+            self._data_requires_save_as = True
+            self._save_session()
             self.status_var.set(f"Retrieved exemplar: {exemplar['name']}")
             close_dialog()
 
@@ -3839,6 +3848,7 @@ class OPLIDE(TkinterDnD.Tk):
             self.model_text.delete(1.0, tk.END)
             self.model_text.insert(tk.END, model_handle.read())
         self.model_file = path
+        self._model_requires_save_as = False
         self._model_saved_text = self._get_editor_text(self.model_text)
         self.highlight(self.model_text)
         self._restore_fold_state(path, self.model_gutter)
@@ -3863,6 +3873,7 @@ class OPLIDE(TkinterDnD.Tk):
             self.data_text.delete(1.0, tk.END)
             self.data_text.insert(tk.END, data_handle.read())
         self.data_file = path
+        self._data_requires_save_as = False
         self._data_saved_text = self._get_editor_text(self.data_text)
         self.highlight(self.data_text, is_data=True)
         self._restore_fold_state(path, self.data_gutter)
@@ -4208,6 +4219,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
+        if getattr(self, "_model_requires_save_as", False):
+            self.save_model_as()
+            return
         if not self.model_file:
             fname = filedialog.asksaveasfilename(
                 defaultextension=".mod",
@@ -4233,6 +4247,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
+        if getattr(self, "_data_requires_save_as", False):
+            self.save_data_as()
+            return
         if not self.data_file:
             fname = filedialog.asksaveasfilename(
                 defaultextension=".dat",
@@ -4264,6 +4281,7 @@ class OPLIDE(TkinterDnD.Tk):
         if not fname:
             return
         self.model_file = fname
+        self._model_requires_save_as = False
         content = self.model_text.get(1.0, tk.END).rstrip("\n")
         with open(self.model_file, "w", encoding="utf-8") as f:
             f.write(content)
@@ -4283,6 +4301,7 @@ class OPLIDE(TkinterDnD.Tk):
         if not fname:
             return
         self.data_file = fname
+        self._data_requires_save_as = False
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
         with open(self.data_file, "w", encoding="utf-8") as f:
             f.write(content)
@@ -6032,6 +6051,8 @@ class OPLIDE(TkinterDnD.Tk):
                 "viewing_output_session_id": self._viewing_output_session_id,
                 "model_file": self.model_file,
                 "data_file": self.data_file,
+                "model_requires_save_as": getattr(self, "_model_requires_save_as", False),
+                "data_requires_save_as": getattr(self, "_data_requires_save_as", False),
                 "fold_view_states": self._fold_view_states,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -6175,6 +6196,8 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             OPLIDE._restore_session_file(self, session.get("model_file"), "model_file", self.model_text)
             OPLIDE._restore_session_file(self, session.get("data_file"), "data_file", self.data_text)
+            self._model_requires_save_as = bool(session.get("model_requires_save_as", False))
+            self._data_requires_save_as = bool(session.get("data_requires_save_as", False))
             for path, gutter in (
                 (self.model_file, getattr(self, "model_gutter", None)),
                 (self.data_file, getattr(self, "data_gutter", None)),

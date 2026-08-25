@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Forced retrieved exemplars to use Save As so editing and saving cannot overwrite the source model or data files.
 - Allowed batch ZIP archives to contain their single `.mod` file below the archive root while continuing to ignore filesystem metadata entries.
 - Required batch archive paths to end in `.zip`, preventing generated reports from overwriting an input with a report-file extension.
 - Returned a nonzero CLI exit status when any batch instance reports an error or failure.

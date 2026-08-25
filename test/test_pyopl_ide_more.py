@@ -792,6 +792,8 @@ minimize x;
                         "viewing_output_session_id": "s1",
                         "model_file": str(model_path),
                         "data_file": str(data_path),
+                        "model_requires_save_as": True,
+                        "data_requires_save_as": True,
                     }
                 ),
                 encoding="utf-8",
@@ -870,6 +872,8 @@ minimize x;
         self.assertEqual(output_text.value, "output")
         self.assertEqual(model_text.value, "model text")
         self.assertEqual(data_text.value, "data text")
+        self.assertTrue(dummy._model_requires_save_as)
+        self.assertTrue(dummy._data_requires_save_as)
         self.assertEqual(
             notebook.tabs[-2:], [("model-frame", {"text": "Model: model.mod"}), ("data-frame", {"text": "Data: data.dat"})]
         )
@@ -965,6 +969,61 @@ minimize x;
                 [("model-frame", {"text": "Model: saved.mod"}), ("data-frame", {"text": "Data: saved.dat"})],
             )
             self.assertEqual(dummy._save_session.call_count, 2)
+
+    def test_retrieved_exemplar_save_requires_new_destination(self):
+        """Ordinary saves clone protected exemplar buffers and never overwrite their source files."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            exemplar_model = root / "exemplar.mod"
+            exemplar_data = root / "exemplar.dat"
+            cloned_model = root / "clone.mod"
+            cloned_data = root / "clone.dat"
+            exemplar_model.write_text("original model", encoding="utf-8")
+            exemplar_data.write_text("original data", encoding="utf-8")
+            dummy = SimpleNamespace(
+                model_file=str(exemplar_model),
+                data_file=str(exemplar_data),
+                _model_requires_save_as=True,
+                _data_requires_save_as=True,
+                model_text=DummyText("changed model\n"),
+                data_text=DummyText("changed data\n"),
+                editor_notebook=mock.Mock(),
+                model_frame="model-frame",
+                data_frame="data-frame",
+                _get_editor_text=lambda widget: widget.get(),
+                _save_session=mock.Mock(),
+                save_model_as=lambda: OPLIDE.save_model_as(dummy),
+                save_data_as=lambda: OPLIDE.save_data_as(dummy),
+            )
+
+            with mock.patch.object(
+                pyopl_ide_bootstrap.filedialog,
+                "asksaveasfilename",
+                side_effect=[str(cloned_model), str(cloned_data)],
+            ) as save_dialog:
+                OPLIDE.save_model(dummy)
+                OPLIDE.save_data(dummy)
+
+            self.assertEqual(save_dialog.call_count, 2)
+            self.assertEqual(exemplar_model.read_text(encoding="utf-8"), "original model")
+            self.assertEqual(exemplar_data.read_text(encoding="utf-8"), "original data")
+            self.assertEqual(cloned_model.read_text(encoding="utf-8"), "changed model")
+            self.assertEqual(cloned_data.read_text(encoding="utf-8"), "changed data")
+            self.assertFalse(dummy._model_requires_save_as)
+            self.assertFalse(dummy._data_requires_save_as)
+
+    def test_cancelled_exemplar_save_remains_protected(self):
+        dummy = SimpleNamespace(
+            model_file="exemplar.mod",
+            _model_requires_save_as=True,
+            model_text=DummyText("changed model"),
+            save_model_as=lambda: OPLIDE.save_model_as(dummy),
+        )
+
+        with mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=""):
+            OPLIDE.save_model(dummy)
+
+        self.assertTrue(dummy._model_requires_save_as)
 
     def test_poll_solver_empty_queue_handles_running_and_unexpected_exit(self):
         """Polling reschedules live solvers and reports dead solvers with no terminal message."""
