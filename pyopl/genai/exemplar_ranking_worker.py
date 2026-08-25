@@ -84,16 +84,9 @@ class ExemplarRankingWorker:
         self._results = None
 
         if not wait:
-            if process is not None:
-                try:
-                    if process.is_alive():
-                        process.terminate()
-                except Exception:
-                    pass
             threading.Thread(
                 target=self._cleanup,
-                args=(process, commands, results, False),
-                daemon=True,
+                args=(process, commands, results, True),
             ).start()
             return
         self._cleanup(process, commands, results, True)
