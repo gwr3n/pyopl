@@ -16,10 +16,11 @@ The grammar supports:
   - decision variables (`dvar`) – scalar and indexed
   - parameters (`param` optional) – scalar (external or inline), indexed (external, inline array, or computed by expression with iterators)
   - ranges
-  - typed scalar sets (`{string}`, `{int}`, `{float}`, `{boolean}`)
+  - typed scalar sets (`{string}`, `{int}`, `{float}`, `{boolean}`), including filtered `{int}` comprehensions
   - tuple types
   - sets of tuples (typed by tuple type)
-  - tuple arrays with one or more named set/range dimensions (`TupleType Arr[I][J]`)
+  - tuple-record arrays with one or more named set/range dimensions (`TupleType Arr[I][J]`)
+  - indexed arrays of tuple sets (`{TupleType} Sets[I][J]`)
   - untyped set-of-tuples assignment in model (tuple literals only)
   - decision expressions (`dexpr`) – scalar and indexed, expanded in-place on use
 - Objectives: `minimize` or `maximize` any numeric or boolean expression, with optional label (`minimize z: expr;` or `minimize z = expr;`)
@@ -182,6 +183,9 @@ Types include tuple type names as identifiers.
 // Set of tuples (typed by a tuple type name)
                 | <set_of_tuples_declaration>
 
+// Indexed arrays of tuple sets
+                | <set_of_tuples_array_declaration>
+
 // Untyped set-of-tuples assignment in model (tuple literals only)
                 | <untyped_tuple_set_assignment>
 
@@ -212,6 +216,7 @@ Typed scalar sets in models:
 
 // Integers
                           | '{' 'int' '}' <NAME> '=' '{' <element_list_int> '}' ';'
+                          | '{' 'int' '}' <NAME> '=' '{' <scalar_comprehension> '}' ';'
                           | '{' 'int' '}' <NAME> ';'
                           | '{' 'int' '}' <NAME> '=' '...' ';'
 
@@ -224,6 +229,11 @@ Typed scalar sets in models:
                           | '{' 'boolean' '}' <NAME> '=' '{' <element_list_boolean> '}' ';'
                           | '{' 'boolean' '}' <NAME> ';'
                           | '{' 'boolean' '}' <NAME> '=' '...' ';'
+
+// Filtered scalar comprehension; currently supported for {int} declarations only.
+// The produced value is intentionally narrower than a general expression.
+<scalar_comprehension> ::= <scalar_comprehension_value> '|' <sum_index_list> <opt_index_constraint>
+<scalar_comprehension_value> ::= <NAME> | <NUMBER> | <STRING_LITERAL>
 ```
 
 Set of tuples in models:
@@ -234,6 +244,10 @@ Set of tuples in models:
                               | '{' <NAME> '}' <NAME> ';'
                               | '{' <NAME> '}' <NAME> '=' '...' ';'
                               | '{' <NAME> '}' <NAME> '=' '{' <tuple_comprehension> '}' ';'  // comprehension
+
+// External indexed array whose value at each index is a set of tuples.
+// Example: {MatrixElement} matrix[Constraints] = ...;
+<set_of_tuples_array_declaration> ::= '{' <NAME> '}' <NAME> <indexed_dimensions> '=' '...' ';'
 
 // Tuple set comprehension (iterators usable inside component expressions)
 <tuple_comprehension> ::= '<' <tuple_comprehension_element_list> '>' '|' <sum_index_list> <opt_index_constraint>
@@ -260,13 +274,18 @@ Tuple types:
 <tuple_field> ::= <type> <NAME> ';'
 ```
 
-Tuple arrays (model declarations):
+Tuple-record arrays (model declarations):
 
 ```
 <tuple_array_declaration> ::= <NAME> <NAME> <named_dimensions> '=' '...' ';'
                             | <NAME> <NAME> <named_dimensions> ';'
 <named_dimensions> ::= ('[' <NAME> ']')+
 ```
+
+The unbraced form stores one tuple record at each index, for example
+`MatrixElement matrix[Elements] = ...;`. It is distinct from the braced
+`{MatrixElement} matrix[Constraints] = ...;` form above, which stores a set of
+`MatrixElement` tuples at each index.
 
 Decision expressions (expanded on use):
 
@@ -465,7 +484,7 @@ Important modeling rule:
 
 <data_declaration> ::= <NAME> '=' <scalar_value> ';'
                      | <NAME> '=' <set_value> ';'
-                     | <NAME> '=' <array_value> ';'
+                     | <NAME> '=' <data_array_value> ';'
                      | <NAME> '=' <key_value_array> ';'          // map-like array: string/tuple -> scalar/array
                      | <NAME> '=' <NUMBER> '..' <NUMBER> ';'
                      | <NAME> '=' '{' <tuple_literal_list> '}' ';'   // set of tuples (untyped)
@@ -475,13 +494,17 @@ Important modeling rule:
 // Keys may be string or tuple; values may be scalar or array:
 <key_value_row> ::= <STRING_LITERAL> <scalar_value>
                   | <tuple_literal> <scalar_value>
-                  | <STRING_LITERAL> <array_value>
-                  | <tuple_literal> <array_value>
+      | <STRING_LITERAL> <data_array_value>
+      | <tuple_literal> <data_array_value>
 
-            // Arrays are recursive and may contain tuple literals at any depth.
-            <row_list> ::= <row_list> ',' <scalar_value> | <scalar_value>
-                   | <row_list> ',' <array_value> | <array_value>
-                   | <row_list> ',' <tuple_literal> | <tuple_literal>
+// Data arrays are recursive and may contain tuple literals or tuple-set values
+// at any depth. Tuple-set values may be empty.
+<data_array_value> ::= '[' <data_row_list> ']'
+<data_row_list> ::= <data_row_list> ',' <scalar_value> | <scalar_value>
+      | <data_row_list> ',' <data_array_value> | <data_array_value>
+      | <data_row_list> ',' <tuple_literal> | <tuple_literal>
+      | <data_row_list> ',' <tuple_set_value> | <tuple_set_value>
+<tuple_set_value> ::= '{' <tuple_literal_list> '}' | '{' '}'
 
 // Allow trailing comma via lexer/permissive parsing
 
