@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recursively solved every ZIP folder containing one `.mod` file and one or more `.dat` files, recording per-instance errors without stopping other folders.
 - Guided GenAI feedback and repair revisions to label objectives and constraints, add concise literate comments, and preserve existing model and data content unless changes are necessary.
 - Clarified that a batch archive may contain one selected-solver settings file (`highs.json` or `gurobi.json`), whose settings apply to every model folder in the archive; settings are not configured per folder.
+- Batch solve now writes result reports after each instance and resumes from existing partial reports.
 
 ### Removed
 

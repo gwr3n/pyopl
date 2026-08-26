@@ -154,6 +154,27 @@ class TestBatchSolve(unittest.TestCase):
                 solver_settings={"TimeLimit": 2},
             )
 
+    def test_writes_partial_results_and_resumes_from_existing_report(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "resume.zip"
+            with zipfile.ZipFile(archive, "w") as batch_archive:
+                batch_archive.writestr("model.mod", "model")
+                batch_archive.writestr("a.dat", "data")
+                batch_archive.writestr("b.dat", "data")
+
+            solve_results = iter([{"status": "OPTIMAL"}, KeyboardInterrupt(), {"status": "OPTIMAL"}])
+            with patch("pyopl.batch_solve.solve", side_effect=solve_results) as solve_mock:
+                with self.assertRaises(KeyboardInterrupt):
+                    batch_solve(archive)
+
+                partial = json.loads(archive.with_suffix(".json").read_text(encoding="utf-8"))
+                self.assertEqual([record["data"] for record in partial["instances"]], ["a.dat"])
+
+                report = batch_solve(archive)
+
+            self.assertEqual([record["data"] for record in report["instances"]], ["a.dat", "b.dat"])
+            self.assertEqual(solve_mock.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

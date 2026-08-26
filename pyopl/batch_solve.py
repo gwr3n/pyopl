@@ -98,6 +98,33 @@ def _make_markdown(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _load_partial_records(json_path: Path, solver: str) -> list[dict[str, Any]]:
+    if not json_path.is_file():
+        return []
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or not isinstance(payload.get("instances"), list):
+        return []
+    return [record for record in payload["instances"] if isinstance(record, dict) and record.get("solver") == solver]
+
+
+def _write_report(
+    archive: Path,
+    models: list[str],
+    records: list[dict[str, Any]],
+    json_path: Path,
+    markdown_path: Path,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {"archive": archive.name, "models": models, "instances": records}
+    if len(models) == 1:
+        report["model"] = models[0]
+    json_path.write_text(json.dumps(_json_safe(report), indent=2) + "\n", encoding="utf-8")
+    markdown_path.write_text(_make_markdown(records), encoding="utf-8")
+    return report
+
+
 def _extract_safely(batch_archive: zipfile.ZipFile, destination: Path) -> None:
     destination_root = destination.resolve()
     for member in batch_archive.infolist():
@@ -168,26 +195,25 @@ def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
             _extract_safely(batch_archive, extraction_root)
             settings = _solver_configuration(members, extraction_root, solver_name)
 
-        records: list[dict[str, Any]] = []
+        models = [model.as_posix() for model, _ in batches]
+        json_path = archive.with_suffix(".json")
+        markdown_path = archive.with_suffix(".md")
+        records = _load_partial_records(json_path, "highs" if solver_name == "scipy" else solver_name)
+        completed = {(record.get("model"), record.get("data")) for record in records}
         for model, data_files in batches:
             for data_file in data_files:
-                records.append(
-                    _solve_data_file(
-                        extraction_root / model,
-                        model.as_posix(),
-                        extraction_root / data_file,
-                        data_file.as_posix(),
-                        solver_name,
-                        settings,
-                    )
+                instance_key = (model.as_posix(), data_file.as_posix())
+                if instance_key in completed:
+                    continue
+                record = _solve_data_file(
+                    extraction_root / model,
+                    model.as_posix(),
+                    extraction_root / data_file,
+                    data_file.as_posix(),
+                    solver_name,
+                    settings,
                 )
-
-    models = [model.as_posix() for model, _ in batches]
-    report = {"archive": archive.name, "models": models, "instances": records}
-    if len(models) == 1:
-        report["model"] = models[0]
-    json_path = archive.with_suffix(".json")
-    markdown_path = archive.with_suffix(".md")
-    json_path.write_text(json.dumps(_json_safe(report), indent=2) + "\n", encoding="utf-8")
-    markdown_path.write_text(_make_markdown(records), encoding="utf-8")
-    return report
+                records.append(record)
+                completed.add(instance_key)
+                _write_report(archive, models, records, json_path, markdown_path)
+        return _write_report(archive, models, records, json_path, markdown_path)
