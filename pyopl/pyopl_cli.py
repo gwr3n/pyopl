@@ -157,13 +157,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "batch-solve",
         help="Solve all instances in a ZIP archive",
         description=(
-            "Solve a batch ZIP archive containing exactly one .mod file and one or more .dat files. "
-            "The archive may also include highs.json or gurobi.json for solver settings."
+            "Solve every archive folder containing exactly one .mod file and one or more .dat files. "
+            "Folders may be nested, and the archive may include highs.json or gurobi.json for solver settings. "
+            "Each .dat file is solved independently; processing continues when an instance fails."
         ),
     )
     p_batch.add_argument(
         "archive",
-        help="ZIP containing one .mod file, one or more .dat files, and optional highs.json or gurobi.json",
+        help=(
+            "ZIP containing one or more folders, each with one .mod file and one or more .dat files, "
+            "plus optional highs.json or gurobi.json"
+        ),
     )
     p_batch.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
 

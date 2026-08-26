@@ -16,14 +16,16 @@ class TestCLI(unittest.TestCase):
             pyopl_cli.main(["--help"])
         self.assertEqual(cm.exception.code, 0)
 
-    def test_cli_batch_help_describes_archive_contents(self):
+    def test_cli_batch_help_describes_recursive_archive_contents(self):
         out_buf = io.StringIO()
         with self.assertRaises(SystemExit) as cm, redirect_stdout(out_buf):
             pyopl_cli.main(["batch-solve", "--help"])
 
         self.assertEqual(cm.exception.code, 0)
         help_text = " ".join(out_buf.getvalue().split())
-        self.assertIn("exactly one .mod file and one or more .dat files", help_text)
+        self.assertIn("every archive folder containing exactly one .mod file and one or more .dat files", help_text)
+        self.assertIn("Folders may be nested", help_text)
+        self.assertIn("processing continues when an instance fails", help_text)
         self.assertIn("highs.json or gurobi.json", help_text)
 
     def test_cli_batch_compare_help_describes_archive_contents(self):
