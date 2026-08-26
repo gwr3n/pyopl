@@ -34,7 +34,6 @@ from .genai_pricing import estimate_costs as _estimate_costs
 logger = logging.getLogger(__name__)
 
 
-# Progress notifier used by generative_solve/feedback and LLM calls
 def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
     try:
         if progress:
@@ -42,7 +41,6 @@ def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
         else:
             logger.debug(str(msg))
     except Exception:
-        # Never let UI callback failures break the run
         pass
 
 
@@ -83,39 +81,8 @@ class Grammar(Enum):
 # ---------- Utilities ----------
 
 
-def _read_file(path: str) -> str:
-    return _BASE.read_file(path)
-
-
-def _read_pyopl_GBNF() -> str:
-    return _BASE.read_pyopl_GBNF()
-
-
-def _read_pyopl_grammar() -> str:
-    return _BASE.read_pyopl_grammar()
-
-
-def _read_pyopl_code() -> str:
-    return _BASE.read_pyopl_code()
-
-
 def _get_grammar_implementation(mode: Grammar) -> str:
     return _BASE.get_grammar_implementation(_BaseGrammar[mode.name])
-
-
-# RAG few-shot helpers
-def _safe_read_text(path: Path, max_chars: int = FEW_SHOT_MAX_CHARS) -> str:
-    return _BASE.safe_read_text(path, max_chars=max_chars)
-
-
-def _find_pair_in_folder(desc_path: Path) -> Tuple[Optional[Path], Optional[Path]]:
-    """
-    Given a description .md path, locate associated .mod and .dat in the same folder.
-    Preference order:
-      1) Same stem: <stem>.mod and <stem>.dat
-      2) First *.mod and first *.dat in folder (sorted)
-    """
-    return _BASE.find_pair_in_folder(desc_path)
 
 
 def _gather_few_shots(
@@ -170,83 +137,6 @@ def _json_loads_relaxed(text: str) -> Dict[str, Any]:
         return json.loads(extract_json_from_markdown(text))
 
 
-def _coalesce_response_text(resp) -> str:
-    # Prefer SDK convenience if present
-    if getattr(resp, "output_text", None):
-        return resp.output_text or ""
-
-    # Responses API: try common shapes
-    try:
-        chunks = []
-        for item in getattr(resp, "output", []) or []:
-            content_blocks = getattr(item, "content", None)
-            if content_blocks is None:
-                if hasattr(item, "text"):
-                    chunks.append(getattr(item, "text") or "")
-                continue
-            for block in content_blocks:
-                if hasattr(block, "text"):
-                    chunks.append(getattr(block, "text") or "")
-                elif isinstance(block, dict) and isinstance(block.get("text"), str):
-                    chunks.append(block["text"])
-        if chunks:
-            return "".join(chunks)
-    except Exception:
-        pass
-
-    # Last-resort fallbacks
-    try:
-        first = getattr(resp, "output", [])[0]
-        first_content = getattr(first, "content", [])[0]
-        if hasattr(first_content, "text"):
-            return first_content.text or ""
-    except Exception:
-        pass
-    return ""
-
-
-def _openai_client():
-    return _BASE._openai_client()
-
-
-def _google_client():
-    return _BASE._google_client()
-
-
-def _ollama_generate_text(
-    model_name: str, prompt: str, num_predict: Optional[int] = MAX_OUTPUT_TOKENS, return_usage: bool = False
-) -> Union[str, Tuple[str, Dict[str, int]]]:  # CHANGED
-    """
-    Call Ollama's Python client and return the response text.
-    If return_usage=True, also return a usage dict with prompt/completion token counts when available.
-    """
-    return _BASE._ollama_generate_text(
-        model_name=model_name,
-        prompt=prompt,
-        num_predict=num_predict,
-        return_usage=return_usage,
-        enforce_json=False,
-    )
-
-
-def _build_create_params(
-    model_name: str,
-    input_text: str,
-    max_tokens: Optional[int] = MAX_OUTPUT_TOKENS,
-    temperature: Optional[float] = None,
-    stop: Optional[list[str]] = None,
-    response_json: bool = False,
-) -> Dict[str, Any]:
-    return _BASE._build_openai_create_params(
-        model_name=model_name,
-        input_text=input_text,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        stop=stop,
-        expected_json=response_json,
-    )
-
-
 def _infer_provider(llm_provider: Optional[str], model_name: str) -> LLMProvider:
     base_p = _BASE.infer_provider(llm_provider, model_name)
     return LLMProvider(base_p.value)
@@ -274,22 +164,6 @@ def _llm_generate_text(
         progress=progress,
         capture_usage=capture_usage,
         expected_json=response_json,
-    )
-
-
-def _call_openai_with_retry(
-    client,
-    create_params: Dict[str, Any],
-    retries: int = 3,
-    backoff_sec: float = 1.5,
-    progress: Optional[Callable[[str], None]] = None,
-) -> Any:
-    return _BASE._call_openai_with_retry(
-        client,
-        create_params,
-        retries=retries,
-        backoff_sec=backoff_sec,
-        progress=progress,
     )
 
 

@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Removed unused private delegation wrappers from the GenAI strategy modules.
+
 ## [v2.4.6] - 2026-08-25
 
 ### Added

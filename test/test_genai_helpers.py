@@ -893,20 +893,6 @@ class TestStrategyModuleHelpers(unittest.TestCase):
                 self.assertEqual(kwargs["model_name"], "gpt-test")
                 self.assertEqual(kwargs["input_text"], "prompt")
 
-    def test_strategy_openai_create_params_delegate_expected_json_flags(self) -> None:
-        expected_json_by_module = {
-            "pyopl.genai.pyopl_standard": False,
-            "pyopl.genai.pyopl_tree_of_thoughts": False,
-        }
-        for module_name in STRATEGY_MODULE_NAMES:
-            module = import_module(module_name)
-            with self.subTest(module=module_name):
-                with patch.object(module._BASE, "_build_openai_create_params", return_value={"ok": True}) as build:
-                    self.assertEqual(module._build_create_params("gpt-test", "prompt", max_tokens=7), {"ok": True})
-                self.assertEqual(build.call_args.kwargs["model_name"], "gpt-test")
-                self.assertEqual(build.call_args.kwargs["input_text"], "prompt")
-                self.assertEqual(build.call_args.kwargs["expected_json"], expected_json_by_module.get(module_name, True))
-
     def test_prompt_builders_include_problem_grammar_and_outputs(self) -> None:
         prompt_builders = [
             ("pyopl.genai.pyopl_standard", "_build_standard_generation_prompt"),
@@ -989,23 +975,10 @@ class TestStrategyModuleHelpers(unittest.TestCase):
 
         self.assertTrue(any("Ollama" in message for message in messages))
 
-    def test_strategy_file_and_pair_wrappers_delegate_to_base_helpers(self) -> None:
+    def test_strategy_grammar_wrappers_delegate_to_base_helper(self) -> None:
         for module_name in STRATEGY_MODULE_NAMES:
             module = import_module(module_name)
-            with self.subTest(module=module_name), tempfile.TemporaryDirectory() as td:
-                folder = Path(td)
-                text_path = folder / "note.txt"
-                desc_path = folder / "problem.md"
-                mod_path = folder / "problem.mod"
-                dat_path = folder / "problem.dat"
-                text_path.write_text("abcdef", encoding="utf-8")
-                desc_path.write_text("description", encoding="utf-8")
-                mod_path.write_text("model", encoding="utf-8")
-                dat_path.write_text("data", encoding="utf-8")
-
-                self.assertEqual(module._read_file(str(text_path)), "abcdef")
-                self.assertEqual(module._safe_read_text(text_path, max_chars=3), "abc")
-                self.assertEqual(module._find_pair_in_folder(desc_path), (mod_path, dat_path))
+            with self.subTest(module=module_name):
                 self.assertEqual(module._get_grammar_implementation(module.Grammar.NONE), "")
 
     def test_strategy_notify_uses_progress_and_swallows_callback_errors(self) -> None:
@@ -1017,30 +990,6 @@ class TestStrategyModuleHelpers(unittest.TestCase):
                 module._notify(lambda msg: (_ for _ in ()).throw(RuntimeError("boom")), "ignored")
 
             self.assertEqual(messages, ["hello"])
-
-    def test_strategy_coalesce_and_ollama_wrappers_delegate(self) -> None:
-        enforce_json_by_module = {
-            "pyopl.genai.pyopl_standard": False,
-            "pyopl.genai.pyopl_tree_of_thoughts": False,
-            "pyopl.genai.pyopl_cafa": False,
-        }
-
-        for module_name in STRATEGY_MODULE_NAMES:
-            module = import_module(module_name)
-            response = SimpleNamespace(output=[SimpleNamespace(content=[SimpleNamespace(text="part1"), {"text": "part2"}])])
-            with self.subTest(module=module_name):
-                self.assertEqual(module._coalesce_response_text(response), "part1part2")
-
-                with patch.object(module._BASE, "_ollama_generate_text", return_value=("{}", {"prompt_tokens": 1})) as ollama:
-                    self.assertEqual(
-                        module._ollama_generate_text("llama", "prompt", num_predict=3, return_usage=True),
-                        ("{}", {"prompt_tokens": 1}),
-                    )
-
-                self.assertEqual(ollama.call_args.kwargs["model_name"], "llama")
-                self.assertEqual(ollama.call_args.kwargs["prompt"], "prompt")
-                self.assertEqual(ollama.call_args.kwargs["num_predict"], 3)
-                self.assertEqual(ollama.call_args.kwargs["enforce_json"], enforce_json_by_module.get(module_name, True))
 
     def test_common_assessment_prompts_include_inputs(self) -> None:
         for module_name in STRATEGY_MODULE_NAMES:
