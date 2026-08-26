@@ -88,6 +88,13 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(ret, 0)
         batch_mock.assert_called_once_with(str(archive), solver="gurobi")
 
+    def test_cli_batch_solve_progress(self):
+        with patch("pyopl.pyopl_cli.batch_solve_with_progress", return_value={}) as progress_mock:
+            ret = pyopl_cli.main(["batch-solve", "batch.zip", "--progress"])
+
+        self.assertEqual(ret, 0)
+        progress_mock.assert_called_once_with("batch.zip", solver="highs")
+
     def test_cli_batch_solve_returns_nonzero_for_failed_instance(self):
         for status in ("ERROR", "FAILED", "EXECUTION_ERROR"):
             with self.subTest(status=status):

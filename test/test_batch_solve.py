@@ -1,8 +1,10 @@
 import json
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 from pyopl.batch_solve import batch_solve
@@ -174,6 +176,34 @@ class TestBatchSolve(unittest.TestCase):
 
             self.assertEqual([record["data"] for record in report["instances"]], ["a.dat", "b.dat"])
             self.assertEqual(solve_mock.call_count, 3)
+
+    def test_reports_progress_metrics_and_stops_before_next_instance(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "progress.zip"
+            with zipfile.ZipFile(archive, "w") as batch_archive:
+                batch_archive.writestr("model.mod", "model")
+                batch_archive.writestr("a.dat", "data")
+                batch_archive.writestr("b.dat", "data")
+
+            stop_event = Event()
+            events = []
+
+            def fake_solve(model, data, solver, solver_settings):
+                stop_event.set()
+                time.sleep(0.001)
+                return {"status": "OPTIMAL"}
+
+            with patch("pyopl.batch_solve.solve", side_effect=fake_solve) as solve_mock:
+                report = batch_solve(archive, progress_callback=events.append, stop_event=stop_event)
+
+            self.assertEqual(solve_mock.call_count, 1)
+            self.assertEqual(len(report["instances"]), 1)
+            self.assertEqual(events[0]["event"], "started")
+            self.assertEqual(events[0]["total"], 2)
+            self.assertEqual(events[-1]["event"], "stopped")
+            self.assertEqual(events[-1]["completed"], 1)
+            self.assertEqual(events[-1]["remaining"], 1)
+            self.assertGreater(events[-1]["average_solution_time"], 0)
 
 
 if __name__ == "__main__":

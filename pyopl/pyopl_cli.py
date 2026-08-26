@@ -24,7 +24,7 @@ from typing import Optional
 
 from . import generative_feedback, generative_solve, solve
 from .batch_compare import batch_compare
-from .batch_solve import batch_solve
+from .batch_solve import batch_solve, batch_solve_with_progress
 from .genai._strategy_base import (
     list_gemini_models,
     list_ollama_models,
@@ -170,6 +170,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_batch.add_argument("--solver", choices=["highs", "gurobi"], default="highs", help="Solver to use (default highs)")
+    p_batch.add_argument("--progress", action="store_true", help="Show a progress window with a stop button")
 
     # batch-compare subcommand
     p_batch_compare = subparsers.add_parser(
@@ -286,7 +287,8 @@ def _handle_solve(args: argparse.Namespace) -> int:
 def _handle_batch_solve(args: argparse.Namespace) -> int:
     try:
         with redirect_stdout(sys.stderr):
-            report = batch_solve(args.archive, solver=args.solver)
+            solve_batch = batch_solve_with_progress if args.progress else batch_solve
+            report = solve_batch(args.archive, solver=args.solver)
         failed = any(
             "ERROR" in str(instance.get("status", "")).upper() or "FAIL" in str(instance.get("status", "")).upper()
             for instance in report.get("instances", [])

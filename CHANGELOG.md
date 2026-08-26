@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `--progress` to `batch-solve` for a progress window with instance timing and a stop button.
+
 ### Fixed
 
 ### Changed

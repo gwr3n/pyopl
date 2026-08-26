@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import tempfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Any
+from threading import Event
+from typing import Any, Callable, Optional
 
 from .pyopl_core import solve
 
@@ -173,7 +176,111 @@ def _solve_data_file(
         }
 
 
-def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
+def _format_duration(seconds: float) -> str:
+    total_minutes = max(0, int(seconds / 60))
+    days, remaining_minutes = divmod(total_minutes, 24 * 60)
+    hours, minutes = divmod(remaining_minutes, 60)
+    parts = []
+    if days:
+        parts.append(f"{days} day" if days == 1 else f"{days} days")
+    if hours:
+        parts.append(f"{hours} hour" if hours == 1 else f"{hours} hours")
+    if minutes:
+        parts.append(f"{minutes} minute" if minutes == 1 else f"{minutes} minutes")
+    return " ".join(parts) if parts else "less than 1 minute"
+
+
+def _solve_batch_instances(
+    archive: Path,
+    extraction_root: Path,
+    batches: list[tuple[Path, list[Path]]],
+    solver_name: str,
+    settings: dict[str, Any],
+    models: list[str],
+    records: list[dict[str, Any]],
+    completed: set[tuple[Any, Any]],
+    json_path: Path,
+    markdown_path: Path,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]],
+    stop_event: Optional[Event],
+) -> dict[str, Any]:
+    total_instances = sum(len(data_files) for _, data_files in batches)
+    solved_instances = len(completed)
+    elapsed_solution_time = 0.0
+    if progress_callback:
+        progress_callback(
+            {
+                "event": "started",
+                "total": total_instances,
+                "completed": solved_instances,
+                "remaining": total_instances - solved_instances,
+                "average_solution_time": 0.0,
+            }
+        )
+    for model, data_files in batches:
+        for data_file in data_files:
+            if stop_event is not None and stop_event.is_set():
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "event": "stopped",
+                            "total": total_instances,
+                            "completed": solved_instances,
+                            "remaining": total_instances - solved_instances,
+                            "average_solution_time": (elapsed_solution_time / solved_instances if solved_instances else 0.0),
+                        }
+                    )
+                return _write_report(archive, models, records, json_path, markdown_path)
+            instance_key = (model.as_posix(), data_file.as_posix())
+            if instance_key in completed:
+                continue
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "instance_started",
+                        "model": model.as_posix(),
+                        "data": data_file.as_posix(),
+                        "total": total_instances,
+                        "completed": solved_instances,
+                        "remaining": total_instances - solved_instances,
+                        "average_solution_time": (elapsed_solution_time / solved_instances if solved_instances else 0.0),
+                    }
+                )
+            started_at = time.perf_counter()
+            record = _solve_data_file(
+                extraction_root / model,
+                model.as_posix(),
+                extraction_root / data_file,
+                data_file.as_posix(),
+                solver_name,
+                settings,
+            )
+            elapsed_solution_time += time.perf_counter() - started_at
+            records.append(record)
+            completed.add(instance_key)
+            solved_instances += 1
+            _write_report(archive, models, records, json_path, markdown_path)
+            if progress_callback:
+                progress_callback(
+                    {
+                        "event": "progress",
+                        "model": model.as_posix(),
+                        "data": data_file.as_posix(),
+                        "total": total_instances,
+                        "completed": solved_instances,
+                        "remaining": total_instances - solved_instances,
+                        "average_solution_time": elapsed_solution_time / solved_instances,
+                    }
+                )
+    return _write_report(archive, models, records, json_path, markdown_path)
+
+
+def batch_solve(
+    zip_path: str | Path,
+    solver: str = "highs",
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    stop_event: Optional[Event] = None,
+) -> dict[str, Any]:
     """Solve each folder containing one ``.mod`` and one or more ``.dat`` files."""
     archive = Path(zip_path)
     if archive.suffix.lower() != ".zip":
@@ -200,20 +307,143 @@ def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
         markdown_path = archive.with_suffix(".md")
         records = _load_partial_records(json_path, "highs" if solver_name == "scipy" else solver_name)
         completed = {(record.get("model"), record.get("data")) for record in records}
-        for model, data_files in batches:
-            for data_file in data_files:
-                instance_key = (model.as_posix(), data_file.as_posix())
-                if instance_key in completed:
-                    continue
-                record = _solve_data_file(
-                    extraction_root / model,
-                    model.as_posix(),
-                    extraction_root / data_file,
-                    data_file.as_posix(),
-                    solver_name,
-                    settings,
-                )
-                records.append(record)
-                completed.add(instance_key)
-                _write_report(archive, models, records, json_path, markdown_path)
-        return _write_report(archive, models, records, json_path, markdown_path)
+        return _solve_batch_instances(
+            archive,
+            extraction_root,
+            batches,
+            solver_name,
+            settings,
+            models,
+            records,
+            completed,
+            json_path,
+            markdown_path,
+            progress_callback,
+            stop_event,
+        )
+
+
+def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
+    """Run batch solving with a small Tk progress window and a stop button."""
+    import tkinter as tk
+    from queue import Empty
+    from tkinter import ttk
+
+    events: multiprocessing.Queue = multiprocessing.Queue()
+    process = multiprocessing.Process(target=_batch_solve_worker, args=(str(zip_path), solver, events))
+
+    root = tk.Tk()
+    root.title("PyOPL batch solve")
+    root.resizable(False, False)
+    frame = ttk.Frame(root, padding=16)
+    frame.grid()
+    status = ttk.Label(frame, text="Preparing batch solve...\n\n\n\n\n", anchor="w", justify="left")
+    status.grid(row=0, column=0, sticky="w")
+    progress = ttk.Progressbar(frame, length=360, mode="determinate")
+    progress.grid(row=1, column=0, pady=(10, 8))
+    root.update_idletasks()
+    root.minsize(root.winfo_width(), root.winfo_height())
+
+    def close_window() -> None:
+        root.destroy()
+
+    def show_close_button() -> None:
+        stop_button.configure(text="Close", command=close_window, state="normal")
+
+    def stop_batch() -> None:
+        if process.is_alive():
+            process.terminate()
+        show_close_button()
+
+    stop_button = ttk.Button(frame, text="Stop", command=stop_batch)
+    stop_button.grid(row=2, column=0, sticky="e")
+
+    def poll_events() -> None:
+        try:
+            while True:
+                event = events.get_nowait()
+                if event["event"] == "started":
+                    progress.configure(maximum=event["total"], value=event["completed"])
+                    status.configure(
+                        text=(
+                            f"Benchmark: {Path(zip_path).name}\n"
+                            "Average solution time per instance: n/a\n"
+                            "Estimated time to completion: n/a"
+                        )
+                    )
+                elif event["event"] == "instance_started":
+                    average = event["average_solution_time"]
+                    has_completed_instances = event["completed"] > 0
+                    estimated_completion = average * event["remaining"]
+                    average_text = (
+                        f"Average solution time per instance: {average:.2f}s"
+                        if has_completed_instances
+                        else "Average solution time per instance: n/a"
+                    )
+                    estimated_completion_text = (
+                        f"Estimated time to completion: {_format_duration(estimated_completion)}"
+                        if has_completed_instances
+                        else "Estimated time to completion: n/a"
+                    )
+                    status.configure(
+                        text=(
+                            f"Benchmark: {Path(zip_path).name}\n"
+                            f"Current model: {Path(event['model']).name}\n"
+                            f"Current data: {Path(event['data']).name}\n"
+                            f"Solved {event['completed']} of {event['total']}\n"
+                            f"{average_text}\n" + estimated_completion_text
+                        )
+                    )
+                elif event["event"] in {"progress", "stopped"}:
+                    progress.configure(value=event["completed"])
+                    average = event["average_solution_time"]
+                    estimated_completion = average * event["remaining"]
+                    status.configure(
+                        text=(
+                            f"Benchmark: {Path(zip_path).name}\n"
+                            f"Current model: {Path(event.get('model', '')).name}\n"
+                            f"Current data: {Path(event.get('data', '')).name}\n"
+                            f"Solved {event['completed']} of {event['total']}\n"
+                            f"Average solution time per instance: {average:.2f}s\n"
+                            f"Estimated time to completion: {_format_duration(estimated_completion)}"
+                        )
+                    )
+                    if event["event"] == "stopped":
+                        stop_button.configure(state="disabled")
+                elif event["event"] == "finished":
+                    show_close_button()
+        except Empty:
+            pass
+        if process.is_alive() or not events.empty():
+            root.after(100, poll_events)
+
+    process.start()
+    root.after(100, poll_events)
+    root.mainloop()
+    process.join()
+    if process.exitcode not in (0, None):
+        report_path = Path(zip_path).with_suffix(".json")
+        if report_path.is_file():
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                if isinstance(report, dict):
+                    return report
+            except (OSError, json.JSONDecodeError):
+                pass
+        raise RuntimeError("Batch solve process was interrupted")
+    report_path = Path(zip_path).with_suffix(".json")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("Batch solve did not produce a report") from error
+    if not isinstance(report, dict):
+        raise RuntimeError("Batch solve produced an invalid report")
+    return report
+
+
+def _batch_solve_worker(zip_path: str, solver: str, events: multiprocessing.Queue) -> None:
+    stop_event = Event()
+    try:
+        batch_solve(zip_path, solver=solver, progress_callback=events.put, stop_event=stop_event)
+    finally:
+        events.put({"event": "finished"})
