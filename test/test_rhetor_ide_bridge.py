@@ -77,9 +77,7 @@ class TestRhetorIDEBridge(unittest.TestCase):
             request_thread = threading.Thread(target=request_bridge)
             request_thread.start()
             while request_thread.is_alive():
-                bridge.process_pending(
-                    lambda method, path, payload: {"method": method, "path": path, "payload": payload}
-                )
+                bridge.process_pending(lambda method, path, payload: {"method": method, "path": path, "payload": payload})
                 request_thread.join(timeout=0.01)
 
             bridge.stop()
@@ -144,8 +142,9 @@ class TestRhetorIDEBridge(unittest.TestCase):
                 headers={"Authorization": f"Bearer {info['token']}"},
             )
 
-            with self.assertRaises(urllib.error.HTTPError) as raised, patch.object(
-                bridge_module, "BRIDGE_REQUEST_TIMEOUT", 0.01
+            with (
+                self.assertRaises(urllib.error.HTTPError) as raised,
+                patch.object(bridge_module, "BRIDGE_REQUEST_TIMEOUT", 0.01),
             ):
                 urllib.request.urlopen(request)
 

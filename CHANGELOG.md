@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added regression coverage for compiler validation helpers, bound-expression arithmetic, condition splicing, convex extrema lowering, reserved names, missing model files, and Rhetor MCP/IDE bridge behavior.
+
 ### Fixed
 
 - Displayed the same `PyOPL: compiling model...` status message before both Gurobi and SciPy compilation.

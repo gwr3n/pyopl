@@ -916,6 +916,28 @@ class TestPyOPLParser(TestPyOPL):
 
 
 class TestPyOPLCompiler(TestPyOPL):
+    def test_eval_bound_expr_binop(self):
+        compiler = OPLCompiler()
+        working_data = {"limit": 6, "offset": 2}
+
+        def number(value):
+            return {"type": "number", "value": value}
+
+        def name(value):
+            return {"type": "name", "value": value}
+
+        def binop(operator, left, right):
+            return {"type": "binop", "op": operator, "left": left, "right": right}
+
+        self.assertEqual(compiler._eval_bound_expr(binop("+", name("limit"), number(2)), working_data), 8)
+        self.assertEqual(compiler._eval_bound_expr(binop("-", name("limit"), name("offset")), working_data), 4)
+        self.assertEqual(compiler._eval_bound_expr(binop("*", name("offset"), number(3)), working_data), 6)
+        self.assertEqual(compiler._eval_bound_expr(binop("/", number(7), number(2)), working_data), 3)
+        self.assertEqual(
+            compiler._eval_bound_expr(binop("+", binop("*", name("offset"), number(2)), number(1)), working_data),
+            5,
+        )
+
     def test_computed_param_algebraic_functions(self):
         model_code = """
             range T = 1..3;

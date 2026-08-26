@@ -227,9 +227,7 @@ class TestRhetorMCP(unittest.TestCase):
 
     def test_request_running_ide_translates_http_and_connection_errors(self):
         connection = {"host": "127.0.0.1", "port": 1234, "token": "token"}
-        http_error = urllib.error.HTTPError(
-            "http://127.0.0.1", 400, "bad", {}, io.BytesIO(b'{"error":"denied"}')
-        )
+        http_error = urllib.error.HTTPError("http://127.0.0.1", 400, "bad", {}, io.BytesIO(b'{"error":"denied"}'))
         for error, message in (
             (http_error, "Rhetor IDE rejected the request: denied"),
             (urllib.error.URLError("offline"), "Could not connect to the running Rhetor IDE"),
@@ -275,6 +273,7 @@ class TestRhetorMCP(unittest.TestCase):
 
         self.assertEqual(result["feedback"], "Plain language feedback")
         self.assertIn("Plain language feedback", result["markdown"])
+
     def test_provider_normalization_and_llm_kwargs(self):
         self.assertEqual(_rhetor_mcp._normalize_solver("highs"), "scipy")
         self.assertEqual(_rhetor_mcp._solve_backend("GUROBI"), "gurobi")

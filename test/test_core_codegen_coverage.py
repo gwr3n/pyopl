@@ -1294,6 +1294,80 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "requires integer indices"):
             compiler._materialize_computed_parameters(ast, {"arr": [1]})
 
+    def test_core_validation_helpers_cover_valid_and_invalid_shapes(self):
+        compiler = OPLCompiler()
+        model_ast = {
+            "declarations": [
+                {"type": "range_declaration_inline", "name": "Items", "start": _num(1), "end": _num(2)},
+                {"type": "typed_set", "base_type": "int", "name": "Labels", "value": None},
+            ]
+        }
+        data = {"Labels": [1, 2]}
+
+        compiler._validate_typed_sets(model_ast, data)
+        compiler._validate_parameter_shape([10, 20], [{"type": "named_range", "name": "Items"}], "cost", model_ast, data)
+
+        with self.assertRaisesRegex(SemanticError, "does not match declared dimension"):
+            compiler._validate_parameter_shape([10], [{"type": "named_range", "name": "Items"}], "cost", model_ast, data)
+        with self.assertRaisesRegex(SemanticError, "expected a 1D array"):
+            compiler._validate_parameter_shape(10, [{"type": "named_range", "name": "Items"}], "cost", model_ast, data)
+        with self.assertRaisesRegex(SemanticError, "All elements of set 'Labels' must be integers"):
+            compiler._validate_typed_set_values("Labels", "int", [1, True])
+
+    def test_core_compiler_rewrites_ground_conditions_and_convex_extrema(self):
+        compiler = OPLCompiler()
+        ast = {
+            "declarations": [{"type": "dvar", "var_type": "float+", "name": "x"}],
+            "objective": {
+                "type": "minimize",
+                "expression": {"type": "maxl", "args": [_name("x"), _num(0)]},
+            },
+            "constraints": [
+                {
+                    "type": "if_constraint",
+                    "condition": _cmp(_num(1), "==", _num(1)),
+                    "then_constraints": [{"type": "constraint", "op": ">=", "left": _name("x"), "right": _num(0)}],
+                    "else_constraints": [{"type": "constraint", "op": "<=", "left": _name("x"), "right": _num(-1)}],
+                }
+            ],
+        }
+
+        compiler._evaluate_and_splice_if_constraints(ast, {})
+        compiler._lower_maxmin_convex(ast)
+
+        self.assertEqual(len(ast["constraints"]), 3)
+        self.assertEqual(ast["objective"]["expression"]["type"], "name")
+        self.assertTrue(all(constraint.get("type") == "constraint" for constraint in ast["constraints"]))
+
+    def test_core_named_range_and_reserved_name_errors(self):
+        compiler = OPLCompiler()
+        ast = {
+            "declarations": [
+                {
+                    "type": "parameter_external_indexed",
+                    "name": "cost",
+                    "dimensions": [{"type": "named_range_dimension", "name": "Items"}],
+                }
+            ],
+            "objective": {},
+            "constraints": [],
+        }
+
+        with self.assertRaisesRegex(SemanticError, "must be declared with explicit bounds"):
+            compiler._validate_named_ranges(ast, {"Items": {"type": "range_data", "start": 1, "end": 2}})
+
+        with self.assertRaisesRegex(SemanticError, "reserved"):
+            compiler._validate_reserved_model_names([{"type": "dvar", "name": "len"}], {})
+
+    def test_load_opl_model_reports_missing_files(self):
+        from pyopl.pyopl_core import load_opl_model
+
+        ast, code, data = load_opl_model("/tmp/pyopl_missing_model.mod")
+
+        self.assertIsNone(ast)
+        self.assertIsNone(code)
+        self.assertIsNone(data)
+
     def test_gurobi_bounds_and_composite_implication_helpers(self):
         ast = {
             "declarations": [
