@@ -9,8 +9,13 @@ block_comment ::= "/*" ( [^*] | "*" [^/] )* "*/"
 // --- Tokens and atoms ---
 NAME ::= [A-Za-z_] [A-Za-z0-9_]*
 NUMBER ::= ( [0-9]+ ( "." [0-9]+ )? | "." [0-9]+ ) ( [eE] [+\-]? [0-9]+ )?
+SIGNED_NUMBER ::= "-"? NUMBER
+DATA_NUMBER ::= [+-]? NUMBER
 BOOLEAN_LITERAL ::= "true" | "false"
-STRING_LITERAL ::= "\"" ([^"\\])* "\""
+STRING_LITERAL ::= "\"" [^"]* "\""
+
+// The active lexers reserve true/false by prefix, so names beginning with either
+// word are not usable even though that exclusion is not expressible in NAME above.
 
 // Operators and symbols appear as literals in productions.
 
@@ -33,8 +38,7 @@ constraint_list ::= constraint+
 
 // Constraint forms
 constraint ::=
-      expression _ "=>" _ expression _ ";" _
-    | expression _ ";" _
+  expression _ ";" _
     | NAME _ ":" _ expression _ ";" _
     | "forall" _ forall_index_header _ constraint _
     | "forall" _ forall_index_header _ constraint_block _
@@ -56,6 +60,7 @@ declaration ::=
     | untyped_set_declaration
     | typed_set_declaration
     | set_of_tuples_declaration
+    | set_of_tuples_array_declaration
     | untyped_tuple_set_assignment
     | tuple_type_declaration
     | tuple_array_declaration
@@ -86,6 +91,7 @@ typed_set_declaration ::=
     | "{" _ "string" _ "}" _ NAME _ ";" _
     | "{" _ "string" _ "}" _ NAME _ "=" _ "..." _ ";" _
     | "{" _ "int" _ "}" _ NAME _ "=" _ "{" _ element_list_int _ "}" _ ";" _
+    | "{" _ "int" _ "}" _ NAME _ "=" _ "{" _ scalar_comprehension _ "}" _ ";" _
     | "{" _ "int" _ "}" _ NAME _ ";" _
     | "{" _ "int" _ "}" _ NAME _ "=" _ "..." _ ";" _
     | "{" _ "float" _ "}" _ NAME _ "=" _ "{" _ element_list_float _ "}" _ ";" _
@@ -97,12 +103,17 @@ typed_set_declaration ::=
 
 // Note: empty literal sets like `{}` are not accepted by the current parser.
 element_list_string  ::= STRING_LITERAL (_ "," _ STRING_LITERAL)*
-element_list_int     ::= NUMBER_INT (_ "," _ NUMBER_INT)*
-element_list_float   ::= NUMBER (_ "," _ NUMBER)*
+element_list_int     ::= SIGNED_NUMBER_INT (_ "," _ SIGNED_NUMBER_INT)*
+element_list_float   ::= SIGNED_NUMBER (_ "," _ SIGNED_NUMBER)*
 element_list_boolean ::= BOOLEAN_LITERAL (_ "," _ BOOLEAN_LITERAL)*
 
-// Helpers to constrain ints in {int} element list
+// Filtered scalar comprehensions are currently accepted for {int} declarations only.
+scalar_comprehension ::= scalar_comprehension_value _ "|" _ sum_index_list _ opt_index_constraint
+scalar_comprehension_value ::= NAME | NUMBER | STRING_LITERAL
+
+// Helpers to constrain ints in {int} element lists
 NUMBER_INT ::= [0-9]+
+SIGNED_NUMBER_INT ::= "-"? NUMBER_INT
 
 // --- set of tuples (typed by tuple type)
 set_of_tuples_declaration ::=
@@ -110,6 +121,10 @@ set_of_tuples_declaration ::=
     | "{" _ NAME _ "}" _ NAME _ ";" _
     | "{" _ NAME _ "}" _ NAME _ "=" _ "..." _ ";" _
     | "{" _ NAME _ "}" _ NAME _ "=" _ "{" _ tuple_comprehension _ "}" _ ";" _
+
+// External indexed array whose value at each index is a set of tuples.
+set_of_tuples_array_declaration ::=
+      "{" _ NAME _ "}" _ NAME _ indexed_dimensions _ "=" _ "..." _ ";" _
 
 // --- untyped set-of-tuples assignment (model; only tuple literals allowed on RHS)
 untyped_tuple_set_assignment ::= NAME _ "=" _ "{" _ tuple_literal_list_model _ "}" _ ";" _
@@ -164,7 +179,7 @@ index_specifier ::=
 range_expr ::= expression                     // must be int-valued (semantic)
 
 // Shared in sum/forall/dexpr
-IN_RANGE ::= ( expression _ ".." _ expression ) | NAME
+IN_RANGE ::= ( expression _ ".." _ expression ) | NAME | NAME _ indexed_dimensions
 
 // --- forall/sum headers
 forall_index_header ::= "(" _ sum_index_list _ opt_index_constraint _ ")" _
@@ -177,7 +192,9 @@ opt_index_constraint ::= ( ":" _ expression )?
 
 
 // --- Expressions (precedence tower; no left recursion) ---
-expression ::= conditional_expr
+// Implication is right-associative and is available anywhere an expression is accepted.
+expression ::= implication_expr
+implication_expr ::= conditional_expr ( _ "=>" _ implication_expr )?
 
 // conditional ternary – condition must be parenthesized (per spec and parser)
 conditional_expr ::=
@@ -224,10 +241,10 @@ function_call ::=
 arg_list ::= expression ( _ "," _ expression )*
 
 // --- Tuple literals
-// Model tuple literals allow names, Boolean literals, nested tuples, and empty `<>`.
+// Model tuple components use a restricted arithmetic tower shared with comprehensions.
 tuple_literal_model ::= "<" _ tuple_element_list_model_opt _ ">" _
 tuple_element_list_model_opt ::= (tuple_element_model (_ "," _ tuple_element_model)*)?
-tuple_element_model ::= NAME | STRING_LITERAL | NUMBER | BOOLEAN_LITERAL | tuple_literal_model
+tuple_element_model ::= tuple_comprehension_additive
 
 // Non-empty tuple literal lists (model)
 tuple_literal_list_model ::= tuple_literal_model ( _ "," _ tuple_literal_model )*
@@ -235,20 +252,24 @@ tuple_literal_list_model ::= tuple_literal_model ( _ "," _ tuple_literal_model )
 // Tuple comprehension (model)
 tuple_comprehension ::= "<" _ tuple_comprehension_element_list _ ">" _ "|" _ sum_index_list _ opt_index_constraint
 tuple_comprehension_element_list ::= tuple_comprehension_element ( _ "," _ tuple_comprehension_element )*
-tuple_comprehension_element ::= tuple_element_model | indexed_name | "(" _ tuple_comprehension_element _ ")" | "-" _ tuple_comprehension_element | tuple_comprehension_element _ ("+" | "-" | "*" | "/" | "%") _ tuple_comprehension_element
+tuple_comprehension_element ::= tuple_comprehension_additive
+tuple_comprehension_additive ::= tuple_comprehension_multiplicative ( _ ("+" | "-") _ tuple_comprehension_multiplicative )*
+tuple_comprehension_multiplicative ::= tuple_comprehension_unary ( _ ("*" | "/" | "%") _ tuple_comprehension_unary )*
+tuple_comprehension_unary ::= "-" _ tuple_comprehension_unary | tuple_comprehension_atom
+tuple_comprehension_atom ::= NAME | NUMBER | STRING_LITERAL | BOOLEAN_LITERAL | tuple_literal_model | indexed_name | "(" _ tuple_comprehension_additive _ ")"
+indexed_name ::= NAME _ tuple_comprehension_dimensions
+tuple_comprehension_dimensions ::= ( "[" _ tuple_comprehension_additive _ "]" _ )+
 
 
-// --- Arrays (nested) for inline params (.mod) ---
+// --- Arrays (nested) for inline params (.mod); scalar entries only ---
 array_value ::= "[" _ row_list _ "]"
 row_list ::=
       row_list _ "," _ scalar_value
     | scalar_value
     | row_list _ "," _ array_value
     | array_value
-    | row_list _ "," _ tuple_literal_data
-    | tuple_literal_data
 
-scalar_value ::= NUMBER | STRING_LITERAL | BOOLEAN_LITERAL
+scalar_value ::= SIGNED_NUMBER | STRING_LITERAL | BOOLEAN_LITERAL
 
 
 // ------------ DATA FILE (.dat) GRAMMAR ------------
@@ -256,11 +277,11 @@ data_file ::= data_declaration_list
 data_declaration_list ::= data_declaration*
 
 data_declaration ::=
-    | NAME _ "=" _ scalar_value _ ";" _
+    | NAME _ "=" _ data_scalar_value _ ";" _
     | NAME _ "=" _ set_value _ ";" _
-    | NAME _ "=" _ array_value _ ";" _
+    | NAME _ "=" _ data_array_value _ ";" _
     | NAME _ "=" _ key_value_array _ ";" _
-    | NAME _ "=" _ NUMBER _ ".." _ NUMBER _ ";" _
+    | NAME _ "=" _ DATA_NUMBER _ ".." _ DATA_NUMBER _ ";" _
     | set_of_tuples_data_assignment
 
 // Set-of-tuples in .dat (untyped or typed)
@@ -269,23 +290,40 @@ set_of_tuples_data_assignment ::=
 
 // set values for .dat scalar sets
 set_value ::= "{" _ element_list_scalar _ "}"
-element_list_scalar ::= scalar_value ( _ "," _ scalar_value )*
+element_list_scalar ::= data_scalar_value ( _ "," _ data_scalar_value )*
 
 // Key-value arrays (string/tuple keys -> scalar or array)
 key_value_array ::= "[" _ key_value_row_list _ "]"
 key_value_row_list ::= key_value_row (_ "," _ key_value_row)* _ ("," _)?
 key_value_row ::=
-      STRING_LITERAL _ scalar_value
-    | tuple_literal_data _ scalar_value
-    | STRING_LITERAL _ array_value
-    | tuple_literal_data _ array_value
+      STRING_LITERAL _ data_scalar_value
+    | tuple_literal_data _ data_scalar_value
+    | STRING_LITERAL _ data_array_value
+    | tuple_literal_data _ data_array_value
+
+// Data arrays may recursively contain scalars, tuple literals, and tuple-set values.
+data_array_value ::= "[" _ data_row_list _ "]"
+data_row_list ::=
+      data_row_list _ "," _ data_scalar_value
+    | data_scalar_value
+    | data_row_list _ "," _ data_array_value
+    | data_array_value
+    | data_row_list _ "," _ tuple_literal_data
+    | tuple_literal_data
+    | data_row_list _ "," _ tuple_set_value
+    | tuple_set_value
+
+tuple_set_value ::=
+      "{" _ tuple_literal_list_data _ "}"
+    | "{" _ "}"
 
 // Data tuple literals do NOT allow NAME elements.
 // Empty tuples `<>` are allowed (align with implementation).
 tuple_literal_data ::= "<" _ tuple_element_list_data _ ">" _
                   | "<" _ ">" _
 tuple_element_list_data ::= tuple_element_data ( _ "," _ tuple_element_data )*
-tuple_element_data ::= scalar_value | tuple_literal_data
+tuple_element_data ::= data_scalar_value | tuple_literal_data
+data_scalar_value ::= DATA_NUMBER | STRING_LITERAL | BOOLEAN_LITERAL
 
 // Non-empty tuple literal lists (data)
 tuple_literal_list_data ::= tuple_literal_data ( _ "," _ tuple_literal_data )*
