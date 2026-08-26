@@ -37,6 +37,39 @@ class TestBatchSolve(unittest.TestCase):
             self.assertEqual(report["model"], "knapsack/model.mod")
             self.assertEqual(report["instances"][0]["data"], "knapsack/data.dat")
 
+    def test_recursively_solves_every_model_folder_and_continues_after_errors(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "nested.zip"
+            with zipfile.ZipFile(archive, "w") as batch_archive:
+                batch_archive.writestr("first/model.mod", "invalid model")
+                batch_archive.writestr("first/data.dat", "data")
+                batch_archive.writestr("collection/second/model.mod", "valid model")
+                batch_archive.writestr("collection/second/a.dat", "data")
+                batch_archive.writestr("collection/second/b.dat", "data")
+                batch_archive.writestr("collection/ignored.dat", "no model in this folder")
+
+            def fake_solve(model, data, solver, solver_settings):
+                if model.endswith("first/model.mod"):
+                    raise ValueError("model failed to compile")
+                return {"status": "OPTIMAL"}
+
+            with patch("pyopl.batch_solve.solve", side_effect=fake_solve) as solve_mock:
+                report = batch_solve(archive)
+
+            self.assertEqual(solve_mock.call_count, 3)
+            self.assertEqual(
+                [(record["model"], record["data"], record["status"]) for record in report["instances"]],
+                [
+                    ("collection/second/model.mod", "collection/second/a.dat", "OPTIMAL"),
+                    ("collection/second/model.mod", "collection/second/b.dat", "OPTIMAL"),
+                    ("first/model.mod", "first/data.dat", "ERROR"),
+                ],
+            )
+            self.assertEqual(report["models"], ["collection/second/model.mod", "first/model.mod"])
+            self.assertIn("model failed to compile", report["instances"][2]["message"])
+            self.assertTrue(archive.with_suffix(".json").exists())
+            self.assertIn("| model | data | solver |", archive.with_suffix(".md").read_text(encoding="utf-8"))
+
     def test_ignores_macos_archive_metadata(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             archive = Path(temporary_directory) / "metadata.zip"
@@ -93,9 +126,9 @@ class TestBatchSolve(unittest.TestCase):
             payload = json.loads((root / "knapsack.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["instances"][1]["status"], "ERROR")
             markdown = (root / "knapsack.md").read_text(encoding="utf-8")
-            self.assertIn("| data | solver | status |", markdown)
-            self.assertIn("| data | solver | status | objective_value | message | runtime |", markdown)
-            self.assertIn("| a.dat | highs | OPTIMAL | 4 | solver message | 0.1 |", markdown)
+            self.assertIn("| model | data | solver | status |", markdown)
+            self.assertIn("| model | data | solver | status | objective_value | message | runtime |", markdown)
+            self.assertIn("| model.mod | a.dat | highs | OPTIMAL | 4 | solver message | 0.1 |", markdown)
             self.assertEqual(markdown.splitlines()[2].count("message"), 1)
             self.assertNotIn('{"runtime":0.1}', markdown)
 

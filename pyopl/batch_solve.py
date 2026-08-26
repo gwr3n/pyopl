@@ -28,6 +28,21 @@ def _archive_members(batch_archive: zipfile.ZipFile) -> list[Path]:
     ]
 
 
+def _model_batches(members: list[Path]) -> list[tuple[Path, list[Path]]]:
+    folders = sorted({member.parent for member in members}, key=lambda path: path.as_posix().lower())
+    batches: list[tuple[Path, list[Path]]] = []
+    for folder in folders:
+        folder_members = [member for member in members if member.parent == folder]
+        models = [member for member in folder_members if member.suffix.lower() == ".mod"]
+        data_files = sorted(
+            (member for member in folder_members if member.suffix.lower() == ".dat"),
+            key=lambda path: path.as_posix().lower(),
+        )
+        if len(models) == 1 and data_files:
+            batches.append((models[0], data_files))
+    return batches
+
+
 def _json_safe(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
@@ -53,15 +68,15 @@ def _markdown_value(value: Any) -> str:
 
 
 def _make_markdown(records: list[dict[str, Any]]) -> str:
-    report_columns = {"data", "solver", "status", "objective_value", "message"}
+    report_columns = {"model", "data", "solver", "status", "objective_value", "message"}
     include_message = any(record.get("solver") != "gurobi" for record in records)
     stat_names = sorted(
         {str(name) for record in records for name in record.get("stats", {}) if str(name) not in report_columns},
         key=str.lower,
     )
-    columns = ["data", "solver", "status", "objective_value", *stat_names]
+    columns = ["model", "data", "solver", "status", "objective_value", *stat_names]
     if include_message:
-        columns.insert(4, "message")
+        columns.insert(5, "message")
     lines = [
         "# Batch solve results",
         "",
@@ -107,14 +122,20 @@ def _solver_configuration(members: list[Path], extraction_root: Path, solver_nam
 
 
 def _solve_data_file(
-    model_path: Path, data_path: Path, data_name: str, solver_name: str, settings: dict[str, Any]
+    model_path: Path,
+    model_name: str,
+    data_path: Path,
+    data_name: str,
+    solver_name: str,
+    settings: dict[str, Any],
 ) -> dict[str, Any]:
     public_solver = "highs" if solver_name == "scipy" else solver_name
     try:
         result = solve(str(model_path), str(data_path), solver=solver_name, solver_settings=settings)
-        return {"data": data_name, "solver": public_solver, **_json_safe(result)}
+        return {"model": model_name, "data": data_name, "solver": public_solver, **_json_safe(result)}
     except Exception as error:
         return {
+            "model": model_name,
             "data": data_name,
             "solver": public_solver,
             "status": "ERROR",
@@ -126,7 +147,7 @@ def _solve_data_file(
 
 
 def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
-    """Solve every ``.dat`` file in *zip_path* and write sibling reports."""
+    """Solve each folder containing one ``.mod`` and one or more ``.dat`` files."""
     archive = Path(zip_path)
     if archive.suffix.lower() != ".zip":
         raise ValueError("Batch archive must have a .zip extension")
@@ -141,29 +162,30 @@ def batch_solve(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
         extraction_root = Path(temporary_directory)
         with zipfile.ZipFile(archive) as batch_archive:
             members = _archive_members(batch_archive)
-            models = [member for member in members if member.suffix.lower() == ".mod"]
-            if len(models) != 1:
-                raise ValueError("Batch archive must contain exactly one .mod file; " f"found {len(models)}")
-            data_files = [member for member in members if member.suffix.lower() == ".dat"]
-            if not data_files:
-                raise ValueError("Batch archive must contain at least one .dat file")
+            batches = _model_batches(members)
+            if not batches:
+                raise ValueError("Batch archive must contain a folder with exactly one .mod and at least one .dat file")
             _extract_safely(batch_archive, extraction_root)
-            model_path = extraction_root / models[0]
             settings = _solver_configuration(members, extraction_root, solver_name)
 
         records: list[dict[str, Any]] = []
-        for data_file in sorted(data_files, key=lambda path: str(path).lower()):
-            records.append(
-                _solve_data_file(
-                    model_path,
-                    extraction_root / data_file,
-                    data_file.as_posix(),
-                    solver_name,
-                    settings,
+        for model, data_files in batches:
+            for data_file in data_files:
+                records.append(
+                    _solve_data_file(
+                        extraction_root / model,
+                        model.as_posix(),
+                        extraction_root / data_file,
+                        data_file.as_posix(),
+                        solver_name,
+                        settings,
+                    )
                 )
-            )
 
-    report = {"archive": archive.name, "model": models[0].as_posix(), "instances": records}
+    models = [model.as_posix() for model, _ in batches]
+    report = {"archive": archive.name, "models": models, "instances": records}
+    if len(models) == 1:
+        report["model"] = models[0]
     json_path = archive.with_suffix(".json")
     markdown_path = archive.with_suffix(".md")
     json_path.write_text(json.dumps(_json_safe(report), indent=2) + "\n", encoding="utf-8")
