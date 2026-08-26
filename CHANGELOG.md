@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded the PyOPL grammar documentation with the implemented BNF, declaration and expression rules, semantic clarifications, backend limitations, and model/data examples.
+
 ### Removed
 
 ## [v2.4.7] - 2026-08-26

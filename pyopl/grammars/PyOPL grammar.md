@@ -50,7 +50,7 @@ Notes:
 - Boolean objectives are allowed.
 - `forall` is statement-level (constraints); `sum`/`min`/`max` aggregates are expressions.
 - Field access (`a.b`) follows tuple typing metadata and supports chaining.
-- Tuple literals in models support strings, numbers, booleans, names, and nested tuples.
+- Tuple literals in models support strings, numbers, booleans, names, indexed names, nested tuples, and restricted arithmetic components.
 - Tuple comprehensions support arithmetic components and indexed parameter lookups, such as `<i, i+1, Cost[i]>`.
 - Computed parameters may use tuple field access in indices, such as `Cost[a.to]`.
 - In model files, scalar sets must be typed; untyped set assignments in models are only allowed for sets of tuples (tuple literals only).
@@ -71,6 +71,10 @@ Comments are discarded by the lexer and may appear anywhere whitespace is allowe
 ```
 
 `//` and `#` comments end at the next newline or the end of the file. Block comments may span lines and end at the first `*/`; nested block comments are not supported. Comment markers inside string literals are string content, not comments.
+
+Lexical restrictions:
+- Strings have no escape syntax and end at the next `"` character; a backslash is treated as ordinary content.
+- Lowercase `true` and `false` are reserved by prefix in both lexers, so identifiers beginning with either word are not usable.
 
 #### IDE section markers (`§`)
 
@@ -112,8 +116,7 @@ Clarification:
 ### Constraints
 
 ```
-<constraint> ::= <expression> '=>' <expression> ';'              // implication
-               | <expression> ';'                                // standard or boolean-equals-true
+<constraint> ::= <expression> ';'                                // standard, implication, or boolean-equals-true
                | <NAME> ':' <expression> ';'                     // labelled
                | 'forall' <forall_index_header> <NAME> ':' <expression> ';'  // labelled-single inside forall
                | 'forall' <forall_index_header> <constraint>     // single (including implication)
@@ -158,7 +161,7 @@ forall(h in H)
 
 Semantics:
 - In `<expression> ';'`, if the expression is a comparison, it is used directly; if it is boolean-valued, it is equated to `true`.
-- Implication sides accept constraints or boolean expressions; boolean expressions are normalized to equality with `true`.
+- Implication is a right-associative boolean expression; its operands must be boolean-valued. In constraint position, boolean operands are normalized to equality with `true` where required.
 - `if` condition must be ground (no decision variables); conditions inside `forall` may reference iterators and parameters only.
 
 ### Declarations
@@ -169,6 +172,7 @@ Types include tuple type names as identifiers.
 // Decision variables (numeric/boolean only; string not allowed)
 <declaration> ::= 'dvar' <dvar_type> <NAME> ';'
                 | 'dvar' <dvar_type> <NAME> <indexed_dimensions> ';'
+                | 'dvar' <dvar_type> <NAME> <dexpr_index_headers> 'in' <expression> '..' <expression> ';'
 
 // Ranges
                 | 'range' <NAME> '=' <range_expr> '..' <range_expr> ';'
@@ -299,9 +303,6 @@ Decision expressions (expanded on use):
 // Indexed dexpr with strict nested headers:
                      | 'dexpr' <type> <NAME> <dexpr_index_headers> '=' <expression> ';'
 
-// Iterator-style indexed decision variable with per-index bounds:
-<dvar_declaration>  ::= 'dvar' <type> <NAME> <dexpr_index_headers> 'in' <expression> '..' <expression> ';'
-
 // dexpr index headers:
 <dexpr_index_header>  ::= '[' <dexpr_index_list> ']'
 <dexpr_index_headers> ::= '[' <dexpr_index_list> ']' ( '[' <dexpr_index_list> ']' )*
@@ -346,7 +347,9 @@ Parameters (param keyword optional; external or inline; arrays or expressions):
 <range_expr> ::= <expression>                           // must be integer-valued
 
 // Shared by sum/forall/dexpr:
-<IN_RANGE> ::= <expression> '..' <expression> | <NAME>  // NAME may denote a named range or a named set
+<IN_RANGE> ::= <expression> '..' <expression>
+             | <NAME>                                  // named range or set
+             | <NAME> <indexed_dimensions>             // indexed array of tuple sets
 ```
 
 Index expressions accept:
@@ -357,14 +360,18 @@ Index expressions accept:
 
 Clarifications:
 - Range bounds and literal indices must be non-negative integers; for ranges, start ≤ end is required.
+- Declaration dimensions are narrower than reference indices: each must be a range expression or a name resolving to a declared range or set. Literal, string, tuple, indexed-name, and arithmetic declaration domains are rejected.
+- An indexed iterator domain such as `e in Edges[i]` must refer to an indexed array of tuple sets.
 - When a named range is used in iterators or indexing, it must be declared in the model (e.g., `range T = 1..N;`). A .dat-only assignment `T = 1..N;` is not sufficient for iterators/indexing.
 
 ### Expressions
 
-Precedence from lowest to highest: `? :`, `||`, `&&`, comparisons (`== != <= >= < >`), `+ -`, `* / %`, unary `!/-`, field access `.` (tightest, right-associative).
+Precedence from lowest to highest: `=>`, `? :`, `||`, `&&`, equality (`== !=`), relational comparisons (`<= >= < >`), `+ -`, `* / %`, unary `!/-`, field access `.` (tightest). Implication and ternary are right-associative.
 
 ```
-<expression> ::= <conditional>
+<expression> ::= <implication>
+<implication> ::= <conditional>
+                | <conditional> '=>' <implication>
 
 <conditional> ::= <logic_or>
                 | '(' <expression> ')' '?' <expression> ':' <expression>   // condition must be parenthesized
@@ -376,11 +383,8 @@ Precedence from lowest to highest: `? :`, `||`, `&&`, comparisons (`== != <= >= 
              | <equality> '!=' <relational>
              | <relational>
 
-<relational> ::= <relational> '<' <additive>
-               | <relational> '>' <additive>
-               | <relational> '<=' <additive>
-               | <relational> '>=' <additive>
-               | <additive>
+<relational> ::= <additive>
+               | <additive> ('<' | '>' | '<=' | '>=') <additive>
 
 <additive> ::= <additive> '+' <multiplicative>
              | <additive> '-' <multiplicative>
@@ -404,6 +408,7 @@ Precedence from lowest to highest: `? :`, `||`, `&&`, comparisons (`== != <= >= 
             | <min_aggregate>
             | <max_aggregate>
             | <function_call>
+            | <tuple_literal>
             | '(' <expression> ')'
             | <primary> '.' <NAME>             // field access (chained; right-assoc)
 ```
@@ -428,7 +433,7 @@ Functions and aggregates:
 
 <arg_list> ::= <expression> | <expression> ',' <arg_list>
 
-<nonparen_expression> ::= <primary>
+<nonparen_expression> ::= <multiplicative>
 <parenthesized_expression> ::= '(' <expression> ')'
 ```
 
@@ -455,12 +460,20 @@ Sum/forall headers:
 <tuple_literal_list> ::= <tuple_literal_list> ',' <tuple_literal> | <tuple_literal>
 <tuple_literal> ::= '<' <tuple_element_list> '>' | '<>'
 <tuple_element_list> ::= <tuple_element_list> ',' <tuple_element> | <tuple_element>
-<tuple_element> ::= <NAME> | <STRING_LITERAL> | <NUMBER> | <BOOLEAN_LITERAL> | <tuple_literal>
+<tuple_element> ::= <tuple_component_additive>
+<tuple_component_additive> ::= <tuple_component_additive> ('+' | '-') <tuple_component_multiplicative>
+                             | <tuple_component_multiplicative>
+<tuple_component_multiplicative> ::= <tuple_component_multiplicative> ('*' | '/' | '%') <tuple_component_unary>
+                                   | <tuple_component_unary>
+<tuple_component_unary> ::= '-' <tuple_component_unary> | <tuple_component_atom>
+<tuple_component_atom> ::= <NAME> | <NUMBER> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
+                         | <tuple_literal> | <indexed_name> | '(' <tuple_component_additive> ')'
+<indexed_name> ::= <NAME> ('[' <tuple_component_additive> ']')+
 
 // Typed scalar set element lists (model)
 <element_list_string> ::= <element_list_string> ',' <STRING_LITERAL> | <STRING_LITERAL>
-<element_list_int> ::= <element_list_int> ',' <NUMBER> | <NUMBER>                    // integers only
-<element_list_float> ::= <element_list_float> ',' <NUMBER> | <NUMBER>                // coerced to float
+<element_list_int> ::= <element_list_int> ',' <signed_number> | <signed_number>      // integers only
+<element_list_float> ::= <element_list_float> ',' <signed_number> | <signed_number>  // coerced to float
 <element_list_boolean> ::= <element_list_boolean> ',' <BOOLEAN_LITERAL> | <BOOLEAN_LITERAL>
 
 // Inline arrays for parameters (model) — nested arrays; entries may be number/string/boolean
@@ -470,7 +483,8 @@ Sum/forall headers:
              | <row_list> ',' <array_value>
              | <array_value>
 
-<scalar_value> ::= <NUMBER> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
+<scalar_value> ::= <signed_number> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
+<signed_number> ::= <NUMBER> | '-' <NUMBER>
 ```
 
 Important modeling rule:
@@ -479,49 +493,48 @@ Important modeling rule:
 ### Data File Grammar (.dat)
 
 ```
-<data_file> ::= <data_declaration_list>
+<data_file> ::= <data_declaration_list> | ε
 <data_declaration_list> ::= <data_declaration_list> <data_declaration> | <data_declaration>
 
-<data_declaration> ::= <NAME> '=' <scalar_value> ';'
+<data_declaration> ::= <NAME> '=' <data_scalar_value> ';'
                      | <NAME> '=' <set_value> ';'
                      | <NAME> '=' <data_array_value> ';'
                      | <NAME> '=' <key_value_array> ';'          // map-like array: string/tuple -> scalar/array
-                     | <NAME> '=' <NUMBER> '..' <NUMBER> ';'
-                     | <NAME> '=' '{' <tuple_literal_list> '}' ';'   // set of tuples (untyped)
+                     | <NAME> '=' <data_number> '..' <data_number> ';'
+                     | <NAME> '=' '{' <data_tuple_literal_list> '}' ';'   // set of tuples (untyped)
 
-<key_value_array> ::= '[' <key_value_row_list> ']'
+<key_value_array> ::= '[' <key_value_row_list> [','] ']'
 <key_value_row_list> ::= <key_value_row_list> ',' <key_value_row> | <key_value_row>
 // Keys may be string or tuple; values may be scalar or array:
-<key_value_row> ::= <STRING_LITERAL> <scalar_value>
-                  | <tuple_literal> <scalar_value>
-      | <STRING_LITERAL> <data_array_value>
-      | <tuple_literal> <data_array_value>
+<key_value_row> ::= <STRING_LITERAL> <data_scalar_value>
+                  | <tuple_literal> <data_scalar_value>
+                  | <STRING_LITERAL> <data_array_value>
+                  | <tuple_literal> <data_array_value>
 
 // Data arrays are recursive and may contain tuple literals or tuple-set values
 // at any depth. Tuple-set values may be empty.
 <data_array_value> ::= '[' <data_row_list> ']'
-<data_row_list> ::= <data_row_list> ',' <scalar_value> | <scalar_value>
+<data_row_list> ::= <data_row_list> ',' <data_scalar_value> | <data_scalar_value>
       | <data_row_list> ',' <data_array_value> | <data_array_value>
-      | <data_row_list> ',' <tuple_literal> | <tuple_literal>
+      | <data_row_list> ',' <data_tuple_literal> | <data_tuple_literal>
       | <data_row_list> ',' <tuple_set_value> | <tuple_set_value>
-<tuple_set_value> ::= '{' <tuple_literal_list> '}' | '{' '}'
+<tuple_set_value> ::= '{' <data_tuple_literal_list> '}' | '{' '}'
 
-// Allow trailing comma via lexer/permissive parsing
+// Only key-value arrays allow a trailing comma.
 
 <set_value> ::= '{' <element_list_scalar> '}'
-<element_list_scalar> ::= <element_list_scalar> ',' <scalar_value> | <scalar_value>
+<element_list_scalar> ::= <element_list_scalar> ',' <data_scalar_value> | <data_scalar_value>
 
-// Arrays may be nested (same as model)
-<array_value> ::= '[' <row_list> ']'
-<row_list> ::= <row_list> ',' <scalar_value>
-             |  <scalar_value>
-             |  <row_list> ',' <array_value>
-             |  <array_value>
-
-<scalar_value> ::= <NUMBER> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
+<data_tuple_literal> ::= '<' <data_tuple_element_list> '>' | '<>'
+<data_tuple_literal_list> ::= <data_tuple_literal_list> ',' <data_tuple_literal> | <data_tuple_literal>
+<data_tuple_element_list> ::= <data_tuple_element_list> ',' <data_tuple_element> | <data_tuple_element>
+<data_tuple_element> ::= <data_scalar_value> | <data_tuple_literal>
+<data_scalar_value> ::= <data_number> | <STRING_LITERAL> | <BOOLEAN_LITERAL>
+<data_number> ::= ['+' | '-'] <NUMBER> | <NUMBER>
 ```
 
 Clarifications:
+- Data numbers accept optional `+` or `-` signs. Range bounds are then semantically required to be non-negative integers with start ≤ end.
 - 'param' and 'set' prefixes are NOT recognized in .dat. Use bare assignments only.
 - Typed scalar set prefixes (e.g., '{string} Aircraft = {...};') are NOT allowed in .dat. The type comes from the model declaration.
 - Typed set-of-tuples form '{TupleType} S = {...};' is NOT parsed in .dat. Provide: S = { <...>, <...> }; and declare '{TupleType} S;' in the model.
@@ -531,14 +544,16 @@ Clarifications:
 ### Operator Precedence and Associativity
 
 From lowest to highest binding power:
-1. Ternary `? :` (right-assoc; condition must be parenthesized)
-2. Logical OR `||`
-3. Logical AND `&&`
-4. Comparisons `==`, `!=`, `<=`, `>=`, `<`, `>` (tokens are non-assoc in precedence; chained comparisons like `a < b < c` are rejected; prefer explicit conjunctions like `(a < b) && (b < c)`)
-5. Add/Sub `+`, `-`
-6. Mul/Div/Mod `*`, `/`, `%`
-7. Unary NOT `!` and unary minus `-` (right-assoc)
-8. Field access `.` (right-assoc; chains like `a.b.c`)
+1. Implication `=>` (right-assoc)
+2. Ternary `? :` (right-assoc; condition must be parenthesized)
+3. Logical OR `||`
+4. Logical AND `&&`
+5. Equality `==`, `!=` (left-assoc)
+6. Relational comparisons `<=`, `>=`, `<`, `>` (non-chaining)
+7. Add/Sub `+`, `-`
+8. Mul/Div/Mod `*`, `/`, `%`
+9. Unary NOT `!` and unary minus `-` (right-assoc)
+10. Field access `.` (right-assoc; chains like `a.b.c`)
 
 ### Notes and Semantics
 
