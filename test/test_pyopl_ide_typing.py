@@ -23,6 +23,19 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_concise_genai_error_hides_context_traceback(self):
+        context_error = RuntimeError(
+            "Request exceeds context length: 131000 input tokens\n\nTraceback (most recent call last):\n"
+            + ("details\n" * 1000)
+        )
+
+        message = pyopl_ide_bootstrap._concise_genai_error(context_error)
+
+        self.assertEqual(
+            message,
+            "The request exceeds the model's context window. Reduce the model/data size or choose a model with a larger context window.",
+        )
+
     def test_save_exemplar_menu_item_follows_export_model(self):
         class FakeMenu:
             instances = []

@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replaced oversized GenAI and exemplar error-dialog tracebacks with concise, actionable messages while retaining detailed diagnostics in the output.
+
 ### Changed
 
 ### Removed

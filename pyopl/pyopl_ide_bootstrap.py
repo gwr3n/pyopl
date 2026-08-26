@@ -110,6 +110,39 @@ GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
 
+
+def _concise_genai_error(exc: Exception) -> str:
+    """Return a short, actionable message for GenAI error dialogs."""
+    detail = str(exc).strip()
+    lowered = detail.lower()
+    context_markers = (
+        "context length",
+        "context window",
+        "maximum context",
+        "max context",
+        "too many tokens",
+        "prompt is too long",
+        "input token",
+    )
+    if any(marker in lowered for marker in context_markers):
+        return "The request exceeds the model's context window. Reduce the model/data size or choose a model with a larger context window."
+
+    first_line = next(
+        (
+            line.strip()
+            for line in detail.splitlines()
+            if line.strip() and line.strip() != "Traceback (most recent call last):"
+        ),
+        "",
+    )
+    if not first_line:
+        first_line = type(exc).__name__
+    if len(first_line) > 500:
+        first_line = first_line[:497].rstrip() + "..."
+    prefix = f"{type(exc).__name__}:"
+    return first_line if first_line.startswith(prefix) else f"{prefix} {first_line}"
+
+
 _FOLD_TOKEN_RE = re.compile(
     r'(?P<double_string>"(?:\\.|[^"\\])*")'
     r"|(?P<single_string>'(?:\\.|[^'\\])*')"
@@ -5824,7 +5857,7 @@ class OPLIDE(TkinterDnD.Tk):
         detail = f"{type(exc).__name__}: {exc}"
         logging.getLogger(__name__).error("Failed to prepare exemplar: %s", detail)
         self.status_var.set(f"Failed to save exemplar: {detail}")
-        messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
+        messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{_concise_genai_error(exc)}", parent=self)
 
     def _finish_exemplar_preparation(self, draft: ExemplarDraft, models_root: Path) -> None:
         self._exemplar_save_pending = False
@@ -6657,7 +6690,7 @@ class OPLIDE(TkinterDnD.Tk):
                     if operation.cancel_requested:
                         return
                     self._finish_foreground_operation(operation)
-                    messagebox.showerror("GenAI Error", type(e).__name__)
+                    messagebox.showerror("GenAI Error", _concise_genai_error(e))
                     self._append_output(f"\nGenAI Error: {e}\n", operation.session_id)
                     self.status_var.set("GenAI: error")
 
@@ -6796,7 +6829,7 @@ class OPLIDE(TkinterDnD.Tk):
                     if operation.cancel_requested:
                         return
                     self._finish_foreground_operation(operation)
-                    messagebox.showerror("GenAI Error", str(e))
+                    messagebox.showerror("GenAI Error", _concise_genai_error(e))
                     self._append_output(f"\nGenAI Error: {e}\n", operation.session_id)
                     self.status_var.set("GenAI: error")
 
