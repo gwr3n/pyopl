@@ -1,8 +1,12 @@
 import asyncio
 import importlib
+import io
+import json
 import logging
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
 
@@ -173,6 +177,104 @@ class TestPyOPLMCP(unittest.TestCase):
 
 
 class TestRhetorMCP(unittest.TestCase):
+    def test_request_running_ide_rejects_invalid_connection_info(self):
+        for connection in (
+            {"host": "192.0.2.1", "port": 1, "token": "x"},
+            {"host": "127.0.0.1"},
+            "not json",
+        ):
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                info_path = Path(tmp_dir) / "ide-mcp.json"
+                info_path.write_text(json.dumps(connection), encoding="utf-8")
+                with patch.object(_rhetor_mcp, "BRIDGE_INFO_PATH", info_path):
+                    with self.assertRaisesRegex(RuntimeError, "No running Rhetor IDE"):
+                        _rhetor_mcp._request_running_ide("GET")
+
+    def test_request_running_ide_handles_success_and_invalid_response(self):
+        class Response:
+            def __init__(self, value):
+                self.value = value
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def read(self):
+                return json.dumps(self.value).encode("utf-8")
+
+        connection = {"host": "127.0.0.1", "port": 1234, "token": "token"}
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(_rhetor_mcp, "BRIDGE_INFO_PATH", Path(tmp_dir) / "ide-mcp.json"),
+            patch.object(_rhetor_mcp.urllib.request, "urlopen", return_value=Response({"model_text": "m"})) as urlopen,
+        ):
+            _rhetor_mcp.BRIDGE_INFO_PATH.write_text(json.dumps(connection), encoding="utf-8")
+            self.assertEqual(_rhetor_mcp._request_running_ide("GET"), {"model_text": "m"})
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("Authorization"), "Bearer token")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(_rhetor_mcp, "BRIDGE_INFO_PATH", Path(tmp_dir) / "ide-mcp.json"),
+            patch.object(_rhetor_mcp.urllib.request, "urlopen", return_value=Response([])),
+        ):
+            _rhetor_mcp.BRIDGE_INFO_PATH.write_text(json.dumps(connection), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "invalid bridge response"):
+                _rhetor_mcp._request_running_ide("GET")
+
+    def test_request_running_ide_translates_http_and_connection_errors(self):
+        connection = {"host": "127.0.0.1", "port": 1234, "token": "token"}
+        http_error = urllib.error.HTTPError(
+            "http://127.0.0.1", 400, "bad", {}, io.BytesIO(b'{"error":"denied"}')
+        )
+        for error, message in (
+            (http_error, "Rhetor IDE rejected the request: denied"),
+            (urllib.error.URLError("offline"), "Could not connect to the running Rhetor IDE"),
+            (TimeoutError("slow"), "Could not connect to the running Rhetor IDE"),
+        ):
+            with (
+                tempfile.TemporaryDirectory() as tmp_dir,
+                patch.object(_rhetor_mcp, "BRIDGE_INFO_PATH", Path(tmp_dir) / "ide-mcp.json"),
+                patch.object(_rhetor_mcp.urllib.request, "urlopen", side_effect=error),
+            ):
+                _rhetor_mcp.BRIDGE_INFO_PATH.write_text(json.dumps(connection), encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, message):
+                    _rhetor_mcp._request_running_ide("GET")
+
+        invalid_http_error = urllib.error.HTTPError("http://127.0.0.1", 400, "bad", {}, io.BytesIO(b"invalid"))
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            patch.object(_rhetor_mcp, "BRIDGE_INFO_PATH", Path(tmp_dir) / "ide-mcp.json"),
+            patch.object(_rhetor_mcp.urllib.request, "urlopen", side_effect=invalid_http_error),
+        ):
+            _rhetor_mcp.BRIDGE_INFO_PATH.write_text(json.dumps(connection), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Rhetor IDE rejected the request: bad"):
+                _rhetor_mcp._request_running_ide("GET")
+
+    def test_provider_and_backend_edge_branches(self):
+        self.assertEqual(_rhetor_mcp._normalize_solver(None), "scipy")
+        with self.assertRaisesRegex(ValueError, "Unsupported provider"):
+            _rhetor_mcp.list_models("unsupported")
+        with patch.dict("sys.modules", {"pyopl.genai.pyopl_generative_graphchain": None}):
+            self.assertIsNone(_rhetor_mcp._try_import_graphchain())
+
+    def test_public_listing_wrapper_and_string_feedback(self):
+        with patch.object(_rhetor_mcp, "list_providers", return_value=["openai"]) as providers:
+            self.assertEqual(_rhetor_mcp.list_providers_tool(), ["openai"])
+        providers.assert_called_once_with()
+
+        with (
+            patch.object(_rhetor_mcp, "_generate_with_best_available_backend", return_value={"generated": True}),
+            patch.object(_rhetor_mcp, "solve", return_value={"status": "OK"}),
+            patch.object(_rhetor_mcp, "_ask_for_feedback", return_value="Plain language feedback"),
+        ):
+            result = _rhetor_mcp.insight_tool("Describe this", iterations=1)
+
+        self.assertEqual(result["feedback"], "Plain language feedback")
+        self.assertIn("Plain language feedback", result["markdown"])
     def test_provider_normalization_and_llm_kwargs(self):
         self.assertEqual(_rhetor_mcp._normalize_solver("highs"), "scipy")
         self.assertEqual(_rhetor_mcp._solve_backend("GUROBI"), "gurobi")
