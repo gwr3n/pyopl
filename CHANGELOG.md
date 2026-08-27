@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved declared lower bounds when indexing inline array literals and Gurobi list-backed parameters, including zero-based ranges.
+
 ### Changed
 
 ### Removed

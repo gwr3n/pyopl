@@ -3626,6 +3626,115 @@ class TestPyOPLProblems(unittest.TestCase):
             places=6,
         )
 
+    @unittest.skip("this test is cumbersome to run")
+    def test_cvrp_zero_based_parameter_arrays(self):
+        """Zero-based CVRP parameters must produce the verified optimum in both backends."""
+        model_code = """
+            int n;
+            int capacity;
+            int vehicleCount;
+            int demand[0..n-1];
+            int distance[0..n-1][0..n-1];
+
+            range Nodes = 0..n-1;
+            range Customers = 1..n-1;
+            range Vehicles = 0..vehicleCount-1;
+
+            dvar boolean x[Nodes][Nodes][Vehicles];
+            dvar int+ load[Nodes][Vehicles];
+
+            minimize sum(k in Vehicles, i in Nodes, j in Nodes : i != j)
+                distance[i][j] * x[i][j][k];
+
+            subject to {
+                forall(k in Vehicles, i in Nodes)
+                    x[i][i][k] == 0;
+                forall(i in Customers)
+                    sum(k in Vehicles, j in Nodes : j != i) x[i][j][k] == 1;
+                forall(i in Customers)
+                    sum(k in Vehicles, j in Nodes : j != i) x[j][i][k] == 1;
+                forall(k in Vehicles, i in Customers)
+                    sum(j in Nodes : j != i) x[i][j][k] == sum(j in Nodes : j != i) x[j][i][k];
+                forall(k in Vehicles)
+                    sum(j in Customers) x[0][j][k] == 1;
+                forall(k in Vehicles)
+                    sum(i in Customers) x[i][0][k] == 1;
+                forall(k in Vehicles, i in Customers)
+                    load[i][k] >= demand[i];
+                forall(k in Vehicles, i in Customers)
+                    load[i][k] <= capacity;
+                forall(k in Vehicles, i in Customers, j in Customers : i != j)
+                    load[j][k] >= load[i][k] + demand[j]
+                        - capacity * (1 - x[i][j][k]);
+            }
+        """
+        data_code = """
+            n = 13;
+            capacity = 6000;
+            vehicleCount = 4;
+            demand = [0, 1200, 1700, 1500, 1400, 1700, 1400, 1200, 1900, 1800, 1600, 1700, 1100];
+            distance = [
+                [0, 9, 14, 21, 23, 22, 25, 32, 36, 38, 42, 50, 52],
+                [9, 0, 5, 12, 22, 21, 24, 31, 35, 37, 41, 49, 51],
+                [14, 5, 0, 7, 17, 16, 23, 26, 30, 36, 36, 44, 46],
+                [21, 12, 7, 0, 10, 21, 30, 27, 37, 43, 31, 37, 39],
+                [23, 22, 17, 10, 0, 19, 28, 25, 35, 41, 29, 31, 29],
+                [22, 21, 16, 21, 19, 0, 9, 10, 16, 22, 20, 28, 30],
+                [25, 24, 23, 30, 28, 9, 0, 7, 11, 13, 17, 25, 27],
+                [32, 31, 26, 27, 25, 10, 7, 0, 10, 16, 10, 18, 20],
+                [36, 35, 30, 37, 35, 16, 11, 10, 0, 6, 6, 14, 16],
+                [38, 37, 36, 43, 41, 22, 13, 16, 6, 0, 12, 12, 20],
+                [42, 41, 36, 31, 29, 20, 17, 10, 6, 12, 0, 17, 10],
+                [50, 49, 44, 37, 31, 28, 25, 18, 14, 12, 17, 0, 10],
+                [52, 51, 46, 39, 29, 30, 27, 20, 16, 20, 10, 10, 0]
+            ];
+        """
+
+        results = {}
+        for solver in ("scipy", "gurobi"):
+            with (
+                tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
+                tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
+            ):
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                tmp_dat.write(data_code)
+                tmp_dat.flush()
+                model_file = tmp_mod.name
+                data_file = tmp_dat.name
+            try:
+                results[solver] = solve(model_file, data_file, solver=solver)
+            finally:
+                os.remove(model_file)
+                os.remove(data_file)
+
+        for solver, result in results.items():
+            self.assertEqual(result["status"], "OPTIMAL", f"{solver} failed: {result}")
+            self.assertAlmostEqual(result["objective_value"], 290.0, places=6)
+
+    def test_zero_based_inline_array_literals(self):
+        """Inline array literals must retain their declared zero-based keys."""
+        model_code = """
+            int vector[0..2] = [10, 20, 30];
+            int matrix[0..1][0..1] = [[1, 2], [3, 4]];
+            minimize sum(i in 0..2) vector[i]
+                + sum(i in 0..1, j in 0..1) matrix[i][j];
+            subject to { }
+        """
+
+        for solver in ("scipy", "gurobi"):
+            with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
+                tmp_mod.write(model_code)
+                tmp_mod.flush()
+                model_file = tmp_mod.name
+            try:
+                result = solve(model_file, solver=solver)
+            finally:
+                os.remove(model_file)
+
+            self.assertEqual(result["status"], "OPTIMAL", f"{solver} failed: {result}")
+            self.assertAlmostEqual(result["objective_value"], 70.0, places=6)
+
     def test_stochastic_lot_sizing(self):
         """
         Test the stochastic lot-sizing problem with both solvers.

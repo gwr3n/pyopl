@@ -2639,7 +2639,7 @@ class GurobiCodeGenerator:
                     set_name = dim_decl.get("name")
                     list_index_parts.append(f"{set_name}_index[{idx_code}]")
                 else:
-                    list_index_parts.append(f"(({idx_code}) - 1)")
+                    list_index_parts.append(self._emit_parameter_list_index(dim_decl, idx_code))
             list_access = base_name + "".join(f"[{part}]" for part in list_index_parts)
             raw0 = raw_idx_exprs[0]
             fallback_idx = list_index_parts[1] if len(list_index_parts) > 1 else list_index_parts[0]
@@ -2654,8 +2654,20 @@ class GurobiCodeGenerator:
             set_name0 = dim_decl0.get("name")
             list_idx0 = f"{set_name0}_index[{idx0}]"
         else:
-            list_idx0 = f"(({idx0}) - 1)"
+            list_idx0 = self._emit_parameter_list_index(dim_decl0, idx0)
         return f"({base_name}[{idx0}] if isinstance({base_name}, dict) else {base_name}[{list_idx0}])"
+
+    def _emit_parameter_list_index(self, dimension, index_code):
+        start = 1
+        if dimension:
+            dimension_type = dimension.get("type")
+            if dimension_type == "range_index":
+                start = self._traverse_expression(dimension["start"], {}, symbolic=True)
+            elif dimension_type == "named_range_dimension":
+                range_declaration = self._find_declaration_by_name(dimension.get("name"), types=["range_declaration_inline"])
+                if range_declaration is not None:
+                    start = self._traverse_expression(range_declaration["start"], {}, symbolic=True)
+        return f"(({index_code}) - ({start}))"
 
     def _emit_parameter_indexed_name(self, base_name, expr_node, declaration, current_iterators, symbolic):
         dims_decl = declaration.get("dimensions", []) if declaration is not None else []
@@ -2685,7 +2697,7 @@ class GurobiCodeGenerator:
                 set_name = dim_decl.get("name")
                 index_exprs.append(f"{set_name}_index[{idx_code}]")
             else:
-                index_exprs.append(f"(({idx_code}) - 1)")
+                index_exprs.append(self._emit_parameter_list_index(dim_decl, idx_code))
         out = base_name
         for index_expr in index_exprs:
             out += f"[{index_expr}]"

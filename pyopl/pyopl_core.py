@@ -4618,6 +4618,10 @@ class OPLCompiler:
                 domains.append(list(elements or []))
             elif dim_type in ("named_range", "named_range_dimension"):
                 domains.append(self._computed_parameter_range_domain(model_ast, working_data, dimension, value))
+            elif dim_type == "range_index":
+                start = self._eval_bound_expr(dimension["start"], working_data)
+                end = self._eval_bound_expr(dimension["end"], working_data)
+                domains.append(list(range(start, end + 1)))
             else:
                 domains.append(list(range(1, len(value) + 1)) if isinstance(value, (list, tuple)) else [])
         return domains

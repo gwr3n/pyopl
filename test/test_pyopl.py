@@ -600,7 +600,7 @@ class TestPyOPLParser(TestPyOPL):
 
         _, gurobi_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="gurobi")
         self.assertIn("matrix = {1: [(1, 1.0), (2, 2.0)]}", gurobi_code)
-        self.assertIn("for e in (matrix[c] if isinstance(matrix, dict) else matrix[((c) - 1)])", gurobi_code)
+        self.assertIn("for e in (matrix[c] if isinstance(matrix, dict) else matrix[((c) - (1))])", gurobi_code)
 
         _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
         self.assertIn("matrix = [[(1, 1.0), (2, 2.0)]]", scipy_code)
