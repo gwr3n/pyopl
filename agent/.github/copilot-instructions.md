@@ -22,9 +22,10 @@ Load the `pyopl-generate` skill for generation requests and the `pyopl-ask` skil
 
 - Use the bundled PyOPL grammar as the syntax authority. Do not assume unsupported IBM OPL syntax works in PyOPL.
 - Keep the user's problem statement or question as the semantic source of truth throughout revisions.
+- For generation, retrieve relevant complete exemplars from the active installation's bundled `pyopl/opl_models` corpus and any additional folder the user identifies, following the `pyopl-generate` skill. Use exemplars as structural guidance only, never as problem requirements.
 - Check objective direction and terms, constraint signs, variable domains, index domains, units, and model/data consistency.
 - When required input data is missing, state the assumption and create a small plausible example instance rather than inventing hidden requirements.
-- Label the objective and constraints. Add concise literate comments for parameters, variables, and non-obvious constraints.
+- Practice literate modeling: arrange the formulation in problem order, give the objective and constraints meaningful labels, and add concise comments explaining the role, units, and mathematical intent of parameters, variables, objective terms, and non-obvious constraint families.
 - Produce complete model and data contents, not fragments or diffs, when proposing generated or revised artifacts.
 - Preserve unrelated model and data content during correction workflows.
 

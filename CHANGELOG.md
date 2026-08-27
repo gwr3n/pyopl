@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Expanded the PyOPL generation skill with bundled and user-supplied exemplar retrieval, image-assisted retrieval context, stable few-shot grounding across revisions, and explicit literate-modeling requirements.
+
 ### Removed
 
 ## [v2.4.9] - 2026-08-26
