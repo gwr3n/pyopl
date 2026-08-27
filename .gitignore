@@ -15,6 +15,7 @@ gen_ai/
 misc/
 docs/dev_notes.md
 tmp/
+opl_models/
 
 # Virtual environments
 venv*
