@@ -19,14 +19,21 @@ Determine:
 
 Keep the original problem description unchanged as the semantic reference for every later assessment and revision.
 
+Before generating artifacts, identify unresolved ambiguity. If in doubt, ask a concise clarification question when different reasonable answers would change the objective, decision variables, constraints, domains, indices, units, or interpretation of supplied data. Do not infer these requirements from an exemplar. Missing instance values alone are not blocking when a small disclosed mock instance is appropriate. If the user explicitly requests best effort without clarification, use the least restrictive reasonable interpretation and record every material assumption.
+
 ## Procedure
 
-1. Acquire syntax guidance.
+1. Resolve material ambiguity.
+   - Check the problem description, attachments, and supplied context before formulation.
+   - Ask only the smallest set of questions needed to distinguish materially different formulations.
+   - Do not create or compile artifacts until blocking clarification is answered, unless the user explicitly authorized a best-effort result.
+
+2. Acquire syntax guidance.
    - Call the PyOPL MCP `read_pyopl_grammar_tool` when available.
    - Otherwise read the repository's bundled PyOPL grammar documentation.
    - Use this reference for syntax, not as a source of problem requirements.
 
-2. Retrieve relevant few-shot exemplars.
+3. Retrieve relevant few-shot exemplars.
    - Search the installed package corpus at `pyopl/opl_models` by default. Resolve it from the active Python installation rather than assuming the repository checkout is the installed package.
    - Also search an additional folder when the user supplies one. Search recursively and retain the bundled corpus as a source.
    - When the prompt includes images, transcribe readable text and briefly describe relevant tables, labels, and relationships; append that compact context to the retrieval query. Continue using the original text and images as the semantic source of truth.
@@ -35,13 +42,13 @@ Keep the original problem description unchanged as the semantic reference for ev
    - Use exemplars for PyOPL syntax, formulation patterns, structure, and literate presentation only. Never copy their requirements, names, indices, or data unless the user's problem independently calls for them.
    - Keep the selected exemplar set fixed across syntax and alignment revisions so later attempts retain the same grounding.
 
-3. Formulate privately.
+4. Formulate privately.
    - Identify sets and ranges, input parameters, decision variables, objective, and constraints.
    - Select binary, integer, or float domains from the problem meaning.
    - Resolve units, signs, index domains, and links between decisions and constraints.
    - If data is absent, prepare a small plausible mock instance and disclose that assumption.
 
-4. Create complete artifacts using literate modeling.
+5. Create complete artifacts using literate modeling.
    - Write one complete `.mod` file and one matching `.dat` file.
    - Organize declarations, objective, and constraints in a readable order that follows the problem formulation.
    - Label the objective and every constraint with problem-domain names rather than generic numbering when practical.
@@ -49,27 +56,27 @@ Keep the original problem description unchanged as the semantic reference for ev
    - Keep comments synchronized with the mathematics and favor explanatory intent over restating syntax. This literate presentation is part of the generated artifact, not optional decoration.
    - Keep instance values in `.dat` unless the grammar requires inline values.
 
-5. Compile the pair.
+6. Compile the pair.
    - Prefer PyOPL MCP `export_py_strings_tool` with the complete model and data strings. This is a compile-only check even though it returns generated Python.
    - Do not call a Rhetor MCP tool.
    - On failure, capture the exact compiler error.
 
-6. Revise syntax or semantics within the attempt budget.
+7. Revise syntax or semantics within the attempt budget.
    - Make only the changes needed to resolve the reported compiler error.
    - Preserve the intended formulation and return to step 5.
    - Count the initial draft as attempt 1. Stop after the configured limit.
 
-7. Assess semantic alignment after a successful compile.
+8. Assess semantic alignment after a successful compile.
    - Compare the model and data against the original problem description.
    - Check objective direction and terms, every stated constraint, variable domains and indices, data coverage, signs, units, missing links, and unintended restrictions.
    - If misaligned and attempts remain, make the smallest alignment correction and return to step 5.
    - Compilation success is necessary but not sufficient for alignment.
 
-8. Optionally solve.
+9. Optionally solve.
    - Call PyOPL MCP `solve_strings_tool` only when the user requests a solve or a representative run is useful to detect infeasibility or bad data.
    - Treat solver status and values as runtime evidence, not proof of semantic alignment.
 
-9. Finish.
+10. Finish.
    - Ensure the final complete contents are present at the target paths.
    - Report paths, attempts used, compile status, alignment assessment, exemplar sources used, mock-data assumptions, and solve status when run.
    - If the budget ends with errors or misalignment, retain the latest artifacts but label them as unresolved rather than valid.
