@@ -800,7 +800,7 @@ Available strategies (choose based on preference):
 - pyopl_reflexion: Generate → critique → revise in short loops.
 - pyopl_cafa: Single‑shot generation with optional few‑shot retrieval; compiles and writes files, with optional alignment assessment and usage/cost tracking.
 - pyopl_chain_of_experts: Specialist prompts (modeling, data, validation) with aggregation.
-- pyopl_generative: Iterative model/data synthesis with few‑shot retrieval, compile‑and‑revise loops, optional alignment check.
+- pyopl_generative: Iterative model/data synthesis with few‑shot retrieval, compile‑and‑revise loops, optional alignment check. This is also available as an agentic skill in folder [agent](../agent/.github/).
 
 All strategies feature OpenAI/Gemini/Ollama support.
 
