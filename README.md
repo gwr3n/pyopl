@@ -137,7 +137,7 @@ v = [3, 4, 5, 6];
 
 See `tools/examples.py` for a repository of examples. 
 
-Solving Stigler's Diet Problem in PyOPL:
+The following Colab notebook show how to solve the traditional Stigler's Diet Problem in PyOPL:
  
 [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb)
 
