@@ -34,6 +34,7 @@ Docs:
 
 [![Docs](https://img.shields.io/badge/docs-user%20guide-blue)](docs/PyOPL%20user%20guide.md)
 [![arXiv](https://img.shields.io/badge/arXiv-2601.17670-B31B1B.svg)](https://arxiv.org/abs/2601.17670)
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Using_PyOPL_and_Rhetor_in_Google_Colab.ipynb)
 
 
 `pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
@@ -77,6 +78,8 @@ results = solve('model.mod', 'data.dat', solver='scipy')   # Use SciPy/HiGHS
 ```
 
 #### Example
+
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Using_PyOPL_and_Rhetor_in_Google_Colab.ipynb)
 
 Suppose you have the following files:
 
@@ -134,6 +137,8 @@ v = [3, 4, 5, 6];
 
 See `tools/examples.py` for a repository of examples. 
 
+Solving Stigler's Diet Problem in PyOPL 
+[![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb)
 
 ## PyOPL IME
 
