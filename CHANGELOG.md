@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added portable Copilot instructions and skills for PyOPL model generation and model/data feedback workflows using PyOPL MCP validation without Rhetor MCP tools.
+- Documented the purpose, workflows, validation tools, and setup of the portable Rhetor skills in the PyOPL user guide.
 
 ### Fixed
 
