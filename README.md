@@ -141,8 +141,9 @@ See `tools/examples.py` for a repository of examples.
 
 | Problem | Notebook | 
 | --- | --- | 
-| Stigler's Diet | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb) |
+| Stigler's Diet Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb) |
 | Dantzig's Truck Dispatching Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Dantzig_Truck_Dispatching_Problem_in_PyOPL.ipynb) |
+| Wagner-Whitin's Dynamic Lot Sizing Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Wagner_Whitin_Economic_Lot_Size_in_PyOPL.ipynb) |
 
 ## PyOPL IME
 
