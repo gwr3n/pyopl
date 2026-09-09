@@ -273,7 +273,7 @@ subject to {
 value = 1;
 """
 
-        self.assertEqual(_find_fold_regions(text), {2: 3, 4: 6, 7: 12, 14: 15})
+        self.assertEqual(_find_fold_regions(text), {2: 3, 4: 5, 7: 12, 14: 15})
 
     def test_find_fold_regions_ends_section_at_next_marker_in_same_block(self):
         text = """subject to {
@@ -285,6 +285,31 @@ value = 1;
 """
 
         self.assertEqual(_find_fold_regions(text), {2: 3, 4: 5})
+
+    def test_find_fold_regions_stops_objective_before_subject_to_block(self):
+        text = """// § Objective
+// Objective: minimize fixed ordering and holding costs.
+minimize TotalCost:
+  sum(t in Periods) (setupCost[t] * orderPlaced[t]);
+
+subject to {
+  // § Inventory-balance constraints
+  forall(t in Periods)
+    orderQuantity[t] - endingInventory[t] == demand[t];
+}
+"""
+
+        self.assertEqual(_find_fold_regions(text), {1: 4, 7: 9})
+
+    def test_find_fold_regions_keeps_non_constraint_braces_in_section(self):
+        text = """// § Parameters
+{int} periods = {1, 2, 3};
+int demand[periods] = [4, 5, 6];
+// § Objective
+minimize sum(t in periods) demand[t];
+"""
+
+        self.assertEqual(_find_fold_regions(text), {1: 3, 4: 5})
 
     def test_find_fold_regions_keeps_directly_following_brace_block_whole(self):
         text = """// § Constraints

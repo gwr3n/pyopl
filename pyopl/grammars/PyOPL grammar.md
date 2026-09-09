@@ -86,7 +86,7 @@ The section sign has no standalone role in the PyOPL compiler grammar. The IDE t
 # § Data
 ```
 
-The marker comment remains visible when its section is collapsed. Its section extends to the next marker, the end of the file, or the closing brace of the block containing it; the closing brace remains visible. A marker inside a string or after code on the same line, such as `x >= 0; // § Bounds`, does not create a section. Because all marker forms are ordinary comments, they are ignored during parsing and do not affect model or data semantics. A bare `§` outside a comment is an illegal character.
+The marker comment remains visible when its section is collapsed. Its section extends to the next marker, the end of the file, the closing brace of the block containing it, or a following `subject to {` block at the same scope; structural boundary lines and closing braces remain visible. A marker inside a string or after code on the same line, such as `x >= 0; // § Bounds`, does not create a section. Because all marker forms are ordinary comments, they are ignored during parsing and do not affect model or data semantics. A bare `§` outside a comment is an illegal character.
 
 ### Model Structure
 

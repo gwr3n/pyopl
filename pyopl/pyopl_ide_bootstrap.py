@@ -164,6 +164,7 @@ def _is_section_marker(comment: str, prefix_length: int) -> bool:
 class _FoldScanState:
     markers: list[tuple[int, Optional[int], Optional[int]]] = field(default_factory=list)
     brace_stack: list[int] = field(default_factory=list)
+    brace_openings: dict[int, tuple[int, Optional[int]]] = field(default_factory=dict)
     brace_closing_lines: dict[int, int] = field(default_factory=dict)
     pending_marker_index: Optional[int] = None
     next_brace_id: int = 0
@@ -205,6 +206,8 @@ class _FoldScanState:
 
     def _open_brace(self) -> None:
         self.next_brace_id += 1
+        containing_brace = self.brace_stack[-1] if self.brace_stack else None
+        self.brace_openings[self.next_brace_id] = (self.line, containing_brace)
         self.brace_stack.append(self.next_brace_id)
         if self.pending_marker_index is not None:
             marker_line, containing_brace, _ = self.markers[self.pending_marker_index]
@@ -213,15 +216,22 @@ class _FoldScanState:
         self.line_has_code = True
 
 
-def _collect_fold_structure(text: str) -> tuple[list[tuple[int, Optional[int], Optional[int]]], dict[int, int]]:
+def _collect_fold_structure(
+    text: str,
+) -> tuple[
+    list[tuple[int, Optional[int], Optional[int]]],
+    dict[int, tuple[int, Optional[int]]],
+    dict[int, int],
+]:
     state = _FoldScanState()
     for match in _FOLD_TOKEN_RE.finditer(text):
         state.consume(match)
-    return state.markers, state.brace_closing_lines
+    return state.markers, state.brace_openings, state.brace_closing_lines
 
 
 def _resolve_fold_regions(
     markers: list[tuple[int, Optional[int], Optional[int]]],
+    brace_openings: dict[int, tuple[int, Optional[int]]],
     brace_closing_lines: dict[int, int],
     lines: list[str],
 ) -> dict[int, int]:
@@ -233,6 +243,20 @@ def _resolve_fold_regions(
             next_marker_line = next(
                 (line for line, brace, _ in markers[marker_index + 1 :] if brace == containing_brace),
                 final_line + 1,
+            )
+        else:
+            next_marker_line = min(
+                next_marker_line,
+                next(
+                    (
+                        line
+                        for line, parent_brace in brace_openings.values()
+                        if marker_line < line
+                        and parent_brace == containing_brace
+                        and re.match(r"^\s*subject\s+to\b", lines[line - 1], re.IGNORECASE)
+                    ),
+                    final_line + 1,
+                ),
             )
         brace_close_line = (
             brace_closing_lines.get(containing_brace, final_line + 1) if containing_brace is not None else final_line + 1
@@ -247,8 +271,8 @@ def _resolve_fold_regions(
 
 def _find_fold_regions(text: str) -> dict[int, int]:
     """Return explicit section folds as marker-line to final collapsible line."""
-    markers, brace_closing_lines = _collect_fold_structure(text)
-    return _resolve_fold_regions(markers, brace_closing_lines, text.splitlines())
+    markers, brace_openings, brace_closing_lines = _collect_fold_structure(text)
+    return _resolve_fold_regions(markers, brace_openings, brace_closing_lines, text.splitlines())
 
 
 def _remap_folded_lines(old_text: str, new_text: str, folded_lines: set[int]) -> set[int]:
