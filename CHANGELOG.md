@@ -9,12 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added a literate Wagner-Whitin dynamic lot-sizing notebook reproducing the paper's twelve-month example and validating its 864 optimum with PyOPL MCP.
 - Added ELM as an OpenAI-compatible generative provider using `ELM_API_KEY`, including model discovery in the API, CLI, MCP server, and IDE.
 - Added portable Copilot instructions and skills for PyOPL model generation and model/data feedback workflows using PyOPL MCP validation without Rhetor MCP tools.
 - Documented the purpose, workflows, validation tools, and setup of the portable Rhetor skills in the PyOPL user guide.
 
 ### Fixed
+
+- Prevented collapsing an objective section in Rhetor from hiding the following `subject to {` block opener.
 
 ### Changed
 
