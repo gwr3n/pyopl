@@ -592,6 +592,43 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertIs(generate.call_args.kwargs["client"], elm_client)
         self.assertEqual(generate.call_args.kwargs["provider_name"], "ELM")
 
+    def test_base_elm_client_uses_configured_endpoint_and_api_key(self) -> None:
+        created_with: dict[str, str] = {}
+
+        def openai_client(**kwargs):
+            created_with.update(kwargs)
+            return "elm-client"
+
+        with (
+            patch.dict(sys.modules, {"openai": SimpleNamespace(OpenAI=openai_client)}),
+            patch.dict("os.environ", {"ELM_API_KEY": "elm-key"}, clear=True),
+        ):
+            client = GenAIStrategyBase._ELM_client()
+
+        self.assertEqual(client, "elm-client")
+        self.assertEqual(created_with, {"base_url": "https://elm.edina.ac.uk/api/v1", "api_key": "elm-key"})
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "ELM_API_KEY environment variable not set"):
+                GenAIStrategyBase._ELM_client()
+
+    def test_base_elm_dispatch_returns_captured_usage(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        expected = ("elm", {"prompt_tokens": 2, "completion_tokens": 3})
+
+        with (
+            patch.object(base, "_ELM_client", return_value=object()),
+            patch.object(base, "_generate_openai", return_value=expected),
+        ):
+            result = base.llm_generate_text(
+                provider=LLMProvider.ELM,
+                model_name="gpt-test",
+                input_text="prompt",
+                capture_usage=True,
+            )
+
+        self.assertEqual(result, expected)
+
     def test_base_elm_generation_uses_elm_progress_labels(self) -> None:
         base = GenAIStrategyBase(logger=genai_pricing.logger)
         progress_messages: list[str] = []
@@ -734,7 +771,7 @@ class TestModelDiscovery(unittest.TestCase):
         client = SimpleNamespace(models=SimpleNamespace(list=lambda: SimpleNamespace(data=[{"id": "local"}, {"id": "gpt"}])))
 
         with patch.object(GenAIStrategyBase, "_ELM_client", return_value=client):
-            self.assertEqual(strategy_base.list_elm_models(), ["gpt", "local"])
+            self.assertEqual(model_discovery.list_elm_models(), ["gpt", "local"])
 
     def test_gemini_new_sdk_listing_strips_models_prefix(self) -> None:
         google_client = SimpleNamespace(
@@ -760,6 +797,16 @@ class TestModelDiscovery(unittest.TestCase):
             patch.object(strategy_base, "list_ollama_models", return_value=["local"]),
         ):
             self.assertEqual(model_discovery.list_models(model_name="anything"), ["local"])
+
+    def test_list_models_dispatches_to_elm_and_labels_errors(self) -> None:
+        with patch.object(strategy_base, "list_elm_models", return_value=["elm-model"]) as list_elm:
+            self.assertEqual(strategy_base.list_models(llm_provider="elm", model_name="gpt-test"), ["elm-model"])
+        list_elm.assert_called_once_with()
+
+        failing_client = SimpleNamespace(models=SimpleNamespace(list=lambda: (_ for _ in ()).throw(RuntimeError("down"))))
+        with patch.object(GenAIStrategyBase, "_ELM_client", return_value=failing_client):
+            with self.assertRaisesRegex(RuntimeError, "Failed to list ELM models: down"):
+                strategy_base.list_elm_models()
 
     def test_model_listing_error_paths_are_wrapped(self) -> None:
         with patch.object(
