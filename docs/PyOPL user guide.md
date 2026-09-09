@@ -807,6 +807,7 @@ All strategies feature OpenAI/Gemini/Ollama support.
 
 To enable GenAI features, set at least one of the following environment variables before launching Rhetor:
 - ```OPENAI_API_KEY``` — for OpenAI models
+- ```ELM_API_KEY``` — for models accessed through the ELM proxy
 - ```GEMINI_API_KEY``` — for Google Gemini
 - or install and run ollama locally.
 
@@ -928,7 +929,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
   - `batch-compare <left.zip> <right.zip>`: compare data instances with matching filenames across two batch archives using `--strategy abstract|concrete` (default: `abstract`). Each archive must contain exactly one model. Writes paired `.json` and `.md` reports beside the left archive.
   - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
-    - `list-models`: list available LLM models for a provider (openai/google/ollama).
+    - `list-models`: list available LLM models for a provider (openai/elm/google/ollama).
     - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
     - `ask`: request feedback on an existing model/data pair.
     - `insight`: generate model+data from a prompt, run the solver on the generated files, then ask the GenAI assistant to translate the solver results into a clear, non-technical Markdown report (writes to stdout or `--out-file`).
@@ -1022,7 +1023,7 @@ Rhetor MCP exposes the Generative (GenAI) assistants, model discovery helpers, l
 - **Exposed tools**:
   - **read_ide_editors_tool**: Read the current `model_text` and `data_text` from the running Rhetor IDE. Requires the Rhetor desktop IDE and its local MCP bridge to be running.
   - **write_ide_editors_tool**: Replace `model_text`, `data_text`, or both in the running Rhetor IDE and return both editor contents. Omit an editor argument to leave it unchanged; at least one editor argument is required.
-  - **list_providers_tool**: Return canonical supported LLM provider identifiers, such as `openai`, `google`, and `ollama`.
+  - **list_providers_tool**: Return canonical supported LLM provider identifiers: `openai`, `elm`, `google`, and `ollama`.
   - **list_models_tool**: List models for a provider. Accepts an optional `provider` and an optional `prefix` to filter model names. The `gemini` provider alias is normalized to `google`.
   - **list_methods_tool**: Return `(display_name, method_id)` pairs for the available generative strategies, such as `pyopl_generative` and `pyopl_chain_of_thought`.
   - **generate_tool**: Produce `.mod` and `.dat` files from a natural-language `prompt` at the supplied `model_file` and `data_file` paths. Accepts optional `llm_model`, `provider`, and `iterations` arguments and returns generation statistics and metadata.
@@ -1031,7 +1032,7 @@ Rhetor MCP exposes the Generative (GenAI) assistants, model discovery helpers, l
 - **Provider and model config**: `provider` aliases normalized (e.g., `gemini` → `google`). Pass `llm_model` and `provider` args to select backend.
 - **Solver config**: `insight_tool` accepts `highs` (mapped to the SciPy/HiGHS backend), `scipy`, or `gurobi` through its `solver` argument. The default is `highs`.
 - **Prerequisites**:
-  - Set credentials for remote providers (e.g., `OPENAI_API_KEY`, `GEMINI_API_KEY`) or run an Ollama instance for `ollama` support.
+  - Set credentials for remote providers (e.g., `OPENAI_API_KEY`, `ELM_API_KEY`, `GEMINI_API_KEY`) or run an Ollama instance for `ollama` support.
   - `read_ide_editors_tool` and `write_ide_editors_tool` require a running Rhetor IDE; the other tools can run directly through the stdio MCP server.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:
 ```json

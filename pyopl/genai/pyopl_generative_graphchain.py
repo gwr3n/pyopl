@@ -153,7 +153,7 @@ class ExecutionContext:
     """Grammar mode for code generation (NONE, BNF, or CODE)."""
 
     provider: LLMProvider
-    """LLM provider (OPENAI, GOOGLE, or OLLAMA)."""
+    """LLM provider (OPENAI, ELM, GOOGLE, or OLLAMA)."""
 
     max_iterations: int
     """Maximum refinement iterations allowed."""

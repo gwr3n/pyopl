@@ -26,6 +26,7 @@ from . import generative_feedback, generative_solve, solve
 from .batch_compare import batch_compare
 from .batch_solve import batch_solve, batch_solve_with_progress
 from .genai._strategy_base import (
+    list_elm_models,
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
@@ -209,7 +210,7 @@ def _build_parser() -> argparse.ArgumentParser:
     genai_sub = p_genai.add_subparsers(dest="genai_cmd")
 
     p_genai_list = genai_sub.add_parser("list-models", help="List LLM models")
-    p_genai_list.add_argument("provider", nargs="?", choices=["openai", "google", "ollama"], default="openai")
+    p_genai_list.add_argument("provider", nargs="?", choices=["openai", "elm", "google", "ollama"], default="openai")
     p_genai_list.add_argument("--prefix", dest="prefix", help="Optional prefix filter for model listing")
 
     genai_sub.add_parser("list-methods", help="List generative methods")
@@ -220,14 +221,14 @@ def _build_parser() -> argparse.ArgumentParser:
     p_genai_generate.add_argument("--data-file", required=True, help="Path to write generated data (.dat)")
     p_genai_generate.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
     p_genai_generate.add_argument(
-        "--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation"
+        "--provider", choices=["openai", "elm", "google", "ollama"], help="LLM provider to use for generation"
     )
     p_genai_generate.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
     p_genai_generate.add_argument("--out-file", help="Write generation statistics to file")
     p_genai_insight = genai_sub.add_parser("insight", help="Generate, solve, and summarise solution in lay terms (markdown)")
     p_genai_insight.add_argument("prompt", help="Prompt for insight generation")
     p_genai_insight.add_argument(
-        "--provider", choices=["openai", "google", "ollama"], help="LLM provider to use for generation/feedback"
+        "--provider", choices=["openai", "elm", "google", "ollama"], help="LLM provider to use for generation/feedback"
     )
     p_genai_insight.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
     p_genai_insight.add_argument("--iterations", type=int, default=5, help="Max iterations for generative loop")
@@ -241,7 +242,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_genai_ask.add_argument("--model-file", required=True, help="Path to model (.mod)")
     p_genai_ask.add_argument("--data-file", required=True, help="Path to data (.dat)")
     p_genai_ask.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
-    p_genai_ask.add_argument("--provider", choices=["openai", "google", "ollama"], help="LLM provider to use")
+    p_genai_ask.add_argument("--provider", choices=["openai", "elm", "google", "ollama"], help="LLM provider to use")
     p_genai_ask.add_argument("--out-file", help="Write feedback JSON to file")
 
     return parser
@@ -372,6 +373,7 @@ def _handle_genai_list_models(args: argparse.Namespace) -> int:
     prefix = getattr(args, "prefix", None)
     listers = {
         "openai": list_openai_models,
+        "elm": list_elm_models,
         "google": list_gemini_models,
         "ollama": list_ollama_models,
     }

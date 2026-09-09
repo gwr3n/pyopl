@@ -22,6 +22,7 @@ from .rag_helper import rank_problem_descriptions as rag_rank
 
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
+    ELM = "elm"
     GOOGLE = "google"
     OLLAMA = "ollama"
 
@@ -405,6 +406,17 @@ class GenAIStrategyBase:
         return ""
 
     @staticmethod
+    def _ELM_client():
+        try:
+            from openai import OpenAI
+        except Exception as e:
+            raise RuntimeError("openai is not installed. pip install openai") from e
+        api_key = os.environ.get("ELM_API_KEY")
+        if not api_key:
+            raise RuntimeError("ELM_API_KEY environment variable not set.")
+        return OpenAI(base_url="https://elm.edina.ac.uk/api/v1", api_key=api_key)
+
+    @staticmethod
     def _openai_client():
         try:
             from openai import OpenAI
@@ -479,6 +491,8 @@ class GenAIStrategyBase:
             lp = llm_provider.strip().lower()
             if lp in ("openai", "oai"):
                 return LLMProvider.OPENAI
+            if lp == "elm":
+                return LLMProvider.ELM
             if lp in ("google", "genai", "gemini", "google.generativeai"):
                 return LLMProvider.GOOGLE
             if lp in ("ollama",):
@@ -593,6 +607,7 @@ class GenAIStrategyBase:
         client: Any,
         create_params: Dict[str, Any],
         *,
+        provider_name: str = "OpenAI",
         retries: int = 3,
         backoff_sec: float = 1.5,
         progress: Optional[Callable[[str], None]] = None,
@@ -639,18 +654,20 @@ class GenAIStrategyBase:
             except Exception as e:
                 last_err = e
                 msg = str(e) if e else "unknown error"
-                self.notify(progress, f"[LLM] OpenAI: {msg}")
+                self.notify(progress, f"[LLM] {provider_name}: {msg}")
                 if _strip_param_from_error_message(msg):
-                    self.notify(progress, "[LLM] OpenAI: retrying without unsupported parameters")
+                    self.notify(progress, f"[LLM] {provider_name}: retrying without unsupported parameters")
                     continue
-                self.notify(progress, f"[LLM] OpenAI: retry {attempt + 1}/{retries} after error: {msg}")
+                self.notify(progress, f"[LLM] {provider_name}: retry {attempt + 1}/{retries} after error: {msg}")
                 sleep(backoff_sec * (2**attempt))
-        self.notify(progress, f"[LLM] OpenAI: failed after {retries} attempts")
-        raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
+        self.notify(progress, f"[LLM] {provider_name}: failed after {retries} attempts")
+        raise RuntimeError(f"{provider_name} request failed after {retries} attempts: {last_err}")
 
     def _generate_openai(
         self,
         *,
+        client: Optional[Any] = None,
+        provider_name: str = "OpenAI",
         model_name: str,
         input_text: str,
         images: Optional[List[ImageInput]],
@@ -661,7 +678,7 @@ class GenAIStrategyBase:
         capture_usage: bool,
         expected_json: bool,
     ) -> Tuple[str, Optional[Dict[str, int]]]:
-        client = self._openai_client()
+        client = client or self._openai_client()
         input_content = self._build_openai_input(input_text=input_text, images=images)
         create_params = self._build_openai_create_params(
             model_name=model_name,
@@ -671,12 +688,17 @@ class GenAIStrategyBase:
             stop=stop,
             expected_json=expected_json,
         )
-        self.notify(progress, f"[LLM] OpenAI • {model_name}: sending request")
-        response = self._call_openai_with_retry(client, create_params, progress=progress)
-        self.notify(progress, "[LLM] OpenAI: response received")
+        self.notify(progress, f"[LLM] {provider_name} • {model_name}: sending request")
+        response = self._call_openai_with_retry(
+            client,
+            create_params,
+            provider_name=provider_name,
+            progress=progress,
+        )
+        self.notify(progress, f"[LLM] {provider_name}: response received")
         response_text = self._coalesce_response_text(response)
         if not response_text:
-            raise RuntimeError(f"Empty OpenAI response: {response}.")
+            raise RuntimeError(f"Empty {provider_name} response: {response}.")
         if not capture_usage:
             return response_text, None
         # Note: usage estimation falls back to tokenizing input_text only (images excluded).
@@ -919,6 +941,24 @@ class GenAIStrategyBase:
                 return text
             return text, cast(Dict[str, int], usage)
 
+        if provider == LLMProvider.ELM:
+            text, usage = self._generate_openai(
+                client=self._ELM_client(),
+                provider_name="ELM",
+                model_name=model_name,
+                input_text=input_text,
+                images=images,
+                mt=mt,
+                temperature=temperature,
+                stop=stop,
+                progress=progress,
+                capture_usage=capture_usage,
+                expected_json=expected_json,
+            )
+            if not capture_usage:
+                return text
+            return text, cast(Dict[str, int], usage)
+
         if provider == LLMProvider.GOOGLE:
             g = self._google_client()
 
@@ -1023,10 +1063,19 @@ class GenAIStrategyBase:
 
 def list_openai_models(*, prefix: Optional[str] = "gpt") -> list[str]:
     client = GenAIStrategyBase._openai_client()
+    return _list_openai_compatible_models(client, prefix=prefix, provider_name="OpenAI")
+
+
+def list_elm_models(*, prefix: Optional[str] = None) -> list[str]:
+    client = GenAIStrategyBase._ELM_client()
+    return _list_openai_compatible_models(client, prefix=prefix, provider_name="ELM")
+
+
+def _list_openai_compatible_models(client: Any, *, prefix: Optional[str], provider_name: str) -> list[str]:
     try:
         resp = client.models.list()
     except Exception as e:
-        raise RuntimeError(f"Failed to list OpenAI models: {e}")
+        raise RuntimeError(f"Failed to list {provider_name} models: {e}")
 
     names: list[str] = []
     data = getattr(resp, "data", None)
@@ -1109,6 +1158,8 @@ def list_models(*, llm_provider: Optional[str] = None, model_name: str) -> list[
     provider = GenAIStrategyBase.infer_provider(llm_provider, model_name)
     if provider == LLMProvider.OPENAI:
         return list_openai_models()
+    if provider == LLMProvider.ELM:
+        return list_elm_models()
     if provider == LLMProvider.GOOGLE:
         return list_gemini_models()
     if provider == LLMProvider.OLLAMA:

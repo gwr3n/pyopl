@@ -35,6 +35,7 @@ from .genai.exemplar_ranking_worker import ExemplarRankingWorker
 
 # Model discovery (provider-specific)
 from .genai.model_discovery import (
+    list_elm_models,
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
@@ -7511,6 +7512,7 @@ class OPLIDE(TkinterDnD.Tk):
         if self._genai_loading:
             return
         self._genai_loading = True
+        discovery_queue: queue.Queue[dict[str, list[str]]] = queue.Queue(maxsize=1)
 
         # Placeholder UI
         try:
@@ -7524,11 +7526,15 @@ class OPLIDE(TkinterDnD.Tk):
             pass
 
         def discover() -> None:
-            provider_models: dict[str, list[str]] = {"openai": [], "google": [], "ollama": []}
+            provider_models: dict[str, list[str]] = {"openai": [], "elm": [], "google": [], "ollama": []}
             try:
                 provider_models["openai"] = list_openai_models()
             except Exception:
                 provider_models["openai"] = []
+            try:
+                provider_models["elm"] = list_elm_models()
+            except Exception:
+                provider_models["elm"] = []
             try:
                 provider_models["google"] = list_gemini_models()
             except Exception:
@@ -7537,14 +7543,21 @@ class OPLIDE(TkinterDnD.Tk):
                 provider_models["ollama"] = list_ollama_models()
             except Exception:
                 provider_models["ollama"] = []
+            discovery_queue.put(provider_models)
 
-            def on_done():
-                self._genai_loading = False
-                self._populate_genai_model_menus(provider_models)
-
-            self.after(0, on_done)
-
+        self.after(50, self._poll_genai_model_discovery, discovery_queue)
         threading.Thread(target=discover, daemon=True).start()
+
+    def _poll_genai_model_discovery(self, discovery_queue: queue.Queue[dict[str, list[str]]]) -> None:
+        if getattr(self, "_shutting_down", False):
+            return
+        try:
+            provider_models = discovery_queue.get_nowait()
+        except queue.Empty:
+            self.after(50, self._poll_genai_model_discovery, discovery_queue)
+            return
+        self._genai_loading = False
+        self._populate_genai_model_menus(provider_models)
 
     def _populate_genai_model_menus(self, provider_models: dict[str, list[str]]) -> None:
         """Populate the GenAI menu with provider submenus and radio items per model."""
@@ -7573,7 +7586,7 @@ class OPLIDE(TkinterDnD.Tk):
             OPLIDE._set_empty_genai_menu(self, active)
 
     def _add_genai_provider_menus(self, provider_models: dict[str, list[str]]) -> None:
-        provider_labels = {"openai": "OpenAI", "google": "Gemini", "ollama": "Ollama"}
+        provider_labels = {"openai": "OpenAI", "elm": "ELM", "google": "Gemini", "ollama": "Ollama"}
         for provider_key, models in provider_models.items():
             if not models:
                 continue
@@ -7640,7 +7653,7 @@ class OPLIDE(TkinterDnD.Tk):
                 return
         if self.genai_provider and self.genai_model:
             return
-        for provider in ("openai", "google", "ollama"):
+        for provider in ("openai", "elm", "google", "ollama"):
             models = provider_models.get(provider) or []
             if models:
                 self.genai_selection_var.set(f"{provider}|{models[0]}")
