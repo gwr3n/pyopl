@@ -250,6 +250,15 @@ class TestCLI(unittest.TestCase):
             out = buf.getvalue()
             self.assertIn("gpt-test-1", out)
 
+    def test_genai_list_models_elm(self):
+        with patch("pyopl.pyopl_cli.list_elm_models", return_value=["elm-model"]):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                ret = pyopl_cli.main(["genai", "list-models", "elm"])
+
+        self.assertEqual(ret, 0)
+        self.assertIn("elm-model", buf.getvalue())
+
     def test_genai_list_methods(self):
         argv = ["genai", "list-methods"]
         buf = io.StringIO()

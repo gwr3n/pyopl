@@ -50,7 +50,7 @@ def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = None
-LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
+LLM_PROVIDER = "openai"  # "openai", "elm", "google", "ollama"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
@@ -72,6 +72,7 @@ _BASE = GenAIStrategyBase(
 
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
+    ELM = "elm"
     GOOGLE = "google"
     OLLAMA = "ollama"
 
@@ -699,7 +700,7 @@ def generative_solve(
         alignment_check (bool|None): If True, check alignment with the original prompt; if False, skip alignment check; if None, use default ALIGNMENT_CHECK.
         temperature (float|None): Sampling temperature; if None, use model default.
         stop (list[str]|None): List of stop sequences; if None, no stop sequences.
-        llm_provider (str|None): "openai" (default), "google", or "ollama".
+        llm_provider (str|None): "openai" (default), "elm", "google", or "ollama".
         progress (callable|None): Optional function that receives progress messages (str).
 
     Returns:

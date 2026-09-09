@@ -41,6 +41,7 @@ from pydantic import Field
 from . import generative_feedback, generative_solve, solve
 from .genai._strategy_base import (
     LLMProvider,
+    list_elm_models,
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
@@ -162,6 +163,7 @@ def _normalize_provider(provider: Optional[str]) -> str:
     normalized = provider.strip().lower()
     provider_aliases = {
         "openai": "openai",
+        "elm": "elm",
         "google": "google",
         "gemini": "google",
         "ollama": "ollama",
@@ -277,7 +279,7 @@ def list_providers() -> list:
         return [provider.value for provider in LLMProvider]
     except Exception:
         # Fallback for safety in environments where the enum isn't available
-        return ["openai", "google", "ollama"]
+        return ["openai", "elm", "google", "ollama"]
 
 
 def list_models(
@@ -289,6 +291,8 @@ def list_models(
 
     if normalized_provider == "openai":
         return list_openai_models(prefix=prefix) if prefix else list_openai_models()
+    if normalized_provider == "elm":
+        return list_elm_models(prefix=prefix) if prefix else list_elm_models()
     if normalized_provider == "google":
         return list_gemini_models(prefix=prefix) if prefix else list_gemini_models()
     if normalized_provider == "ollama":
@@ -302,7 +306,7 @@ def list_providers_tool() -> list:
     """Return supported LLM provider identifiers.
 
     Returns a list of canonical provider names (strings), e.g.
-    `['openai', 'google', 'ollama']`.
+    `['openai', 'elm', 'google', 'ollama']`.
 
     Returns:
         A list of provider name strings.
@@ -322,7 +326,7 @@ def list_models_tool(
     models are filtered to those starting with the prefix.
 
     Args:
-        provider: Provider identifier (e.g., ``openai``, ``google``, ``ollama``).
+        provider: Provider identifier (e.g., ``openai``, ``elm``, ``google``, ``ollama``).
         prefix: Optional prefix for filtering model names.
 
     Returns:
@@ -364,7 +368,7 @@ def generate_tool(
     generation/refinement process.
 
     Important: generative backends require appropriate environment
-    variables (for example `OPENAI_API_KEY` or `GEMINI_API_KEY`) to be set.
+    variables (for example `OPENAI_API_KEY`, `ELM_API_KEY`, or `GEMINI_API_KEY`) to be set.
 
     Args:
         prompt: Natural-language problem description.

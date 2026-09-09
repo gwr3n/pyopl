@@ -279,6 +279,7 @@ class TestRhetorMCP(unittest.TestCase):
         self.assertEqual(_rhetor_mcp._solve_backend("GUROBI"), "gurobi")
         self.assertEqual(_rhetor_mcp._normalize_provider(None), _rhetor_mcp.DEFAULT_PROVIDER)
         self.assertEqual(_rhetor_mcp._normalize_provider(" Gemini "), "google")
+        self.assertEqual(_rhetor_mcp._normalize_provider("ELM"), "elm")
         self.assertEqual(_rhetor_mcp._normalize_provider("ollama"), "ollama")
         with self.assertRaisesRegex(ValueError, "Unsupported provider"):
             _rhetor_mcp._normalize_provider("anthropic")
@@ -354,14 +355,16 @@ class TestRhetorMCP(unittest.TestCase):
         with patch.object(_rhetor_mcp, "LLMProvider", [type("P", (), {"value": "p1"})(), type("P", (), {"value": "p2"})()]):
             self.assertEqual(_rhetor_mcp.list_providers(), ["p1", "p2"])
         with patch.object(_rhetor_mcp, "LLMProvider", object()):
-            self.assertEqual(_rhetor_mcp.list_providers(), ["openai", "google", "ollama"])
+            self.assertEqual(_rhetor_mcp.list_providers(), ["openai", "elm", "google", "ollama"])
 
         with (
             patch.object(_rhetor_mcp, "list_openai_models", return_value=["gpt"]),
+            patch.object(_rhetor_mcp, "list_elm_models", return_value=["elm-model"]),
             patch.object(_rhetor_mcp, "list_gemini_models", return_value=["gemini"]),
             patch.object(_rhetor_mcp, "list_ollama_models", return_value=["llama"]),
         ):
             self.assertEqual(_rhetor_mcp.list_models("openai"), ["gpt"])
+            self.assertEqual(_rhetor_mcp.list_models("elm"), ["elm-model"])
             self.assertEqual(_rhetor_mcp.list_models("google", prefix="gem"), ["gemini"])
             self.assertEqual(_rhetor_mcp.list_models("ollama"), ["llama"])
 

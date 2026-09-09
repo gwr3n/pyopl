@@ -572,6 +572,24 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertEqual(cost["estimated_costs"], {"total_cost": 1.2})
         self.assertEqual(GenAIStrategyBase.infer_provider(None, "gemini-2"), LLMProvider.GOOGLE)
         self.assertEqual(GenAIStrategyBase.infer_provider(None, "llama3"), LLMProvider.OLLAMA)
+        self.assertEqual(GenAIStrategyBase.infer_provider("elm", "gpt-test"), LLMProvider.ELM)
+
+    def test_base_elm_dispatch_uses_elm_client(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        elm_client = object()
+
+        with (
+            patch.object(base, "_ELM_client", return_value=elm_client),
+            patch.object(base, "_generate_openai", return_value=("elm", None)) as generate,
+        ):
+            result = base.llm_generate_text(
+                provider=LLMProvider.ELM,
+                model_name="gpt-test",
+                input_text="prompt",
+            )
+
+        self.assertEqual(result, "elm")
+        self.assertIs(generate.call_args.kwargs["client"], elm_client)
 
 
 class TestGenAIPricing(unittest.TestCase):
@@ -685,6 +703,12 @@ class TestModelDiscovery(unittest.TestCase):
 
         with patch.object(GenAIStrategyBase, "_openai_client", return_value=client):
             self.assertEqual(model_discovery.list_openai_models(prefix="gpt"), ["gpt-a", "gpt-b"])
+
+    def test_elm_model_listing_uses_elm_client(self) -> None:
+        client = SimpleNamespace(models=SimpleNamespace(list=lambda: SimpleNamespace(data=[{"id": "local"}, {"id": "gpt"}])))
+
+        with patch.object(GenAIStrategyBase, "_ELM_client", return_value=client):
+            self.assertEqual(strategy_base.list_elm_models(), ["gpt", "local"])
 
     def test_gemini_new_sdk_listing_strips_models_prefix(self) -> None:
         google_client = SimpleNamespace(

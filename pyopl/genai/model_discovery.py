@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import Optional
 
 from ._strategy_base import (
+    list_elm_models as _list_elm_models,
+)
+from ._strategy_base import (
     list_gemini_models as _list_gemini_models,
 )
 from ._strategy_base import (
@@ -24,6 +27,10 @@ from ._strategy_base import (
 
 def list_openai_models(prefix: Optional[str] = "gpt") -> list[str]:
     return _list_openai_models(prefix=prefix)
+
+
+def list_elm_models(prefix: Optional[str] = None) -> list[str]:
+    return _list_elm_models(prefix=prefix)
 
 
 def list_gemini_models(prefix: Optional[str] = "gemini") -> list[str]:

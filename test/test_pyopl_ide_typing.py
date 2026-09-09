@@ -1,4 +1,5 @@
 import os
+import queue
 import unittest
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -1421,6 +1422,23 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy.genai_provider, "openai")
         self.assertEqual(dummy.genai_model, "custom-model")
         self.assertEqual(dummy.genai_selection_var.get(), "openai|custom-model")
+
+    def test_poll_genai_model_discovery_delivers_elm_models(self):
+        discovery_queue = queue.Queue()
+        provider_models = {"openai": [], "elm": ["gpt-5.4"], "google": [], "ollama": []}
+        discovery_queue.put(provider_models)
+        dummy = SimpleNamespace(
+            _shutting_down=False,
+            _genai_loading=True,
+            after=mock.Mock(),
+            _populate_genai_model_menus=mock.Mock(),
+        )
+
+        OPLIDE._poll_genai_model_discovery(dummy, discovery_queue)
+
+        self.assertFalse(dummy._genai_loading)
+        dummy._populate_genai_model_menus.assert_called_once_with(provider_models)
+        dummy.after.assert_not_called()
 
     def test_pillow_optional_imports_exist(self):
         # Module should define these attributes

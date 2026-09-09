@@ -45,7 +45,7 @@ def _notify(progress: Optional[Callable[[str], None]], msg: str) -> None:
 
 MAX_ITERATIONS = 5
 MAX_OUTPUT_TOKENS = None
-LLM_PROVIDER = "openai"  # "openai", "google", "ollama"
+LLM_PROVIDER = "openai"  # "openai", "elm", "google", "ollama"
 MODEL_NAME = "gpt-5"
 ALIGNMENT_CHECK = True  # Whether to check alignment with original prompt
 
@@ -67,6 +67,7 @@ _BASE = GenAIStrategyBase(
 
 class LLMProvider(Enum):
     OPENAI = "openai"  # Default
+    ELM = "elm"
     GOOGLE = "google"
     OLLAMA = "ollama"
 
@@ -132,7 +133,7 @@ def _llm_generate_text(
     progress: Optional[Callable[[str], None]] = None,
     capture_usage: bool = False,
 ) -> Union[str, Tuple[str, Dict[str, int]]]:
-    expected_json = provider == LLMProvider.OPENAI
+    expected_json = provider in (LLMProvider.OPENAI, LLMProvider.ELM)
     return _BASE.llm_generate_text(
         provider=_BaseLLMProvider[provider.name],
         model_name=model_name,

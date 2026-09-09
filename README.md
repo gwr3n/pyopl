@@ -152,7 +152,7 @@ PyOPL includes [Rhetor](https://gwr3n.github.io/rhetor), a GenAI-first integrate
 
 The IME features:
 
-- GenAI-first modelling workflows for generating models, revising existing model/data pairs, asking questions about a formulation, and explaining solutions with OpenAI, Google/Gemini, or Ollama models when configured
+- GenAI-first modelling workflows for generating models, revising existing model/data pairs, asking questions about a formulation, and explaining solutions with OpenAI, ELM, Google/Gemini, or Ollama models when configured
 - Optional visual prompt attachments for supported GenAI workflows, including images and short PDFs
 - Session-based model version tracking: each run/request can keep a timestamped snapshot that can be previewed, diffed against the current editors, restored, renamed, or deleted
 - Output and session panels for reviewing recent runs, generated artifacts, model/data snapshots, and GenAI interactions
