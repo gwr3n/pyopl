@@ -590,6 +590,32 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
 
         self.assertEqual(result, "elm")
         self.assertIs(generate.call_args.kwargs["client"], elm_client)
+        self.assertEqual(generate.call_args.kwargs["provider_name"], "ELM")
+
+    def test_base_elm_generation_uses_elm_progress_labels(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        progress_messages: list[str] = []
+        response = SimpleNamespace(output_text="ok")
+        client = SimpleNamespace(responses=SimpleNamespace(create=lambda **kwargs: response))
+
+        text, usage = base._generate_openai(
+            client=client,
+            provider_name="ELM",
+            model_name="gpt-test",
+            input_text="prompt",
+            images=None,
+            mt=None,
+            temperature=None,
+            stop=None,
+            progress=progress_messages.append,
+            capture_usage=False,
+            expected_json=False,
+        )
+
+        self.assertEqual((text, usage), ("ok", None))
+        self.assertTrue(progress_messages)
+        self.assertTrue(all("OpenAI" not in message for message in progress_messages))
+        self.assertTrue(all("ELM" in message for message in progress_messages))
 
 
 class TestGenAIPricing(unittest.TestCase):

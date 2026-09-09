@@ -607,6 +607,7 @@ class GenAIStrategyBase:
         client: Any,
         create_params: Dict[str, Any],
         *,
+        provider_name: str = "OpenAI",
         retries: int = 3,
         backoff_sec: float = 1.5,
         progress: Optional[Callable[[str], None]] = None,
@@ -653,19 +654,20 @@ class GenAIStrategyBase:
             except Exception as e:
                 last_err = e
                 msg = str(e) if e else "unknown error"
-                self.notify(progress, f"[LLM] OpenAI: {msg}")
+                self.notify(progress, f"[LLM] {provider_name}: {msg}")
                 if _strip_param_from_error_message(msg):
-                    self.notify(progress, "[LLM] OpenAI: retrying without unsupported parameters")
+                    self.notify(progress, f"[LLM] {provider_name}: retrying without unsupported parameters")
                     continue
-                self.notify(progress, f"[LLM] OpenAI: retry {attempt + 1}/{retries} after error: {msg}")
+                self.notify(progress, f"[LLM] {provider_name}: retry {attempt + 1}/{retries} after error: {msg}")
                 sleep(backoff_sec * (2**attempt))
-        self.notify(progress, f"[LLM] OpenAI: failed after {retries} attempts")
-        raise RuntimeError(f"OpenAI request failed after {retries} attempts: {last_err}")
+        self.notify(progress, f"[LLM] {provider_name}: failed after {retries} attempts")
+        raise RuntimeError(f"{provider_name} request failed after {retries} attempts: {last_err}")
 
     def _generate_openai(
         self,
         *,
         client: Optional[Any] = None,
+        provider_name: str = "OpenAI",
         model_name: str,
         input_text: str,
         images: Optional[List[ImageInput]],
@@ -686,12 +688,17 @@ class GenAIStrategyBase:
             stop=stop,
             expected_json=expected_json,
         )
-        self.notify(progress, f"[LLM] OpenAI • {model_name}: sending request")
-        response = self._call_openai_with_retry(client, create_params, progress=progress)
-        self.notify(progress, "[LLM] OpenAI: response received")
+        self.notify(progress, f"[LLM] {provider_name} • {model_name}: sending request")
+        response = self._call_openai_with_retry(
+            client,
+            create_params,
+            provider_name=provider_name,
+            progress=progress,
+        )
+        self.notify(progress, f"[LLM] {provider_name}: response received")
         response_text = self._coalesce_response_text(response)
         if not response_text:
-            raise RuntimeError(f"Empty OpenAI response: {response}.")
+            raise RuntimeError(f"Empty {provider_name} response: {response}.")
         if not capture_usage:
             return response_text, None
         # Note: usage estimation falls back to tokenizing input_text only (images excluded).
@@ -937,6 +944,7 @@ class GenAIStrategyBase:
         if provider == LLMProvider.ELM:
             text, usage = self._generate_openai(
                 client=self._ELM_client(),
+                provider_name="ELM",
                 model_name=model_name,
                 input_text=input_text,
                 images=images,
