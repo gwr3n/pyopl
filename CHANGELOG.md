@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.5.0] - 2026-09-10
+
+### Added
+
 - Added regression coverage for ELM client configuration, generation dispatch, usage capture, and model discovery.
 - Added ELM as an OpenAI-compatible generative provider using `ELM_API_KEY`, including model discovery in the API, CLI, MCP server, and IDE.
 - Added portable Copilot instructions and skills for PyOPL model generation and model/data feedback workflows using PyOPL MCP validation without Rhetor MCP tools.
