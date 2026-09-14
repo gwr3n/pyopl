@@ -40,6 +40,39 @@ RENAMED_MODEL = """
 
 
 class AbstractEquivalenceTests(unittest.TestCase):
+    def test_structural_and_auto_modes_honor_explicit_variable_mapping(self):
+        left = "dvar float+ x; dvar float+ y; minimize x + 2*y; subject to { x <= 1; y <= 1; }"
+        right = "dvar float+ a; dvar float+ b; minimize a + 2*b; subject to { a <= 1; b <= 1; }"
+        for mode in ("structural", "auto"):
+            with self.subTest(mode=mode):
+                correct = prove_abstract_equivalent(left, right, mode=mode, variable_mapping={"x": "a", "y": "b"})
+                incorrect = prove_abstract_equivalent(left, right, mode=mode, variable_mapping={"x": "b", "y": "a"})
+
+                self.assertTrue(correct.equivalent)
+                self.assertFalse(incorrect.equivalent)
+
+    def test_auto_mode_honors_explicit_parameter_mapping(self):
+        left = "float p = ...; float q = ...; dvar float+ x; minimize p*x + q; subject to { x <= 1; }"
+        right = "float a = ...; float b = ...; dvar float+ y; minimize a*y + b; subject to { y <= 1; }"
+        correct = prove_abstract_equivalent(left, right, mode="auto", parameter_mapping={"p": "a", "q": "b"})
+        incorrect = prove_abstract_equivalent(left, right, mode="auto", parameter_mapping={"p": "b", "q": "a"})
+
+        self.assertTrue(correct.equivalent)
+        self.assertFalse(incorrect.equivalent)
+
+    def test_indexed_schema_isomorphism_honors_explicit_mapping(self):
+        for mapping, expected in (({"x": "quantity"}, True), ({"x": "unitCost"}, False), ({"missing": "quantity"}, False)):
+            with self.subTest(mapping=mapping):
+                result = prove_abstract_equivalent(LEFT_MODEL, RENAMED_MODEL, mode="auto", variable_mapping=mapping)
+
+                self.assertEqual(result.equivalent, expected)
+
+    def test_structural_mapping_must_be_injective(self):
+        model = "dvar float+ x; dvar float+ y; minimize x+y; subject to { x <= 1; y <= 1; }"
+        result = prove_abstract_equivalent(model, model, variable_mapping={"x": "x", "y": "x"})
+
+        self.assertFalse(result.equivalent)
+
     def test_compare_abstract_accepts_renamed_and_reordered_model_schema(self):
         self.assertTrue(compare_abstract(LEFT_MODEL, RENAMED_MODEL))
 

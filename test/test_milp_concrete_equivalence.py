@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from pyopl.linear_problem import LinearProblem
 from pyopl.milp_concrete_equivalence import EquivalenceResult, compare, prove_equivalent
@@ -7,6 +8,79 @@ from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class CompareTests(unittest.TestCase):
+    def test_fixed_integer_infeasibility_survives_normalization(self):
+        feasible = linear_problem_from_opl("dvar float+ x; minimize x; subject to { x <= 1; }")
+        infeasible = replace(
+            feasible,
+            var_names=["x", "fixed"],
+            bounds=[*feasible.bounds, [0.5, 0.5]],
+            integrality=[0, 1],
+            c=[1.0, 0.0],
+            A_ub=[[*row, 0.0] for row in feasible.A_ub],
+        )
+
+        for mode in ("solver", "auto"):
+            with self.subTest(mode=mode):
+                self.assertFalse(prove_equivalent(infeasible, feasible, mode=mode).equivalent)
+
+    def test_constant_inequalities_after_fixed_variable_elimination(self):
+        problem = linear_problem_from_opl("dvar float+ x; minimize x; subject to { x <= 1; }")
+        fixed = replace(problem, bounds=[[0, 0]], A_ub=[[1.0]], b_ub=[1.0])
+        no_rows = replace(fixed, A_ub=[], b_ub=[])
+        contradictory = replace(fixed, b_ub=[-1.0])
+
+        self.assertTrue(prove_equivalent(fixed, fixed).equivalent)
+        self.assertTrue(prove_equivalent(fixed, no_rows).equivalent)
+        self.assertFalse(prove_equivalent(contradictory, no_rows).equivalent)
+
+    def test_explicit_mapping_preserves_fixed_alias_and_slack_variables(self):
+        models = (
+            "dvar float+ x; minimize x; subject to { x <= 1; }",
+            "dvar float+ x; dvar float alias; minimize alias; subject to { alias == 2*x; x <= 1; }",
+            "dvar float+ x; dvar float+ slack; minimize x; subject to { x + slack == 1; }",
+        )
+        for model in models:
+            left = linear_problem_from_opl(model)
+            if len(left.var_names) == 1:
+                left = replace(left, bounds=[[0, 0]])
+            mapping = {name: f"renamed_{name}" for name in left.var_names}
+            right = replace(left, var_names=list(mapping.values()))
+            for mode in ("solver", "auto"):
+                with self.subTest(model=model, mode=mode):
+                    self.assertTrue(prove_equivalent(left, right, mode=mode, variable_mapping=mapping).equivalent)
+
+        self.assertEqual(prove_equivalent(left, right, variable_mapping={"missing": "renamed_x"}).status, "different")
+
+    def test_explicit_mapping_rejects_different_fixed_values(self):
+        problem = linear_problem_from_opl("dvar boolean x; minimize 0*x; subject to { x <= 1; }")
+        left = replace(problem, bounds=[[0, 0]])
+        right = replace(problem, var_names=["y"], bounds=[[1, 1]])
+
+        for mode in ("solver", "auto"):
+            with self.subTest(mode=mode):
+                self.assertFalse(prove_equivalent(left, right, mode=mode, variable_mapping={"x": "y"}).equivalent)
+
+    def test_projected_comparison_preserves_target_binary_bounds(self):
+        problem = linear_problem_from_opl("dvar boolean x; minimize x; subject to { x <= 1; }")
+        for mode in ("projected_milp", "auto"):
+            for left_value, right_value in ((0, 1), (1, 0)):
+                with self.subTest(mode=mode, left_value=left_value):
+                    left = replace(problem, bounds=[[left_value, left_value]], A_ub=[], b_ub=[])
+                    right = replace(problem, bounds=[[right_value, right_value]], A_ub=[], b_ub=[])
+
+                    result = prove_equivalent(left, right, mode=mode)
+
+                    self.assertEqual(result.status, "different")
+                    self.assertEqual(result.counterexample, f"x={left_value}")
+
+    def test_projected_assignment_budget_allows_exhaustion_check(self):
+        problem = linear_problem_from_opl("dvar boolean x; minimize x; subject to { x <= 1; }")
+        for budget, expected in ((3, "unknown"), (4, "equivalent"), (5, "equivalent")):
+            with self.subTest(budget=budget):
+                result = prove_equivalent(problem, problem, mode="projected_milp", max_projected_assignments=budget)
+
+                self.assertEqual(result.status, expected)
+
     def test_compare_accepts_equivalent_opl_models_compiled_by_scipy_codegen(self):
         first = linear_problem_from_opl("""
             dvar float+ x;

@@ -105,6 +105,8 @@ def prove_abstract_equivalent(
     order, labels, parentheses, and operand order for associative-commutative
     arithmetic and logical operators.  It also canonicalizes comparison
     direction, so ``a >= b`` and ``b <= a`` have the same representation.
+    Explicit parameter and variable mappings constrain schema isomorphism as
+    well as the algebraic proof stages.
 
     ``mode="structural"`` performs only schema isomorphism and preserves the
     original API behavior.  ``mode="algebraic"`` lowers scalar affine schemas
@@ -133,7 +135,7 @@ def prove_abstract_equivalent(
             reason=issue or "invalid abstract model AST",
         )
 
-    structural_result = _prove_schema_isomorphism(left_ast, right_ast)
+    structural_result = _prove_schema_isomorphism(left_ast, right_ast, parameter_mapping, variable_mapping)
     if mode == "structural" or (mode == "auto" and structural_result.equivalent):
         return structural_result
     if mode not in {"algebraic", "auto"}:
@@ -238,10 +240,13 @@ def _effective_algebraic_mappings(
 def _prove_schema_isomorphism(
     left_ast: Mapping[str, Any],
     right_ast: Mapping[str, Any],
+    parameter_mapping: Mapping[str, str] | None = None,
+    variable_mapping: Mapping[str, str] | None = None,
 ) -> AbstractEquivalenceResult:
     try:
-        left_graph = _AbstractGraphBuilder(left_ast).build()
-        right_graph = _AbstractGraphBuilder(right_ast).build()
+        left_labels, right_labels = _schema_mapping_labels(parameter_mapping, variable_mapping)
+        left_graph = _AbstractGraphBuilder(left_ast).build(left_labels)
+        right_graph = _AbstractGraphBuilder(right_ast).build(right_labels)
     except _UnsupportedAbstractNode as exc:
         return AbstractEquivalenceResult(
             status="unknown",
@@ -274,6 +279,21 @@ def _prove_schema_isomorphism(
         proof_steps=proof_steps,
         counterexample="no label-preserving abstract-syntax graph isomorphism exists",
     )
+
+
+def _schema_mapping_labels(
+    parameter_mapping: Mapping[str, str] | None,
+    variable_mapping: Mapping[str, str] | None,
+) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+    left_labels: dict[str, tuple[str, str]] = {}
+    right_labels: dict[str, tuple[str, str]] = {}
+    for kind, mapping in (("parameter", parameter_mapping), ("variable", variable_mapping)):
+        for left_name, right_name in (mapping or {}).items():
+            if left_name in left_labels or right_name in right_labels:
+                raise _UnsupportedAbstractNode("abstract declaration mappings must be disjoint and injective")
+            left_labels[left_name] = (kind, left_name)
+            right_labels[right_name] = (kind, left_name)
+    return left_labels, right_labels
 
 
 def _coerce_ast(model: AbstractModelInput) -> Mapping[str, Any]:
@@ -309,7 +329,7 @@ class _AbstractGraphBuilder:
         self._global_symbols: dict[str, int] = {}
         self._declaration_nodes: list[tuple[Mapping[str, Any], int]] = []
 
-    def build(self) -> nx.DiGraph:
+    def build(self, mapping_labels: Mapping[str, tuple[str, str]] | None = None) -> nx.DiGraph:
         root = self._new_node(("model",))
         declarations = self.ast["declarations"]
         for declaration in declarations:
@@ -323,6 +343,12 @@ class _AbstractGraphBuilder:
                 if name in self._global_symbols:
                     raise _UnsupportedAbstractNode(f"duplicate abstract declaration: {name}")
                 self._global_symbols[name] = node
+
+        for name, label in (mapping_labels or {}).items():
+            if name not in self._global_symbols:
+                raise _UnsupportedAbstractNode(f"abstract mapping references unknown declaration: {name}")
+            mapping_node = self._new_node(("user_mapping", *label))
+            self._edge(mapping_node, self._global_symbols[name], "refers_to")
 
         for declaration, node in self._declaration_nodes:
             self._populate_mapping(node, declaration, self._global_symbols, declaration=True)

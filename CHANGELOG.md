@@ -11,7 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved target bounds in projected MILP equivalence checks and allowed enumeration to finish exactly at the assignment budget.
+- Preserved infeasible fixed integer domains and explicitly mapped variables during concrete equivalence normalization, and handled constant inequalities without empty solver calls.
+- Honored explicit parameter and variable mappings in abstract structural and automatic equivalence checks.
+
 ### Changed
+
+- Separated fixed-variable selection and slack-equality conversion from concrete equivalence elimination routines to reduce complexity without changing behavior.
 
 ### Removed
 

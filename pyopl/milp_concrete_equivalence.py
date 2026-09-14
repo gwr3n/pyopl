@@ -131,7 +131,8 @@ def prove_equivalent(
     converted into labelled bipartite row-column graphs and tested for labelled
     isomorphism.
 
-    Variable names are ignored unless ``variable_mapping`` is supplied.  Column
+    Variable names are ignored unless ``variable_mapping`` is supplied. Mapped
+    variables are retained during elimination to preserve their correspondence. Column
     labels contain the normalized objective coefficient and integrality flag,
     while row labels contain the constraint sense and right-hand side.  The
     comparison is invariant to row order, column order, positive scaling of
@@ -251,8 +252,10 @@ def _prove_normalized_equivalent(
     max_iterations: int | None,
     max_projected_assignments: int,
 ) -> EquivalenceResult:
-    left_normalized = _canonicalize(left, tolerance, max_iterations)
-    right_normalized = _canonicalize(right, tolerance, max_iterations)
+    left_normalized = _canonicalize(left, tolerance, max_iterations, frozenset(variable_mapping or ()))
+    right_normalized = _canonicalize(
+        right, tolerance, max_iterations, frozenset(variable_mapping.values()) if variable_mapping is not None else frozenset()
+    )
     mapping_issue = _mapping_issue(left_normalized, right_normalized, variable_mapping)
     if mapping_issue is not None:
         return EquivalenceResult(
@@ -512,8 +515,6 @@ def _find_projected_counterexample(
     cuts: list[LinearConstraint] = []
     checked = 0
     while True:
-        if checked >= remaining:
-            return "limit", checked, None
         result = milp(
             c=np.zeros(len(source.var_names)),
             integrality=np.asarray(source.integrality, dtype=np.int8),
@@ -524,6 +525,8 @@ def _find_projected_counterexample(
             return "complete", checked, None
         if result.status != 0 or result.x is None:
             return "solver", checked, None
+        if checked >= remaining:
+            return "limit", checked, None
         assignment = {name: int(round(float(result.x[index]))) for name, index in source_indices.items()}
         checked += 1
         target_assignment = {mapping[name]: value for name, value in assignment.items()}
@@ -568,6 +571,8 @@ def _fixed_assignment_feasibility(
     index_by_name = {name: index for index, name in enumerate(problem.var_names)}
     for name, value in assignment.items():
         index = index_by_name[name]
+        if value < lower[index] or value > upper[index]:
+            return "infeasible"
         lower[index] = value
         upper[index] = value
     result = milp(
@@ -718,11 +723,13 @@ def _has_mapped_isomorphism(
     )
 
 
-def _canonicalize(problem: LinearProblem, tolerance: float, max_iterations: int | None) -> _NormalizedProblem:
+def _canonicalize(
+    problem: LinearProblem, tolerance: float, max_iterations: int | None, kept_names: frozenset[str] = frozenset()
+) -> _NormalizedProblem:
     _validate(problem, tolerance)
-    problem = _eliminate_affine_aliases(problem, tolerance)
-    problem = _eliminate_slack_variables(problem, tolerance)
-    problem = _eliminate_fixed_variables(problem, tolerance)
+    problem = _eliminate_affine_aliases(problem, tolerance, kept_names)
+    problem = _eliminate_slack_variables(problem, tolerance, kept_names)
+    problem = _eliminate_fixed_variables(problem, tolerance, kept_names)
     objective_sign = -1.0 if problem.sense == "maximize" else 1.0
     columns = tuple(
         _Column(
@@ -765,18 +772,22 @@ def _canonicalize(problem: LinearProblem, tolerance: float, max_iterations: int 
     )
 
 
-def _eliminate_affine_aliases(problem: LinearProblem, tolerance: float) -> LinearProblem:
+def _eliminate_affine_aliases(
+    problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
+) -> LinearProblem:
     current = problem
     while True:
-        alias = _find_affine_alias(current, tolerance)
+        alias = _find_affine_alias(current, tolerance, kept_names)
         if alias is None:
             return current
         current = _substitute_affine_alias(current, alias)
 
 
-def _find_affine_alias(problem: LinearProblem, tolerance: float) -> tuple[int, int] | None:
+def _find_affine_alias(
+    problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
+) -> tuple[int, int] | None:
     for column_index, (bounds, integrality) in enumerate(zip(problem.bounds, problem.integrality, strict=True)):
-        if integrality != 0 or bounds != [None, None]:
+        if problem.var_names[column_index] in kept_names or integrality != 0 or bounds != [None, None]:
             continue
         equality_rows = [row_index for row_index, row in enumerate(problem.A_eq) if abs(float(row[column_index])) > tolerance]
         if len(equality_rows) != 1:
@@ -835,11 +846,21 @@ def _substitute_alias_rhs(row: list[float], rhs: float, alias_index: int, alias_
     return rhs - row[alias_index] * alias_constant
 
 
-def _eliminate_slack_variables(problem: LinearProblem, tolerance: float) -> LinearProblem:
-    slack_columns = _find_slack_columns(problem, tolerance)
+def _eliminate_slack_variables(
+    problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
+) -> LinearProblem:
+    slack_columns = {
+        index: row_index
+        for index, row_index in _find_slack_columns(problem, tolerance).items()
+        if problem.var_names[index] not in kept_names
+    }
     if not slack_columns:
         return problem
 
+    return _convert_slack_equalities(problem, slack_columns)
+
+
+def _convert_slack_equalities(problem: LinearProblem, slack_columns: dict[int, int]) -> LinearProblem:
     removed_columns = set(slack_columns)
     removed_equalities = set(slack_columns.values())
     kept_indices = [column_index for column_index in range(len(problem.var_names)) if column_index not in removed_columns]
@@ -900,18 +921,14 @@ def _remove_columns(row: list[float], kept_indices: list[int]) -> list[float]:
     return [row[index] for index in kept_indices]
 
 
-def _eliminate_fixed_variables(problem: LinearProblem, tolerance: float) -> LinearProblem:
-    fixed_values: dict[int, float] = {}
-    kept_indices: list[int] = []
-    for column_index, (lower_bound, upper_bound) in enumerate(problem.bounds):
-        if lower_bound is not None and upper_bound is not None and abs(float(lower_bound) - float(upper_bound)) <= tolerance:
-            fixed_values[column_index] = float(lower_bound)
-        else:
-            kept_indices.append(column_index)
-
+def _eliminate_fixed_variables(
+    problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
+) -> LinearProblem:
+    fixed_values = _find_fixed_values(problem, tolerance, kept_names)
     if not fixed_values:
         return problem
 
+    kept_indices = [index for index in range(len(problem.var_names)) if index not in fixed_values]
     objective_offset = problem.objective_offset + sum(
         problem.c[column_index] * value for column_index, value in fixed_values.items()
     )
@@ -927,6 +944,20 @@ def _eliminate_fixed_variables(problem: LinearProblem, tolerance: float) -> Line
         b_ub=[_substitute_fixed_rhs(row, rhs, fixed_values) for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)],
         objective_offset=objective_offset,
     )
+
+
+def _find_fixed_values(problem: LinearProblem, tolerance: float, kept_names: frozenset[str]) -> dict[int, float]:
+    fixed_values: dict[int, float] = {}
+    for column_index, (lower_bound, upper_bound) in enumerate(problem.bounds):
+        if (
+            problem.var_names[column_index] not in kept_names
+            and lower_bound is not None
+            and upper_bound is not None
+            and abs(float(lower_bound) - float(upper_bound)) <= tolerance
+            and (problem.integrality[column_index] == 0 or float(lower_bound).is_integer())
+        ):
+            fixed_values[column_index] = float(lower_bound)
+    return fixed_values
 
 
 def _substitute_fixed_row(row: list[float], fixed_values: dict[int, float], kept_indices: list[int]) -> list[float]:
@@ -1042,6 +1073,8 @@ def _is_lp_redundant_row(
     variable_count: int,
     tolerance: float,
 ) -> bool:
+    if variable_count == 0:
+        return row.rhs >= 0
     result = linprog(**_lp_redundancy_inputs(row, other_rows, variable_count, tolerance))
     if result.status != 0:
         return False
