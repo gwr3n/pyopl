@@ -212,6 +212,8 @@ def _prove_projection_equivalent(
     tolerance: float,
     max_iterations: int | None,
 ) -> EquivalenceResult:
+    _validate(left, tolerance)
+    _validate(right, tolerance)
     if variable_mapping is None:
         return EquivalenceResult(
             status="unknown",
@@ -361,15 +363,6 @@ def _prove_projected_milp_equivalent(
             level="projected_milp_proven",
             reason=issue,
         )
-    objective_issue = _projected_objective_issue(left, right, mapping, tolerance)
-    if objective_issue is not None:
-        return EquivalenceResult(
-            status="different",
-            level="projected_milp_proven",
-            reason=objective_issue,
-            counterexample=objective_issue,
-        )
-
     checked = 0
     for source, target, source_to_target in (
         (left, right, mapping),
@@ -410,15 +403,29 @@ def _prove_projected_milp_equivalent(
                 ),
                 counterexample=rendered,
             )
+        if direction[0] == "objective":
+            assignment = direction[2] or {}
+            rendered = ", ".join(f"{name}={value}" for name, value in sorted(assignment.items()))
+            return EquivalenceResult(
+                status="different",
+                level="projected_milp_proven",
+                reason="projected objective values differ at a shared feasible assignment",
+                proof_steps=(
+                    "enumerated feasible shared binary assignments with no-good cuts",
+                    "compared objective values on shared feasible assignments",
+                ),
+                counterexample=rendered,
+            )
 
     return EquivalenceResult(
         status="equivalent",
         level="projected_milp_proven",
         reason=f"all {checked} directed feasible shared assignments agree after auxiliary projection",
         proof_steps=(
-            "validated shared binary variables and objective coefficients",
+            "validated shared binary variables and objective-neutral auxiliaries",
             "enumerated feasible shared binary assignments with no-good cuts in both directions",
             "checked continuous auxiliary feasibility in the other formulation",
+            "compared objective values on shared feasible assignments",
         ),
     )
 
@@ -484,33 +491,13 @@ def _projected_mapping_issue(
     return None
 
 
-def _projected_objective_issue(
-    left: LinearProblem,
-    right: LinearProblem,
-    mapping: dict[str, str],
-    tolerance: float,
-) -> str | None:
-    left_sign = -1.0 if left.sense == "maximize" else 1.0
-    right_sign = -1.0 if right.sense == "maximize" else 1.0
-    if abs(left_sign * float(left.objective_offset) - right_sign * float(right.objective_offset)) > tolerance:
-        return "projected objective offsets differ"
-    left_index = {name: index for index, name in enumerate(left.var_names)}
-    right_index = {name: index for index, name in enumerate(right.var_names)}
-    for left_name, right_name in mapping.items():
-        left_coefficient = left_sign * float(left.c[left_index[left_name]])
-        right_coefficient = right_sign * float(right.c[right_index[right_name]])
-        if abs(left_coefficient - right_coefficient) > tolerance:
-            return f"projected objective coefficients differ for {left_name} and {right_name}"
-    return None
-
-
 def _find_projected_counterexample(
     source: LinearProblem,
     target: LinearProblem,
     mapping: dict[str, str],
     tolerance: float,
     remaining: int,
-) -> tuple[Literal["complete", "counterexample", "limit", "solver"], int, dict[str, int] | None]:
+) -> tuple[Literal["complete", "counterexample", "limit", "objective", "solver"], int, dict[str, int] | None]:
     source_indices = {name: source.var_names.index(name) for name in mapping}
     cuts: list[LinearConstraint] = []
     checked = 0
@@ -535,7 +522,23 @@ def _find_projected_counterexample(
             return "counterexample", checked, assignment
         if feasibility != "feasible":
             return "solver", checked, None
+        if (
+            abs(
+                _normalized_assignment_objective(source, assignment)
+                - _normalized_assignment_objective(target, target_assignment)
+            )
+            > tolerance
+        ):
+            return "objective", checked, assignment
         cuts.append(_no_good_cut(source, assignment, source_indices))
+
+
+def _normalized_assignment_objective(problem: LinearProblem, assignment: dict[str, int]) -> float:
+    index_by_name = {name: index for index, name in enumerate(problem.var_names)}
+    value = float(problem.objective_offset) + sum(
+        float(problem.c[index_by_name[name]]) * assigned_value for name, assigned_value in assignment.items()
+    )
+    return -value if problem.sense == "maximize" else value
 
 
 def _problem_bounds(problem: LinearProblem) -> Bounds:

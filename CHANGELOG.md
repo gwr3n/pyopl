@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Required nonempty auxiliary domains before restricted projection and compared projected objectives on feasible retained assignments rather than by coefficient identity.
 - Preserved target bounds in projected MILP equivalence checks and allowed enumeration to finish exactly at the assignment budget.
 - Preserved infeasible fixed integer domains and explicitly mapped variables during concrete equivalence normalization, and handled constant inequalities without empty solver calls.
 - Honored explicit parameter and variable mappings in abstract structural and automatic equivalence checks.

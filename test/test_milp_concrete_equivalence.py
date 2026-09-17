@@ -283,6 +283,51 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(result.status, "equivalent")
         self.assertIn("projected unmapped auxiliary variables", result.proof_steps)
 
+    def test_projection_mode_validates_independent_auxiliary_domain_before_dropping_it(self):
+        base = LinearProblem(
+            sense="minimize",
+            var_names=["x"],
+            bounds=[[0, 1]],
+            integrality=[0],
+            c=[1.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[],
+            b_ub=[],
+        )
+        empty_extension = LinearProblem(
+            sense="minimize",
+            var_names=["x", "aux"],
+            bounds=[[0, 1], [1, 0]],
+            integrality=[0, 0],
+            c=[1.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[],
+            b_ub=[],
+        )
+
+        with self.assertRaisesRegex(ValueError, "lower bound exceeds upper bound"):
+            prove_equivalent(base, empty_extension, mode="projection", variable_mapping={"x": "x"})
+
+    def test_projected_milp_compares_objectives_on_feasible_assignments(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x"],
+            bounds=[[0, 0]],
+            integrality=[1],
+            c=[1.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[],
+            b_ub=[],
+        )
+        right = replace(left, c=[2.0])
+
+        result = prove_equivalent(left, right, mode="projected_milp")
+
+        self.assertEqual(result.status, "equivalent")
+
     def test_projected_milp_mode_compares_linked_continuous_auxiliaries(self):
         left = LinearProblem(
             sense="minimize",
