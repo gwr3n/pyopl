@@ -18,3 +18,4 @@ class LinearProblem:
     A_ub: list[list[float]]
     b_ub: list[float]
     objective_offset: float = 0.0
+    objective_is_minimization_form: bool = False

@@ -538,7 +538,9 @@ def _normalized_assignment_objective(problem: LinearProblem, assignment: dict[st
     value = float(problem.objective_offset) + sum(
         float(problem.c[index_by_name[name]]) * assigned_value for name, assigned_value in assignment.items()
     )
-    return -value if problem.sense == "maximize" else value
+    if problem.objective_is_minimization_form or problem.sense != "maximize":
+        return value
+    return -value
 
 
 def _problem_bounds(problem: LinearProblem) -> Bounds:
@@ -672,6 +674,7 @@ def _drop_independent_auxiliaries(problem: LinearProblem, kept_names: set[str], 
         A_ub=[_remove_columns(row, kept_indices) for row in problem.A_ub],
         b_ub=problem.b_ub[:],
         objective_offset=problem.objective_offset,
+        objective_is_minimization_form=problem.objective_is_minimization_form,
     )
 
 
@@ -733,7 +736,7 @@ def _canonicalize(
     problem = _eliminate_affine_aliases(problem, tolerance, kept_names)
     problem = _eliminate_slack_variables(problem, tolerance, kept_names)
     problem = _eliminate_fixed_variables(problem, tolerance, kept_names)
-    objective_sign = -1.0 if problem.sense == "maximize" else 1.0
+    objective_sign = -1.0 if problem.sense == "maximize" and not problem.objective_is_minimization_form else 1.0
     columns = tuple(
         _Column(
             name=var_name,
@@ -832,6 +835,7 @@ def _substitute_affine_alias(problem: LinearProblem, alias: tuple[int, int]) -> 
             for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)
         ],
         objective_offset=problem.objective_offset + alias_objective * alias_constant,
+        objective_is_minimization_form=problem.objective_is_minimization_form,
     )
 
 
@@ -884,6 +888,7 @@ def _convert_slack_equalities(problem: LinearProblem, slack_columns: dict[int, i
         A_ub=[_remove_columns(row, kept_indices) for row in problem.A_ub] + added_ub_rows,
         b_ub=[*problem.b_ub, *added_ub_rhs],
         objective_offset=problem.objective_offset,
+        objective_is_minimization_form=problem.objective_is_minimization_form,
     )
 
 
@@ -946,6 +951,7 @@ def _eliminate_fixed_variables(
         A_ub=[_substitute_fixed_row(row, fixed_values, kept_indices) for row in problem.A_ub],
         b_ub=[_substitute_fixed_rhs(row, rhs, fixed_values) for row, rhs in zip(problem.A_ub, problem.b_ub, strict=True)],
         objective_offset=objective_offset,
+        objective_is_minimization_form=problem.objective_is_minimization_form,
     )
 
 

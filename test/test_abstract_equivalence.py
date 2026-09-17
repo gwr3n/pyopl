@@ -294,6 +294,31 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "equivalent")
         self.assertEqual(result.level, "presburger_proven")
 
+    def test_algebraic_mode_preserves_integer_alias_divisibility(self):
+        left = """
+            dvar int x;
+            minimize x;
+            subject to { x >= 0; x <= 3; }
+        """
+        right = """
+            dvar int y;
+            dvar int half;
+            minimize y;
+            subject to { y >= 0; y <= 3; half >= 0; half <= 2; 2 * half == y; }
+        """
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            variable_mapping={"x": "y"},
+            right_auxiliaries={"half"},
+        )
+
+        self.assertEqual(result.status, "different")
+        self.assertEqual(result.level, "presburger_proven")
+        self.assertIn("x=1", result.counterexample or "")
+
     def test_algebraic_mode_saturates_chained_alias_rewrites(self):
         left = """
             dvar float x;

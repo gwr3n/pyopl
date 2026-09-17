@@ -16,6 +16,7 @@ misc/
 docs/dev_notes.md
 tmp/
 opl_models/
+milp_equivalence_portfolio/
 
 # Virtual environments
 venv*

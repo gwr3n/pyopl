@@ -2807,6 +2807,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         sense = self.ast.get("objective", {}).get("type", "minimize")
         if sense not in ("minimize", "maximize"):
             sense = "minimize"
+        objective_offset = -self.obj_const_offset if sense == "maximize" else self.obj_const_offset
         return LinearProblem(
             sense=cast(ObjectiveSense, sense),
             var_names=list(self.var_names),
@@ -2817,7 +2818,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             b_eq=list(self.b_eq),
             A_ub=[list(row) for row in self.A_ub],
             b_ub=list(self.b_ub),
-            objective_offset=float(self.obj_const_offset),
+            objective_offset=float(objective_offset),
+            objective_is_minimization_form=True,
         )
 
     def build_problem(self) -> LinearProblem:

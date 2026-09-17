@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserved integer divisibility during abstract equivalence checking by retaining integer aliases for finite-domain enumeration unless integral reconstruction is established.
+- Prevented double negation of compiled maximization objectives by recording whether a `LinearProblem` objective is already in minimization form.
 - Required nonempty auxiliary domains before restricted projection and compared projected objectives on feasible retained assignments rather than by coefficient identity.
 - Preserved target bounds in projected MILP equivalence checks and allowed enumeration to finish exactly at the assignment budget.
 - Preserved infeasible fixed integer domains and explicitly mapped variables during concrete equivalence normalization, and handled constant inequalities without empty solver calls.
@@ -18,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Split algebraic mapping dispatch and affine-alias elimination into focused helpers to reduce cyclomatic complexity without changing proof behavior.
 - Separated fixed-variable selection and slack-equality conversion from concrete equivalence elimination routines to reduce complexity without changing behavior.
 
 ### Removed

@@ -23,6 +23,17 @@ class TestLinearProblem(unittest.TestCase):
         self.assertEqual(problem.A_eq, [])
         self.assertEqual(problem.b_eq, [])
         self.assertEqual(problem.objective_offset, 3.0)
+        self.assertTrue(problem.objective_is_minimization_form)
+
+    def test_maximization_snapshot_uses_minimization_form_for_full_objective(self):
+        ast = parse_model("dvar float+ x; maximize 2*x+5; subject to { x <= 4; }")
+
+        problem = SciPyCSCCodeGenerator(ast).build_problem()
+
+        self.assertEqual(problem.sense, "maximize")
+        self.assertEqual(problem.c, [-2.0])
+        self.assertEqual(problem.objective_offset, -5.0)
+        self.assertTrue(problem.objective_is_minimization_form)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,15 @@ class ModelEquivalenceApiTests(unittest.TestCase):
         self.assertIsInstance(result, EquivalenceResult)
         self.assertTrue(result.equivalent)
 
+    def test_concrete_strategy_normalizes_compiled_maximization_once(self):
+        minimize = "dvar float+ x; minimize -2*x-5; subject to { x <= 3; }"
+        maximize = "dvar float+ y; maximize 2*y+5; subject to { y <= 3; }"
+
+        result = compare_models(minimize, maximize, strategy="concrete")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "solver_implied")
+
     def test_concrete_strategy_uses_projected_milp_fallback(self):
         left = """
             dvar boolean x; dvar float+ load;

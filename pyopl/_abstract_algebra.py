@@ -253,7 +253,7 @@ def lower_linear_problem(problem: LinearProblem) -> SymbolicModel:
         variables=tuple(variables),
         constraints=tuple(constraints),
         objective=sp.expand(objective),
-        objective_sense=problem.sense,
+        objective_sense="minimize" if problem.objective_is_minimization_form else problem.sense,
     )
 
 
@@ -278,31 +278,66 @@ def prove_algebraic_equivalence(
         return AlgebraicProof("different", "symbolically_normalized", "no compatible parameter and variable mapping")
 
     unknown_reasons: list[str] = []
+    different_proof: AlgebraicProof | None = None
     for parameter_map, variable_map in mappings:
-        renamed_right = _rename_model(right, parameter_map, variable_map)
-        left_kept = {variable.name for variable in left.variables if variable.name not in left_auxiliaries}
-        right_kept = {left_name for left_name, right_name in variable_map.items() if right_name not in right_auxiliaries}
-        if left_kept != right_kept:
-            continue
         try:
-            proof = _prove_mapped_models(
+            proof = _prove_candidate_mapping(
                 left,
-                renamed_right,
-                left_kept,
-                set(left_auxiliaries),
-                {left_name for left_name, right_name in variable_map.items() if right_name in right_auxiliaries},
+                right,
+                parameter_map,
+                variable_map,
+                left_auxiliaries,
+                right_auxiliaries,
                 max_rewrite_iterations,
             )
         except UnsupportedAlgebra as exc:
             unknown_reasons.append(str(exc))
             continue
+        if proof is None:
+            continue
         if proof.status == "equivalent":
             return proof
         if proof.status == "unknown":
             unknown_reasons.append(proof.reason)
+        elif different_proof is None:
+            different_proof = proof
 
+    return _unproved_algebraic_result(unknown_reasons, different_proof)
+
+
+def _prove_candidate_mapping(
+    left: SymbolicModel,
+    right: SymbolicModel,
+    parameter_map: Mapping[str, str],
+    variable_map: Mapping[str, str],
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    max_rewrite_iterations: int,
+) -> AlgebraicProof | None:
+    renamed_right = _rename_model(right, parameter_map, variable_map)
+    left_kept = {variable.name for variable in left.variables if variable.name not in left_auxiliaries}
+    right_kept = {left_name for left_name, right_name in variable_map.items() if right_name not in right_auxiliaries}
+    if left_kept != right_kept:
+        return None
+    mapped_right_auxiliaries = {left_name for left_name, right_name in variable_map.items() if right_name in right_auxiliaries}
+    return _prove_mapped_models(
+        left,
+        renamed_right,
+        left_kept,
+        set(left_auxiliaries),
+        mapped_right_auxiliaries,
+        max_rewrite_iterations,
+    )
+
+
+def _unproved_algebraic_result(
+    unknown_reasons: list[str],
+    different_proof: AlgebraicProof | None,
+) -> AlgebraicProof:
     if unknown_reasons:
         return AlgebraicProof("unknown", "rewrite_certified", unknown_reasons[0])
+    if different_proof is not None:
+        return different_proof
     return AlgebraicProof(
         "different",
         "symbolically_normalized",
@@ -632,37 +667,65 @@ def _eliminate_affine_alias(
     auxiliaries: set[str],
 ) -> tuple[SymbolicModel, str] | None:
     for auxiliary in sorted(auxiliaries):
+        if not _is_continuous_auxiliary(model, auxiliary):
+            continue
         symbol = sp.Symbol(auxiliary, real=True)
-        defining = [
-            constraint
-            for constraint in model.constraints
-            if constraint.sense == "=" and symbol in constraint.expression.free_symbols
-        ]
-        if len(defining) != 1:
+        defining = _unique_defining_constraint(model, symbol)
+        if defining is None:
             continue
-        coefficient = sp.expand(defining[0].expression).coeff(symbol)
-        if coefficient == 0 or symbol in coefficient.free_symbols:
+        replacement = _alias_replacement(model, defining, symbol)
+        if replacement is None:
             continue
-        if coefficient.free_symbols and not _assumptions_prove_nonzero(coefficient, model.assumptions):
-            continue
-        replacement = sp.solve(defining[0].expression, symbol, dict=False)
-        if len(replacement) != 1:
-            continue
-        substituted_constraints = tuple(
-            AffineConstraint(sp.expand(constraint.expression.subs(symbol, replacement[0])), constraint.sense)
-            for constraint in model.constraints
-            if constraint is not defining[0]
-        )
-        return (
-            replace(
-                model,
-                variables=tuple(variable for variable in model.variables if variable.name != auxiliary),
-                constraints=substituted_constraints,
-                objective=sp.expand(model.objective.subs(symbol, replacement[0])),
-            ),
-            auxiliary,
-        )
+        return _substitute_affine_alias(model, auxiliary, defining, symbol, replacement), auxiliary
     return None
+
+
+def _is_continuous_auxiliary(model: SymbolicModel, auxiliary: str) -> bool:
+    variable = next((variable for variable in model.variables if variable.name == auxiliary), None)
+    return variable is not None and variable.value_type not in {"int", "int+", "boolean"}
+
+
+def _unique_defining_constraint(model: SymbolicModel, symbol: sp.Symbol) -> AffineConstraint | None:
+    defining = [
+        constraint
+        for constraint in model.constraints
+        if constraint.sense == "=" and symbol in constraint.expression.free_symbols
+    ]
+    return defining[0] if len(defining) == 1 else None
+
+
+def _alias_replacement(
+    model: SymbolicModel,
+    defining: AffineConstraint,
+    symbol: sp.Symbol,
+) -> sp.Expr | None:
+    coefficient = sp.expand(defining.expression).coeff(symbol)
+    if coefficient == 0 or symbol in coefficient.free_symbols:
+        return None
+    if coefficient.free_symbols and not _assumptions_prove_nonzero(coefficient, model.assumptions):
+        return None
+    replacements = sp.solve(defining.expression, symbol, dict=False)
+    return replacements[0] if len(replacements) == 1 else None
+
+
+def _substitute_affine_alias(
+    model: SymbolicModel,
+    auxiliary: str,
+    defining: AffineConstraint,
+    symbol: sp.Symbol,
+    replacement: sp.Expr,
+) -> SymbolicModel:
+    substituted_constraints = tuple(
+        AffineConstraint(sp.expand(constraint.expression.subs(symbol, replacement)), constraint.sense)
+        for constraint in model.constraints
+        if constraint is not defining
+    )
+    return replace(
+        model,
+        variables=tuple(variable for variable in model.variables if variable.name != auxiliary),
+        constraints=substituted_constraints,
+        objective=sp.expand(model.objective.subs(symbol, replacement)),
+    )
 
 
 def _assumptions_prove_nonzero(expression: sp.Expr, assumptions: Sequence[sp.Expr]) -> bool:
@@ -898,13 +961,14 @@ def _prove_finite_integer_models(
             "bounded integer feasible assignments and objective values are identical",
             tuple(dict.fromkeys(steps + ("exhaustively eliminated bounded integer auxiliaries",))),
         )
-    witness = next(iter(left_points.symmetric_difference(right_points)))
+    assignment, objective = min(left_points.symmetric_difference(right_points))
+    rendered_assignment = ", ".join(f"{name}={value}" for name, value in assignment)
     return AlgebraicProof(
         "different",
         "presburger_proven",
         "bounded integer projections differ",
         tuple(dict.fromkeys(steps + ("exhaustively eliminated bounded integer auxiliaries",))),
-        counterexample=f"projected assignment/objective differs: {witness}",
+        counterexample=f"projected assignment/objective differs: {rendered_assignment}; objective={objective}",
     )
 
 
