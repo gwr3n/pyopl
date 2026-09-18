@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pyopl.milp_abstract_equivalence import (
@@ -7,6 +8,7 @@ from pyopl.milp_abstract_equivalence import (
     parse_abstract_model,
     prove_abstract_equivalent,
 )
+from pyopl.pyopl_core import linear_problem_from_opl
 
 LEFT_MODEL = """
     int N = ...;
@@ -41,6 +43,69 @@ RENAMED_MODEL = """
 
 
 class AbstractEquivalenceTests(unittest.TestCase):
+    def test_portfolio_instance_counterexample(self):
+        case = Path(__file__).resolve().parents[1] / "milp_equivalence_portfolio/17_one_instance_not_a_schema_proof"
+        witness = 1.5
+        for data_name in ("theta_1.dat", "theta_2.dat"):
+            for side in ("left", "right"):
+                with self.subTest(data=data_name, side=side):
+                    problem = linear_problem_from_opl((case / f"{side}.mod").read_text(), (case / data_name).read_text())
+                    self.assertEqual(problem.var_names, ["x"])
+                    self.assertEqual(problem.integrality, [0])
+                    lower, upper = problem.bounds[0]
+                    feasible = (
+                        (lower is None or lower <= witness)
+                        and (upper is None or witness <= upper)
+                        and all(row[0] * witness <= bound for row, bound in zip(problem.A_ub, problem.b_ub))
+                        and all(row[0] * witness == bound for row, bound in zip(problem.A_eq, problem.b_eq))
+                    )
+                    self.assertEqual(feasible, data_name == "theta_2.dat" and side == "left")
+
+    def test_soundness_boundary_refusals(self):
+        cases = (
+            (
+                "nonnegative_parameter_denominator",
+                "float+ theta = ...; dvar float x; minimize x; subject to {}",
+                "float+ theta = ...; dvar float x; dvar float auxiliary; minimize x; " "subject to {theta*auxiliary == x;}",
+                {"right_auxiliaries": {"auxiliary"}, "assumptions": {"theta": "nonnegative"}},
+                "uniform_schema",
+            ),
+            (
+                "unbounded_integer_divisibility",
+                "dvar int x; minimize x; subject to {x>=0;}",
+                "dvar int x; dvar int auxiliary; minimize x; subject to {x>=0; 2*auxiliary==x;}",
+                {"right_auxiliaries": {"auxiliary"}},
+                "parameterless_instance",
+            ),
+            (
+                "narrow_interval_is_not_fixed",
+                "dvar float x; minimize x; subject to {x>=0; x<=0.0000000005;}",
+                "dvar float x; minimize x; subject to {x==0;}",
+                {},
+                "parameterless_instance",
+            ),
+            (
+                "sub_tolerance_margin_is_not_redundant",
+                "dvar float x; minimize x; subject to {x>=0; x<=1;}",
+                "dvar float x; minimize x; subject to {x>=0; x<=1; x<=0.9999999995;}",
+                {},
+                "parameterless_instance",
+            ),
+            (
+                "leading_negative_row_preserves_orientation",
+                "float theta = ...; dvar float x; minimize x; subject to {-2*x<=-2*theta;}",
+                "float theta = ...; dvar float x; minimize x; subject to {x<=theta;}",
+                {},
+                "uniform_schema",
+            ),
+        )
+        for name, left, right, options, scope in cases:
+            with self.subTest(case=name):
+                result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x"}, **options)
+                self.assertEqual(result.status, "unknown")
+                self.assertEqual(result.scope, scope)
+                self.assertIsNone(result.counterexample)
+
     def test_rewrite_limit_reports_budget(self):
         model = "dvar float x; minimize x; subject to {x>=0;}"
         result = prove_abstract_equivalent(model, model, mode="algebraic", max_rewrite_iterations=0)

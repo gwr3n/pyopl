@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added five exact-algebraic refusal regressions and a checked separating assignment for portfolio case 17; portfolio comparisons now assert expected scopes as well as statuses and method labels.
 - Added public model-comparison options for retained-variable and parameter mappings, auxiliary partitions, and supported schema assumptions, together with relation, scope, arithmetic, correspondence, and termination metadata.
 
 ### Fixed
