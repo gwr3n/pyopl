@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Updated batch-comparison test fixtures to use result dataclasses required by the shared report serializer, including checks for metadata and error recovery.
 - Prevented symbolic alias division under merely nonnegative parameter assumptions, and reported incomplete mapping or implication searches as unknown rather than semantic differences.
 - Normalized positive rational row content and admitted equalities into exact continuous projection, including objective equality on a retained equality set.
 - Required valid, injective comparison mappings and explicit grounded auxiliary partitions; supplied abstract data now request instance comparison without a schema-isomorphism shortcut.
