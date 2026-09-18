@@ -1,5 +1,4 @@
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from pyopl.milp_abstract_equivalence import (
@@ -42,14 +41,44 @@ RENAMED_MODEL = """
 """
 
 
+PORTFOLIO_17_MODELS = {
+    "left": """
+        float theta = ...;
+        dvar float x;
+
+        minimize x;
+
+        subject to {
+            x >= 0;
+            x <= theta;
+        }
+    """,
+    "right": """
+        float theta = ...;
+        dvar float x;
+
+        minimize x;
+
+        subject to {
+            x >= 0;
+            x <= 1;
+        }
+    """,
+}
+
+PORTFOLIO_17_DATA = {
+    "theta_1.dat": "theta = 1;",
+    "theta_2.dat": "theta = 2;",
+}
+
+
 class AbstractEquivalenceTests(unittest.TestCase):
     def test_portfolio_instance_counterexample(self):
-        case = Path(__file__).resolve().parents[1] / "milp_equivalence_portfolio/17_one_instance_not_a_schema_proof"
         witness = 1.5
-        for data_name in ("theta_1.dat", "theta_2.dat"):
-            for side in ("left", "right"):
+        for data_name, data in PORTFOLIO_17_DATA.items():
+            for side, model in PORTFOLIO_17_MODELS.items():
                 with self.subTest(data=data_name, side=side):
-                    problem = linear_problem_from_opl((case / f"{side}.mod").read_text(), (case / data_name).read_text())
+                    problem = linear_problem_from_opl(model, data)
                     self.assertEqual(problem.var_names, ["x"])
                     self.assertEqual(problem.integrality, [0])
                     lower, upper = problem.bounds[0]
