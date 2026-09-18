@@ -49,7 +49,8 @@ class CompareTests(unittest.TestCase):
                 with self.subTest(model=model, mode=mode):
                     self.assertTrue(prove_equivalent(left, right, mode=mode, variable_mapping=mapping).equivalent)
 
-        self.assertEqual(prove_equivalent(left, right, variable_mapping={"missing": "renamed_x"}).status, "different")
+        with self.assertRaises(ValueError):
+            prove_equivalent(left, right, variable_mapping={"missing": "renamed_x"})
 
     def test_explicit_mapping_rejects_different_fixed_values(self):
         problem = linear_problem_from_opl("dvar boolean x; minimize 0*x; subject to { x <= 1; }")
@@ -71,7 +72,7 @@ class CompareTests(unittest.TestCase):
                     result = prove_equivalent(left, right, mode=mode)
 
                     self.assertEqual(result.status, "different")
-                    self.assertEqual(result.counterexample, f"x={left_value}")
+                    self.assertEqual(result.counterexample, f"feasible only in left: x={left_value}")
 
     def test_projected_assignment_budget_allows_exhaustion_check(self):
         problem = linear_problem_from_opl("dvar boolean x; minimize x; subject to { x <= 1; }")

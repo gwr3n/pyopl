@@ -11,17 +11,35 @@ An equivalent result is a proof that the supported abstract schemas are
 isomorphic.  A different result only means that this structural procedure did
 not establish equivalence; it is not a complete decision procedure for all
 parameterized MILP reformulations.
+
+Paper correspondence
+--------------------
+The binding-aware graph construction implements Lemma 6.3 (Binding-aware
+renaming), and a successful graph match is the computational case of Theorem
+6.4 (Schema isomorphism is uniformly sound).  Algebraic fallback follows
+Proposition 6.5 (Sound symbolic normalization), Theorem 6.6 (Certified rewrite
+chains), and the projection results in Theorems 7.6 and 7.9.  Supplying data
+crosses from a schema claim to the instance claim of Proposition 6.8 (Correct
+finite grounding).  The result levels are interpreted in Section 9.2 (Result
+labels) of the attached paper.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Collection, Literal, Mapping
 
 import networkx as nx
 from networkx.algorithms import isomorphism
 
-from pyopl._abstract_algebra import UnsupportedAlgebra, lower_linear_problem, lower_symbolic_model, prove_algebraic_equivalence
+from pyopl._abstract_algebra import (
+    AlgebraicProof,
+    SymbolicModel,
+    UnsupportedAlgebra,
+    lower_linear_problem,
+    lower_symbolic_model,
+    prove_algebraic_equivalence,
+)
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 
 AbstractEquivalenceStatus = Literal["equivalent", "different", "unknown"]
@@ -49,13 +67,29 @@ _SYMBOL_NAME_NODE_TYPES = {
 
 @dataclass(frozen=True)
 class AbstractEquivalenceResult:
-    """Status-bearing result for an abstract model comparison."""
+    """Status-bearing abstract result from the layered procedure.
+
+    ``level`` identifies the supporting result as described in
+    Section 9.2 (Result labels); ``unknown`` has the inconclusive meaning
+    specified after Theorem 9.1, rather than non-equivalence.
+    """
 
     status: AbstractEquivalenceStatus
     level: AbstractEquivalenceLevel
     reason: str
     proof_steps: tuple[str, ...] = ()
     counterexample: str | None = None
+    relation: str = "not_recorded"
+    scope: str = "not_recorded"
+    arithmetic: str = "not_recorded"
+    variable_mapping: tuple[tuple[str, str], ...] = ()
+    parameter_mapping: tuple[tuple[str, str], ...] = ()
+    left_auxiliaries: tuple[str, ...] = ()
+    right_auxiliaries: tuple[str, ...] = ()
+    assumptions: tuple[tuple[str, str], ...] = ()
+    termination: str = "not_recorded"
+    budget_exhausted: bool = False
+    evidence_kind: str = "internal_checks_only"
 
     @property
     def equivalent(self) -> bool:
@@ -63,7 +97,11 @@ class AbstractEquivalenceResult:
 
 
 def parse_abstract_model(model_code: str) -> dict[str, Any]:
-    """Parse PyOPL source without data-dependent compiler materialization."""
+    """Parse source into the schema representation of Section 6.
+
+    No valuation is supplied here, so indexed declarations and binders remain
+    available for the uniform comparison in Theorem 6.4.
+    """
 
     ast = OPLParser().parse(OPLLexer().tokenize(model_code))
     if not isinstance(ast, dict):
@@ -78,7 +116,12 @@ def compare_abstract(
     mode: Literal["structural", "algebraic", "auto"] = "structural",
     **proof_options: Any,
 ) -> bool:
-    """Return whether two PyOPL sources or parser ASTs are schema-isomorphic."""
+    """Return whether the selected paper-backed proof path establishes equivalence.
+
+    This boolean projection intentionally maps both ``different`` and
+    ``unknown`` to ``False``; use :func:`prove_abstract_equivalent` to retain
+    the three outcomes required by Theorem 9.1.
+    """
 
     return prove_abstract_equivalent(left, right, mode=mode, **proof_options).equivalent
 
@@ -115,8 +158,8 @@ def prove_abstract_equivalent(
     and exhaustive bounded-integer elimination.  ``mode="auto"`` accepts a
     schema isomorphism immediately and otherwise tries the algebraic backend.
 
-    When both data texts are supplied, indexed declarations and quantified
-    constraints may be finitely grounded by PyOPL's matrix lowering before the
+    When both data texts are supplied, models are finitely grounded by
+    PyOPL's matrix lowering before the
     algebraic proof stages. Such a result proves equivalence for those supplied
     data instances, not universally for every parameter assignment. Algebraic
     mode otherwise returns ``unknown`` for unsupported indexed, nonlinear,
@@ -133,18 +176,115 @@ def prove_abstract_equivalent(
             status="unknown",
             level="schema_isomorphic",
             reason=issue or "invalid abstract model AST",
+            termination="unsupported_input",
         )
 
+    _validate_comparison_options(
+        left_ast, right_ast, parameter_mapping, variable_mapping, left_auxiliaries, right_auxiliaries, assumptions
+    )
+    requires_algebra = _validate_proof_route(
+        mode, left_data_text, right_data_text, parameter_mapping, assumptions, left_auxiliaries, right_auxiliaries
+    )
     structural_result = _prove_schema_isomorphism(left_ast, right_ast, parameter_mapping, variable_mapping)
-    if mode == "structural" or (mode == "auto" and structural_result.equivalent):
+    if mode == "structural" or (mode == "auto" and structural_result.equivalent and not requires_algebra):
         return structural_result
     if mode not in {"algebraic", "auto"}:
         return AbstractEquivalenceResult(
             status="unknown",
             level="schema_isomorphic",
             reason=f"unsupported abstract equivalence mode: {mode}",
+            termination="unsupported_input",
         )
 
+    context = _algebraic_result_context(
+        structural_result.proof_steps if mode == "auto" else (),
+        left_data_text is not None,
+        variable_mapping,
+        parameter_mapping,
+        left_auxiliaries,
+        right_auxiliaries,
+        assumptions,
+    )
+    return _prove_algebraic_models(
+        left_ast,
+        right_ast,
+        left,
+        right,
+        assumptions,
+        left_data_text,
+        right_data_text,
+        parameter_mapping,
+        variable_mapping,
+        left_auxiliaries,
+        right_auxiliaries,
+        max_rewrite_iterations,
+        context,
+    )
+
+
+def _validate_proof_route(
+    mode: str,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    parameter_mapping: Mapping[str, str] | None,
+    assumptions: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+) -> bool:
+    """Validate schema/instance options before accepting a structural shortcut."""
+    supplied_data = left_data_text is not None or right_data_text is not None
+    if supplied_data and (left_data_text is None or right_data_text is None):
+        raise ValueError("abstract instance comparison requires both data texts")
+    if supplied_data and (parameter_mapping or assumptions):
+        raise ValueError("parameter mappings and assumptions apply to schemas, not supplied instances")
+    requires_algebra = bool(supplied_data or assumptions or left_auxiliaries or right_auxiliaries)
+    if mode == "structural" and requires_algebra:
+        raise ValueError("structural mode does not accept data, assumptions, or auxiliary partitions; use auto or algebraic")
+    return requires_algebra
+
+
+def _algebraic_result_context(
+    proof_steps: tuple[str, ...],
+    supplied_data: bool,
+    variable_mapping: Mapping[str, str] | None,
+    parameter_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    assumptions: Mapping[str, str] | None,
+) -> AbstractEquivalenceResult:
+    """Record the requested correspondence and scope before attempting lowering."""
+    return AbstractEquivalenceResult(
+        status="unknown",
+        level="symbolically_normalized",
+        reason="",
+        proof_steps=proof_steps,
+        relation="projected_value",
+        scope="supplied_instances" if supplied_data else "source_schemas",
+        termination="unsupported_fragment",
+        variable_mapping=tuple(sorted((variable_mapping or {}).items())),
+        parameter_mapping=tuple(sorted((parameter_mapping or {}).items())),
+        left_auxiliaries=tuple(sorted(left_auxiliaries)),
+        right_auxiliaries=tuple(sorted(right_auxiliaries)),
+        assumptions=tuple(sorted((assumptions or {}).items())),
+    )
+
+
+def _prove_algebraic_models(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left: AbstractModelInput,
+    right: AbstractModelInput,
+    assumptions: Mapping[str, str] | None,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    parameter_mapping: Mapping[str, str] | None,
+    variable_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    max_rewrite_iterations: int,
+    context: AbstractEquivalenceResult,
+) -> AbstractEquivalenceResult:
+    """Run lowering and algebraic proof while preserving inconclusive outcomes."""
     try:
         left_model, right_model, grounded_indexed_schema = _lower_comparison_models(
             left_ast,
@@ -155,42 +295,134 @@ def prove_abstract_equivalent(
             left_data_text,
             right_data_text,
         )
-        effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries = _effective_algebraic_mappings(
-            left_model,
-            right_model,
-            grounded_indexed_schema,
-            variable_mapping,
-            left_auxiliaries,
-            right_auxiliaries,
-        )
+        effective_left_auxiliaries = set(left_auxiliaries)
+        effective_right_auxiliaries = set(right_auxiliaries)
+        if grounded_indexed_schema:
+            _validate_grounded_correspondence(left_model, right_model, variable_mapping, left_auxiliaries, right_auxiliaries)
         proof = prove_algebraic_equivalence(
             left_model,
             right_model,
             parameter_mapping=parameter_mapping,
-            variable_mapping=effective_variable_mapping,
+            variable_mapping=variable_mapping,
             left_auxiliaries=effective_left_auxiliaries,
             right_auxiliaries=effective_right_auxiliaries,
             max_rewrite_iterations=max_rewrite_iterations,
         )
     except UnsupportedAlgebra as exc:
-        return AbstractEquivalenceResult(
-            status="unknown",
-            level="symbolically_normalized",
-            reason=str(exc),
-            proof_steps=structural_result.proof_steps if mode == "auto" else (),
+        return replace(context, reason=str(exc))
+    context = replace(
+        context,
+        left_auxiliaries=tuple(sorted(effective_left_auxiliaries)),
+        right_auxiliaries=tuple(sorted(effective_right_auxiliaries)),
+    )
+    return _algebraic_public_result(proof, context, left_model, right_model, grounded_indexed_schema)
+
+
+def _validate_grounded_correspondence(
+    left: SymbolicModel,
+    right: SymbolicModel,
+    variable_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+) -> None:
+    """Require named scalar columns after the grounding of Proposition 6.8."""
+    left_names = {variable.name for variable in left.variables}
+    right_names = {variable.name for variable in right.variables}
+    if (
+        not set(variable_mapping or {}) <= left_names
+        or not set((variable_mapping or {}).values()) <= right_names
+        or not set(left_auxiliaries) <= left_names
+        or not set(right_auxiliaries) <= right_names
+    ):
+        raise UnsupportedAlgebra(
+            "grounded indexed correspondences require scalar column names; indexed declaration maps are not expanded"
         )
+
+
+def _algebraic_public_result(
+    proof: AlgebraicProof,
+    context: AbstractEquivalenceResult,
+    left: SymbolicModel,
+    right: SymbolicModel,
+    grounded: bool,
+) -> AbstractEquivalenceResult:
+    """Attach scope and arithmetic to the backend outcome, as in Section 9.2."""
     proof_steps = proof.steps
-    if grounded_indexed_schema:
-        proof_steps = ("grounded finite indexed schemas with supplied data",) + proof_steps
-    if mode == "auto":
-        proof_steps = structural_result.proof_steps + proof_steps
-    return AbstractEquivalenceResult(
+    if grounded:
+        proof_steps = ("grounded finite models with supplied data",) + proof_steps
+    scope = "uniform_schema" if left.parameters or right.parameters else "parameterless_instance"
+    termination = "completed" if proof.status != "unknown" else "inconclusive"
+    return replace(
+        context,
         status=proof.status,
         level=proof.level,
         reason=proof.reason,
-        proof_steps=tuple(dict.fromkeys(proof_steps)),
+        proof_steps=tuple(dict.fromkeys(context.proof_steps + proof_steps)),
         counterexample=proof.counterexample,
+        scope="supplied_instances" if grounded else scope,
+        arithmetic="exact_on_embedded_matrix_values" if grounded else "exact_on_parsed_values",
+        variable_mapping=proof.variable_mapping or context.variable_mapping,
+        parameter_mapping=proof.parameter_mapping or context.parameter_mapping,
+        termination="budget_exhausted" if proof.budget_exhausted else termination,
+        budget_exhausted=proof.budget_exhausted,
     )
+
+
+def _validate_comparison_options(
+    left: Mapping[str, Any],
+    right: Mapping[str, Any],
+    parameter_mapping: Mapping[str, str] | None,
+    variable_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    assumptions: Mapping[str, str] | None,
+) -> None:
+    """Validate declaration maps, auxiliary partitions, and parameter assumptions."""
+    left_declarations = {item.get("name"): item for item in left["declarations"] if isinstance(item, Mapping)}
+    right_declarations = {item.get("name"): item for item in right["declarations"] if isinstance(item, Mapping)}
+    _validate_declaration_mapping(left_declarations, right_declarations, variable_mapping, "dvar")
+    _validate_declaration_mapping(left_declarations, right_declarations, parameter_mapping, "parameter")
+    for declarations, auxiliaries, retained in (
+        (left_declarations, left_auxiliaries, set(variable_mapping or {})),
+        (right_declarations, right_auxiliaries, set((variable_mapping or {}).values())),
+    ):
+        _validate_auxiliary_partition(declarations, auxiliaries, retained)
+    _validate_parameter_assumptions(left_declarations, right_declarations, assumptions)
+
+
+def _validate_declaration_mapping(
+    left: Mapping[Any, Any],
+    right: Mapping[Any, Any],
+    mapping: Mapping[str, str] | None,
+    declaration_prefix: str,
+) -> None:
+    """Check injectivity and declaration kind before any proof search."""
+    if len(set((mapping or {}).values())) != len(mapping or {}):
+        raise ValueError("declaration mappings must be injective")
+    for name, target in (mapping or {}).items():
+        for declarations, candidate in ((left, name), (right, target)):
+            if not str(declarations.get(candidate, {}).get("type", "")).startswith(declaration_prefix):
+                raise ValueError(f"mapping references unknown or wrong-kind declaration: {candidate}")
+
+
+def _validate_auxiliary_partition(declarations: Mapping[Any, Any], auxiliaries: Collection[str], retained: set[str]) -> None:
+    """Require auxiliaries to be declared decisions outside the retained map."""
+    for name in auxiliaries:
+        if not str(declarations.get(name, {}).get("type", "")).startswith("dvar"):
+            raise ValueError(f"unknown auxiliary variable: {name}")
+        if name in retained:
+            raise ValueError(f"retained and auxiliary variables must be disjoint: {name}")
+
+
+def _validate_parameter_assumptions(
+    left: Mapping[Any, Any], right: Mapping[Any, Any], assumptions: Mapping[str, str] | None
+) -> None:
+    """Require supported assumption facts on parameter names shared by both inputs."""
+    for name, condition in (assumptions or {}).items():
+        if condition not in {"positive", "nonnegative", "nonzero"}:
+            raise ValueError(f"unsupported assumption condition: {condition}")
+        if any(not str(declarations.get(name, {}).get("type", "")).startswith("parameter") for declarations in (left, right)):
+            raise ValueError(f"assumptions require a parameter with this name on both sides: {name}")
 
 
 def _lower_comparison_models(
@@ -201,40 +433,23 @@ def _lower_comparison_models(
     assumptions: Mapping[str, str] | None,
     left_data_text: str | None,
     right_data_text: str | None,
-) -> tuple[Any, Any, bool]:
-    try:
-        return lower_symbolic_model(left_ast, assumptions), lower_symbolic_model(right_ast, assumptions), False
-    except UnsupportedAlgebra:
-        if not isinstance(left, str) or not isinstance(right, str) or left_data_text is None or right_data_text is None:
-            raise
+) -> tuple[SymbolicModel, SymbolicModel, bool]:
+    """Lower schemas symbolically, or ground supplied finite instances.
+
+    Grounding is justified only at the supplied valuations, as stated by
+    Proposition 6.8 (Correct finite grounding); the returned flag preserves that scope in
+    the reported proof steps.
+    """
+
+    if left_data_text is not None and right_data_text is not None:
+        if not isinstance(left, str) or not isinstance(right, str):
+            raise ValueError("grounding requires model source strings")
         return (
             lower_linear_problem(linear_problem_from_opl(left, left_data_text)),
             lower_linear_problem(linear_problem_from_opl(right, right_data_text)),
             True,
         )
-
-
-def _effective_algebraic_mappings(
-    left_model: Any,
-    right_model: Any,
-    grounded_indexed_schema: bool,
-    variable_mapping: Mapping[str, str] | None,
-    left_auxiliaries: Collection[str],
-    right_auxiliaries: Collection[str],
-) -> tuple[Mapping[str, str] | None, set[str], set[str]]:
-    effective_variable_mapping = variable_mapping
-    effective_left_auxiliaries = set(left_auxiliaries)
-    effective_right_auxiliaries = set(right_auxiliaries)
-    if not grounded_indexed_schema or effective_variable_mapping is not None:
-        return effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries
-
-    left_types = {variable.name: variable.value_type for variable in left_model.variables}
-    right_types = {variable.name: variable.value_type for variable in right_model.variables}
-    shared_names = {name for name in left_types.keys() & right_types.keys() if left_types[name] == right_types[name]}
-    effective_variable_mapping = {name: name for name in shared_names}
-    effective_left_auxiliaries.update(left_types.keys() - shared_names)
-    effective_right_auxiliaries.update(right_types.keys() - shared_names)
-    return effective_variable_mapping, effective_left_auxiliaries, effective_right_auxiliaries
+    return lower_symbolic_model(left_ast, assumptions), lower_symbolic_model(right_ast, assumptions), False
 
 
 def _prove_schema_isomorphism(
@@ -243,15 +458,27 @@ def _prove_schema_isomorphism(
     parameter_mapping: Mapping[str, str] | None = None,
     variable_mapping: Mapping[str, str] | None = None,
 ) -> AbstractEquivalenceResult:
+    """Test the sufficient schema-equivalence condition of Theorem 6.4.
+
+    Failure rejects this graph correspondence only; Theorem 9.1
+    permits algebraic and projected stages to establish semantic equivalence.
+    """
+
     try:
         left_labels, right_labels = _schema_mapping_labels(parameter_mapping, variable_mapping)
-        left_graph = _AbstractGraphBuilder(left_ast).build(left_labels)
-        right_graph = _AbstractGraphBuilder(right_ast).build(right_labels)
+        left_builder = _AbstractGraphBuilder(left_ast)
+        right_builder = _AbstractGraphBuilder(right_ast)
+        left_graph = left_builder.build(left_labels)
+        right_graph = right_builder.build(right_labels)
     except _UnsupportedAbstractNode as exc:
         return AbstractEquivalenceResult(
             status="unknown",
             level="schema_isomorphic",
             reason=str(exc),
+            relation="schema_structural",
+            scope="source_schemas",
+            arithmetic="parsed_ast_labels",
+            termination="unsupported_fragment",
         )
 
     proof_steps = (
@@ -266,11 +493,27 @@ def _prove_schema_isomorphism(
         edge_match=isomorphism.categorical_edge_match("role", None),
     )
     if matcher.is_isomorphic():
+        right_names = {node: name for name, node in right_builder._global_symbols.items()}
+        declaration_map = {name: right_names[matcher.mapping[node]] for name, node in left_builder._global_symbols.items()}
+        variable_names = {item["name"] for item in left_ast["declarations"] if str(item.get("type", "")).startswith("dvar")}
+        parameter_names = {
+            item["name"] for item in left_ast["declarations"] if str(item.get("type", "")).startswith("parameter")
+        }
         return AbstractEquivalenceResult(
             status="equivalent",
             level="schema_isomorphic",
             reason="abstract model schemas are isomorphic",
             proof_steps=proof_steps,
+            relation="schema_structural",
+            scope="uniform_schema" if parameter_names else "parameterless_instance",
+            arithmetic="parsed_ast_labels",
+            variable_mapping=tuple(
+                sorted((name, target) for name, target in declaration_map.items() if name in variable_names)
+            ),
+            parameter_mapping=tuple(
+                sorted((name, target) for name, target in declaration_map.items() if name in parameter_names)
+            ),
+            termination="completed",
         )
     return AbstractEquivalenceResult(
         status="different",
@@ -278,6 +521,10 @@ def _prove_schema_isomorphism(
         reason="abstract model schemas are not isomorphic",
         proof_steps=proof_steps,
         counterexample="no label-preserving abstract-syntax graph isomorphism exists",
+        relation="schema_structural",
+        scope="source_schemas",
+        arithmetic="parsed_ast_labels",
+        termination="completed",
     )
 
 
@@ -285,6 +532,12 @@ def _schema_mapping_labels(
     parameter_mapping: Mapping[str, str] | None,
     variable_mapping: Mapping[str, str] | None,
 ) -> tuple[dict[str, tuple[str, str]], dict[str, tuple[str, str]]]:
+    """Encode prescribed declaration pairs as isomorphism constraints.
+
+    This is the abstract counterpart of the mapping restriction in
+    Corollary 5.10 (Mapping-constrained comparison).
+    """
+
     left_labels: dict[str, tuple[str, str]] = {}
     right_labels: dict[str, tuple[str, str]] = {}
     for kind, mapping in (("parameter", parameter_mapping), ("variable", variable_mapping)):
@@ -322,6 +575,13 @@ class _UnsupportedAbstractNode(ValueError):
 
 
 class _AbstractGraphBuilder:
+    """Build the faithful syntax-and-binding graph of Section 6.
+
+    Declaration and iterator reference edges carry the binding evidence needed
+    by Lemma 6.3 (Binding-aware renaming); edge roles preserve ordered operands while
+    repeated operand vertices preserve multiplicity.
+    """
+
     def __init__(self, ast: Mapping[str, Any]) -> None:
         self.ast = ast
         self.graph = nx.DiGraph()
@@ -330,6 +590,8 @@ class _AbstractGraphBuilder:
         self._declaration_nodes: list[tuple[Mapping[str, Any], int]] = []
 
     def build(self, mapping_labels: Mapping[str, tuple[str, str]] | None = None) -> nx.DiGraph:
+        """Construct a complete model graph with declarations linked before uses."""
+
         root = self._new_node(("model",))
         declarations = self.ast["declarations"]
         for declaration in declarations:
@@ -395,6 +657,8 @@ class _AbstractGraphBuilder:
         return node
 
     def _add_operator(self, value: Mapping[str, Any], scope: Mapping[str, int]) -> int:
+        """Apply the semantics-preserving AST standardization preceding Theorem 6.4."""
+
         node_type = value.get("type")
         operator = value.get("op") if node_type in {"binop", "constraint"} else node_type
         left = value.get("left")
@@ -421,6 +685,8 @@ class _AbstractGraphBuilder:
         return node
 
     def _flatten_operator(self, value: Any, operator: str) -> list[Any]:
+        """Flatten associative-commutative operands while retaining occurrences."""
+
         if not isinstance(value, Mapping):
             return [value]
         node_type = value.get("type")
@@ -462,6 +728,8 @@ class _AbstractGraphBuilder:
         iterators: Any,
         outer_scope: Mapping[str, int],
     ) -> Mapping[str, int]:
+        """Create binder vertices and extend lexical scope as in Lemma 6.3."""
+
         if not isinstance(iterators, list):
             raise _UnsupportedAbstractNode("abstract model iterators must be a list")
         scope = dict(outer_scope)

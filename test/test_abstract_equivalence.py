@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from pyopl.milp_abstract_equivalence import (
     AbstractEquivalenceResult,
@@ -40,6 +41,120 @@ RENAMED_MODEL = """
 
 
 class AbstractEquivalenceTests(unittest.TestCase):
+    def test_rewrite_limit_reports_budget(self):
+        model = "dvar float x; minimize x; subject to {x>=0;}"
+        result = prove_abstract_equivalent(model, model, mode="algebraic", max_rewrite_iterations=0)
+        self.assertEqual(result.status, "unknown")
+        self.assertTrue(result.budget_exhausted)
+        self.assertEqual(result.termination, "budget_exhausted")
+
+    def test_integer_enumeration_limit_reports_budget(self):
+        left = "dvar int x; minimize x; subject to {x>=0; x<=100001;}"
+        right = left.replace("minimize x", "minimize 2*x")
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+        self.assertEqual(result.status, "unknown")
+        self.assertTrue(result.budget_exhausted)
+
+    def test_objective_certificate_failure_is_unknown(self):
+        left = "dvar float x; dvar float y; minimize x; subject to {x+y==1;}"
+        right = left.replace("minimize x", "minimize 1-y")
+        with patch("pyopl._abstract_algebra._objectives_equal_on_polyhedron", return_value=False):
+            result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x", "y": "y"})
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_equality_certificate_retains_both_directions(self):
+        import sympy as symbolic
+
+        from pyopl._abstract_algebra import AffineConstraint, _farkas_certificate, _verify_farkas
+
+        decision = symbolic.Symbol("decision", real=True)
+        equality = AffineConstraint(decision - 1, "=")
+        certificates = _farkas_certificate((equality,), equality, ["decision"])
+        self.assertIsInstance(certificates, tuple)
+        for sign, certificate in zip((1, -1), certificates):
+            self.assertTrue(
+                _verify_farkas((equality,), AffineConstraint(sign * equality.expression, "<="), ["decision"], certificate)
+            )
+
+    def test_parameterized_rational_row_scaling(self):
+        left = "float theta = ...; dvar float x; minimize x; subject to {2*x<=2*theta;}"
+        right = "float theta = ...; dvar float x; minimize x; subject to {x<=theta;}"
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "symbolically_normalized")
+        reversed_row = right.replace("x<=theta", "-x<=-theta")
+        self.assertFalse(prove_abstract_equivalent(left, reversed_row, mode="algebraic").equivalent)
+
+    def test_equivalent_retained_equality_bases(self):
+        left = "dvar float x; dvar float y; minimize x; subject to {x==0; y==0;}"
+        right = "dvar float x; dvar float y; minimize x; subject to {x+y==0; x-y==0;}"
+        result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x", "y": "y"})
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "polyhedrally_proven")
+
+    def test_objectives_equal_on_retained_equality(self):
+        left = "dvar float x; dvar float y; minimize x; subject to {x+y==1;}"
+        right = left.replace("minimize x", "minimize 1-y")
+        self.assertTrue(
+            prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x", "y": "y"}).equivalent
+        )
+
+    def test_projection_handles_one_sided_and_empty_fibers(self):
+        left = "dvar float x; minimize x; subject to {}"
+        right = "dvar float x; dvar float auxiliary; minimize x; subject to {auxiliary>=x;}"
+        options = dict(mode="algebraic", variable_mapping={"x": "x"}, right_auxiliaries={"auxiliary"})
+        self.assertTrue(prove_abstract_equivalent(left, right, **options).equivalent)
+        empty = right.replace("auxiliary>=x;", "auxiliary>=1; auxiliary<=0;")
+        self.assertFalse(prove_abstract_equivalent(left, empty, **options).equivalent)
+
+    def test_failed_implication_discovery_is_unknown(self):
+        left = "dvar float x; minimize x; subject to { x>=0; x<=1; }"
+        right = "dvar float x; minimize x; subject to { x>=0; x<=1; x<=2; }"
+        for target in ("_solve_farkas_multipliers", "_verify_farkas"):
+            with self.subTest(target=target), patch("pyopl._abstract_algebra." + target, return_value=None):
+                result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x"})
+                self.assertEqual(result.status, "unknown")
+                self.assertIsNone(result.counterexample)
+
+    def test_missing_mapping_is_unknown(self):
+        left = "dvar float x; minimize x; subject to {}"
+        right = "dvar float x; dvar float auxiliary; minimize x; subject to {}"
+        self.assertEqual(prove_abstract_equivalent(left, right, mode="auto").status, "unknown")
+
+    def test_mapping_search_limit_is_unknown(self):
+        from pyopl._abstract_algebra import AlgebraicProof
+
+        model = " ".join(f"dvar int decision{index};" for index in range(6)) + " minimize decision0; subject to {}"
+        rejection = AlgebraicProof("different", "presburger_proven", "candidate rejected")
+        with patch("pyopl._abstract_algebra._prove_candidate_mapping", return_value=rejection) as attempt:
+            result = prove_abstract_equivalent(model, model, mode="algebraic")
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("limit", result.reason)
+        self.assertEqual(attempt.call_count, 256)
+        self.assertTrue(result.budget_exhausted)
+
+    def test_mapping_search_continues_after_candidate_disproof(self):
+        left = "dvar int x; dvar int y; minimize x+2*y; subject to {x>=0; x<=1; y>=0; y<=1;}"
+        right = "dvar int a; dvar int b; minimize 2*a+b; subject to {a>=0; a<=1; b>=0; b<=1;}"
+        self.assertTrue(prove_abstract_equivalent(left, right, mode="algebraic").equivalent)
+
+    def test_symbolic_alias_requires_nonzero_parameter(self):
+        left = "float+ theta = ...; dvar float x; minimize x; subject to {}"
+        for equality in ("theta*auxiliary == x", "theta*auxiliary == -x"):
+            right = "float+ theta = ...; dvar float x; dvar float auxiliary; minimize x; subject to {" + equality + ";}"
+            for condition in (None, "nonnegative", "positive", "nonzero"):
+                with self.subTest(equality=equality, condition=condition):
+                    result = prove_abstract_equivalent(
+                        left,
+                        right,
+                        mode="algebraic",
+                        variable_mapping={"x": "x"},
+                        right_auxiliaries={"auxiliary"},
+                        assumptions=None if condition is None else {"theta": condition},
+                    )
+                    self.assertEqual(result.status, "equivalent" if condition in {"positive", "nonzero"} else "unknown")
+
     def test_structural_and_auto_modes_honor_explicit_variable_mapping(self):
         left = "dvar float+ x; dvar float+ y; minimize x + 2*y; subject to { x <= 1; y <= 1; }"
         right = "dvar float+ a; dvar float+ b; minimize a + 2*b; subject to { a <= 1; b <= 1; }"
@@ -61,17 +176,19 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertFalse(incorrect.equivalent)
 
     def test_indexed_schema_isomorphism_honors_explicit_mapping(self):
-        for mapping, expected in (({"x": "quantity"}, True), ({"x": "unitCost"}, False), ({"missing": "quantity"}, False)):
+        for mapping, expected in (({"x": "quantity"}, True),):
             with self.subTest(mapping=mapping):
                 result = prove_abstract_equivalent(LEFT_MODEL, RENAMED_MODEL, mode="auto", variable_mapping=mapping)
 
                 self.assertEqual(result.equivalent, expected)
+        for mapping in ({"x": "unitCost"}, {"missing": "quantity"}):
+            with self.assertRaises(ValueError):
+                prove_abstract_equivalent(LEFT_MODEL, RENAMED_MODEL, mode="auto", variable_mapping=mapping)
 
     def test_structural_mapping_must_be_injective(self):
         model = "dvar float+ x; dvar float+ y; minimize x+y; subject to { x <= 1; y <= 1; }"
-        result = prove_abstract_equivalent(model, model, variable_mapping={"x": "x", "y": "x"})
-
-        self.assertFalse(result.equivalent)
+        with self.assertRaises(ValueError):
+            prove_abstract_equivalent(model, model, variable_mapping={"x": "x", "y": "x"})
 
     def test_compare_abstract_accepts_renamed_and_reordered_model_schema(self):
         self.assertTrue(compare_abstract(LEFT_MODEL, RENAMED_MODEL))
@@ -379,9 +496,9 @@ class AbstractEquivalenceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "equivalent")
         self.assertEqual(result.level, "symbolically_normalized")
-        self.assertIn("grounded finite indexed schemas", " ".join(result.proof_steps))
+        self.assertIn("grounded finite models", " ".join(result.proof_steps))
 
-    def test_grounded_indexed_formulations_infer_unmatched_auxiliaries(self):
+    def test_grounded_indexed_formulations_require_auxiliary_partition(self):
         left = """
             int N = ...; range I = 1..N;
             dvar boolean x[I]; dvar float+ load[I];
@@ -405,7 +522,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "unknown")
-        self.assertIn("mixed integer/continuous projection", result.reason)
+        self.assertIn("no compatible parameter and variable mapping", result.reason)
 
 
 if __name__ == "__main__":

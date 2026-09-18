@@ -31,11 +31,24 @@ Reference:
     and Tian Ding. "OptiBench: Benchmarking Large Language Models in
     Optimization Modeling with Equivalence-Detection Evaluation." 2024.
     https://openreview.net/forum?id=KD9F5Ap878
+
+Paper correspondence
+--------------------
+The reductions implement the recognized cases of Lemma 5.1 (Affine
+elimination), Corollary 5.2 (Concrete alias and fixed-variable rules), Lemma
+5.3 (Slack elimination), Lemma 5.4 (Independent auxiliaries), and Proposition
+5.6 (Redundancy by optimization).  The terminal graph realizes Theorem 5.9
+(Faithfulness of the incidence encoding), with color refinement justified by
+Lemma 5.12 (Refinement invariance); their composition is the concrete path of
+Theorem 5.14 (Exact concrete-path soundness).  Auxiliary projection follows
+Lemma 5.4 or Theorem 7.11 (Bidirectional shared-binary enumeration).  Because
+this module uses tolerance labels and numerical solvers, Proposition 8.1 and
+Section 8 qualify the exact-paper idealization.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, TypedDict
 
 import networkx as nx
@@ -51,11 +64,29 @@ EquivalenceLevel = Literal["structural", "normalized", "solver_implied", "projec
 
 @dataclass(frozen=True)
 class EquivalenceResult:
+    """Status-bearing concrete result from the layered proof procedure.
+
+    The meanings of ``solver_implied``, ``projection``, and
+    ``projected_milp_proven`` are given in Section 9.2 (Result labels),
+    including their numerical-solver qualifications.
+    """
+
     status: EquivalenceStatus
     level: EquivalenceLevel
     reason: str
     proof_steps: tuple[str, ...] = ()
     counterexample: str | None = None
+    relation: str = "not_recorded"
+    scope: str = "not_recorded"
+    arithmetic: str = "not_recorded"
+    variable_mapping: tuple[tuple[str, str], ...] = ()
+    parameter_mapping: tuple[tuple[str, str], ...] = ()
+    left_auxiliaries: tuple[str, ...] = ()
+    right_auxiliaries: tuple[str, ...] = ()
+    assumptions: tuple[tuple[str, str], ...] = ()
+    termination: str = "not_recorded"
+    budget_exhausted: bool = False
+    evidence_kind: str = "numerical_checks_only"
 
     @property
     def equivalent(self) -> bool:
@@ -100,7 +131,12 @@ def compare(
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
 ) -> bool:
-    """Convenience wrapper for ``prove_equivalent`` that returns a boolean result."""
+    """Return whether the automatic concrete route establishes equivalence.
+
+    This convenience view collapses the three outcomes following
+    Theorem 9.1; call :func:`prove_equivalent` when ``different``
+    must remain distinct from ``unknown``.
+    """
 
     return prove_equivalent(
         left,
@@ -111,7 +147,7 @@ def compare(
     ).equivalent
 
 
-def prove_equivalent(
+def _prove_equivalent(
     left: LinearProblem,
     right: LinearProblem,
     *,
@@ -169,6 +205,13 @@ def prove_equivalent(
     Raises:
         ValueError: If either model has inconsistent dimensions, invalid bounds,
             an unsupported objective sense, or a nonpositive tolerance.
+
+    Paper links:
+        The solver path implements Theorem 5.14 (Exact concrete-path
+        soundness) under the numerical qualifications of Proposition 8.1.
+        The restricted projection path uses Lemma 5.4 (Independent
+        auxiliaries); the shared-binary path follows Theorem 7.11 and its
+        no-good cuts follow Lemma 7.10.
     """
 
     if mode == "projected_milp":
@@ -205,6 +248,75 @@ def prove_equivalent(
     )
 
 
+def prove_equivalent(
+    left: LinearProblem,
+    right: LinearProblem,
+    *,
+    mode: Literal["structural", "normalized", "solver", "projection", "projected_milp", "auto"] = "solver",
+    variable_mapping: dict[str, str] | None = None,
+    tolerance: float = 1e-9,
+    max_iterations: int | None = None,
+    max_projected_assignments: int = 100_000,
+) -> EquivalenceResult:
+    """Compare matrix models with explicit relation and numerical provenance.
+
+    Structural, normalized, and solver modes decide the normalized graph
+    relation, not general semantic inequivalence. Auto mode falls back to
+    shared-binary projection; an unsuccessful proof attempt is unknown.
+    All concrete results remain qualified by numerical reduction/solver
+    decisions. Invalid mappings raise ValueError before any reductions.
+    """
+    _validate(left, tolerance)
+    _validate(right, tolerance)
+    _validate_variable_mapping(left, right, variable_mapping)
+    result = _prove_equivalent(
+        left,
+        right,
+        mode=mode,
+        variable_mapping=variable_mapping,
+        tolerance=tolerance,
+        max_iterations=max_iterations,
+        max_projected_assignments=max_projected_assignments,
+    )
+    return _concrete_result_metadata(result, left, right, variable_mapping, tolerance)
+
+
+def _validate_variable_mapping(left: LinearProblem, right: LinearProblem, variable_mapping: dict[str, str] | None) -> None:
+    """Reject invalid named correspondences before any reductions are applied."""
+    if variable_mapping is None:
+        return
+    if len(set(variable_mapping.values())) != len(variable_mapping):
+        raise ValueError("variable mapping must be injective")
+    if not set(variable_mapping) <= set(left.var_names) or not set(variable_mapping.values()) <= set(right.var_names):
+        raise ValueError("variable mapping references an unknown variable")
+
+
+def _concrete_result_metadata(
+    result: EquivalenceResult,
+    left: LinearProblem,
+    right: LinearProblem,
+    variable_mapping: dict[str, str] | None,
+    tolerance: float,
+) -> EquivalenceResult:
+    """Qualify the selected proof route with the numerical semantics of Section 9.2."""
+    projected = result.level in {"projection", "projected_milp_proven"}
+    mapping = dict(result.variable_mapping) or variable_mapping or {}
+    if result.level == "projected_milp_proven" and variable_mapping is None:
+        mapping = _infer_shared_binary_mapping(left, right, tolerance)
+    exhausted = result.budget_exhausted or (result.status == "unknown" and "exceeded" in result.reason)
+    return replace(
+        result,
+        relation="projected_value" if projected else "normalized_structural",
+        scope="matrix_instances",
+        arithmetic="numerical_solver" if result.level == "projected_milp_proven" else "quantized_with_numerical_reductions",
+        variable_mapping=tuple(sorted(mapping.items())),
+        left_auxiliaries=tuple(sorted(set(left.var_names) - set(mapping))) if projected else (),
+        right_auxiliaries=tuple(sorted(set(right.var_names) - set(mapping.values()))) if projected else (),
+        termination="budget_exhausted" if exhausted else ("completed" if result.status != "unknown" else "inconclusive"),
+        budget_exhausted=exhausted,
+    )
+
+
 def _prove_projection_equivalent(
     left: LinearProblem,
     right: LinearProblem,
@@ -212,6 +324,8 @@ def _prove_projection_equivalent(
     tolerance: float,
     max_iterations: int | None,
 ) -> EquivalenceResult:
+    """Apply Lemma 5.4 (Independent auxiliaries), then compare retained models."""
+
     _validate(left, tolerance)
     _validate(right, tolerance)
     if variable_mapping is None:
@@ -237,11 +351,12 @@ def _prove_projection_equivalent(
         max_iterations=max_iterations,
     )
     return EquivalenceResult(
-        status=result.status,
+        status="unknown" if result.status == "different" else result.status,
         level="projection",
         reason=result.reason,
         proof_steps=projection_steps + result.proof_steps,
-        counterexample=result.counterexample,
+        counterexample=None,
+        variable_mapping=tuple(sorted(variable_mapping.items())),
     )
 
 
@@ -254,6 +369,13 @@ def _prove_normalized_equivalent(
     max_iterations: int | None,
     max_projected_assignments: int,
 ) -> EquivalenceResult:
+    """Run the reduction-and-match path of Theorem 5.14.
+
+    The graph labels are quantized, so a match has the precise numerical
+    interpretation in Proposition 8.1 rather than proving
+    equality of arbitrary pre-quantization real data.
+    """
+
     left_normalized = _canonicalize(left, tolerance, max_iterations, frozenset(variable_mapping or ()))
     right_normalized = _canonicalize(
         right, tolerance, max_iterations, frozenset(variable_mapping.values()) if variable_mapping is not None else frozenset()
@@ -271,35 +393,43 @@ def _prove_normalized_equivalent(
         "normalized both models",
         "removed duplicate and solver-proven redundant rows",
     )
-    if left_normalized.objective_offset != right_normalized.objective_offset:
-        if mode == "auto":
-            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
+    result = _compare_normalized_models(left_normalized, right_normalized, variable_mapping, proof_steps)
+    if result.status == "different" and mode == "auto":
+        return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
+    return result
+
+
+def _normalized_size_issue(left: _NormalizedProblem, right: _NormalizedProblem) -> str | None:
+    """Reject mismatched offsets or graph sizes before searching for isomorphism."""
+    if left.objective_offset != right.objective_offset:
+        return "normalized objective offsets differ"
+    if len(left.columns) != len(right.columns):
+        return "normalized column counts differ"
+    if len(left.rows) != len(right.rows):
+        return "normalized row counts differ"
+    return None
+
+
+def _compare_normalized_models(
+    left_normalized: _NormalizedProblem,
+    right_normalized: _NormalizedProblem,
+    variable_mapping: dict[str, str] | None,
+    proof_steps: tuple[str, ...],
+) -> EquivalenceResult:
+    """Decide the encoded graph relation, leaving semantic fallback to the caller.
+
+    The isomorphism implements Theorem 5.9 under the prescribed correspondence
+    of Corollary 5.10. Its labels retain the quantization qualification of
+    Proposition 8.1; a structural rejection alone is not semantic disproof.
+    """
+    issue = _normalized_size_issue(left_normalized, right_normalized)
+    if issue is not None:
         return EquivalenceResult(
             status="different",
             level="solver_implied",
-            reason="normalized objective offsets differ",
+            reason=issue,
             proof_steps=proof_steps,
-            counterexample="normalized objective offsets differ",
-        )
-    if len(left_normalized.columns) != len(right_normalized.columns):
-        if mode == "auto":
-            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
-        return EquivalenceResult(
-            status="different",
-            level="solver_implied",
-            reason="normalized column counts differ",
-            proof_steps=proof_steps,
-            counterexample="normalized column counts differ",
-        )
-    if len(left_normalized.rows) != len(right_normalized.rows):
-        if mode == "auto":
-            return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
-        return EquivalenceResult(
-            status="different",
-            level="solver_implied",
-            reason="normalized row counts differ",
-            proof_steps=proof_steps,
-            counterexample="normalized row counts differ",
+            counterexample=issue,
         )
 
     left_graph = _to_graph(left_normalized)
@@ -327,9 +457,14 @@ def _prove_normalized_equivalent(
             level="solver_implied",
             reason="normalized graphs are isomorphic",
             proof_steps=proof_steps,
+            variable_mapping=tuple(
+                sorted(
+                    (left_normalized.columns[node[1]].name, right_normalized.columns[target[1]].name)
+                    for node, target in matcher.mapping.items()
+                    if node[0] == "column"
+                )
+            ),
         )
-    if mode == "auto":
-        return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
     return EquivalenceResult(
         status="different",
         level="solver_implied",
@@ -346,6 +481,14 @@ def _prove_projected_milp_equivalent(
     tolerance: float,
     max_assignments: int,
 ) -> EquivalenceResult:
+    """Enumerate shared binary decisions in both directions.
+
+    This is the algorithm of Theorem 7.11.  The implementation
+    reports the solver-qualified level documented in
+    Section 9.2, since SciPy statuses are not exposed as
+    independently checked exact infeasibility certificates.
+    """
+
     _validate(left, tolerance)
     _validate(right, tolerance)
     if max_assignments <= 0:
@@ -355,7 +498,7 @@ def _prove_projected_milp_equivalent(
             reason="max_projected_assignments must be positive",
         )
 
-    mapping = variable_mapping or _infer_shared_binary_mapping(left, right, tolerance)
+    mapping = variable_mapping if variable_mapping is not None else _infer_shared_binary_mapping(left, right, tolerance)
     issue = _projected_mapping_issue(left, right, mapping, tolerance)
     if issue is not None:
         return EquivalenceResult(
@@ -376,46 +519,9 @@ def _prove_projected_milp_equivalent(
             max_assignments - checked,
         )
         checked += direction[1]
-        if direction[0] == "limit":
-            return EquivalenceResult(
-                status="unknown",
-                level="projected_milp_proven",
-                reason=f"projected MILP enumeration exceeded {max_assignments} shared assignments",
-                proof_steps=("enumerated feasible shared binary assignments with no-good cuts",),
-            )
-        if direction[0] == "solver":
-            return EquivalenceResult(
-                status="unknown",
-                level="projected_milp_proven",
-                reason="projected MILP solver did not return an optimal or infeasible status",
-                proof_steps=("enumerated feasible shared binary assignments with no-good cuts",),
-            )
-        if direction[0] == "counterexample":
-            assignment = direction[2] or {}
-            rendered = ", ".join(f"{name}={value}" for name, value in sorted(assignment.items()))
-            return EquivalenceResult(
-                status="different",
-                level="projected_milp_proven",
-                reason="a shared binary assignment is feasible in only one formulation",
-                proof_steps=(
-                    "enumerated feasible shared binary assignments with no-good cuts",
-                    "checked continuous auxiliary feasibility in the other formulation",
-                ),
-                counterexample=rendered,
-            )
-        if direction[0] == "objective":
-            assignment = direction[2] or {}
-            rendered = ", ".join(f"{name}={value}" for name, value in sorted(assignment.items()))
-            return EquivalenceResult(
-                status="different",
-                level="projected_milp_proven",
-                reason="projected objective values differ at a shared feasible assignment",
-                proof_steps=(
-                    "enumerated feasible shared binary assignments with no-good cuts",
-                    "compared objective values on shared feasible assignments",
-                ),
-                counterexample=rendered,
-            )
+        result = _projected_direction_result(direction, max_assignments, "left" if source is left else "right")
+        if result is not None:
+            return result
 
     return EquivalenceResult(
         status="equivalent",
@@ -427,6 +533,53 @@ def _prove_projected_milp_equivalent(
             "checked continuous auxiliary feasibility in the other formulation",
             "compared objective values on shared feasible assignments",
         ),
+    )
+
+
+def _projected_direction_result(
+    direction: tuple[Literal["complete", "counterexample", "limit", "objective", "solver"], int, dict[str, int] | None],
+    max_assignments: int,
+    source_side: str,
+) -> EquivalenceResult | None:
+    """Interpret one directed search under the outcome semantics of Section 9.1.
+
+    Completion of one inclusion permits the caller to check the reverse;
+    budgets and solver failures are inconclusive, while a separating decision
+    is reported with the source side needed to interpret its correspondence.
+    """
+    outcome, _, assignment = direction
+    if outcome == "complete":
+        return None
+    proof_steps = ("enumerated feasible shared binary assignments with no-good cuts",)
+    if outcome == "limit":
+        return EquivalenceResult(
+            status="unknown",
+            level="projected_milp_proven",
+            reason=f"projected MILP enumeration exceeded {max_assignments} shared assignments",
+            proof_steps=proof_steps,
+        )
+    if outcome == "solver":
+        return EquivalenceResult(
+            status="unknown",
+            level="projected_milp_proven",
+            reason="projected MILP solver did not return an optimal or infeasible status",
+            proof_steps=proof_steps,
+        )
+    rendered = ", ".join(f"{name}={value}" for name, value in sorted((assignment or {}).items()))
+    if outcome == "counterexample":
+        return EquivalenceResult(
+            status="different",
+            level="projected_milp_proven",
+            reason="a shared binary assignment is feasible in only one formulation",
+            proof_steps=proof_steps + ("checked continuous auxiliary feasibility in the other formulation",),
+            counterexample=f"feasible only in {source_side}: {rendered}",
+        )
+    return EquivalenceResult(
+        status="different",
+        level="projected_milp_proven",
+        reason="projected objective values differ at a shared feasible assignment",
+        proof_steps=proof_steps + ("compared objective values on shared feasible assignments",),
+        counterexample=f"objective mismatch at {source_side} assignment: {rendered}",
     )
 
 
@@ -498,6 +651,13 @@ def _find_projected_counterexample(
     tolerance: float,
     remaining: int,
 ) -> tuple[Literal["complete", "counterexample", "limit", "objective", "solver"], int, dict[str, int] | None]:
+    """Check one inclusion of projected binary domains and values.
+
+    Every successful iteration excludes exactly one assignment by
+    Lemma 7.10 (Binary no-good cut); the caller reverses direction to establish
+    the second inclusion required by Theorem 7.11.
+    """
+
     source_indices = {name: source.var_names.index(name) for name in mapping}
     cuts: list[LinearConstraint] = []
     checked = 0
@@ -598,6 +758,8 @@ def _no_good_cut(
     assignment: dict[str, int],
     indices: dict[str, int],
 ) -> LinearConstraint:
+    """Encode the Hamming-distance exclusion of Lemma 7.10."""
+
     coefficients = np.zeros(len(problem.var_names))
     one_count = 0
     for name, value in assignment.items():
@@ -610,6 +772,8 @@ def _no_good_cut(
 
 
 def _to_graph(problem: _NormalizedProblem) -> nx.Graph:
+    """Construct the attributed incidence graph of Theorem 5.9."""
+
     graph = nx.Graph()
     for column_index, column in enumerate(problem.columns):
         graph.add_node(
@@ -635,6 +799,8 @@ def _project_to_mapping(
     variable_mapping: dict[str, str],
     tolerance: float,
 ) -> tuple[LinearProblem, LinearProblem, tuple[str, ...]] | None:
+    """Project independent objective-neutral auxiliaries by Lemma 5.4."""
+
     left_projected = _drop_independent_auxiliaries(
         left,
         set(variable_mapping.keys()),
@@ -716,6 +882,8 @@ def _has_mapped_isomorphism(
     right: _NormalizedProblem,
     variable_mapping: dict[str, str],
 ) -> bool:
+    """Enforce the prescribed pairs required by Corollary 5.10."""
+
     left_name_by_index = {column_index: column.name for column_index, column in enumerate(left.columns)}
     right_index_by_name = {column.name: column_index for column_index, column in enumerate(right.columns)}
     required_node_mapping = {
@@ -732,6 +900,13 @@ def _has_mapped_isomorphism(
 def _canonicalize(
     problem: LinearProblem, tolerance: float, max_iterations: int | None, kept_names: frozenset[str] = frozenset()
 ) -> _NormalizedProblem:
+    """Apply recognized reductions before the terminal graph comparison.
+
+    The reduction sequence supplies the computational witnesses composed in
+    Theorem 4.6 (Composition of witnesses); row scaling and bound expansion are
+    the transformations of Proposition 5.5 (Elementary row transformations).
+    """
+
     _validate(problem, tolerance)
     problem = _eliminate_affine_aliases(problem, tolerance, kept_names)
     problem = _eliminate_slack_variables(problem, tolerance, kept_names)
@@ -781,6 +956,8 @@ def _canonicalize(
 def _eliminate_affine_aliases(
     problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
 ) -> LinearProblem:
+    """Repeatedly apply the recognized continuous case of Lemma 5.1."""
+
     current = problem
     while True:
         alias = _find_affine_alias(current, tolerance, kept_names)
@@ -805,6 +982,8 @@ def _find_affine_alias(
 
 
 def _substitute_affine_alias(problem: LinearProblem, alias: tuple[int, int]) -> LinearProblem:
+    """Substitute an alias through rows and objective as required by Lemma 5.1."""
+
     alias_index, alias_row_index = alias
     alias_row = problem.A_eq[alias_row_index]
     alias_rhs = problem.b_eq[alias_row_index]
@@ -856,6 +1035,8 @@ def _substitute_alias_rhs(row: list[float], rhs: float, alias_index: int, alias_
 def _eliminate_slack_variables(
     problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
 ) -> LinearProblem:
+    """Apply Lemma 5.3 (Slack elimination) to uniquely recognized columns."""
+
     slack_columns = {
         index: row_index
         for index, row_index in _find_slack_columns(problem, tolerance).items()
@@ -932,6 +1113,8 @@ def _remove_columns(row: list[float], kept_indices: list[int]) -> list[float]:
 def _eliminate_fixed_variables(
     problem: LinearProblem, tolerance: float, kept_names: frozenset[str] = frozenset()
 ) -> LinearProblem:
+    """Delete fixed coordinates with the shifts in Corollary 5.2."""
+
     fixed_values = _find_fixed_values(problem, tolerance, kept_names)
     if not fixed_values:
         return problem
@@ -1013,6 +1196,8 @@ def _validate_matrix(name: str, matrix: list[list[float]], variable_count: int) 
 
 
 def _normalize_row(sense: Literal["<=", "="], row: list[float], rhs: float, tolerance: float) -> _Row:
+    """Normalize row scale using Proposition 5.5, then quantize labels."""
+
     scale = max((abs(float(value)) for value in row), default=0.0)
     if scale <= tolerance:
         scale = abs(float(rhs)) or 1.0
@@ -1050,6 +1235,8 @@ def _deduplicate_rows(rows: tuple[_Row, ...]) -> tuple[_Row, ...]:
 
 
 def _remove_redundant_rows(rows: tuple[_Row, ...], columns: tuple[_Column, ...], tolerance: float) -> tuple[_Row, ...]:
+    """Remove rows sequentially as required by Proposition 5.6."""
+
     kept_rows = list(rows)
     index = 0
     while index < len(kept_rows):
@@ -1071,6 +1258,8 @@ def _is_redundant_row(
     columns: tuple[_Column, ...],
     tolerance: float,
 ) -> bool:
+    """Test the auxiliary maximization criterion of Proposition 5.6."""
+
     if any(column.integrality != 0 for column in columns):
         return _is_milp_redundant_row(row, other_rows, columns, tolerance)
     return _is_lp_redundant_row(row, other_rows, len(columns), tolerance)
@@ -1173,6 +1362,8 @@ def _first_nonzero(values: list[float], tolerance: float) -> float:
 def _refine_colors(
     rows: tuple[_Row, ...], columns: tuple[_Column, ...], max_iterations: int | None
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Compute isomorphism-invariant colors as justified by Lemma 5.12."""
+
     row_colors = _compact_colors(_row_local_key(row) for row in rows)
     column_colors = _compact_colors(_column_local_key(column) for column in columns)
     row_neighbors, column_neighbors = _neighbors(rows, len(columns))
@@ -1275,6 +1466,8 @@ def _column_local_key(
 
 
 def _quantize(value: float, tolerance: float) -> int:
+    """Compute the tolerance label analyzed in Proposition 8.1."""
+
     if abs(value) <= tolerance:
         return 0
     return int(round(value / tolerance))

@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 
 from pyopl import compare_models
 from pyopl.milp_abstract_equivalence import AbstractEquivalenceResult
@@ -7,6 +8,81 @@ from pyopl.model_equivalence import comparison_result_to_dict
 
 
 class ModelEquivalenceApiTests(unittest.TestCase):
+    def test_public_auxiliary_examples(self):
+        cases = (
+            (
+                "dvar float x; minimize 3*x+4; subject to {x>=0; x<=5;}",
+                "dvar float y; dvar float auxiliary; minimize auxiliary; subject to {2*auxiliary==6*y+8; y>=0; y<=5;}",
+                "rewrite_certified",
+            ),
+            (
+                "dvar float x; minimize x; subject to {x>=0; x<=1;}",
+                "dvar float y; dvar float auxiliary; minimize y; subject to {y>=0; auxiliary>=y; auxiliary<=1;}",
+                "polyhedrally_proven",
+            ),
+        )
+        for left, right, level in cases:
+            with self.subTest(level=level):
+                result = compare_models(left, right, variable_mapping={"x": "y"}, right_auxiliaries={"auxiliary"})
+                self.assertTrue(result.equivalent)
+                self.assertEqual(result.level, level)
+                payload = comparison_result_to_dict(result, strategy="abstract")
+                self.assertEqual(payload["relation"], "projected_value")
+                self.assertEqual(payload["variable_mapping"], {"x": "y"})
+                self.assertEqual(payload["scope"], "parameterless_instance")
+                self.assertEqual(payload["arithmetic"], "exact_on_parsed_values")
+
+    def test_supplied_data_cannot_be_bypassed_by_schema_match(self):
+        model = "float bound = ...; dvar float x; minimize x; subject to {x>=0; x<=bound;}"
+        result = compare_models(model, model, left_data_text="bound=1;", right_data_text="bound=2;")
+        self.assertFalse(result.equivalent)
+        self.assertEqual(result.scope, "supplied_instances")
+        self.assertEqual(result.arithmetic, "exact_on_embedded_matrix_values")
+
+    def test_public_invalid_options_raise(self) -> None:
+        model = "dvar float x; minimize x; subject to {}"
+        invalid_options: tuple[dict[str, Any], ...] = (
+            {"right_auxiliaries": {"missing"}},
+            {"variable_mapping": {"x": "x"}, "left_auxiliaries": {"x"}},
+            {"strategy": "concrete", "assumptions": {"theta": "positive"}},
+            {"strategy": "concrete", "right_auxiliaries": {"x"}},
+        )
+        for options in invalid_options:
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                compare_models(model, model, **options)
+
+    def test_public_concrete_partition(self):
+        left = "dvar boolean x; minimize x; subject to {}"
+        right = "dvar boolean y; dvar float auxiliary; minimize y; subject to {auxiliary>=y;}"
+        result = compare_models(left, right, strategy="concrete", variable_mapping={"x": "y"}, right_auxiliaries={"auxiliary"})
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.relation, "projected_value")
+        self.assertEqual(result.right_auxiliaries, ("auxiliary",))
+
+    def test_schema_assumptions_and_parameter_map(self):
+        left = "float theta = ...; dvar float x; minimize x; subject to {}"
+        right = "float theta = ...; dvar float y; dvar float auxiliary; minimize y; subject to {theta*auxiliary==-y;}"
+        result = compare_models(
+            left,
+            right,
+            variable_mapping={"x": "y"},
+            parameter_mapping={"theta": "theta"},
+            right_auxiliaries={"auxiliary"},
+            assumptions={"theta": "positive"},
+        )
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.scope, "uniform_schema")
+        self.assertEqual(dict(result.assumptions), {"theta": "positive"})
+
+    def test_structural_and_numerical_provenance(self):
+        model = "dvar float+ x; minimize x; subject to {x<=1;}"
+        symbolic = compare_models(model, model)
+        numeric = compare_models(model, model, strategy="concrete")
+        self.assertEqual(symbolic.relation, "schema_structural")
+        self.assertEqual(dict(symbolic.variable_mapping), {"x": "x"})
+        self.assertEqual(numeric.relation, "normalized_structural")
+        self.assertEqual(numeric.arithmetic, "quantized_with_numerical_reductions")
+
     def test_compare_models_defaults_to_abstract_strategy(self):
         left = "dvar float+ x; minimize x; subject to { x <= 3; }"
         right = "dvar float+ y; minimize y; subject to { 2 * y <= 6; }"

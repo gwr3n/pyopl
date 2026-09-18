@@ -9,8 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added public model-comparison options for retained-variable and parameter mappings, auxiliary partitions, and supported schema assumptions, together with relation, scope, arithmetic, correspondence, and termination metadata.
+
 ### Fixed
 
+- Prevented symbolic alias division under merely nonnegative parameter assumptions, and reported incomplete mapping or implication searches as unknown rather than semantic differences.
+- Normalized positive rational row content and admitted equalities into exact continuous projection, including objective equality on a retained equality set.
+- Required valid, injective comparison mappings and explicit grounded auxiliary partitions; supplied abstract data now request instance comparison without a schema-isomorphism shortcut.
+- Preserved both equality-implication certificates internally and added directional finite-domain counterexamples and explicit search-budget reporting.
 - Preserved integer divisibility during abstract equivalence checking by retaining integer aliases for finite-domain enumeration unless integral reconstruction is established.
 - Prevented double negation of compiled maximization objectives by recording whether a `LinearProblem` objective is already in minimization form.
 - Required nonempty auxiliary domains before restricted projection and compared projected objectives on feasible retained assignments rather than by coefficient identity.
@@ -20,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored abstract and concrete equivalence orchestration into focused validation, proof-dispatch, and result-reporting helpers, removing all five complexity warnings without changing public behavior.
+- Documented the abstract algebra backend as a literate paper companion, linking proof stages to named results and explaining arithmetic, certificate checks, and supported fragments without changing behavior.
+- Clarified equivalence guarantees and numerical provenance in the manuscript and API documentation; independent certificate export/checking remains deferred. Updated the existing portfolio and removed aggregate capability rankings.
 - Split algebraic mapping dispatch and affine-alias elimination into focused helpers to reduce cyclomatic complexity without changing proof behavior.
 - Separated fixed-variable selection and slack-equality conversion from concrete equivalence elimination routines to reduce complexity without changing behavior.
 
