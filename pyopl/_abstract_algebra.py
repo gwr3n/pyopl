@@ -1,7 +1,7 @@
 """Algebraic comparison companion to the paper's abstract and projected routes.
 
 Read this module alongside *Abstract and Concrete MILP Model Equivalence:
-A Layered Proof Framework* (September 2026). The numbered results below refer to 
+A Layered Proof Framework* (September 2026). The numbered results below refer to
 that paper; their titles identify them if subsequent revisions change numbering.
 Binding-aware syntax matching belongs to ``milp_abstract_equivalence``;
 numerically qualified matrix matching belongs to ``milp_concrete_equivalence``.

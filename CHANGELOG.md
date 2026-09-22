@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Assert relation, arithmetic, and termination metadata in every applicable MILP equivalence portfolio check.
 - Require complete relation, scope, arithmetic, and termination metadata on abstract equivalence results.
 - Align Python proof documentation with the current manuscript result numbering and named guarantees.
 - Keep manuscript and supplementary reproduction references within the distributed MILP equivalence portfolio.

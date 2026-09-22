@@ -554,6 +554,25 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertFalse(result.equivalent)
         self.assertIn("no compatible indexed declaration mapping", result.reason)
 
+    def test_indexed_algebra_compares_computed_parameter_definitions(self):
+        left = """
+            int A = 1;
+            int N = A + 1;
+            range I = 1..N;
+            dvar float x[I];
+            minimize sum(i in I) x[i];
+            subject to {}
+        """
+        renamed = left.replace("int A = 1;", "int B = 1;").replace("A + 1", "B + 1")
+        changed = renamed.replace("B + 1", "B + 2")
+
+        equivalent = prove_abstract_equivalent(left, renamed, mode="algebraic")
+        different = prove_abstract_equivalent(left, changed, mode="algebraic")
+
+        self.assertEqual(equivalent.status, "equivalent")
+        self.assertEqual(different.status, "unknown")
+        self.assertIn("no compatible indexed declaration mapping", different.reason)
+
     def test_index_safety_requires_interpretable_named_set_domain(self):
         model = """
             {string} Products = {"A", "B"};

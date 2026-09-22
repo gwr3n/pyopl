@@ -325,32 +325,31 @@ def _mapped_declarations_match(
                     return False
             except UnsupportedAlgebra:
                 return False
-        if declaration.kind == "parameter" and not _mapped_parameter_definitions_match(
-            declaration.node, other.node, inverse
-        ):
+        if declaration.kind == "parameter" and not _mapped_parameter_definitions_match(declaration.node, other.node, inverse):
             return False
     return True
 
 
-def _mapped_parameter_definitions_match(
-    left: Mapping[str, Any], right: Mapping[str, Any], rename: Mapping[str, str]
-) -> bool:
-    left_has_value = "value" in left and left.get("value") is not None
-    right_has_value = "value" in right and right.get("value") is not None
-    if left_has_value != right_has_value:
+def _mapped_parameter_definitions_match(left: Mapping[str, Any], right: Mapping[str, Any], rename: Mapping[str, str]) -> bool:
+    left_defined, left_value = _parameter_definition(left)
+    right_defined, right_value = _parameter_definition(right)
+    if left_defined != right_defined:
         return False
-    if not left_has_value:
+    if not left_defined:
         return True
-    left_value = left.get("value")
-    right_value = right.get("value")
     if isinstance(left_value, Mapping) or isinstance(right_value, Mapping):
         try:
-            return _canonical_index(left_value, {}, {}, [100]) == _canonical_index(
-                right_value, rename, {}, [100]
-            )
+            return _index_term(left_value, {}, {}) == _index_term(right_value, {}, rename)
         except UnsupportedAlgebra:
             return False
     return left_value == right_value
+
+
+def _parameter_definition(node: Mapping[str, Any]) -> tuple[bool, Any]:
+    for key in ("expression", "value"):
+        if key in node and node.get(key) is not None:
+            return True, node[key]
+    return False, None
 
 
 def _invert(mapping: Mapping[str, str]) -> dict[str, str]:
