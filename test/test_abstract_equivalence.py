@@ -373,6 +373,78 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "equivalent")
         self.assertEqual(result.level, "symbolically_normalized")
 
+    def test_algebraic_mode_normalizes_indexed_distributive_sum(self):
+        left = """
+            int N = ...;
+            range Products = 1..N;
+            float unitCost[Products] = ...;
+            dvar float quantity[Products];
+            minimize sum(p in Products) unitCost[p] * (quantity[p] + 1);
+            subject to {}
+        """
+        right = """
+            int count = ...;
+            range Items = 1..count;
+            float cost[Items] = ...;
+            dvar float amount[Items];
+            minimize sum(item in Items) (cost[item] * amount[item] + cost[item]);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.level, "symbolically_normalized")
+        self.assertEqual(result.scope, "uniform_schema")
+        self.assertIn("normalized indexed affine expressions", result.proof_steps)
+        self.assertIn("lifted equality through alpha-normalized quantifiers", result.proof_steps)
+
+    def test_algebraic_mode_normalizes_pointwise_indexed_constraint(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I) x[i];
+            subject to { forall(i in I) a[i] * (x[i] + 1) <= 0; }
+        """
+        right = """
+            int size = ...;
+            range J = 1..size;
+            float coefficient[J] = ...;
+            dvar float value[J];
+            minimize sum(j in J) value[j];
+            subject to { forall(j in J) 0 >= coefficient[j] * value[j] + coefficient[j]; }
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("normalized pointwise affine constraints", result.proof_steps)
+
+    def test_indexed_algebraic_near_misses_remain_unknown(self):
+        base = """
+            int N = ...;
+            range I = 1..N;
+            range J = 1..N;
+            float a[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I) a[i] * x[i];
+            subject to {}
+        """
+        variants = {
+            "different domain": base.replace("sum(i in I)", "sum(i in J)"),
+            "filtered sum": base.replace("sum(i in I)", "sum(i in I : i >= 1)"),
+            "symbolic division": base.replace("a[i] * x[i]", "x[i] / a[i]"),
+            "decision product": base.replace("a[i] * x[i]", "x[i] * x[i]"),
+            "rank mismatch": base.replace("dvar float x[I];", "dvar float x[I][I];").replace("x[i];", "x[i][i];"),
+        }
+        for name, variant in variants.items():
+            with self.subTest(case=name):
+                result = prove_abstract_equivalent(base, variant, mode="algebraic")
+                self.assertEqual(result.status, "unknown")
+                self.assertIsNone(result.counterexample)
+
     def test_algebraic_mode_eliminates_arbitrary_affine_alias(self):
         left = """
             dvar float x;
@@ -555,11 +627,11 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "equivalent")
         self.assertEqual(result.level, "rewrite_certified")
 
-    def test_algebraic_mode_returns_unknown_for_indexed_schema(self):
+    def test_algebraic_mode_normalizes_indexed_schema(self):
         result = prove_abstract_equivalent(LEFT_MODEL, RENAMED_MODEL, mode="algebraic")
 
-        self.assertEqual(result.status, "unknown")
-        self.assertIn("scalar declarations", result.reason)
+        self.assertEqual(result.status, "equivalent")
+        self.assertEqual(result.scope, "uniform_schema")
 
     def test_algebraic_mode_grounds_indexed_schema_with_data(self):
         left = """

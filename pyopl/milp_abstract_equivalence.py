@@ -40,6 +40,7 @@ from pyopl._abstract_algebra import (
     lower_symbolic_model,
     prove_algebraic_equivalence,
 )
+from pyopl._indexed_algebra import prove_indexed_equivalence
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 
 AbstractEquivalenceStatus = Literal["equivalent", "different", "unknown"]
@@ -286,6 +287,20 @@ def _prove_algebraic_models(
 ) -> AbstractEquivalenceResult:
     """Run lowering and algebraic proof while preserving inconclusive outcomes."""
     try:
+        if left_data_text is None and right_data_text is None:
+            if assumptions:
+                indexed_proof = None
+            else:
+                indexed_proof = prove_indexed_equivalence(
+                    left_ast,
+                    right_ast,
+                    parameter_mapping=parameter_mapping,
+                    variable_mapping=variable_mapping,
+                    left_auxiliaries=left_auxiliaries,
+                    right_auxiliaries=right_auxiliaries,
+                )
+            if indexed_proof is not None:
+                return _indexed_algebraic_public_result(indexed_proof, context)
         left_model, right_model, grounded_indexed_schema = _lower_comparison_models(
             left_ast,
             right_ast,
@@ -316,6 +331,26 @@ def _prove_algebraic_models(
         right_auxiliaries=tuple(sorted(effective_right_auxiliaries)),
     )
     return _algebraic_public_result(proof, context, left_model, right_model, grounded_indexed_schema)
+
+
+def _indexed_algebraic_public_result(
+    proof: AlgebraicProof,
+    context: AbstractEquivalenceResult,
+) -> AbstractEquivalenceResult:
+    """Expose a uniform indexed-schema proof without scalarizing its families."""
+
+    return replace(
+        context,
+        status=proof.status,
+        level=proof.level,
+        reason=proof.reason,
+        proof_steps=tuple(dict.fromkeys(context.proof_steps + proof.steps)),
+        scope="uniform_schema",
+        arithmetic="exact_on_parsed_values",
+        variable_mapping=proof.variable_mapping or context.variable_mapping,
+        parameter_mapping=proof.parameter_mapping or context.parameter_mapping,
+        termination="completed",
+    )
 
 
 def _validate_grounded_correspondence(
