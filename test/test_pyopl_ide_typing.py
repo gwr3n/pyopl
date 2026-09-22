@@ -12,6 +12,7 @@ from unittest import mock
 # Import should not fail regardless of Pillow availability
 from pyopl import pyopl_ide_bootstrap
 from pyopl.pyopl_ide_bootstrap import OPLIDE
+from pyopl.semantic_error import SemanticError
 
 
 class _ImmediateThread:
@@ -24,6 +25,35 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_compare_wrapper_reports_semantic_error_without_traceback(self):
+        result_queue = mock.Mock()
+        error = SemanticError("index 2 of 'shipment' can exceed its declared range")
+
+        with TemporaryDirectory() as tmpdir:
+            left_model = Path(tmpdir) / "left.mod"
+            right_model = Path(tmpdir) / "right.mod"
+            left_model.write_text("minimize 0; subject to {}", encoding="utf-8")
+            right_model.write_text("minimize 0; subject to {}", encoding="utf-8")
+            with mock.patch.object(pyopl_ide_bootstrap, "compare_models", side_effect=error):
+                pyopl_ide_bootstrap._compare_models_wrapper(
+                    str(left_model), "", str(right_model), "", "abstract", result_queue
+                )
+
+        kind, detail = result_queue.put.call_args.args[0]
+        self.assertEqual(kind, "validation_error")
+        self.assertEqual(detail, "index 2 of 'shipment' can exceed its declared range")
+        self.assertNotIn("Traceback", detail)
+
+    def test_comparison_validation_error_has_index_repair_hint(self):
+        message = pyopl_ide_bootstrap._format_comparison_validation_error(
+            "index 2 of 'shipment' can exceed its declared range"
+        )
+
+        self.assertIn("Model validation issue", message)
+        self.assertIn("stopped before checking equivalence", message)
+        self.assertIn("j < N", message)
+        self.assertNotIn("Traceback", message)
+
     def test_concise_genai_error_hides_context_traceback(self):
         context_error = RuntimeError(
             "Request exceeds context length: 131000 input tokens\n\nTraceback (most recent call last):\n"
@@ -855,6 +885,33 @@ class TestPyOPLIDETyping(unittest.TestCase):
             {"status": "OPTIMAL"}, session_id="session-1", solver_choice="scipy"
         )
         dummy._restore_output_textbox.assert_called_once()
+
+    def test_model_error_marks_solver_progress_failed_without_explanation(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation(
+            kind="solve",
+            label="Solve Model",
+            session_id="session-1",
+            solver_choice="gurobi",
+            explain_after_solve=True,
+        )
+        payload = {"status": "MODEL_ERROR", "message": "index 2 exceeds its declared range"}
+        dummy = SimpleNamespace(
+            _finish_solver_progress=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+
+        with mock.patch.object(OPLIDE, "_handle_solver_explanation") as explain:
+            OPLIDE._handle_successful_solver_poll(dummy, payload, operation)
+
+        dummy._finish_solver_progress.assert_called_once_with(payload, status="failed")
+        dummy._display_solve_results.assert_called_once_with(
+            payload,
+            session_id="session-1",
+            solver_choice="gurobi",
+        )
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
+        explain.assert_not_called()
 
     def test_poll_solver_persists_traceback_before_failed_result_message(self):
         class DummyProcess:

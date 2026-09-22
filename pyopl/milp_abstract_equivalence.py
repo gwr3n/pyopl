@@ -40,7 +40,10 @@ from pyopl._abstract_algebra import (
     lower_symbolic_model,
     prove_algebraic_equivalence,
 )
+from pyopl._indexed_algebra import prove_indexed_equivalence
+from pyopl.index_safety import find_index_safety_issue
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
+from pyopl.semantic_error import SemanticError
 
 AbstractEquivalenceStatus = Literal["equivalent", "different", "unknown"]
 AbstractEquivalenceLevel = Literal[
@@ -168,16 +171,9 @@ def prove_abstract_equivalent(
 
     left_ast = _coerce_ast(left)
     right_ast = _coerce_ast(right)
-    left_issue = _model_ast_issue(left_ast)
-    right_issue = _model_ast_issue(right_ast)
-    if left_issue is not None or right_issue is not None:
-        issue = left_issue or right_issue
-        return AbstractEquivalenceResult(
-            status="unknown",
-            level="schema_isomorphic",
-            reason=issue or "invalid abstract model AST",
-            termination="unsupported_input",
-        )
+    preflight_result = _abstract_model_preflight(left_ast, right_ast, left_data_text, right_data_text)
+    if preflight_result is not None:
+        return preflight_result
 
     _validate_comparison_options(
         left_ast, right_ast, parameter_mapping, variable_mapping, left_auxiliaries, right_auxiliaries, assumptions
@@ -219,6 +215,45 @@ def prove_abstract_equivalent(
         right_auxiliaries,
         max_rewrite_iterations,
         context,
+    )
+
+
+def _abstract_model_preflight(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left_data_text: str | None,
+    right_data_text: str | None,
+) -> AbstractEquivalenceResult | None:
+    issue = _model_ast_issue(left_ast) or _model_ast_issue(right_ast)
+    if issue is not None:
+        return AbstractEquivalenceResult(
+            status="unknown",
+            level="schema_isomorphic",
+            reason=issue,
+            termination="unsupported_input",
+        )
+    return _index_safety_preflight(left_ast, right_ast, left_data_text, right_data_text)
+
+
+def _index_safety_preflight(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left_data_text: str | None,
+    right_data_text: str | None,
+) -> AbstractEquivalenceResult | None:
+    safety_issues = (find_index_safety_issue(left_ast), find_index_safety_issue(right_ast))
+    unsafe_issue = next((issue for issue in safety_issues if issue is not None and issue.status == "unsafe"), None)
+    if unsafe_issue is not None:
+        raise SemanticError(unsafe_issue.reason)
+    unresolved_issue = next((issue for issue in safety_issues if issue is not None), None)
+    if unresolved_issue is None or left_data_text is not None or right_data_text is not None:
+        return None
+    return AbstractEquivalenceResult(
+        status="unknown",
+        level="schema_isomorphic",
+        reason=unresolved_issue.reason,
+        scope="source_schemas",
+        termination="unsupported_fragment",
     )
 
 
@@ -286,6 +321,21 @@ def _prove_algebraic_models(
 ) -> AbstractEquivalenceResult:
     """Run lowering and algebraic proof while preserving inconclusive outcomes."""
     try:
+        if left_data_text is None and right_data_text is None:
+            if assumptions:
+                indexed_proof = None
+            else:
+                indexed_proof = prove_indexed_equivalence(
+                    left_ast,
+                    right_ast,
+                    parameter_mapping=parameter_mapping,
+                    variable_mapping=variable_mapping,
+                    left_auxiliaries=left_auxiliaries,
+                    right_auxiliaries=right_auxiliaries,
+                    max_rewrite_iterations=max_rewrite_iterations,
+                )
+            if indexed_proof is not None:
+                return _indexed_algebraic_public_result(indexed_proof, context)
         left_model, right_model, grounded_indexed_schema = _lower_comparison_models(
             left_ast,
             right_ast,
@@ -316,6 +366,27 @@ def _prove_algebraic_models(
         right_auxiliaries=tuple(sorted(effective_right_auxiliaries)),
     )
     return _algebraic_public_result(proof, context, left_model, right_model, grounded_indexed_schema)
+
+
+def _indexed_algebraic_public_result(
+    proof: AlgebraicProof,
+    context: AbstractEquivalenceResult,
+) -> AbstractEquivalenceResult:
+    """Expose a uniform indexed-schema proof without scalarizing its families."""
+
+    return replace(
+        context,
+        status=proof.status,
+        level=proof.level,
+        reason=proof.reason,
+        proof_steps=tuple(dict.fromkeys(context.proof_steps + proof.steps)),
+        scope="uniform_schema",
+        arithmetic="exact_on_parsed_values",
+        variable_mapping=proof.variable_mapping or context.variable_mapping,
+        parameter_mapping=proof.parameter_mapping or context.parameter_mapping,
+        termination="budget_exhausted" if proof.budget_exhausted else "completed",
+        budget_exhausted=proof.budget_exhausted,
+    )
 
 
 def _validate_grounded_correspondence(

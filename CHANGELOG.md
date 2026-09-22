@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Validate indexed accesses inside `forall` constraint bodies during index-safety preflight.
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -9,12 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.6.0] - 2026-09-22
+
+### Added
+
+- Added binder-aware indexed affine normalization for sums and pointwise constraints over named ranges and scalar sets, including nested and shadowed sum binders, exact conjunction filters, multidimensional arithmetic index expressions, and deterministic rewrite budgets.
+- Added nested `forall` alpha-normalization and stable indexed-IR diagnostics that expose binder identities and canonical mismatch forms.
+- Added dependent scalar ranges, free-binder and domain-dependency analysis, parameter-selected index applications, dependency-aware independent-binder reordering, and guarded sum fusion and splitting.
+- Added uniform-schema proofs for distributive indexed affine rewrites, iterator renaming, and declaration renaming while preserving explicit `unknown` outcomes for unequal filters, nonlinear decision products, symbolic division, and rank or domain mismatches.
 - Expanded batch-solve coverage across input validation, solver configuration, report serialization and resumption, progress events, worker cleanup, and headless progress-window outcomes.
 - Added five exact-algebraic refusal regressions and a checked separating assignment for portfolio case 17; portfolio comparisons now assert expected scopes as well as statuses and method labels.
 - Added public model-comparison options for retained-variable and parameter mappings, auxiliary partitions, and supported schema assumptions, together with relation, scope, arithmetic, correspondence, and termination metadata.
 
 ### Fixed
 
+- Applied conjoined iterator filters and conditional branch guards when validating indexed accesses, avoiding false out-of-range errors for guarded indices.
+- Unified provably unsafe index reporting across Gurobi and HiGHS IDE solves as concise `MODEL_ERROR` results without backend tracebacks or generic code-generation hints.
+- Reported expected model-validation failures in the comparison result panel with concise repair guidance instead of opening a traceback error window.
+- Rejected abstract equivalence proofs for provably out-of-range affine indices and reported unresolved data-selected index safety as unknown before schema matching.
 - Made the portfolio case 17 regression self-contained so installed test suites do not depend on the undistributed portfolio directory.
 - Updated batch-comparison test fixtures to use result dataclasses required by the shared report serializer, including checks for metadata and error recovery.
 - Prevented symbolic alias division under merely nonnegative parameter assumptions, and reported incomplete mapping or implication searches as unknown rather than semantic differences.
@@ -30,6 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored indexed equivalence mapping, affine normalization, index parsing, and binder analysis into focused helpers, removing all five complexity warnings without changing proof behavior.
 - Refactored abstract and concrete equivalence orchestration into focused validation, proof-dispatch, and result-reporting helpers, removing all five complexity warnings without changing public behavior.
 - Documented the abstract algebra backend as a literate paper companion, linking proof stages to named results and explaining arithmetic, certificate checks, and supported fragments without changing behavior.
 - Clarified equivalence guarantees and numerical provenance in the manuscript and API documentation; independent certificate export/checking remains deferred. Updated the existing portfolio and removed aggregate capability rankings.

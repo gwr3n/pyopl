@@ -255,6 +255,21 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             "\nMessage: Finished\n",
         )
 
+    def test_format_model_error_is_concise(self):
+        output = _format_solve_results(
+            {
+                "status": "MODEL_ERROR",
+                "message": "index 2 of 'shipment' can exceed its declared range",
+            },
+            "gurobi",
+        )
+
+        self.assertIn("Status: MODEL_ERROR", output)
+        self.assertIn("Model validation issue", output)
+        self.assertIn("index 2 of 'shipment'", output)
+        self.assertIn("j < N", output)
+        self.assertNotIn("No detailed solver statistics", output)
+
     def test_find_fold_regions_uses_explicit_section_markers(self):
         text = """// ordinary comment
 // § Variables

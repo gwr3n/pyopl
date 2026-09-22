@@ -47,6 +47,29 @@ def _cmp(left, op, right):
 
 
 class TestCoreHelperCoverage(unittest.TestCase):
+    def test_solver_backends_return_same_model_error_for_unsafe_index(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            dvar float+ x[I];
+            minimize sum(i in I) x[i + 1];
+            subject to {}
+        """
+        data = "N = 3;"
+
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            data_path = Path(tmpdir) / "model.dat"
+            model_path.write_text(model, encoding="utf-8")
+            data_path.write_text(data, encoding="utf-8")
+            for solve_backend in (solve_with_gurobi, solve_with_scipy):
+                with self.subTest(solve_backend=solve_backend.__name__):
+                    result = solve_backend(model_path, data_path)
+
+                    self.assertEqual(result["status"], "MODEL_ERROR")
+                    self.assertIn("index 1 of 'x' can exceed", result["message"])
+                    self.assertNotIn("Traceback", result["message"])
+
     def test_solver_backends_report_compilation(self):
         with TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "model.mod"

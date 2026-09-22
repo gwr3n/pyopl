@@ -55,6 +55,7 @@ from .pyopl_core import (
     export_model as export_opl_model,
 )
 from .rhetor_ide_bridge import RhetorIDEBridge
+from .semantic_error import SemanticError
 
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
@@ -311,6 +312,14 @@ def _format_iis(iis: dict) -> list[str]:
 
 def _format_solve_results(results: dict, solver_choice: str) -> str:
     lines = [f"\nSolver: {solver_choice}\n", "\nStatus: " + results.get("status", "UNKNOWN") + "\n"]
+    if results.get("status") == "MODEL_ERROR":
+        lines.append(f"\nModel validation issue:\n{results.get('message', 'The model could not be compiled.')}\n")
+        if "declared range" in str(results.get("message", "")):
+            lines.append(
+                "\nCheck the index expression and its iterator filter. "
+                "For example, an access using j + 1 over 1..N requires a guard such as j < N.\n"
+            )
+        return "".join(lines)
     if "objective_value" in results and results["objective_value"] is not None:
         lines.append(f"Objective: {results['objective_value']}\n")
     solution = results.get("solution")
@@ -679,8 +688,28 @@ def _compare_models_wrapper(
             right_data_text=read_optional_file(right_data),
         )
         q.put(("success", result))
+    except SemanticError as exc:
+        q.put(("validation_error", exc.message))
     except Exception as exc:
         q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
+
+
+def _format_comparison_validation_error(detail: str) -> str:
+    """Format an expected model validation failure for the result panel."""
+    lines = [
+        "Model validation issue",
+        "",
+        detail,
+    ]
+    if "declared range" in detail or "cannot prove index" in detail:
+        lines.extend(
+            [
+                "",
+                "The comparison stopped before checking equivalence because an indexed access is not known to stay in its declared range.",
+                "Check the index expression and its iterator filter. For example, an access using j + 1 over 1..N requires a guard such as j < N.",
+            ]
+        )
+    return "\n".join(lines) + "\n"
 
 
 class _CodeGenerator(Protocol):
@@ -4208,6 +4237,12 @@ class OPLIDE(TkinterDnD.Tk):
                 self.status_var.set(f"Compare models: {payload.status}")
                 return
 
+            if kind == "validation_error":
+                detail = str(payload)
+                set_result(_format_comparison_validation_error(detail))
+                self.status_var.set("Compare models: model validation issue")
+                return
+
             detail = str(payload)
             logging.getLogger(__name__).error("Compare models failed: %s", detail)
             set_result(f"Comparison failed.\n\n{detail}\n")
@@ -5465,14 +5500,18 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _handle_successful_solver_poll(ide: Any, payload: Any, operation: Optional[_ForegroundOperation]) -> None:
-        ide._finish_solver_progress(payload if isinstance(payload, dict) else None, status="complete")
+        model_error = isinstance(payload, dict) and payload.get("status") == "MODEL_ERROR"
+        ide._finish_solver_progress(
+            payload if isinstance(payload, dict) else None,
+            status="failed" if model_error else "complete",
+        )
         ide._display_solve_results(
             payload,
             session_id=operation.session_id if operation is not None else None,
             solver_choice=operation.solver_choice if operation is not None else None,
         )
 
-        if OPLIDE._handle_solver_explanation(ide, payload, operation):
+        if not model_error and OPLIDE._handle_solver_explanation(ide, payload, operation):
             return
         ide._finish_foreground_operation(operation)
 

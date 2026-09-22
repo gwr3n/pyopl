@@ -31,6 +31,7 @@ except Exception:  # pragma: no cover
 
 # === Local imports ===
 from .gurobi_codegen import GurobiCodeGenerator
+from .index_safety import find_index_safety_issue
 from .linear_problem import LinearProblem
 from .linear_problem_highs import export_linear_problem
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
@@ -2752,6 +2753,7 @@ class OPLParser(Parser):
         allowed_types = {
             "number_literal_index",
             "name_reference_index",
+            "indexed_name",
             "binop",
             "uminus",
             "parenthesized_expression",
@@ -4965,74 +4967,78 @@ class OPLCompiler:
             except SemanticError as exc:
                 self._raise_masked_syntax_error(exc, effective_reporting)
 
-        ast: dict[str, Any] = {}
-        code = ""
         model_ast, working_data = self._prepare_model_ast_and_working_data(model_code, data_code)
-        data_dict = dict(working_data)
-
         self._materialize_set_of_tuples_comprehensions(model_ast, working_data)
         self._materialize_typed_set_comprehensions(model_ast, working_data)
         self._materialize_computed_parameters(model_ast, working_data)
         self._validate_tuple_schemas(model_ast, working_data)
         data_dict = dict(working_data)
-
-        if model_ast and "declarations" in model_ast:
-            for decl in model_ast["declarations"]:
-                if decl.get("type") in (
-                    "parameter_external",
-                    "parameter_external_indexed",
-                    "parameter_external_explicit",
-                    "parameter_external_explicit_indexed",
-                    "parameter_inline",
-                    "parameter_inline_indexed",
-                ) and decl.get("dimensions"):
-                    param_data = data_dict.get(decl["name"])
-                    if param_data is not None and isinstance(param_data, (list, tuple)):
-                        self._validate_parameter_shape(
-                            param_data,
-                            decl["dimensions"],
-                            decl["name"],
-                            model_ast,
-                            data_dict,
-                        )
-
+        self._validate_indexed_parameter_shapes(model_ast, data_dict)
         self._validate_typed_sets(model_ast, data_dict)
-
         self._validate_named_ranges(model_ast, data_dict)
+        self._lower_model_ast(model_ast, working_data, data_dict)
+        return model_ast, self._generate_solver_code(model_ast, data_dict, solver), data_dict
 
-        ast = model_ast
+    def _validate_indexed_parameter_shapes(self, model_ast: dict[str, Any], data_dict: dict[str, Any]) -> None:
+        parameter_types = {
+            "parameter_external",
+            "parameter_external_indexed",
+            "parameter_external_explicit",
+            "parameter_external_explicit_indexed",
+            "parameter_inline",
+            "parameter_inline_indexed",
+        }
+        for declaration in model_ast.get("declarations", ()):
+            dimensions = declaration.get("dimensions")
+            parameter_data = data_dict.get(declaration.get("name"))
+            if declaration.get("type") not in parameter_types or not dimensions:
+                continue
+            if parameter_data is None or not isinstance(parameter_data, (list, tuple)):
+                continue
+            self._validate_parameter_shape(
+                parameter_data,
+                dimensions,
+                declaration["name"],
+                model_ast,
+                data_dict,
+            )
 
+    def _lower_model_ast(
+        self,
+        ast: dict[str, Any],
+        working_data: dict[str, Any],
+        data_dict: dict[str, Any],
+    ) -> None:
         try:
             self._simplify_ground_booleans(ast, working_data)
-        except SemanticError as e:
-            logger.error(f"Ground boolean simplification error: {e}")
+        except SemanticError as exc:
+            logger.error(f"Ground boolean simplification error: {exc}")
             raise
-
         try:
             self._evaluate_and_splice_if_constraints(ast, data_dict)
             self._simplify_ground_booleans(ast, working_data)
             self._lower_minmax_aggregates(ast)
             self._lower_maxmin_convex(ast)
             self._split_boolean_and_constraints(ast)
-        except SemanticError as e:
-            logger.error(f"Conditional constraint error: {e}")
+        except SemanticError as exc:
+            logger.error(f"Conditional constraint error: {exc}")
             raise
 
+    def _generate_solver_code(self, ast: dict[str, Any], data_dict: dict[str, Any], solver: str) -> str:
         import copy
 
         codegen_ast = copy.deepcopy(ast)
         codegen_data = copy.deepcopy(data_dict)
         self._normalize_tuple_arrays_for_codegen(codegen_ast, codegen_data)
         self._normalize_indexed_parameters_for_codegen(codegen_ast, codegen_data)
-
+        index_issue = find_index_safety_issue(codegen_ast)
+        if index_issue is not None and index_issue.status == "unsafe":
+            raise SemanticError(index_issue.reason)
         if solver == "gurobi":
-            code = GurobiCodeGenerator(codegen_ast, codegen_data).generate_code()
-        elif solver == "scipy":
-            code = cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(codegen_ast, codegen_data)).generate_code()
-        else:
-            raise ValueError(f"Unsupported solver: {solver}")
-
-        return ast, code, data_dict
+            return GurobiCodeGenerator(codegen_ast, codegen_data).generate_code()
+        if solver == "scipy":
+            return cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(codegen_ast, codegen_data)).generate_code()
+        raise ValueError(f"Unsupported solver: {solver}")
 
     @staticmethod
     def _boolean_literal(value: bool) -> dict[str, Any]:
@@ -5904,7 +5910,7 @@ def export_model(
 
 
 # --- Utility function to load OPL model from disk ---
-def load_opl_model(model_file_name, data_file_name=None, solver="gurobi"):
+def load_opl_model(model_file_name, data_file_name=None, solver="gurobi", *, raise_semantic_errors=False):
     """
     Loads an OPL model from a file and optionally a data file,
     then parses it and generates solver-specific code.
@@ -5942,8 +5948,9 @@ def load_opl_model(model_file_name, data_file_name=None, solver="gurobi"):
         logger.error(f"Error: File not found - {e.filename}")
         return None, None, None
     except SemanticError as e:
+        if raise_semantic_errors:
+            raise
         logger.error(f"Error parsing OPL model or data: {e}")
-        traceback.print_exc()
         return None, None, None
     except Exception as e:
         logger.error(f"An unexpected error occurred while loading/parsing the model: {e}")
@@ -6024,7 +6031,12 @@ def solve_with_gurobi(
         logger.info(f"--- Using Data File: {data_file} ---")
 
     print("PyOPL: compiling model...")
-    loaded_ast, loaded_gurobi_code, loaded_data_dict = load_opl_model(model_file, data_file)
+    try:
+        loaded_ast, loaded_gurobi_code, loaded_data_dict = load_opl_model(model_file, data_file, raise_semantic_errors=True)
+    except SemanticError as exc:
+        results["status"] = "MODEL_ERROR"
+        results["message"] = exc.message
+        return results
 
     if loaded_ast and loaded_gurobi_code:
         logger.info("\n--- Loaded AST from file ---")
@@ -6140,7 +6152,14 @@ def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[
         logger.info(f"--- Using Data File: {data_file} ---")
 
     print("PyOPL: compiling model...")
-    loaded_ast, loaded_scipy_code, loaded_data_dict = load_opl_model(model_file, data_file, solver="scipy")
+    try:
+        loaded_ast, loaded_scipy_code, loaded_data_dict = load_opl_model(
+            model_file, data_file, solver="scipy", raise_semantic_errors=True
+        )
+    except SemanticError as exc:
+        results["status"] = "MODEL_ERROR"
+        results["message"] = exc.message
+        return results
 
     if loaded_ast and loaded_scipy_code:
         logger.info("\n--- Loaded AST from file ---")
