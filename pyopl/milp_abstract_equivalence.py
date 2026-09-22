@@ -80,17 +80,17 @@ class AbstractEquivalenceResult:
     status: AbstractEquivalenceStatus
     level: AbstractEquivalenceLevel
     reason: str
+    relation: str
+    scope: str
+    arithmetic: str
+    termination: str
     proof_steps: tuple[str, ...] = ()
     counterexample: str | None = None
-    relation: str = "not_recorded"
-    scope: str = "not_recorded"
-    arithmetic: str = "not_recorded"
     variable_mapping: tuple[tuple[str, str], ...] = ()
     parameter_mapping: tuple[tuple[str, str], ...] = ()
     left_auxiliaries: tuple[str, ...] = ()
     right_auxiliaries: tuple[str, ...] = ()
     assumptions: tuple[tuple[str, str], ...] = ()
-    termination: str = "not_recorded"
     budget_exhausted: bool = False
     evidence_kind: str = "internal_checks_only"
 
@@ -189,6 +189,9 @@ def prove_abstract_equivalent(
             status="unknown",
             level="schema_isomorphic",
             reason=f"unsupported abstract equivalence mode: {mode}",
+            relation="schema_structural",
+            scope="source_schemas",
+            arithmetic="parsed_ast_labels",
             termination="unsupported_input",
         )
 
@@ -230,6 +233,9 @@ def _abstract_model_preflight(
             status="unknown",
             level="schema_isomorphic",
             reason=issue,
+            relation="schema_structural",
+            scope="source_schemas",
+            arithmetic="parsed_ast_labels",
             termination="unsupported_input",
         )
     return _index_safety_preflight(left_ast, right_ast, left_data_text, right_data_text)
@@ -252,7 +258,9 @@ def _index_safety_preflight(
         status="unknown",
         level="schema_isomorphic",
         reason=unresolved_issue.reason,
+        relation="schema_structural",
         scope="source_schemas",
+        arithmetic="parsed_ast_labels",
         termination="unsupported_fragment",
     )
 
@@ -295,6 +303,7 @@ def _algebraic_result_context(
         proof_steps=proof_steps,
         relation="projected_value",
         scope="supplied_instances" if supplied_data else "source_schemas",
+        arithmetic="exact_on_embedded_matrix_values" if supplied_data else "exact_on_parsed_values",
         termination="unsupported_fragment",
         variable_mapping=tuple(sorted((variable_mapping or {}).items())),
         parameter_mapping=tuple(sorted((parameter_mapping or {}).items())),

@@ -473,6 +473,19 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertFalse(result.equivalent)
         self.assertIn("objective", result.reason)
         self.assertEqual(result.proof_steps, ())
+        self.assertEqual(result.relation, "schema_structural")
+        self.assertEqual(result.scope, "source_schemas")
+        self.assertEqual(result.arithmetic, "parsed_ast_labels")
+        self.assertEqual(result.termination, "unsupported_input")
+
+    def test_unsupported_mode_records_result_metadata(self):
+        result = prove_abstract_equivalent(LEFT_MODEL, LEFT_MODEL, mode="unsupported")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.relation, "schema_structural")
+        self.assertEqual(result.scope, "source_schemas")
+        self.assertEqual(result.arithmetic, "parsed_ast_labels")
+        self.assertEqual(result.termination, "unsupported_input")
 
     def test_parse_abstract_model_keeps_symbolic_external_parameters(self):
         ast = parse_abstract_model(LEFT_MODEL)
@@ -736,6 +749,10 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
         self.assertIn("cannot prove index", result.reason)
+        self.assertEqual(result.relation, "schema_structural")
+        self.assertEqual(result.scope, "source_schemas")
+        self.assertEqual(result.arithmetic, "parsed_ast_labels")
+        self.assertEqual(result.termination, "unsupported_fragment")
 
     def test_indexed_normalization_limit_reports_budget(self):
         model = """
