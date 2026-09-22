@@ -45,6 +45,13 @@ class QuantifiedExpression:
     body: tuple[sp.Expr, tuple[tuple[DecisionAtom, sp.Expr], ...]] | QuantifiedExpression
 
 
+@dataclass(frozen=True)
+class QuantifiedConstraint:
+    domains: tuple[str, ...]
+    filter: Any
+    body: Any
+
+
 def prove_indexed_equivalence(
     left_ast: Mapping[str, Any],
     right_ast: Mapping[str, Any],
@@ -81,10 +88,13 @@ def prove_indexed_equivalence(
     candidates = _declaration_mappings(left, right, parameter_mapping or {}, variable_mapping or {})
     if not candidates:
         raise UnsupportedAlgebra("no compatible indexed declaration mapping found")
+    first_mismatch: tuple[Any, Any] | None = None
     for mapping in candidates[:256]:
         try:
             budget = [max_rewrite_iterations * 100]
-            if _canonical_model(left_ast, left, {}, budget) == _canonical_model(right_ast, right, _invert(mapping), budget):
+            left_canonical = _canonical_model(left_ast, left, {}, budget)
+            right_canonical = _canonical_model(right_ast, right, _invert(mapping), budget)
+            if left_canonical == right_canonical:
                 steps = [
                     "alpha-normalized indexed declarations and binders",
                     "normalized indexed affine expressions",
@@ -93,6 +103,8 @@ def prove_indexed_equivalence(
                 ]
                 if _contains_nested_sum(left_ast) or _contains_nested_sum(right_ast):
                     steps.append("alpha-normalized nested indexed binders")
+                if _contains_nested_forall(left_ast) or _contains_nested_forall(right_ast):
+                    steps.append("alpha-normalized nested forall constraints")
                 if _contains_filter(left_ast) or _contains_filter(right_ast):
                     steps.append("canonicalized indexed quantifier filters")
                 if _contains_complex_index(left_ast) or _contains_complex_index(right_ast):
@@ -109,6 +121,8 @@ def prove_indexed_equivalence(
                         sorted((name, target) for name, target in mapping.items() if left[name].kind == "parameter")
                     ),
                 )
+            if first_mismatch is None:
+                first_mismatch = left_canonical, right_canonical
         except UnsupportedAlgebra as exc:
             if "rewrite limit" in str(exc):
                 return AlgebraicProof(
@@ -120,6 +134,13 @@ def prove_indexed_equivalence(
             continue
     if len(candidates) > 256:
         raise UnsupportedAlgebra("indexed declaration mapping search limit reached")
+    if first_mismatch is not None:
+        left_canonical, right_canonical = first_mismatch
+        raise UnsupportedAlgebra(
+            "indexed affine schemas differ after supported normalization; "
+            f"left canonical: {render_indexed_ir(left_canonical)}; "
+            f"right canonical: {render_indexed_ir(right_canonical)}"
+        )
     raise UnsupportedAlgebra("indexed affine schemas could not be normalized to the same supported form")
 
 
@@ -305,6 +326,17 @@ def _contains_nested_sum(node: Any, inside_sum: bool = False) -> bool:
     return False
 
 
+def _contains_nested_forall(node: Any, inside_forall: bool = False) -> bool:
+    if isinstance(node, Mapping):
+        is_forall = node.get("type") == "forall_constraint"
+        if inside_forall and is_forall:
+            return True
+        return any(_contains_nested_forall(value, inside_forall or is_forall) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_nested_forall(value, inside_forall) for value in node)
+    return False
+
+
 def _contains_filter(node: Any) -> bool:
     if isinstance(node, Mapping):
         if node.get("type") in {"sum", "forall_constraint"} and node.get("index_constraint") is not None:
@@ -381,21 +413,14 @@ def _canonical_constraint(
     if not isinstance(node, Mapping):
         raise UnsupportedAlgebra("malformed indexed constraint")
     if node.get("type") == "forall_constraint":
-        body = node.get("constraint")
-        if body is None:
-            constraints = node.get("constraints")
-            if not isinstance(constraints, list) or len(constraints) != 1:
-                raise UnsupportedAlgebra("indexed algebra supports one constraint per forall")
-            body = constraints[0]
-        quantifier = _quantified(
-            {**node, "expression": _constraint_residual(body)},
+        return _canonical_forall_constraint(
+            node,
             declarations,
             rename,
             binders,
             budget,
             max(binders.values(), default=-1) + 1,
         )
-        return "forall", _constraint_sense(body), quantifier
     _constraint_sense(node)
     left = node.get("left")
     right = node.get("right")
@@ -412,6 +437,52 @@ def _canonical_constraint(
         "constraint",
         _constraint_sense(node),
         _freeze_affine(_affine(_constraint_residual(node), declarations, rename, binders, budget)),
+    )
+
+
+def _canonical_forall_constraint(
+    node: Mapping[str, Any],
+    declarations: Mapping[str, Declaration],
+    rename: Mapping[str, str],
+    outer_binders: Mapping[str, int],
+    budget: list[int],
+    next_binder_id: int,
+) -> QuantifiedConstraint:
+    _consume_budget(budget)
+    iterators = node.get("iterators")
+    if not isinstance(iterators, list) or not iterators:
+        raise UnsupportedAlgebra("indexed forall requires binders")
+    binders = dict(outer_binders)
+    domains: list[str] = []
+    for iterator in iterators:
+        if not isinstance(iterator, Mapping) or not isinstance(iterator.get("iterator"), str):
+            raise UnsupportedAlgebra("malformed indexed forall binder")
+        domain = iterator.get("range")
+        if not isinstance(domain, Mapping) or domain.get("type") not in {"named_range", "named_set"}:
+            raise UnsupportedAlgebra("indexed algebra requires named forall domains")
+        domain_name = domain.get("name")
+        if not isinstance(domain_name, str):
+            raise UnsupportedAlgebra("indexed forall domain must be named")
+        domains.append(rename.get(domain_name, domain_name))
+        binders[str(iterator["iterator"])] = next_binder_id
+        next_binder_id += 1
+
+    body = node.get("constraint")
+    if body is None:
+        constraints = node.get("constraints")
+        if not isinstance(constraints, list) or len(constraints) != 1:
+            raise UnsupportedAlgebra("indexed algebra supports one constraint per forall")
+        body = constraints[0]
+    if not isinstance(body, Mapping):
+        raise UnsupportedAlgebra("malformed indexed forall body")
+    if body.get("type") == "forall_constraint":
+        canonical_body: Any = _canonical_forall_constraint(body, declarations, rename, binders, budget, next_binder_id)
+    else:
+        canonical_body = _canonical_constraint(body, declarations, rename, binders, budget)
+    return QuantifiedConstraint(
+        tuple(domains),
+        _canonical_predicate(node.get("index_constraint"), rename, binders),
+        canonical_body,
     )
 
 
@@ -590,10 +661,87 @@ def _consume_budget(budget: list[int]) -> None:
         raise UnsupportedAlgebra("indexed normalization rewrite limit reached")
 
 
+def render_indexed_ir(value: Any) -> str:
+    """Render canonical indexed IR with explicit binder identities."""
+
+    return _render_indexed_ir(value, 0)
+
+
+def _render_indexed_ir(value: Any, next_binder_id: int) -> str:
+    if isinstance(value, IndexTerm):
+        return _render_index_term(value)
+    if isinstance(value, DecisionAtom):
+        indices = ", ".join(_render_index_term(index) for index in value.indices)
+        return f"{value.declaration}[{indices}]" if value.indices else value.declaration
+    if isinstance(value, QuantifiedExpression):
+        binders = tuple(range(next_binder_id, next_binder_id + len(value.domains)))
+        header = ", ".join(f"${binder} in {domain}" for binder, domain in zip(binders, value.domains, strict=True))
+        filter_text = "" if value.filter is True else f" : {_render_predicate(value.filter)}"
+        body = _render_indexed_ir(value.body, next_binder_id + len(value.domains))
+        return f"sum({header}{filter_text}) {body}"
+    if isinstance(value, QuantifiedConstraint):
+        binders = tuple(range(next_binder_id, next_binder_id + len(value.domains)))
+        header = ", ".join(f"${binder} in {domain}" for binder, domain in zip(binders, value.domains, strict=True))
+        filter_text = "" if value.filter is True else f" : {_render_predicate(value.filter)}"
+        body = _render_indexed_ir(value.body, next_binder_id + len(value.domains))
+        return f"forall({header}{filter_text}) {body}"
+    if _is_frozen_affine(value):
+        return _render_affine(value)
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_render_indexed_ir(item, next_binder_id) for item in value) + ")"
+    return str(value)
+
+
+def _render_index_term(term: IndexTerm) -> str:
+    if term.kind == "binder":
+        return f"${term.value}"
+    if term.kind in {"number", "declaration"}:
+        return str(term.value)
+    if term.kind == "negate":
+        return f"(-{_render_index_term(term.value)})"
+    if term.kind == "arithmetic":
+        operator, left, right = term.value
+        return f"({_render_index_term(left)} {operator} {_render_index_term(right)})"
+    return repr(term)
+
+
+def _is_frozen_affine(value: Any) -> bool:
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and isinstance(value[1], tuple)
+        and all(isinstance(term, tuple) and len(term) == 2 and isinstance(term[0], DecisionAtom) for term in value[1])
+    )
+
+
+def _render_affine(value: tuple[sp.Expr, tuple[tuple[DecisionAtom, sp.Expr], ...]]) -> str:
+    constant, terms = value
+    parts: list[str] = []
+    for atom, coefficient in terms:
+        atom_text = _render_indexed_ir(atom, 0)
+        if coefficient == 1:
+            parts.append(atom_text)
+        elif coefficient == -1:
+            parts.append(f"-{atom_text}")
+        else:
+            parts.append(f"({coefficient}) * {atom_text}")
+    if constant != 0 or not parts:
+        parts.append(str(constant))
+    return " + ".join(parts)
+
+
+def _render_predicate(predicate: Any) -> str:
+    if isinstance(predicate, tuple):
+        return "(" + ", ".join(_render_predicate(item) for item in predicate) + ")"
+    return str(predicate)
+
+
 __all__ = [
     "DecisionAtom",
     "IndexTerm",
     "IndexedAffineExpression",
+    "QuantifiedConstraint",
     "QuantifiedExpression",
     "prove_indexed_equivalence",
+    "render_indexed_ir",
 ]

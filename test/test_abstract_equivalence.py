@@ -576,6 +576,8 @@ class AbstractEquivalenceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
+        self.assertIn("left canonical", result.reason)
+        self.assertIn("right canonical", result.reason)
 
     def test_indexed_normalization_limit_reports_budget(self):
         model = """
@@ -591,6 +593,53 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertTrue(result.budget_exhausted)
         self.assertEqual(result.termination, "budget_exhausted")
+
+    def test_algebraic_mode_normalizes_nested_forall_constraints(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I][I];
+            minimize 0;
+            subject to {
+                forall(i in I) {
+                    forall(j in I) a[j] * (x[i][j] + 1) <= 0;
+                }
+            }
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            float coefficient[Items] = ...;
+            dvar float value[Items][Items];
+            minimize 0;
+            subject to {
+                forall(row in Items) {
+                    forall(column in Items)
+                        0 >= coefficient[column] * value[row][column] + coefficient[column];
+                }
+            }
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("alpha-normalized nested forall constraints", result.proof_steps)
+
+    def test_nested_forall_shadowing_does_not_capture_outer_binder(self):
+        shadowed = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize 0;
+            subject to { forall(i in I) { forall(i in I) x[i][i] <= 1; } }
+        """
+        distinct = shadowed.replace("forall(i in I) x[i][i]", "forall(j in I) x[i][j]")
+
+        result = prove_abstract_equivalent(shadowed, distinct, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
 
     def test_algebraic_mode_eliminates_arbitrary_affine_alias(self):
         left = """
