@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import permutations, product
-from typing import Any, Collection, Literal, Mapping
+from typing import Any, Collection, Literal, Mapping, Sequence
 
 import sympy as sp
 
@@ -22,7 +22,7 @@ class Declaration:
 
 @dataclass(frozen=True)
 class IndexTerm:
-    kind: Literal["binder", "number", "declaration", "arithmetic", "negate"]
+    kind: Literal["binder", "number", "declaration", "application", "arithmetic", "negate"]
     value: Any
 
 
@@ -30,6 +30,12 @@ class IndexTerm:
 class DecisionAtom:
     declaration: str
     indices: tuple[IndexTerm, ...]
+
+
+@dataclass(frozen=True)
+class DomainTerm:
+    kind: Literal["named", "range"]
+    value: Any
 
 
 @dataclass
@@ -40,14 +46,14 @@ class IndexedAffineExpression:
 
 @dataclass(frozen=True)
 class QuantifiedExpression:
-    domains: tuple[str, ...]
+    domains: tuple[DomainTerm, ...]
     filter: Any
     body: tuple[sp.Expr, tuple[tuple[DecisionAtom, sp.Expr], ...]] | QuantifiedExpression
 
 
 @dataclass(frozen=True)
 class QuantifiedConstraint:
-    domains: tuple[str, ...]
+    domains: tuple[DomainTerm, ...]
     filter: Any
     body: Any
 
@@ -109,6 +115,16 @@ def prove_indexed_equivalence(
                     steps.append("canonicalized indexed quantifier filters")
                 if _contains_complex_index(left_ast) or _contains_complex_index(right_ast):
                     steps.append("preserved complete indexed access expressions")
+                if _contains_parameter_selected_index(left_ast) or _contains_parameter_selected_index(right_ast):
+                    steps.append("preserved parameter-selected index applications")
+                if _contains_dependent_domain(left_ast) or _contains_dependent_domain(right_ast):
+                    steps.append("preserved dependent quantifier domains")
+                if _contains_multi_or_nested_binders(left_ast) or _contains_multi_or_nested_binders(right_ast):
+                    steps.append("flattened ordered indexed binders")
+                if _contains_reorderable_binders(left_ast) or _contains_reorderable_binders(right_ast):
+                    steps.append("reordered independent indexed binders")
+                if _contains_split_sums(left_ast) or _contains_split_sums(right_ast):
+                    steps.append("fused indexed sums with identical domains and filters")
                 return AlgebraicProof(
                     "equivalent",
                     "symbolically_normalized",
@@ -273,7 +289,61 @@ def _canonical_expression(
     _consume_budget(budget)
     if isinstance(node, Mapping) and node.get("type") == "sum":
         return _quantified(node, declarations, rename, binders, budget, next_binder_id)
+    if isinstance(node, Mapping) and node.get("type") == "binop" and node.get("op") in {"+", "-"}:
+        left_node = node.get("left")
+        right_node = node.get("right")
+        if _contains_sum(left_node) or _contains_sum(right_node):
+            left = _canonical_expression(left_node, declarations, rename, binders, budget, next_binder_id)
+            right = _canonical_expression(right_node, declarations, rename, binders, budget, next_binder_id)
+            return _combine_quantified_expressions(left, right, -1 if node.get("op") == "-" else 1)
     return _freeze_affine(_affine(node, declarations, rename, binders, budget))
+
+
+def _combine_quantified_expressions(left: Any, right: Any, right_sign: int) -> QuantifiedExpression:
+    if not isinstance(left, QuantifiedExpression) or not isinstance(right, QuantifiedExpression):
+        raise UnsupportedAlgebra("indexed sum fusion requires quantified expressions on both sides")
+    if left.domains != right.domains or left.filter != right.filter:
+        raise UnsupportedAlgebra("indexed sum fusion requires identical domains and filters")
+    if isinstance(left.body, QuantifiedExpression) or isinstance(right.body, QuantifiedExpression):
+        body = _combine_quantified_expressions(left.body, right.body, right_sign)
+    elif _is_frozen_affine(left.body) and _is_frozen_affine(right.body):
+        body = _combine_frozen_affine(left.body, right.body, right_sign)
+    else:
+        raise UnsupportedAlgebra("indexed sum fusion requires matching quantifier depth")
+    return QuantifiedExpression(left.domains, left.filter, body)
+
+
+def _combine_frozen_affine(left: Any, right: Any, right_sign: int) -> Any:
+    left_constant, left_terms = left
+    right_constant, right_terms = right
+    terms = dict(left_terms)
+    for atom, coefficient in right_terms:
+        terms[atom] = sp.expand(terms.get(atom, sp.S.Zero) + right_sign * coefficient)
+        if terms[atom] == 0:
+            del terms[atom]
+    return (
+        sp.expand(left_constant + right_sign * right_constant),
+        tuple(sorted(terms.items(), key=lambda item: repr(item[0]))),
+    )
+
+
+def _contains_sum(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        return node.get("type") == "sum" or any(_contains_sum(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_sum(value) for value in node)
+    return False
+
+
+def _contains_split_sums(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") == "binop" and node.get("op") in {"+", "-"}:
+            if _contains_sum(node.get("left")) and _contains_sum(node.get("right")):
+                return True
+        return any(_contains_split_sums(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_split_sums(value) for value in node)
+    return False
 
 
 def _quantified(
@@ -288,31 +358,102 @@ def _quantified(
     iterators = node.get("iterators")
     if not isinstance(iterators, list) or not iterators:
         raise UnsupportedAlgebra("indexed quantifier requires binders")
+    iterators = _canonical_iterator_order(iterators, node.get("expression"), node.get("index_constraint"))
     binders = dict(outer_binders)
-    domains: list[str] = []
+    layers: list[tuple[DomainTerm, int]] = []
     for iterator in iterators:
         if not isinstance(iterator, Mapping) or not isinstance(iterator.get("iterator"), str):
             raise UnsupportedAlgebra("malformed indexed binder")
-        domain = iterator.get("range")
-        if not isinstance(domain, Mapping) or domain.get("type") not in {"named_range", "named_set"}:
-            raise UnsupportedAlgebra("indexed algebra requires named binder domains")
-        domain_name = domain.get("name")
-        if not isinstance(domain_name, str):
-            raise UnsupportedAlgebra("indexed binder domain must be named")
-        domains.append(rename.get(domain_name, domain_name))
+        domain = _canonical_iterator_domain(iterator.get("range"), binders, rename)
+        layers.append((domain, next_binder_id))
         binders[str(iterator["iterator"])] = next_binder_id
         next_binder_id += 1
     predicate = _canonical_predicate(node.get("index_constraint"), rename, binders)
     body = node.get("expression")
     if isinstance(body, Mapping) and body.get("type") == "sum":
-        return QuantifiedExpression(
-            tuple(domains), predicate, _quantified(body, declarations, rename, binders, budget, next_binder_id)
-        )
-    if isinstance(body, Mapping) and body.get("type") == "forall_constraint":
+        canonical_body: Any = _quantified(body, declarations, rename, binders, budget, next_binder_id)
+    elif isinstance(body, Mapping) and body.get("type") == "forall_constraint":
         raise UnsupportedAlgebra("indexed algebra does not support nested forall constraints")
-    return QuantifiedExpression(
-        tuple(domains), predicate, _freeze_affine(_affine(body, declarations, rename, binders, budget))
+    else:
+        canonical_body = _freeze_affine(_affine(body, declarations, rename, binders, budget))
+    for position, (domain, _) in enumerate(reversed(layers)):
+        canonical_body = QuantifiedExpression((domain,), predicate if position == 0 else True, canonical_body)
+    return canonical_body
+
+
+def _canonical_iterator_domain(node: Any, binders: Mapping[str, int], rename: Mapping[str, str]) -> DomainTerm:
+    if not isinstance(node, Mapping):
+        raise UnsupportedAlgebra("malformed indexed binder domain")
+    node_type = node.get("type")
+    if node_type in {"named_range", "named_set"}:
+        name = node.get("name")
+        if not isinstance(name, str):
+            raise UnsupportedAlgebra("indexed binder domain must be named")
+        return DomainTerm("named", rename.get(name, name))
+    if node_type == "range_specifier":
+        return DomainTerm(
+            "range",
+            (
+                _index_term(node.get("start"), binders, rename),
+                _index_term(node.get("end"), binders, rename),
+            ),
+        )
+    raise UnsupportedAlgebra("indexed algebra supports named and scalar range binder domains only")
+
+
+def _canonical_iterator_order(iterators: list[Any], body: Any, predicate: Any) -> list[Any]:
+    if len(iterators) < 2 or not _iterators_are_independent(iterators):
+        return iterators
+    names = [iterator.get("iterator") for iterator in iterators if isinstance(iterator, Mapping)]
+    if len(names) != len(iterators) or not all(isinstance(name, str) for name in names):
+        return iterators
+    return sorted(
+        iterators,
+        key=lambda iterator: (
+            _binder_occurrence_paths(body, str(iterator["iterator"])),
+            _binder_occurrence_paths(predicate, str(iterator["iterator"])),
+        ),
     )
+
+
+def _iterators_are_independent(iterators: list[Any]) -> bool:
+    names = {
+        str(iterator["iterator"])
+        for iterator in iterators
+        if isinstance(iterator, Mapping) and isinstance(iterator.get("iterator"), str)
+    }
+    return all(not (_source_names(iterator.get("range")) & names) for iterator in iterators if isinstance(iterator, Mapping))
+
+
+def _source_names(node: Any) -> frozenset[str]:
+    if isinstance(node, Mapping):
+        names: set[str] = set()
+        if node.get("type") == "name" and isinstance(node.get("value"), str):
+            names.add(str(node["value"]))
+        if node.get("type") == "name_reference_index" and isinstance(node.get("name"), str):
+            names.add(str(node["name"]))
+        for value in node.values():
+            names.update(_source_names(value))
+        return frozenset(names)
+    if isinstance(node, list):
+        return frozenset().union(*(_source_names(value) for value in node))
+    return frozenset()
+
+
+def _binder_occurrence_paths(node: Any, name: str, path: tuple[str, ...] = ()) -> tuple[tuple[str, ...], ...]:
+    paths: list[tuple[str, ...]] = []
+    if isinstance(node, Mapping):
+        if node.get("type") == "name" and node.get("value") == name:
+            paths.append(path)
+        if node.get("type") == "name_reference_index" and node.get("name") == name:
+            paths.append(path)
+        for key, value in node.items():
+            if key not in {"sem_type", "iterator"}:
+                paths.extend(_binder_occurrence_paths(value, name, path + (str(key),)))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            paths.extend(_binder_occurrence_paths(value, name, path + (str(index),)))
+    return tuple(paths)
 
 
 def _contains_nested_sum(node: Any, inside_sum: bool = False) -> bool:
@@ -344,6 +485,40 @@ def _contains_filter(node: Any) -> bool:
         return any(_contains_filter(value) for value in node.values())
     if isinstance(node, list):
         return any(_contains_filter(value) for value in node)
+    return False
+
+
+def _contains_dependent_domain(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") == "range_specifier":
+            return True
+        return any(_contains_dependent_domain(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_dependent_domain(value) for value in node)
+    return False
+
+
+def _contains_multi_or_nested_binders(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") in {"sum", "forall_constraint"}:
+            iterators = node.get("iterators")
+            if isinstance(iterators, list) and len(iterators) > 1:
+                return True
+        return any(_contains_multi_or_nested_binders(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_multi_or_nested_binders(value) for value in node)
+    return False
+
+
+def _contains_reorderable_binders(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") in {"sum", "forall_constraint"}:
+            iterators = node.get("iterators")
+            if isinstance(iterators, list) and len(iterators) > 1 and _iterators_are_independent(iterators):
+                return True
+        return any(_contains_reorderable_binders(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_reorderable_binders(value) for value in node)
     return False
 
 
@@ -452,18 +627,15 @@ def _canonical_forall_constraint(
     iterators = node.get("iterators")
     if not isinstance(iterators, list) or not iterators:
         raise UnsupportedAlgebra("indexed forall requires binders")
+    body_node = node.get("constraint") if node.get("constraint") is not None else node.get("constraints")
+    iterators = _canonical_iterator_order(iterators, body_node, node.get("index_constraint"))
     binders = dict(outer_binders)
-    domains: list[str] = []
+    layers: list[DomainTerm] = []
     for iterator in iterators:
         if not isinstance(iterator, Mapping) or not isinstance(iterator.get("iterator"), str):
             raise UnsupportedAlgebra("malformed indexed forall binder")
-        domain = iterator.get("range")
-        if not isinstance(domain, Mapping) or domain.get("type") not in {"named_range", "named_set"}:
-            raise UnsupportedAlgebra("indexed algebra requires named forall domains")
-        domain_name = domain.get("name")
-        if not isinstance(domain_name, str):
-            raise UnsupportedAlgebra("indexed forall domain must be named")
-        domains.append(rename.get(domain_name, domain_name))
+        domain = _canonical_iterator_domain(iterator.get("range"), binders, rename)
+        layers.append(domain)
         binders[str(iterator["iterator"])] = next_binder_id
         next_binder_id += 1
 
@@ -479,11 +651,10 @@ def _canonical_forall_constraint(
         canonical_body: Any = _canonical_forall_constraint(body, declarations, rename, binders, budget, next_binder_id)
     else:
         canonical_body = _canonical_constraint(body, declarations, rename, binders, budget)
-    return QuantifiedConstraint(
-        tuple(domains),
-        _canonical_predicate(node.get("index_constraint"), rename, binders),
-        canonical_body,
-    )
+    predicate = _canonical_predicate(node.get("index_constraint"), rename, binders)
+    for position, domain in enumerate(reversed(layers)):
+        canonical_body = QuantifiedConstraint((domain,), predicate if position == 0 else True, canonical_body)
+    return canonical_body
 
 
 def _is_quantified_expression(node: Any) -> bool:
@@ -574,6 +745,14 @@ def _index_term(node: Any, binders: Mapping[str, int], rename: Mapping[str, str]
         if name in binders:
             return IndexTerm("binder", binders[name])
         return IndexTerm("declaration", rename.get(name, name))
+    if node_type == "indexed_name" and isinstance(node.get("name"), str):
+        return IndexTerm(
+            "application",
+            (
+                rename.get(str(node["name"]), str(node["name"])),
+                tuple(_index_term(dimension, binders, rename) for dimension in node.get("dimensions", ())),
+            ),
+        )
     if node_type == "number":
         return IndexTerm("number", str(node.get("value")))
     if node_type == "unary" and node.get("op") == "-":
@@ -602,6 +781,18 @@ def _contains_complex_index(node: Any) -> bool:
         return any(_contains_complex_index(value) for value in node.values())
     if isinstance(node, list):
         return any(_contains_complex_index(value) for value in node)
+    return False
+
+
+def _contains_parameter_selected_index(node: Any, inside_dimension: bool = False) -> bool:
+    if isinstance(node, Mapping):
+        if inside_dimension and node.get("type") == "indexed_name":
+            return True
+        if node.get("type") == "indexed_name":
+            return any(_contains_parameter_selected_index(dimension, True) for dimension in node.get("dimensions", ()))
+        return any(_contains_parameter_selected_index(value, inside_dimension) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_parameter_selected_index(value, inside_dimension) for value in node)
     return False
 
 
@@ -673,15 +864,21 @@ def _render_indexed_ir(value: Any, next_binder_id: int) -> str:
     if isinstance(value, DecisionAtom):
         indices = ", ".join(_render_index_term(index) for index in value.indices)
         return f"{value.declaration}[{indices}]" if value.indices else value.declaration
+    if isinstance(value, DomainTerm):
+        return _render_domain(value)
     if isinstance(value, QuantifiedExpression):
         binders = tuple(range(next_binder_id, next_binder_id + len(value.domains)))
-        header = ", ".join(f"${binder} in {domain}" for binder, domain in zip(binders, value.domains, strict=True))
+        header = ", ".join(
+            f"${binder} in {_render_domain(domain)}" for binder, domain in zip(binders, value.domains, strict=True)
+        )
         filter_text = "" if value.filter is True else f" : {_render_predicate(value.filter)}"
         body = _render_indexed_ir(value.body, next_binder_id + len(value.domains))
         return f"sum({header}{filter_text}) {body}"
     if isinstance(value, QuantifiedConstraint):
         binders = tuple(range(next_binder_id, next_binder_id + len(value.domains)))
-        header = ", ".join(f"${binder} in {domain}" for binder, domain in zip(binders, value.domains, strict=True))
+        header = ", ".join(
+            f"${binder} in {_render_domain(domain)}" for binder, domain in zip(binders, value.domains, strict=True)
+        )
         filter_text = "" if value.filter is True else f" : {_render_predicate(value.filter)}"
         body = _render_indexed_ir(value.body, next_binder_id + len(value.domains))
         return f"forall({header}{filter_text}) {body}"
@@ -697,12 +894,76 @@ def _render_index_term(term: IndexTerm) -> str:
         return f"${term.value}"
     if term.kind in {"number", "declaration"}:
         return str(term.value)
+    if term.kind == "application":
+        declaration, indices = term.value
+        return f"{declaration}[{', '.join(_render_index_term(index) for index in indices)}]"
     if term.kind == "negate":
         return f"(-{_render_index_term(term.value)})"
     if term.kind == "arithmetic":
         operator, left, right = term.value
         return f"({_render_index_term(left)} {operator} {_render_index_term(right)})"
     return repr(term)
+
+
+def _render_domain(domain: Any) -> str:
+    if isinstance(domain, str):
+        return domain
+    if not isinstance(domain, DomainTerm):
+        return repr(domain)
+    if domain.kind == "named":
+        return str(domain.value)
+    start, end = domain.value
+    return f"{_render_index_term(start)}..{_render_index_term(end)}"
+
+
+def free_binders(value: Any, first_binder_id: int = 0) -> frozenset[int]:
+    """Return binder identities referenced by an indexed IR value."""
+
+    if isinstance(value, IndexTerm):
+        if value.kind == "binder":
+            return frozenset({int(value.value)})
+        if value.kind == "negate":
+            return free_binders(value.value, first_binder_id)
+        if value.kind == "arithmetic":
+            _, left, right = value.value
+            return free_binders(left, first_binder_id) | free_binders(right, first_binder_id)
+        if value.kind == "application":
+            _, indices = value.value
+            return frozenset().union(*(free_binders(index, first_binder_id) for index in indices))
+        return frozenset()
+    if isinstance(value, DecisionAtom):
+        return frozenset().union(*(free_binders(index, first_binder_id) for index in value.indices))
+    if isinstance(value, DomainTerm):
+        if value.kind == "range":
+            start, end = value.value
+            return free_binders(start, first_binder_id) | free_binders(end, first_binder_id)
+        return frozenset()
+    if isinstance(value, (QuantifiedExpression, QuantifiedConstraint)):
+        local_ids = frozenset(range(first_binder_id, first_binder_id + len(value.domains)))
+        domains = frozenset().union(*(free_binders(domain, first_binder_id) for domain in value.domains))
+        nested_start = first_binder_id + len(value.domains)
+        references = domains | free_binders(value.filter, nested_start) | free_binders(value.body, nested_start)
+        return references - local_ids
+    if isinstance(value, tuple):
+        if len(value) == 2 and value[0] == "binder" and isinstance(value[1], int):
+            return frozenset({value[1]})
+        return frozenset().union(*(free_binders(item, first_binder_id) for item in value))
+    if isinstance(value, list):
+        return frozenset().union(*(free_binders(item, first_binder_id) for item in value))
+    return frozenset()
+
+
+def domain_dependency_graph(domains: Sequence[DomainTerm], first_binder_id: int = 0) -> dict[int, frozenset[int]]:
+    """Return prior-binder dependencies for an ordered domain sequence."""
+
+    graph: dict[int, frozenset[int]] = {}
+    for offset, domain in enumerate(domains):
+        binder_id = first_binder_id + offset
+        dependencies = free_binders(domain, first_binder_id)
+        if any(dependency >= binder_id for dependency in dependencies):
+            raise UnsupportedAlgebra("quantifier domain references its own or a later binder")
+        graph[binder_id] = dependencies
+    return graph
 
 
 def _is_frozen_affine(value: Any) -> bool:
@@ -738,10 +999,13 @@ def _render_predicate(predicate: Any) -> str:
 
 __all__ = [
     "DecisionAtom",
+    "DomainTerm",
     "IndexTerm",
     "IndexedAffineExpression",
     "QuantifiedConstraint",
     "QuantifiedExpression",
     "prove_indexed_equivalence",
+    "free_binders",
+    "domain_dependency_graph",
     "render_indexed_ir",
 ]

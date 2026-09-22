@@ -565,9 +565,11 @@ class AbstractEquivalenceTests(unittest.TestCase):
     def test_index_position_permutation_remains_unknown(self):
         left = """
             int N = ...;
+            int M = ...;
             range I = 1..N;
-            dvar float x[I][I];
-            minimize sum(i in I, j in I) x[i][j];
+            range J = 1..M;
+            dvar float x[I][J];
+            minimize sum(i in I, j in J) x[i][j];
             subject to {}
         """
         right = left.replace("x[i][j];", "x[j][i];")
@@ -640,6 +642,183 @@ class AbstractEquivalenceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
+
+    def test_dependent_domains_preserve_binder_dependencies(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in 1..i) 2 * (x[i][j] + 1);
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            dvar float value[Items][Items];
+            minimize sum(row in Items) sum(column in 1..row) (2 * value[row][column] + 2);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("preserved dependent quantifier domains", result.proof_steps)
+        self.assertIn("flattened ordered indexed binders", result.proof_steps)
+
+    def test_different_dependent_domain_bound_remains_unknown(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in 1..i) x[i][j];
+            subject to {}
+        """
+        right = left.replace("j in 1..i", "j in 1..N")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_parameter_selected_indices_preserve_application_tree(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            int next[I] = ...;
+            dvar float x[I][I];
+            minimize sum(i in I, j in I) 2 * (x[next[i]][j + 1] + 1);
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            int successor[Items] = ...;
+            dvar float value[Items][Items];
+            minimize sum(row in Items, column in Items)
+                (2 * value[successor[row]][column + 1] + 2);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("preserved parameter-selected index applications", result.proof_steps)
+
+    def test_different_parameter_selected_index_remains_unknown(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            int next[I] = ...;
+            int previous[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I) x[next[i]];
+            subject to {}
+        """
+        right = left.replace("x[next[i]]", "x[previous[i]]")
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            parameter_mapping={"N": "N", "next": "next", "previous": "previous"},
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_independent_binders_can_be_reordered(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in I) x[i][j];
+            subject to {}
+        """
+        right = left.replace("sum(i in I, j in I)", "sum(j in I, i in I)")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("reordered independent indexed binders", result.proof_steps)
+
+    def test_dependent_binder_order_is_not_reordered(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in 1..i) x[i][j];
+            subject to {}
+        """
+        right = left.replace("j in 1..i", "j in 1..N")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+
+    def test_sums_split_and_fuse_only_over_identical_domains_and_filters(self):
+        fused = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I : i >= 1) (a[i] * x[i] + a[i]);
+            subject to {}
+        """
+        split = """
+            int size = ...;
+            range Items = 1..size;
+            float coefficient[Items] = ...;
+            dvar float value[Items];
+            minimize sum(item in Items : item >= 1) coefficient[item] * value[item]
+                + sum(item in Items : item >= 1) coefficient[item];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(fused, split, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("fused indexed sums with identical domains and filters", result.proof_steps)
+
+        changed_filter = split.replace(
+            "sum(item in Items : item >= 1) coefficient[item];",
+            "sum(item in Items : item >= 2) coefficient[item];",
+        )
+        refused = prove_abstract_equivalent(fused, changed_filter, mode="algebraic")
+        self.assertEqual(refused.status, "unknown")
+        self.assertIsNone(refused.counterexample)
+
+    def test_nested_filtered_identity_has_grounded_cross_check(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I][I];
+            minimize sum(i in I) sum(j in 1..i : j >= 1) a[j] * (x[i][j] + 1);
+            subject to {}
+        """
+        right = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I][I];
+            minimize sum(i in I) sum(j in 1..i : j >= 1) (a[j] * x[i][j] + a[j]);
+            subject to {}
+        """
+        data = "N = 3; a = [2, 3, 5];"
+
+        symbolic = prove_abstract_equivalent(left, right, mode="algebraic")
+        grounded = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            left_data_text=data,
+            right_data_text=data,
+        )
+
+        self.assertEqual(symbolic.status, "equivalent")
+        self.assertEqual(symbolic.scope, "uniform_schema")
+        self.assertEqual(grounded.status, "equivalent")
+        self.assertEqual(grounded.scope, "supplied_instances")
 
     def test_algebraic_mode_eliminates_arbitrary_affine_alias(self):
         left = """

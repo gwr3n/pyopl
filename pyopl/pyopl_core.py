@@ -2752,6 +2752,7 @@ class OPLParser(Parser):
         allowed_types = {
             "number_literal_index",
             "name_reference_index",
+            "indexed_name",
             "binop",
             "uminus",
             "parenthesized_expression",

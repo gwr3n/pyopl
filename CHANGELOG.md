@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added binder-aware indexed affine normalization for sums and pointwise constraints over named ranges and scalar sets, including nested and shadowed sum binders, exact conjunction filters, multidimensional arithmetic index expressions, and deterministic rewrite budgets.
 - Added nested `forall` alpha-normalization and stable indexed-IR diagnostics that expose binder identities and canonical mismatch forms.
+- Added dependent scalar ranges, free-binder and domain-dependency analysis, parameter-selected index applications, dependency-aware independent-binder reordering, and guarded sum fusion and splitting.
 - Added uniform-schema proofs for distributive indexed affine rewrites, iterator renaming, and declaration renaming while preserving explicit `unknown` outcomes for unequal filters, nonlinear decision products, symbolic division, and rank or domain mismatches.
 - Expanded batch-solve coverage across input validation, solver configuration, report serialization and resumption, progress events, worker cleanup, and headless progress-window outcomes.
 - Added five exact-algebraic refusal regressions and a checked separating assignment for portfolio case 17; portfolio comparisons now assert expected scopes as well as statuses and method labels.
