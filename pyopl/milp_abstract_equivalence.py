@@ -40,8 +40,8 @@ from pyopl._abstract_algebra import (
     lower_symbolic_model,
     prove_algebraic_equivalence,
 )
-from pyopl._indexed_algebra import prove_indexed_equivalence
 from pyopl._index_safety import find_index_safety_issue
+from pyopl._indexed_algebra import prove_indexed_equivalence
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 from pyopl.semantic_error import SemanticError
 

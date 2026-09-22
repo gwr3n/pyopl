@@ -167,6 +167,19 @@ class CompareTests(unittest.TestCase):
         self.assertIn("Right data: (none)", formatted)
         self.assertIn("Counterexample:", formatted)
 
+    def test_compare_models_formatter_displays_unknown_as_undetermined(self):
+        result = EquivalenceResult(
+            status="unknown",
+            level="symbolically_normalized",
+            reason="no compatible parameter and variable mapping found",
+        )
+
+        formatted = OPLIDE._format_equivalence_result(result, "/tmp/left.mod", "/tmp/right.mod")
+
+        self.assertIn("Status: unknown", formatted)
+        self.assertIn("Equivalent: Undetermined", formatted)
+        self.assertNotIn("Equivalent: No", formatted)
+
     def test_prove_equivalent_returns_different_result(self):
         left = LinearProblem(
             sense="minimize",

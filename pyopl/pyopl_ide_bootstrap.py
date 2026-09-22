@@ -4306,12 +4306,17 @@ class OPLIDE(TkinterDnD.Tk):
         strategy: str = "abstract",
     ) -> str:
         """Format an EquivalenceResult for the compare-models dialog."""
+        equivalence_label = {
+            "equivalent": "Yes",
+            "different": "No",
+            "unknown": "Undetermined",
+        }[result.status]
         lines = [
             "Compare models",
             "",
             f"Strategy: {strategy}",
             f"Status: {result.status}",
-            f"Equivalent: {'Yes' if result.equivalent else 'No'}",
+            f"Equivalent: {equivalence_label}",
             f"Level: {result.level}",
             f"Reason: {result.reason}",
             "",

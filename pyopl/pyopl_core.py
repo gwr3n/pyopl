@@ -30,8 +30,8 @@ except Exception:  # pragma: no cover
     pass
 
 # === Local imports ===
-from .gurobi_codegen import GurobiCodeGenerator
 from ._index_safety import find_index_safety_issue
+from .gurobi_codegen import GurobiCodeGenerator
 from .linear_problem import LinearProblem
 from .linear_problem_highs import export_linear_problem
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
