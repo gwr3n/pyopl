@@ -74,7 +74,8 @@ def _visit(
             if interval is not None:
                 nested_binders[str(iterator["iterator"])] = interval
         _apply_filter(node.get("index_constraint"), nested_binders)
-        _visit(node.get("expression"), declarations, nested_binders, issues)
+        body_key = "expression" if node_type == "sum" else "constraint"
+        _visit(node.get(body_key), declarations, nested_binders, issues)
         return
     if node_type == "conditional":
         _visit(node.get("condition"), declarations, binders, issues)

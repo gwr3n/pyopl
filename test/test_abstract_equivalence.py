@@ -146,6 +146,17 @@ class AbstractEquivalenceTests(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "can fall below"):
             prove_abstract_equivalent(model, model, mode="auto")
 
+    def test_forall_rejects_unsafe_index(self):
+        model = """
+            range I = 1..3;
+            dvar float+ x[I];
+            minimize 0;
+            subject to { forall(i in I) x[i + 1] >= 0; }
+        """
+
+        with self.assertRaisesRegex(SemanticError, "can exceed"):
+            prove_abstract_equivalent(model, model, mode="auto")
+
     def test_loose_filter_does_not_widen_iterator_domain(self):
         model = """
             int N = ...;
