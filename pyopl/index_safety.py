@@ -76,6 +76,15 @@ def _visit(
         _apply_filter(node.get("index_constraint"), nested_binders)
         _visit(node.get("expression"), declarations, nested_binders, issues)
         return
+    if node_type == "conditional":
+        _visit(node.get("condition"), declarations, binders, issues)
+        then_binders = dict(binders)
+        _apply_filter(node.get("condition"), then_binders)
+        _visit(node.get("then"), declarations, then_binders, issues)
+        else_binders = dict(binders)
+        _apply_negated_filter(node.get("condition"), else_binders)
+        _visit(node.get("else"), declarations, else_binders, issues)
+        return
     if node_type == "indexed_name":
         _validate_access(node, declarations, binders, issues)
     for value in node.values():
@@ -126,7 +135,7 @@ def _expand_binders(expression: _Affine, binders: Mapping[str, _Interval], *, up
 def _apply_filter(node: Any, binders: dict[str, _Interval]) -> None:
     if not isinstance(node, Mapping):
         return
-    if node.get("type") == "binop" and node.get("op") in {"&&", "and"}:
+    if node.get("type") == "and" or (node.get("type") == "binop" and node.get("op") in {"&&", "and"}):
         _apply_filter(node.get("left"), binders)
         _apply_filter(node.get("right"), binders)
         return
@@ -155,6 +164,18 @@ def _apply_filter(node: Any, binders: dict[str, _Interval]) -> None:
             },
             binders,
         )
+
+
+def _apply_negated_filter(node: Any, binders: dict[str, _Interval]) -> None:
+    if not isinstance(node, Mapping) or node.get("type") != "binop":
+        return
+    operator = node.get("op")
+    if not isinstance(operator, str):
+        return
+    negated_op = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}.get(operator)
+    if negated_op is None:
+        return
+    _apply_filter({**node, "op": negated_op}, binders)
 
 
 def _validate_access(

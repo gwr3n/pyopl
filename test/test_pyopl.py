@@ -1109,11 +1109,10 @@ class TestPyOPLCompiler(TestPyOPL):
                 data_file = tmp_dat.name
             try:
                 result = solve(model_file, data_file, solver=solver)
-                self.assertIn(result["status"].upper(), ["ERROR", "FAILED", "EXECUTION_ERROR"])
-                self.assertIn(
-                    "Failed to load or parse OPL model from file. See errors traceback.",
-                    result.get("message", ""),
-                )
+                self.assertIn(result["status"].upper(), ["ERROR", "FAILED", "EXECUTION_ERROR", "MODEL_ERROR"])
+                message = result.get("message", "")
+                self.assertIn("Parameter 'demand'", message)
+                self.assertTrue("does not match declared dimension" in message or "must be rectangular" in message)
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
@@ -1326,8 +1325,8 @@ class TestPyOPLCompiler(TestPyOPL):
         """Test an empty model (should return error status)."""
         model = """"""
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_invalid_operator(self):
         """Test model with an invalid operator in constraint (should return error status)."""
@@ -1339,8 +1338,8 @@ class TestPyOPLCompiler(TestPyOPL):
         }
         """
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_parameter_not_found(self):
         """Test model referencing a parameter not in data (should return error status)."""
@@ -1351,8 +1350,8 @@ class TestPyOPLCompiler(TestPyOPL):
         subject to { x >= 1; }
         """
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_range_start_greater_than_end(self):
         """Test range with start > end (should return error status)."""
@@ -1363,8 +1362,8 @@ class TestPyOPLCompiler(TestPyOPL):
         subject to { x <= 1; }
         """
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_constraint_with_symbolic_rhs(self):
         """Test constraint with symbolic right-hand side (should return error status)."""
@@ -1376,8 +1375,8 @@ class TestPyOPLCompiler(TestPyOPL):
         """
         # No data for 'a', should error
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_parenthesized_expression(self):
         """Test parenthesized expressions in objective and constraints."""
@@ -1436,69 +1435,35 @@ class TestPyOPLCompiler(TestPyOPL):
         subject to { x >= 1; }
         """
         gurobi, scipy = self.run_both_solvers(model)
-        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED"])
+        self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_infeasible_model_compare_solvers(self):
         """Test that infeasible models are detected by both solvers."""
-        dummy_model_file = "infeasible.mod"
-        dummy_data_file = "infeasible.dat"
-        try:
-            with open(dummy_model_file, "w") as f:
-                f.write("""
-                dvar float x;
-                maximize x;
-                subject to {
-                    x >= 2;
-                    x <= 1;
-                }
-                """)
-            with open(dummy_data_file, "w") as f:
-                f.write("")
-            result_gurobi, result_scipy = self.run_both_solvers(dummy_model_file, dummy_data_file)
-            self.assertIn(
-                result_gurobi.get("status", "").upper(),
-                ["INFEASIBLE", "INF_OR_UNBD", "FAILED"],
-            )
-            self.assertIn(
-                result_scipy.get("status", "").upper(),
-                ["INFEASIBLE", "INF_OR_UNBD", "FAILED"],
-            )
-        finally:
-            if os.path.exists(dummy_model_file):
-                os.remove(dummy_model_file)
-            if os.path.exists(dummy_data_file):
-                os.remove(dummy_data_file)
+        model = """
+        dvar float x;
+        maximize x;
+        subject to {
+            x >= 2;
+            x <= 1;
+        }
+        """
+        result_gurobi, result_scipy = self.run_both_solvers(model)
+        self.assertIn(result_gurobi.get("status", "").upper(), ["INFEASIBLE", "INF_OR_UNBD", "FAILED"])
+        self.assertIn(result_scipy.get("status", "").upper(), ["INFEASIBLE", "INF_OR_UNBD", "FAILED"])
 
     def test_unbounded_model_compare_solvers(self):
         """Test that unbounded models are detected by both solvers."""
-        dummy_model_file = "unbounded.mod"
-        dummy_data_file = "unbounded.dat"
-        try:
-            with open(dummy_model_file, "w") as f:
-                f.write("""
-                dvar float x;
-                maximize x;
-                subject to {
-                    x >= 0;
-                }
-                """)
-            with open(dummy_data_file, "w") as f:
-                f.write("")
-            result_gurobi, result_scipy = self.run_both_solvers(dummy_model_file, dummy_data_file)
-            self.assertIn(
-                result_gurobi.get("status", "").upper(),
-                ["UNBOUNDED", "INF_OR_UNBD", "FAILED"],
-            )
-            self.assertIn(
-                result_scipy.get("status", "").upper(),
-                ["UNBOUNDED", "INF_OR_UNBD", "FAILED"],
-            )
-        finally:
-            if os.path.exists(dummy_model_file):
-                os.remove(dummy_model_file)
-            if os.path.exists(dummy_data_file):
-                os.remove(dummy_data_file)
+        model = """
+        dvar float x;
+        maximize x;
+        subject to {
+            x >= 0;
+        }
+        """
+        result_gurobi, result_scipy = self.run_both_solvers(model)
+        self.assertIn(result_gurobi.get("status", "").upper(), ["UNBOUNDED", "INF_OR_UNBD", "FAILED"])
+        self.assertIn(result_scipy.get("status", "").upper(), ["UNBOUNDED", "INF_OR_UNBD", "FAILED"])
 
     def test_floatplus_and_intplus_edge(self):
         """Test float+ and int+ variables with negative lower bounds (should clamp to 0)."""

@@ -110,6 +110,42 @@ class AbstractEquivalenceTests(unittest.TestCase):
 
         self.assertTrue(prove_abstract_equivalent(model, model, mode="auto").equivalent)
 
+    def test_conjoined_filter_guards_affine_index_in_multi_iterator_sum(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            int next[I] = ...;
+            dvar float+ x[I][I];
+            minimize sum(i in I, j in I : i >= 1 && j < N) x[next[i]][j + 1];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(model, model, mode="auto")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("index 1", result.reason)
+
+    def test_conditional_guard_protects_affine_index(self):
+        model = """
+            range I = 1..8;
+            dvar float+ x[I];
+            minimize sum(i in I) ((i > 1) ? x[i - 1] : x[i]);
+            subject to {}
+        """
+
+        self.assertTrue(prove_abstract_equivalent(model, model, mode="auto").equivalent)
+
+    def test_conditional_without_guard_rejects_unsafe_index(self):
+        model = """
+            range I = 1..8;
+            dvar float+ x[I];
+            minimize sum(i in I) ((i > 1) ? x[i - 2] : x[i]);
+            subject to {}
+        """
+
+        with self.assertRaisesRegex(SemanticError, "can fall below"):
+            prove_abstract_equivalent(model, model, mode="auto")
+
     def test_loose_filter_does_not_widen_iterator_domain(self):
         model = """
             int N = ...;

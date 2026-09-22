@@ -1032,9 +1032,7 @@ def _index_term_free_binders(value: IndexTerm, first_binder_id: int) -> frozense
     return frozenset()
 
 
-def _quantified_free_binders(
-    value: QuantifiedExpression | QuantifiedConstraint, first_binder_id: int
-) -> frozenset[int]:
+def _quantified_free_binders(value: QuantifiedExpression | QuantifiedConstraint, first_binder_id: int) -> frozenset[int]:
     local_ids = frozenset(range(first_binder_id, first_binder_id + len(value.domains)))
     domains = frozenset().union(*(free_binders(domain, first_binder_id) for domain in value.domains))
     nested_start = first_binder_id + len(value.domains)
