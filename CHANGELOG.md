@@ -14,6 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.6.0] - 2026-09-22
+
+### Added
+
 - Added binder-aware indexed affine normalization for sums and pointwise constraints over named ranges and scalar sets, including nested and shadowed sum binders, exact conjunction filters, multidimensional arithmetic index expressions, and deterministic rewrite budgets.
 - Added nested `forall` alpha-normalization and stable indexed-IR diagnostics that expose binder identities and canonical mismatch forms.
 - Added dependent scalar ranges, free-binder and domain-dependency analysis, parameter-selected index applications, dependency-aware independent-binder reordering, and guarded sum fusion and splitting.
