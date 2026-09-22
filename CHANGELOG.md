@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Rejected abstract equivalence proofs for provably out-of-range affine indices and reported unresolved data-selected index safety as unknown before schema matching.
 - Made the portfolio case 17 regression self-contained so installed test suites do not depend on the undistributed portfolio directory.
 - Updated batch-comparison test fixtures to use result dataclasses required by the shared report serializer, including checks for metadata and error recovery.
 - Prevented symbolic alias division under merely nonnegative parameter assumptions, and reported incomplete mapping or implication searches as unknown rather than semantic differences.

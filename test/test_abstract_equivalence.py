@@ -8,6 +8,7 @@ from pyopl.milp_abstract_equivalence import (
     prove_abstract_equivalent,
 )
 from pyopl.pyopl_core import linear_problem_from_opl
+from pyopl.semantic_error import SemanticError
 
 LEFT_MODEL = """
     int N = ...;
@@ -73,6 +74,84 @@ PORTFOLIO_17_DATA = {
 
 
 class AbstractEquivalenceTests(unittest.TestCase):
+    def test_abstract_comparison_rejects_provably_out_of_range_index(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            dvar float+ x[I];
+            minimize sum(i in I) x[i + 1];
+            subject to {}
+        """
+
+        with self.assertRaisesRegex(SemanticError, "can exceed"):
+            prove_abstract_equivalent(model, model, mode="auto")
+
+    def test_definite_index_error_precedes_unresolved_parameter_index(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            int next[I] = ...;
+            dvar float+ x[I][I];
+            minimize sum(i in I, j in I) x[next[i]][j + 1];
+            subject to {}
+        """
+
+        with self.assertRaisesRegex(SemanticError, "index 2.*can exceed"):
+            prove_abstract_equivalent(model, model, mode="auto")
+
+    def test_abstract_comparison_accepts_guarded_affine_index(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            dvar float+ x[I];
+            minimize sum(i in I : i < N) x[i + 1];
+            subject to {}
+        """
+
+        self.assertTrue(prove_abstract_equivalent(model, model, mode="auto").equivalent)
+
+    def test_loose_filter_does_not_widen_iterator_domain(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            dvar float+ x[I];
+            minimize sum(i in I : i <= N + 1) x[i];
+            subject to {}
+        """
+
+        self.assertTrue(prove_abstract_equivalent(model, model, mode="auto").equivalent)
+
+    def test_incomparable_symbolic_ranges_are_unknown(self):
+        model = """
+            int N = ...;
+            int M = ...;
+            range I = 1..N;
+            range J = 1..M;
+            dvar float+ x[J];
+            minimize sum(i in I) x[i];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(model, model, mode="auto")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("cannot prove index", result.reason)
+
+    def test_abstract_comparison_is_unknown_for_data_selected_index(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            int next[I] = ...;
+            dvar float+ x[I];
+            minimize sum(i in I) x[next[i]];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(model, model, mode="auto")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("cannot prove index", result.reason)
+
     def test_portfolio_instance_counterexample(self):
         witness = 1.5
         for data_name, data in PORTFOLIO_17_DATA.items():
@@ -546,14 +625,15 @@ class AbstractEquivalenceTests(unittest.TestCase):
             int N = ...;
             range I = 1..N;
             dvar float x[I][I];
-            minimize sum(i in I, j in I) 2 * (x[i][j + 1] + 1);
+            minimize sum(i in I, j in I : j < N) 2 * (x[i][j + 1] + 1);
             subject to {}
         """
         right = """
             int size = ...;
             range Items = 1..size;
             dvar float value[Items][Items];
-            minimize sum(row in Items, column in Items) (2 * value[row][column + 1] + 2);
+            minimize sum(row in Items, column in Items : column < size)
+                (2 * value[row][column + 1] + 2);
             subject to {}
         """
 
@@ -578,8 +658,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
 
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
-        self.assertIn("left canonical", result.reason)
-        self.assertIn("right canonical", result.reason)
+        self.assertIn("cannot prove index", result.reason)
 
     def test_indexed_normalization_limit_reports_budget(self):
         model = """
@@ -680,13 +759,13 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
 
-    def test_parameter_selected_indices_preserve_application_tree(self):
+    def test_parameter_selected_indices_require_data_for_safety(self):
         left = """
             int N = ...;
             range I = 1..N;
             int next[I] = ...;
             dvar float x[I][I];
-            minimize sum(i in I, j in I) 2 * (x[next[i]][j + 1] + 1);
+            minimize sum(i in I, j in I : j < N) 2 * (x[next[i]][j + 1] + 1);
             subject to {}
         """
         right = """
@@ -694,15 +773,15 @@ class AbstractEquivalenceTests(unittest.TestCase):
             range Items = 1..size;
             int successor[Items] = ...;
             dvar float value[Items][Items];
-            minimize sum(row in Items, column in Items)
+            minimize sum(row in Items, column in Items : column < size)
                 (2 * value[successor[row]][column + 1] + 2);
             subject to {}
         """
 
         result = prove_abstract_equivalent(left, right, mode="algebraic")
 
-        self.assertEqual(result.status, "equivalent")
-        self.assertIn("preserved parameter-selected index applications", result.proof_steps)
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("cannot prove index 1", result.reason)
 
     def test_different_parameter_selected_index_remains_unknown(self):
         left = """

@@ -41,7 +41,9 @@ from pyopl._abstract_algebra import (
     prove_algebraic_equivalence,
 )
 from pyopl._indexed_algebra import prove_indexed_equivalence
+from pyopl.index_safety import find_index_safety_issue
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
+from pyopl.semantic_error import SemanticError
 
 AbstractEquivalenceStatus = Literal["equivalent", "different", "unknown"]
 AbstractEquivalenceLevel = Literal[
@@ -169,16 +171,9 @@ def prove_abstract_equivalent(
 
     left_ast = _coerce_ast(left)
     right_ast = _coerce_ast(right)
-    left_issue = _model_ast_issue(left_ast)
-    right_issue = _model_ast_issue(right_ast)
-    if left_issue is not None or right_issue is not None:
-        issue = left_issue or right_issue
-        return AbstractEquivalenceResult(
-            status="unknown",
-            level="schema_isomorphic",
-            reason=issue or "invalid abstract model AST",
-            termination="unsupported_input",
-        )
+    preflight_result = _abstract_model_preflight(left_ast, right_ast, left_data_text, right_data_text)
+    if preflight_result is not None:
+        return preflight_result
 
     _validate_comparison_options(
         left_ast, right_ast, parameter_mapping, variable_mapping, left_auxiliaries, right_auxiliaries, assumptions
@@ -220,6 +215,45 @@ def prove_abstract_equivalent(
         right_auxiliaries,
         max_rewrite_iterations,
         context,
+    )
+
+
+def _abstract_model_preflight(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left_data_text: str | None,
+    right_data_text: str | None,
+) -> AbstractEquivalenceResult | None:
+    issue = _model_ast_issue(left_ast) or _model_ast_issue(right_ast)
+    if issue is not None:
+        return AbstractEquivalenceResult(
+            status="unknown",
+            level="schema_isomorphic",
+            reason=issue,
+            termination="unsupported_input",
+        )
+    return _index_safety_preflight(left_ast, right_ast, left_data_text, right_data_text)
+
+
+def _index_safety_preflight(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left_data_text: str | None,
+    right_data_text: str | None,
+) -> AbstractEquivalenceResult | None:
+    safety_issues = (find_index_safety_issue(left_ast), find_index_safety_issue(right_ast))
+    unsafe_issue = next((issue for issue in safety_issues if issue is not None and issue.status == "unsafe"), None)
+    if unsafe_issue is not None:
+        raise SemanticError(unsafe_issue.reason)
+    unresolved_issue = next((issue for issue in safety_issues if issue is not None), None)
+    if unresolved_issue is None or left_data_text is not None or right_data_text is not None:
+        return None
+    return AbstractEquivalenceResult(
+        status="unknown",
+        level="schema_isomorphic",
+        reason=unresolved_issue.reason,
+        scope="source_schemas",
+        termination="unsupported_fragment",
     )
 
 
