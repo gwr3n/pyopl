@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unified provably unsafe index reporting across Gurobi and HiGHS IDE solves as concise `MODEL_ERROR` results without backend tracebacks or generic code-generation hints.
+- Reported expected model-validation failures in the comparison result panel with concise repair guidance instead of opening a traceback error window.
 - Rejected abstract equivalence proofs for provably out-of-range affine indices and reported unresolved data-selected index safety as unknown before schema matching.
 - Made the portfolio case 17 regression self-contained so installed test suites do not depend on the undistributed portfolio directory.
 - Updated batch-comparison test fixtures to use result dataclasses required by the shared report serializer, including checks for metadata and error recovery.
