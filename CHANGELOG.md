@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refactored indexed equivalence mapping, affine normalization, index parsing, and binder analysis into focused helpers, removing all five complexity warnings without changing proof behavior.
 - Refactored abstract and concrete equivalence orchestration into focused validation, proof-dispatch, and result-reporting helpers, removing all five complexity warnings without changing public behavior.
 - Documented the abstract algebra backend as a literate paper companion, linking proof stages to named results and explaining arithmetic, certificate checks, and supported fragments without changing behavior.
 - Clarified equivalence guarantees and numerical provenance in the manuscript and API documentation; independent certificate export/checking remains deferred. Updated the existing portfolio and removed aggregate capability rankings.

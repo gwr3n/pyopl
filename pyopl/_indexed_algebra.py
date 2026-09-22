@@ -94,49 +94,37 @@ def prove_indexed_equivalence(
     candidates = _declaration_mappings(left, right, parameter_mapping or {}, variable_mapping or {})
     if not candidates:
         raise UnsupportedAlgebra("no compatible indexed declaration mapping found")
+    return _prove_mapped_indexed_equivalence(
+        left_ast,
+        right_ast,
+        left,
+        right,
+        candidates,
+        max_rewrite_iterations,
+    )
+
+
+def _prove_mapped_indexed_equivalence(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left: Mapping[str, Declaration],
+    right: Mapping[str, Declaration],
+    candidates: Sequence[Mapping[str, str]],
+    max_rewrite_iterations: int,
+) -> AlgebraicProof:
     first_mismatch: tuple[Any, Any] | None = None
     for mapping in candidates[:256]:
         try:
-            budget = [max_rewrite_iterations * 100]
-            left_canonical = _canonical_model(left_ast, left, {}, budget)
-            right_canonical = _canonical_model(right_ast, right, _invert(mapping), budget)
+            left_canonical, right_canonical = _canonical_model_pair(
+                left_ast,
+                right_ast,
+                left,
+                right,
+                mapping,
+                max_rewrite_iterations,
+            )
             if left_canonical == right_canonical:
-                steps = [
-                    "alpha-normalized indexed declarations and binders",
-                    "normalized indexed affine expressions",
-                    "normalized pointwise affine constraints",
-                    "lifted equality through alpha-normalized quantifiers",
-                ]
-                if _contains_nested_sum(left_ast) or _contains_nested_sum(right_ast):
-                    steps.append("alpha-normalized nested indexed binders")
-                if _contains_nested_forall(left_ast) or _contains_nested_forall(right_ast):
-                    steps.append("alpha-normalized nested forall constraints")
-                if _contains_filter(left_ast) or _contains_filter(right_ast):
-                    steps.append("canonicalized indexed quantifier filters")
-                if _contains_complex_index(left_ast) or _contains_complex_index(right_ast):
-                    steps.append("preserved complete indexed access expressions")
-                if _contains_parameter_selected_index(left_ast) or _contains_parameter_selected_index(right_ast):
-                    steps.append("preserved parameter-selected index applications")
-                if _contains_dependent_domain(left_ast) or _contains_dependent_domain(right_ast):
-                    steps.append("preserved dependent quantifier domains")
-                if _contains_multi_or_nested_binders(left_ast) or _contains_multi_or_nested_binders(right_ast):
-                    steps.append("flattened ordered indexed binders")
-                if _contains_reorderable_binders(left_ast) or _contains_reorderable_binders(right_ast):
-                    steps.append("reordered independent indexed binders")
-                if _contains_split_sums(left_ast) or _contains_split_sums(right_ast):
-                    steps.append("fused indexed sums with identical domains and filters")
-                return AlgebraicProof(
-                    "equivalent",
-                    "symbolically_normalized",
-                    "indexed affine schemas have equal canonical forms",
-                    steps=tuple(steps),
-                    variable_mapping=tuple(
-                        sorted((name, target) for name, target in mapping.items() if left[name].kind == "variable")
-                    ),
-                    parameter_mapping=tuple(
-                        sorted((name, target) for name, target in mapping.items() if left[name].kind == "parameter")
-                    ),
-                )
+                return _equivalent_indexed_proof(left_ast, right_ast, left, mapping)
             if first_mismatch is None:
                 first_mismatch = left_canonical, right_canonical
         except UnsupportedAlgebra as exc:
@@ -158,6 +146,69 @@ def prove_indexed_equivalence(
             f"right canonical: {render_indexed_ir(right_canonical)}"
         )
     raise UnsupportedAlgebra("indexed affine schemas could not be normalized to the same supported form")
+
+
+def _canonical_model_pair(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left: Mapping[str, Declaration],
+    right: Mapping[str, Declaration],
+    mapping: Mapping[str, str],
+    max_rewrite_iterations: int,
+) -> tuple[Any, Any]:
+    budget = [max_rewrite_iterations * 100]
+    return (
+        _canonical_model(left_ast, left, {}, budget),
+        _canonical_model(right_ast, right, _invert(mapping), budget),
+    )
+
+
+def _equivalent_indexed_proof(
+    left_ast: Mapping[str, Any],
+    right_ast: Mapping[str, Any],
+    left: Mapping[str, Declaration],
+    mapping: Mapping[str, str],
+) -> AlgebraicProof:
+    return AlgebraicProof(
+        "equivalent",
+        "symbolically_normalized",
+        "indexed affine schemas have equal canonical forms",
+        steps=tuple(_indexed_proof_steps(left_ast, right_ast)),
+        variable_mapping=_mapping_for_kind(mapping, left, "variable"),
+        parameter_mapping=_mapping_for_kind(mapping, left, "parameter"),
+    )
+
+
+def _indexed_proof_steps(left_ast: Mapping[str, Any], right_ast: Mapping[str, Any]) -> list[str]:
+    steps = [
+        "alpha-normalized indexed declarations and binders",
+        "normalized indexed affine expressions",
+        "normalized pointwise affine constraints",
+        "lifted equality through alpha-normalized quantifiers",
+    ]
+    optional_steps = (
+        (_contains_nested_sum, "alpha-normalized nested indexed binders"),
+        (_contains_nested_forall, "alpha-normalized nested forall constraints"),
+        (_contains_filter, "canonicalized indexed quantifier filters"),
+        (_contains_complex_index, "preserved complete indexed access expressions"),
+        (_contains_parameter_selected_index, "preserved parameter-selected index applications"),
+        (_contains_dependent_domain, "preserved dependent quantifier domains"),
+        (_contains_multi_or_nested_binders, "flattened ordered indexed binders"),
+        (_contains_reorderable_binders, "reordered independent indexed binders"),
+        (_contains_split_sums, "fused indexed sums with identical domains and filters"),
+    )
+    for predicate, description in optional_steps:
+        if predicate(left_ast) or predicate(right_ast):
+            steps.append(description)
+    return steps
+
+
+def _mapping_for_kind(
+    mapping: Mapping[str, str],
+    declarations: Mapping[str, Declaration],
+    kind: Literal["parameter", "variable"],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((name, target) for name, target in mapping.items() if declarations[name].kind == kind))
 
 
 def _declarations(ast: Mapping[str, Any]) -> dict[str, Declaration]:
@@ -202,24 +253,10 @@ def _declaration_mappings(
     if len(left) != len(right):
         return []
     prescribed = dict(parameter_mapping) | dict(variable_mapping)
-    groups: list[tuple[list[str], list[str]]] = []
-    signatures = sorted({_signature(declaration) for declaration in left.values()})
-    for signature in signatures:
-        left_names = sorted(name for name, declaration in left.items() if _signature(declaration) == signature)
-        right_names = sorted(name for name, declaration in right.items() if _signature(declaration) == signature)
-        if len(left_names) != len(right_names):
-            return []
-        groups.append((left_names, right_names))
-
-    choices: list[list[dict[str, str]]] = []
-    for left_names, right_names in groups:
-        choices.append(
-            [
-                dict(zip(left_names, ordering, strict=True))
-                for ordering in permutations(right_names)
-                if all(name not in prescribed or prescribed[name] == target for name, target in zip(left_names, ordering))
-            ]
-        )
+    groups = _declaration_groups(left, right)
+    if groups is None:
+        return []
+    choices = [_mapping_choices(left_names, right_names, prescribed) for left_names, right_names in groups]
     mappings: list[dict[str, str]] = []
     for parts in product(*choices):
         mapping = {name: target for part in parts for name, target in part.items()}
@@ -228,6 +265,29 @@ def _declaration_mappings(
             if len(mappings) > 256:
                 break
     return mappings
+
+
+def _declaration_groups(
+    left: Mapping[str, Declaration], right: Mapping[str, Declaration]
+) -> list[tuple[list[str], list[str]]] | None:
+    groups: list[tuple[list[str], list[str]]] = []
+    for signature in sorted({_signature(declaration) for declaration in left.values()}):
+        left_names = sorted(name for name, declaration in left.items() if _signature(declaration) == signature)
+        right_names = sorted(name for name, declaration in right.items() if _signature(declaration) == signature)
+        if len(left_names) != len(right_names):
+            return None
+        groups.append((left_names, right_names))
+    return groups
+
+
+def _mapping_choices(
+    left_names: Sequence[str], right_names: Sequence[str], prescribed: Mapping[str, str]
+) -> list[dict[str, str]]:
+    return [
+        dict(zip(left_names, ordering, strict=True))
+        for ordering in permutations(right_names)
+        if all(name not in prescribed or prescribed[name] == target for name, target in zip(left_names, ordering))
+    ]
 
 
 def _signature(declaration: Declaration) -> tuple[str, str, int]:
@@ -692,26 +752,38 @@ def _affine(
     if node_type == "number":
         return IndexedAffineExpression(sp.Rational(str(node.get("value"))), {})
     if node_type in {"name", "indexed_name"}:
-        name = node.get("value") if node_type == "name" else node.get("name")
-        if not isinstance(name, str) or name not in declarations:
-            raise UnsupportedAlgebra(f"unknown indexed symbol: {name}")
-        declaration = declarations[name]
-        indices = tuple(_index_term(index, binders, rename) for index in node.get("dimensions", ()))
-        if len(indices) != len(declaration.dimensions):
-            raise UnsupportedAlgebra(f"indexed rank mismatch for {name}")
-        canonical_name = rename.get(name, name)
-        if declaration.kind == "variable":
-            return IndexedAffineExpression(sp.S.Zero, {DecisionAtom(canonical_name, indices): sp.S.One})
-        if declaration.kind != "parameter":
-            raise UnsupportedAlgebra("domain declarations cannot appear as arithmetic values")
-        return IndexedAffineExpression(_coefficient_atom(canonical_name, indices), {})
+        return _affine_symbol(node, declarations, rename, binders)
     if node_type == "unary" and node.get("op") == "-":
         return _scale(_affine(node.get("operand"), declarations, rename, binders, budget), -1)
     if node_type != "binop":
         raise UnsupportedAlgebra(f"unsupported indexed expression: {node_type}")
     left = _affine(node.get("left"), declarations, rename, binders, budget)
     right = _affine(node.get("right"), declarations, rename, binders, budget)
-    operator = node.get("op")
+    return _combine_affine(left, right, node.get("op"))
+
+
+def _affine_symbol(
+    node: Mapping[str, Any],
+    declarations: Mapping[str, Declaration],
+    rename: Mapping[str, str],
+    binders: Mapping[str, int],
+) -> IndexedAffineExpression:
+    name = node.get("value") if node.get("type") == "name" else node.get("name")
+    if not isinstance(name, str) or name not in declarations:
+        raise UnsupportedAlgebra(f"unknown indexed symbol: {name}")
+    declaration = declarations[name]
+    indices = tuple(_index_term(index, binders, rename) for index in node.get("dimensions", ()))
+    if len(indices) != len(declaration.dimensions):
+        raise UnsupportedAlgebra(f"indexed rank mismatch for {name}")
+    canonical_name = rename.get(name, name)
+    if declaration.kind == "variable":
+        return IndexedAffineExpression(sp.S.Zero, {DecisionAtom(canonical_name, indices): sp.S.One})
+    if declaration.kind != "parameter":
+        raise UnsupportedAlgebra("domain declarations cannot appear as arithmetic values")
+    return IndexedAffineExpression(_coefficient_atom(canonical_name, indices), {})
+
+
+def _combine_affine(left: IndexedAffineExpression, right: IndexedAffineExpression, operator: Any) -> IndexedAffineExpression:
     if operator == "+":
         return _add(left, right)
     if operator == "-":
@@ -735,24 +807,8 @@ def _index_term(node: Any, binders: Mapping[str, int], rename: Mapping[str, str]
     node_type = node.get("type")
     if node_type == "parenthesized_expression":
         return _index_term(node.get("expression"), binders, rename)
-    if node_type == "name_reference_index":
-        name = node.get("name")
-        if not isinstance(name, str) or name not in binders:
-            raise UnsupportedAlgebra(f"unbound indexed iterator: {name}")
-        return IndexTerm("binder", binders[name])
-    if node_type == "name" and isinstance(node.get("value"), str):
-        name = str(node["value"])
-        if name in binders:
-            return IndexTerm("binder", binders[name])
-        return IndexTerm("declaration", rename.get(name, name))
-    if node_type == "indexed_name" and isinstance(node.get("name"), str):
-        return IndexTerm(
-            "application",
-            (
-                rename.get(str(node["name"]), str(node["name"])),
-                tuple(_index_term(dimension, binders, rename) for dimension in node.get("dimensions", ())),
-            ),
-        )
+    if node_type in {"name_reference_index", "name", "indexed_name"}:
+        return _named_index_term(node, binders, rename)
     if node_type == "number":
         return IndexTerm("number", str(node.get("value")))
     if node_type == "unary" and node.get("op") == "-":
@@ -767,6 +823,29 @@ def _index_term(node: Any, binders: Mapping[str, int], rename: Mapping[str, str]
             ),
         )
     raise UnsupportedAlgebra("unsupported indexed access expression")
+
+
+def _named_index_term(node: Mapping[str, Any], binders: Mapping[str, int], rename: Mapping[str, str]) -> IndexTerm:
+    node_type = node.get("type")
+    if node_type == "name_reference_index":
+        name = node.get("name")
+        if not isinstance(name, str) or name not in binders:
+            raise UnsupportedAlgebra(f"unbound indexed iterator: {name}")
+        return IndexTerm("binder", binders[name])
+    name = node.get("value") if node_type == "name" else node.get("name")
+    if not isinstance(name, str):
+        raise UnsupportedAlgebra("unsupported indexed access expression")
+    if node_type == "name":
+        if name in binders:
+            return IndexTerm("binder", binders[name])
+        return IndexTerm("declaration", rename.get(name, name))
+    return IndexTerm(
+        "application",
+        (
+            rename.get(name, name),
+            tuple(_index_term(dimension, binders, rename) for dimension in node.get("dimensions", ())),
+        ),
+    )
 
 
 def _contains_complex_index(node: Any) -> bool:
@@ -920,17 +999,7 @@ def free_binders(value: Any, first_binder_id: int = 0) -> frozenset[int]:
     """Return binder identities referenced by an indexed IR value."""
 
     if isinstance(value, IndexTerm):
-        if value.kind == "binder":
-            return frozenset({int(value.value)})
-        if value.kind == "negate":
-            return free_binders(value.value, first_binder_id)
-        if value.kind == "arithmetic":
-            _, left, right = value.value
-            return free_binders(left, first_binder_id) | free_binders(right, first_binder_id)
-        if value.kind == "application":
-            _, indices = value.value
-            return frozenset().union(*(free_binders(index, first_binder_id) for index in indices))
-        return frozenset()
+        return _index_term_free_binders(value, first_binder_id)
     if isinstance(value, DecisionAtom):
         return frozenset().union(*(free_binders(index, first_binder_id) for index in value.indices))
     if isinstance(value, DomainTerm):
@@ -939,11 +1008,7 @@ def free_binders(value: Any, first_binder_id: int = 0) -> frozenset[int]:
             return free_binders(start, first_binder_id) | free_binders(end, first_binder_id)
         return frozenset()
     if isinstance(value, (QuantifiedExpression, QuantifiedConstraint)):
-        local_ids = frozenset(range(first_binder_id, first_binder_id + len(value.domains)))
-        domains = frozenset().union(*(free_binders(domain, first_binder_id) for domain in value.domains))
-        nested_start = first_binder_id + len(value.domains)
-        references = domains | free_binders(value.filter, nested_start) | free_binders(value.body, nested_start)
-        return references - local_ids
+        return _quantified_free_binders(value, first_binder_id)
     if isinstance(value, tuple):
         if len(value) == 2 and value[0] == "binder" and isinstance(value[1], int):
             return frozenset({value[1]})
@@ -951,6 +1016,30 @@ def free_binders(value: Any, first_binder_id: int = 0) -> frozenset[int]:
     if isinstance(value, list):
         return frozenset().union(*(free_binders(item, first_binder_id) for item in value))
     return frozenset()
+
+
+def _index_term_free_binders(value: IndexTerm, first_binder_id: int) -> frozenset[int]:
+    if value.kind == "binder":
+        return frozenset({int(value.value)})
+    if value.kind == "negate":
+        return free_binders(value.value, first_binder_id)
+    if value.kind == "arithmetic":
+        _, left, right = value.value
+        return free_binders(left, first_binder_id) | free_binders(right, first_binder_id)
+    if value.kind == "application":
+        _, indices = value.value
+        return frozenset().union(*(free_binders(index, first_binder_id) for index in indices))
+    return frozenset()
+
+
+def _quantified_free_binders(
+    value: QuantifiedExpression | QuantifiedConstraint, first_binder_id: int
+) -> frozenset[int]:
+    local_ids = frozenset(range(first_binder_id, first_binder_id + len(value.domains)))
+    domains = frozenset().union(*(free_binders(domain, first_binder_id) for domain in value.domains))
+    nested_start = first_binder_id + len(value.domains)
+    references = domains | free_binders(value.filter, nested_start) | free_binders(value.body, nested_start)
+    return references - local_ids
 
 
 def domain_dependency_graph(domains: Sequence[DomainTerm], first_binder_id: int = 0) -> dict[int, frozenset[int]]:
