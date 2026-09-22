@@ -1,8 +1,10 @@
 import ast as py_ast
+import json
 import math
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pyopl.pyopl_core import (
@@ -341,6 +343,24 @@ class TestPyOPLLexer(TestPyOPL):
 
 
 class TestPyOPLParser(TestPyOPL):
+    def test_indexed_access_can_select_an_index(self):
+        model = """
+            range I = 1..2;
+            int next[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I) x[next[i]];
+            subject to {}
+        """
+
+        parsed = OPLParser().parse(OPLLexer().tokenize(model))
+        objective_index = parsed["objective"]["expression"]["expression"]["dimensions"][0]
+
+        self.assertEqual(objective_index["type"], "indexed_name")
+        schema_path = Path(__file__).parents[1] / "pyopl" / "grammars" / "JSON_SCHEMA_AST.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        dimension_refs = schema["$defs"]["IndexedName"]["properties"]["dimensions"]["items"]["oneOf"]
+        self.assertIn({"$ref": "#/$defs/IndexedName"}, dimension_refs)
+
     def test_min_max_aggregates_cleanup_iterator_state(self):
         lexer = OPLLexer()
         parser = OPLParser()

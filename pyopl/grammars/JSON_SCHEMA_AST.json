@@ -244,6 +244,7 @@
               { "$ref": "#/$defs/IndexExprNameRef" },
               { "$ref": "#/$defs/IndexExprNumber" },
               { "$ref": "#/$defs/IndexExprString" },
+              { "$ref": "#/$defs/IndexedName" },
               { "$ref": "#/$defs/Binop" },
               { "$ref": "#/$defs/Uminus" },
               { "$ref": "#/$defs/Parenthesized" },

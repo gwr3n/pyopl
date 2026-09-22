@@ -173,7 +173,7 @@ dexpr_index ::= NAME _ "in" _ IN_RANGE
 indexed_dimensions ::= ( "[" _ index_specifier _ "]" _ )+
 index_specifier ::=
       expression _ ".." _ expression          // range index
-    | expression                              // general index: name/number/arith/field/string/tuple literal
+    | expression                              // general index: name/number/indexed access/arith/field/string/tuple literal
     | tuple_literal_model                      // tuple literal index for tuple-set dims
 
 range_expr ::= expression                     // must be int-valued (semantic)

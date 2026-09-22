@@ -353,7 +353,7 @@ Parameters (param keyword optional; external or inline; arrays or expressions):
 ```
 
 Index expressions accept:
-- number literal, name (iterator or parameter), arithmetic `+ - * / %`, unary minus, parentheses
+- number literal, name (iterator or parameter), indexed access such as `next[i]`, arithmetic `+ - * / %`, unary minus, parentheses
 - field access index (e.g., `t.a` if int-typed), normalized internally
 - string literal (as index into typed sets)
 - tuple literals for tuple-indexed variables/parameters
