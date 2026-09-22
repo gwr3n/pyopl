@@ -1,9 +1,8 @@
 """Algebraic comparison companion to the paper's abstract and projected routes.
 
 Read this module alongside *Abstract and Concrete MILP Model Equivalence:
-A Layered Proof Framework* (September 2026), whose source is
-``note/milp_equivalence_theory.tex``. The numbered results below refer to that
-paper; their titles identify them if subsequent revisions change numbering.
+A Layered Proof Framework* (September 2026). The numbered results below refer to 
+that paper; their titles identify them if subsequent revisions change numbering.
 Binding-aware syntax matching belongs to ``milp_abstract_equivalence``;
 numerically qualified matrix matching belongs to ``milp_concrete_equivalence``.
 This backend supplies symbolic normalization and the supported exact-arithmetic
@@ -33,9 +32,9 @@ Paper correspondence
     objective condition; Theorem 4.6 (Composition of witnesses) transfers a
     terminal comparison through justified reductions.
 * Lemma 5.1 (Affine elimination), Proposition 5.5 (Elementary row
-    transformations), Proposition 6.5 (Sound symbolic normalization), and
-    Theorem 6.6 (Certified rewrite chains) justify normalization and substitution.
-    Proposition 6.8 (Correct finite grounding) delimits the matrix adapter.
+    transformations), Proposition 6.6 (Sound symbolic normalization), and
+    Theorem 6.7 (Certified rewrite chains) justify normalization and substitution.
+    Proposition 6.9 (Correct finite grounding) delimits the matrix adapter.
 * Lemma 7.1 (Fourier--Motzkin elimination) and Corollary 7.2 (Exact rational
     projection) justify real elimination. Theorem 7.4 (Farkas certificates for
     row implication), Proposition 7.5 (Equality of affine objectives on a feasible
@@ -211,7 +210,7 @@ def _lower_inline_values(
 
     The resulting substitutions simplify decision expressions; parameter
     declarations are retained, so this is not the general grounding operation
-    of Proposition 6.8.
+    of Proposition 6.9 (Correct finite grounding).
     """
 
     inline_values: dict[str, sp.Expr] = {}
@@ -286,7 +285,7 @@ def lower_symbolic_model(
     ast: Mapping[str, Any],
     assumptions: Mapping[str, str] | None = None,
 ) -> SymbolicModel:
-    """Prepare scalar schemas for Proposition 6.5 (Sound symbolic normalization).
+    """Prepare scalar schemas for Proposition 6.6 (Sound symbolic normalization).
 
     Type-derived decision bounds become rows before any rewrite, ensuring
     that eliminating a variable also substitutes through its domain. Parameters
@@ -339,7 +338,7 @@ def lower_linear_problem(problem: LinearProblem) -> SymbolicModel:
 
     This adapter lets indexed declarations, sums, and ``forall`` constraints
     use PyOPL's established finite-domain expansion before certified algebraic
-    comparison. Proposition 6.8 (Correct finite grounding) restricts the
+    comparison. Proposition 6.9 (Correct finite grounding) restricts the
     conclusion to that supplied instance. Finite bounds are expanded into rows
     as in Proposition 5.5, and an already normalized objective is not negated
     again. Numeric values are embedded through their decimal strings; subsequent
@@ -520,7 +519,7 @@ def _prove_mapped_models(
     right_auxiliaries: set[str],
     max_iterations: int,
 ) -> AlgebraicProof:
-    """Compare aligned models by Theorems 6.6, 7.6, or 7.9 as applicable.
+    """Compare aligned models by Theorems 6.7, 7.6, or 7.9 as applicable.
 
     First require matching assumption sets and perform certified local
     rewrites. Matching terminal expressions can establish a uniform schema
@@ -840,7 +839,7 @@ def _saturate(
     auxiliaries: set[str],
     max_iterations: int,
 ) -> tuple[SymbolicModel, tuple[str, ...]]:
-    """Build the bounded rewrite chain justified by Theorem 6.6.
+    """Build the bounded rewrite chain justified by Theorem 6.7 (Certified rewrite chains).
 
     Each accepted alias is substituted throughout the model and the result is
     normalized again. ``auxiliaries`` is a caller-owned working set: eliminated
@@ -864,7 +863,7 @@ def _saturate(
 
 
 def _normalize_model(model: SymbolicModel) -> SymbolicModel:
-    """Normalize minimization costs and rows using Propositions 5.5 and 6.5.
+    """Normalize minimization costs and rows using Propositions 5.5 and 6.6.
 
     Exact duplicate removal and sorting provide a comparison form, not a
     canonical representation of every semantically equivalent polyhedron.
@@ -902,7 +901,7 @@ def _constraint_key(constraint: AffineConstraint) -> tuple[str, str]:
 
 
 def _symbolic_models_equal(left: SymbolicModel, right: SymbolicModel) -> bool:
-    """Test the sufficient normal-form agreement of Proposition 6.5.
+    """Test the sufficient normal-form agreement of Proposition 6.6.
 
     The caller has already aligned types and assumptions. A failed expression
     comparison may reflect different but equivalent row systems, so subsequent

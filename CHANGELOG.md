@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Align Python proof documentation with the current manuscript result numbering and named guarantees.
+- Keep manuscript and supplementary reproduction references within the distributed MILP equivalence portfolio.
 - Compare inline parameter definitions in indexed equivalence proofs and return an inconclusive result when index safety cannot interpret a declared domain.
 - Validate indexed accesses inside `forall` constraint bodies during index-safety preflight.
 - Display unknown model-comparison outcomes as undetermined instead of non-equivalent in the IDE.

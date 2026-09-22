@@ -59,7 +59,7 @@ def compare_models(
     The abstract structural result is the sufficient condition of Theorem 6.4
     (Schema isomorphism is uniformly sound).  Concrete reduction and graph
     matching follow Theorem 5.14 (Exact concrete-path soundness).  If abstract
-    lowering uses supplied data, Proposition 6.8 (Correct finite grounding)
+    lowering uses supplied data, Proposition 6.9 (Correct finite grounding)
     restricts that proof to those data rather than all admissible schema
     valuations.  The returned status preserves the ``equivalent``,
     ``different``, and ``unknown`` outcomes required by Theorem 9.1.

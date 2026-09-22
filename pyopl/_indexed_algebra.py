@@ -1,4 +1,20 @@
-"""Binder-aware affine normalization for a deliberately small indexed fragment."""
+"""Binder-aware affine normalization for a deliberately small indexed fragment.
+
+This is the implementation counterpart of Proposition 6.5 (Sound indexed
+affine canonicalization) in the PDF manuscript *Abstract and Concrete MILP
+Model Equivalence: A Layered Proof Framework*. It alpha-normalizes binders,
+preserves complete index expressions and declaration domains, collects exact
+affine decision terms, canonicalizes supported filters, and compares the
+resulting objectives and quantified constraints under typed declaration maps.
+
+The proposition applies only to well-defined schemas in the supported
+fragment. Index well-definedness is checked separately by ``_index_safety``.
+Tuple declarations, computed indexed parameters, explicit indexed decision
+bounds, auxiliary partitions, and unsupported predicates or index expressions
+remain inconclusive, as required by Theorem 9.1's three-way outcome semantics.
+Successful results are uniform-schema proofs; grounding particular data instead
+belongs to Proposition 6.9 (Correct finite grounding).
+"""
 
 from __future__ import annotations
 
@@ -68,11 +84,12 @@ def prove_indexed_equivalence(
     right_auxiliaries: Collection[str] = (),
     max_rewrite_iterations: int = 12,
 ) -> AlgebraicProof | None:
-    """Prove the supported indexed affine schemas equal, or decline the route.
+    """Apply Proposition 6.5's canonical-form sufficient condition.
 
     ``None`` means neither model uses indexed algebra and lets scalar lowering
     proceed. Unsupported indexed syntax raises ``UnsupportedAlgebra`` so the
-    public API preserves its inconclusive outcome.
+    public API preserves Theorem 9.1's inconclusive outcome. Equality of the
+    complete supported canonical forms proves a uniform schema result.
     """
 
     left = _declarations(left_ast)
@@ -346,6 +363,7 @@ def _canonical_model(
     rename: Mapping[str, str],
     budget: list[int],
 ) -> tuple[Any, ...]:
+    """Build Proposition 6.5's objective-and-constraint comparison form."""
     _consume_budget(budget)
     objective = ast.get("objective")
     if not isinstance(objective, Mapping) or objective.get("type") not in {"minimize", "maximize"}:

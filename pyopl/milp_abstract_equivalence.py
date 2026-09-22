@@ -17,9 +17,9 @@ Paper correspondence
 The binding-aware graph construction implements Lemma 6.3 (Binding-aware
 renaming), and a successful graph match is the computational case of Theorem
 6.4 (Schema isomorphism is uniformly sound).  Algebraic fallback follows
-Proposition 6.5 (Sound symbolic normalization), Theorem 6.6 (Certified rewrite
+Proposition 6.6 (Sound symbolic normalization), Theorem 6.7 (Certified rewrite
 chains), and the projection results in Theorems 7.6 and 7.9.  Supplying data
-crosses from a schema claim to the instance claim of Proposition 6.8 (Correct
+crosses from a schema claim to the instance claim of Proposition 6.9 (Correct
 finite grounding).  The result levels are interpreted in Section 9.2 (Result
 labels) of the attached paper.
 """
@@ -396,7 +396,7 @@ def _validate_grounded_correspondence(
     left_auxiliaries: Collection[str],
     right_auxiliaries: Collection[str],
 ) -> None:
-    """Require named scalar columns after the grounding of Proposition 6.8."""
+    """Require named scalar columns after Proposition 6.9 finite grounding."""
     left_names = {variable.name for variable in left.variables}
     right_names = {variable.name for variable in right.variables}
     if (
@@ -508,7 +508,7 @@ def _lower_comparison_models(
     """Lower schemas symbolically, or ground supplied finite instances.
 
     Grounding is justified only at the supplied valuations, as stated by
-    Proposition 6.8 (Correct finite grounding); the returned flag preserves that scope in
+    Proposition 6.9 (Correct finite grounding); the returned flag preserves that scope in
     the reported proof steps.
     """
 

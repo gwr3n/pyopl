@@ -1,4 +1,19 @@
-"""Conservative index-domain validation for abstract model schemas."""
+"""Conservative index-domain validation for abstract model schemas.
+
+The PDF manuscript's Section 6 requires an indexed schema to be well-defined
+at every access reached by its binders. A definite out-of-domain access is an
+invalid schema; an access whose safety is not proved leaves uniform comparison
+undetermined. This module implements the conservative affine-interval preflight
+described there before the proof routes of Theorem 6.4 (Schema isomorphism is
+uniformly sound) and Proposition 6.5 (Sound indexed affine canonicalization).
+
+Binder ranges become symbolic intervals. Simple conjunctive filters and
+conditional branches tighten those intervals, after which each indexed access
+is checked against its declared range. ``unsafe`` records a proved range
+violation, while ``unknown`` records an unsupported domain or unresolved bound.
+Returning ``None`` means this preflight discharged its limited obligations; it
+is not a general proof of source-language well-definedness.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +52,11 @@ class _Interval:
 
 
 def find_index_safety_issue(ast: Mapping[str, Any]) -> IndexSafetyIssue | None:
-    """Return a definite index error before any unresolved safety obligation."""
+    """Apply Section 6's index-safety preflight to one schema AST.
+
+    Definite violations take precedence over unresolved obligations so callers
+    can reject an invalid schema rather than report an inconclusive comparison.
+    """
     declarations: dict[str, Mapping[str, Any]] = {}
     for declaration in ast.get("declarations", ()):
         if isinstance(declaration, Mapping) and isinstance(declaration.get("name"), str):
