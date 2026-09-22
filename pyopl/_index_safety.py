@@ -99,7 +99,7 @@ def _iterator_interval(
 ) -> _Interval | None:
     if not isinstance(domain, Mapping):
         return None
-    if domain.get("type") == "named_range":
+    if domain.get("type") in {"named_range", "named_range_dimension"}:
         name = domain.get("name")
         if not isinstance(name, str):
             return None
@@ -193,9 +193,15 @@ def _validate_access(
         return
     dimensions = zip(node.get("dimensions", ()), declaration.get("dimensions", ()))
     for dimension_number, (index, dimension) in enumerate(dimensions, 1):
-        declared = _range_interval(dimension, binders) if isinstance(dimension, Mapping) else None
+        declared = _iterator_interval(dimension, declarations, binders)
         actual = _expression_interval(index, binders)
         if declared is None:
+            issues.append(
+                IndexSafetyIssue(
+                    "unknown",
+                    f"cannot interpret declared range for index {dimension_number} of '{name}'",
+                )
+            )
             continue
         if actual is None:
             issues.append(

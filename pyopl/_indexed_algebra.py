@@ -308,7 +308,32 @@ def _mapped_declarations_match(
                     return False
             except UnsupportedAlgebra:
                 return False
+        if declaration.kind == "parameter" and not _mapped_parameter_definitions_match(
+            declaration.node, other.node, inverse
+        ):
+            return False
     return True
+
+
+def _mapped_parameter_definitions_match(
+    left: Mapping[str, Any], right: Mapping[str, Any], rename: Mapping[str, str]
+) -> bool:
+    left_has_value = "value" in left and left.get("value") is not None
+    right_has_value = "value" in right and right.get("value") is not None
+    if left_has_value != right_has_value:
+        return False
+    if not left_has_value:
+        return True
+    left_value = left.get("value")
+    right_value = right.get("value")
+    if isinstance(left_value, Mapping) or isinstance(right_value, Mapping):
+        try:
+            return _canonical_index(left_value, {}, {}, [100]) == _canonical_index(
+                right_value, rename, {}, [100]
+            )
+        except UnsupportedAlgebra:
+            return False
+    return left_value == right_value
 
 
 def _invert(mapping: Mapping[str, str]) -> dict[str, str]:

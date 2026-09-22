@@ -525,6 +525,36 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertIn("normalized indexed affine expressions", result.proof_steps)
         self.assertIn("lifted equality through alpha-normalized quantifiers", result.proof_steps)
 
+    def test_indexed_algebra_rejects_different_inline_parameter_definitions(self):
+        left = """
+            int N = 2;
+            range I = 1..N;
+            dvar float x[I];
+            minimize sum(i in I) x[i];
+            subject to {}
+        """
+        right = left.replace("int N = 2;", "int N = 3;")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.equivalent)
+        self.assertIn("no compatible indexed declaration mapping", result.reason)
+
+    def test_index_safety_requires_interpretable_named_set_domain(self):
+        model = """
+            {string} Products = {"A", "B"};
+            dvar float x[Products];
+            minimize sum(product in Products) x[product];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(model, model, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertFalse(result.equivalent)
+        self.assertIn("cannot interpret declared range", result.reason)
+
     def test_algebraic_mode_normalizes_pointwise_indexed_constraint(self):
         left = """
             int N = ...;
