@@ -31,7 +31,7 @@ except Exception:  # pragma: no cover
 
 # === Local imports ===
 from .gurobi_codegen import GurobiCodeGenerator
-from .index_safety import find_index_safety_issue
+from ._index_safety import find_index_safety_issue
 from .linear_problem import LinearProblem
 from .linear_problem_highs import export_linear_problem
 from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
