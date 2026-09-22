@@ -445,6 +445,153 @@ class AbstractEquivalenceTests(unittest.TestCase):
                 self.assertEqual(result.status, "unknown")
                 self.assertIsNone(result.counterexample)
 
+    def test_algebraic_mode_normalizes_nested_indexed_sums(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I) sum(j in I) 2 * (x[i][j] + 1);
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            dvar float value[Items][Items];
+            minimize sum(row in Items) sum(column in Items) (2 * value[row][column] + 2);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("alpha-normalized nested indexed binders", result.proof_steps)
+
+    def test_nested_indexed_shadowing_does_not_capture_outer_binder(self):
+        shadowed = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I) sum(i in I) x[i][i];
+            subject to {}
+        """
+        distinct = shadowed.replace("sum(i in I) x[i][i]", "sum(j in I) x[i][j]")
+
+        result = prove_abstract_equivalent(shadowed, distinct, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_multiple_shadowed_binders_receive_fresh_identities(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in I) sum(i in I, j in I) x[i][j];
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            dvar float value[Items][Items];
+            minimize sum(outerRow in Items, outerColumn in Items)
+                sum(innerRow in Items, innerColumn in Items) value[innerRow][innerColumn];
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+
+    def test_algebraic_mode_normalizes_filtered_indexed_sums(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            float a[I] = ...;
+            dvar float x[I];
+            minimize sum(i in I : i >= 1 && i <= N) a[i] * (x[i] + 1);
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            float coefficient[Items] = ...;
+            dvar float value[Items];
+            minimize sum(item in Items : item <= size && item >= 1)
+                (coefficient[item] * value[item] + coefficient[item]);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("canonicalized indexed quantifier filters", result.proof_steps)
+
+    def test_different_indexed_filters_remain_unknown(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I];
+            minimize sum(i in I : i >= 1) x[i];
+            subject to {}
+        """
+        right = left.replace("i >= 1", "i >= 2")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_algebraic_mode_preserves_nested_index_expressions(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in I) 2 * (x[i][j + 1] + 1);
+            subject to {}
+        """
+        right = """
+            int size = ...;
+            range Items = 1..size;
+            dvar float value[Items][Items];
+            minimize sum(row in Items, column in Items) (2 * value[row][column + 1] + 2);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "equivalent")
+        self.assertIn("preserved complete indexed access expressions", result.proof_steps)
+
+    def test_index_position_permutation_remains_unknown(self):
+        left = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I][I];
+            minimize sum(i in I, j in I) x[i][j];
+            subject to {}
+        """
+        right = left.replace("x[i][j];", "x[j][i];")
+
+        result = prove_abstract_equivalent(left, right, mode="algebraic")
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIsNone(result.counterexample)
+
+    def test_indexed_normalization_limit_reports_budget(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            dvar float x[I];
+            minimize sum(i in I) 2 * (x[i] + 1);
+            subject to {}
+        """
+
+        result = prove_abstract_equivalent(model, model, mode="algebraic", max_rewrite_iterations=0)
+
+        self.assertEqual(result.status, "unknown")
+        self.assertTrue(result.budget_exhausted)
+        self.assertEqual(result.termination, "budget_exhausted")
+
     def test_algebraic_mode_eliminates_arbitrary_affine_alias(self):
         left = """
             dvar float x;

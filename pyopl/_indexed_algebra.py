@@ -22,8 +22,8 @@ class Declaration:
 
 @dataclass(frozen=True)
 class IndexTerm:
-    kind: Literal["binder"]
-    value: int
+    kind: Literal["binder", "number", "declaration", "arithmetic", "negate"]
+    value: Any
 
 
 @dataclass(frozen=True)
@@ -41,7 +41,8 @@ class IndexedAffineExpression:
 @dataclass(frozen=True)
 class QuantifiedExpression:
     domains: tuple[str, ...]
-    body: tuple[sp.Expr, tuple[tuple[DecisionAtom, sp.Expr], ...]]
+    filter: Any
+    body: tuple[sp.Expr, tuple[tuple[DecisionAtom, sp.Expr], ...]] | QuantifiedExpression
 
 
 def prove_indexed_equivalence(
@@ -52,6 +53,7 @@ def prove_indexed_equivalence(
     variable_mapping: Mapping[str, str] | None = None,
     left_auxiliaries: Collection[str] = (),
     right_auxiliaries: Collection[str] = (),
+    max_rewrite_iterations: int = 12,
 ) -> AlgebraicProof | None:
     """Prove the supported indexed affine schemas equal, or decline the route.
 
@@ -68,23 +70,38 @@ def prove_indexed_equivalence(
         return None
     if left_auxiliaries or right_auxiliaries:
         raise UnsupportedAlgebra("indexed algebra does not support auxiliary partitions")
+    if max_rewrite_iterations <= 0:
+        return AlgebraicProof(
+            "unknown",
+            "symbolically_normalized",
+            "indexed normalization rewrite limit reached",
+            budget_exhausted=True,
+        )
 
     candidates = _declaration_mappings(left, right, parameter_mapping or {}, variable_mapping or {})
     if not candidates:
         raise UnsupportedAlgebra("no compatible indexed declaration mapping found")
     for mapping in candidates[:256]:
         try:
-            if _canonical_model(left_ast, left, {}) == _canonical_model(right_ast, right, _invert(mapping)):
+            budget = [max_rewrite_iterations * 100]
+            if _canonical_model(left_ast, left, {}, budget) == _canonical_model(right_ast, right, _invert(mapping), budget):
+                steps = [
+                    "alpha-normalized indexed declarations and binders",
+                    "normalized indexed affine expressions",
+                    "normalized pointwise affine constraints",
+                    "lifted equality through alpha-normalized quantifiers",
+                ]
+                if _contains_nested_sum(left_ast) or _contains_nested_sum(right_ast):
+                    steps.append("alpha-normalized nested indexed binders")
+                if _contains_filter(left_ast) or _contains_filter(right_ast):
+                    steps.append("canonicalized indexed quantifier filters")
+                if _contains_complex_index(left_ast) or _contains_complex_index(right_ast):
+                    steps.append("preserved complete indexed access expressions")
                 return AlgebraicProof(
                     "equivalent",
                     "symbolically_normalized",
                     "indexed affine schemas have equal canonical forms",
-                    steps=(
-                        "alpha-normalized indexed declarations and binders",
-                        "normalized indexed affine expressions",
-                        "normalized pointwise affine constraints",
-                        "lifted equality through alpha-normalized quantifiers",
-                    ),
+                    steps=tuple(steps),
                     variable_mapping=tuple(
                         sorted((name, target) for name, target in mapping.items() if left[name].kind == "variable")
                     ),
@@ -92,7 +109,14 @@ def prove_indexed_equivalence(
                         sorted((name, target) for name, target in mapping.items() if left[name].kind == "parameter")
                     ),
                 )
-        except UnsupportedAlgebra:
+        except UnsupportedAlgebra as exc:
+            if "rewrite limit" in str(exc):
+                return AlgebraicProof(
+                    "unknown",
+                    "symbolically_normalized",
+                    str(exc),
+                    budget_exhausted=True,
+                )
             continue
     if len(candidates) > 256:
         raise UnsupportedAlgebra("indexed declaration mapping search limit reached")
@@ -195,15 +219,22 @@ def _invert(mapping: Mapping[str, str]) -> dict[str, str]:
 
 
 def _canonical_model(
-    ast: Mapping[str, Any], declarations: Mapping[str, Declaration], rename: Mapping[str, str]
+    ast: Mapping[str, Any],
+    declarations: Mapping[str, Declaration],
+    rename: Mapping[str, str],
+    budget: list[int],
 ) -> tuple[Any, ...]:
+    _consume_budget(budget)
     objective = ast.get("objective")
     if not isinstance(objective, Mapping) or objective.get("type") not in {"minimize", "maximize"}:
         raise UnsupportedAlgebra("unsupported indexed objective")
-    objective_form = (objective.get("type"), _canonical_expression(objective.get("expression"), declarations, rename, {}))
+    objective_form = (
+        objective.get("type"),
+        _canonical_expression(objective.get("expression"), declarations, rename, {}, budget),
+    )
     constraints = tuple(
         sorted(
-            (_canonical_constraint(node, declarations, rename, {}) for node in ast.get("constraints", [])),
+            (_canonical_constraint(node, declarations, rename, {}, budget) for node in ast.get("constraints", [])),
             key=repr,
         )
     )
@@ -215,10 +246,13 @@ def _canonical_expression(
     declarations: Mapping[str, Declaration],
     rename: Mapping[str, str],
     binders: Mapping[str, int],
+    budget: list[int],
+    next_binder_id: int = 0,
 ) -> Any:
+    _consume_budget(budget)
     if isinstance(node, Mapping) and node.get("type") == "sum":
-        return _quantified(node, declarations, rename, binders)
-    return _freeze_affine(_affine(node, declarations, rename, binders))
+        return _quantified(node, declarations, rename, binders, budget, next_binder_id)
+    return _freeze_affine(_affine(node, declarations, rename, binders, budget))
 
 
 def _quantified(
@@ -226,9 +260,10 @@ def _quantified(
     declarations: Mapping[str, Declaration],
     rename: Mapping[str, str],
     outer_binders: Mapping[str, int],
+    budget: list[int],
+    next_binder_id: int,
 ) -> QuantifiedExpression:
-    if node.get("index_constraint") is not None:
-        raise UnsupportedAlgebra("indexed algebra does not support filtered quantifiers")
+    _consume_budget(budget)
     iterators = node.get("iterators")
     if not isinstance(iterators, list) or not iterators:
         raise UnsupportedAlgebra("indexed quantifier requires binders")
@@ -244,11 +279,95 @@ def _quantified(
         if not isinstance(domain_name, str):
             raise UnsupportedAlgebra("indexed binder domain must be named")
         domains.append(rename.get(domain_name, domain_name))
-        binders[str(iterator["iterator"])] = len(binders)
+        binders[str(iterator["iterator"])] = next_binder_id
+        next_binder_id += 1
+    predicate = _canonical_predicate(node.get("index_constraint"), rename, binders)
     body = node.get("expression")
-    if isinstance(body, Mapping) and body.get("type") in {"sum", "forall_constraint"}:
-        raise UnsupportedAlgebra("indexed algebra does not support nested quantifiers")
-    return QuantifiedExpression(tuple(domains), _freeze_affine(_affine(body, declarations, rename, binders)))
+    if isinstance(body, Mapping) and body.get("type") == "sum":
+        return QuantifiedExpression(
+            tuple(domains), predicate, _quantified(body, declarations, rename, binders, budget, next_binder_id)
+        )
+    if isinstance(body, Mapping) and body.get("type") == "forall_constraint":
+        raise UnsupportedAlgebra("indexed algebra does not support nested forall constraints")
+    return QuantifiedExpression(
+        tuple(domains), predicate, _freeze_affine(_affine(body, declarations, rename, binders, budget))
+    )
+
+
+def _contains_nested_sum(node: Any, inside_sum: bool = False) -> bool:
+    if isinstance(node, Mapping):
+        is_sum = node.get("type") == "sum"
+        if inside_sum and is_sum:
+            return True
+        return any(_contains_nested_sum(value, inside_sum or is_sum) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_nested_sum(value, inside_sum) for value in node)
+    return False
+
+
+def _contains_filter(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") in {"sum", "forall_constraint"} and node.get("index_constraint") is not None:
+            return True
+        return any(_contains_filter(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_filter(value) for value in node)
+    return False
+
+
+def _canonical_predicate(node: Any, rename: Mapping[str, str], binders: Mapping[str, int]) -> Any:
+    if node is None:
+        return True
+    if not isinstance(node, Mapping):
+        raise UnsupportedAlgebra("malformed indexed quantifier filter")
+    if node.get("type") == "parenthesized_expression":
+        return _canonical_predicate(node.get("expression"), rename, binders)
+    if node.get("type") == "and":
+        operands = _predicate_conjuncts(node, rename, binders)
+        return "and", tuple(sorted(operands, key=repr))
+    if node.get("type") == "binop" and node.get("op") in {"<", "<=", "==", "!=", ">=", ">"}:
+        return (
+            "compare",
+            node.get("op"),
+            _canonical_predicate_term(node.get("left"), rename, binders),
+            _canonical_predicate_term(node.get("right"), rename, binders),
+        )
+    raise UnsupportedAlgebra("indexed algebra supports comparison and conjunction filters only")
+
+
+def _predicate_conjuncts(node: Mapping[str, Any], rename: Mapping[str, str], binders: Mapping[str, int]) -> list[Any]:
+    operands: list[Any] = []
+    for child in (node.get("left"), node.get("right")):
+        if isinstance(child, Mapping) and child.get("type") == "and":
+            operands.extend(_predicate_conjuncts(child, rename, binders))
+        else:
+            operands.append(_canonical_predicate(child, rename, binders))
+    return operands
+
+
+def _canonical_predicate_term(node: Any, rename: Mapping[str, str], binders: Mapping[str, int]) -> Any:
+    if not isinstance(node, Mapping):
+        raise UnsupportedAlgebra("malformed indexed filter term")
+    node_type = node.get("type")
+    if node_type == "parenthesized_expression":
+        return _canonical_predicate_term(node.get("expression"), rename, binders)
+    if node_type == "number":
+        return "number", str(node.get("value"))
+    if node_type == "name" and isinstance(node.get("value"), str):
+        name = str(node["value"])
+        if name in binders:
+            return "binder", binders[name]
+        return "declaration", rename.get(name, name)
+    if node_type == "unary" and node.get("op") == "-":
+        return "negate", _canonical_predicate_term(node.get("operand"), rename, binders)
+    if node_type == "binop" and node.get("op") in {"+", "-", "*"}:
+        return (
+            "arithmetic",
+            node.get("op"),
+            _canonical_predicate_term(node.get("left"), rename, binders),
+            _canonical_predicate_term(node.get("right"), rename, binders),
+        )
+    raise UnsupportedAlgebra("unsupported indexed filter term")
 
 
 def _canonical_constraint(
@@ -256,7 +375,9 @@ def _canonical_constraint(
     declarations: Mapping[str, Declaration],
     rename: Mapping[str, str],
     binders: Mapping[str, int],
+    budget: list[int],
 ) -> Any:
+    _consume_budget(budget)
     if not isinstance(node, Mapping):
         raise UnsupportedAlgebra("malformed indexed constraint")
     if node.get("type") == "forall_constraint":
@@ -266,7 +387,14 @@ def _canonical_constraint(
             if not isinstance(constraints, list) or len(constraints) != 1:
                 raise UnsupportedAlgebra("indexed algebra supports one constraint per forall")
             body = constraints[0]
-        quantifier = _quantified({**node, "expression": _constraint_residual(body)}, declarations, rename, binders)
+        quantifier = _quantified(
+            {**node, "expression": _constraint_residual(body)},
+            declarations,
+            rename,
+            binders,
+            budget,
+            max(binders.values(), default=-1) + 1,
+        )
         return "forall", _constraint_sense(body), quantifier
     _constraint_sense(node)
     left = node.get("left")
@@ -277,13 +405,13 @@ def _canonical_constraint(
         return (
             "constraint",
             "=" if node.get("op") == "==" else "<=",
-            _canonical_expression(left, declarations, rename, binders),
-            _canonical_expression(right, declarations, rename, binders),
+            _canonical_expression(left, declarations, rename, binders, budget),
+            _canonical_expression(right, declarations, rename, binders, budget),
         )
     return (
         "constraint",
         _constraint_sense(node),
-        _freeze_affine(_affine(_constraint_residual(node), declarations, rename, binders)),
+        _freeze_affine(_affine(_constraint_residual(node), declarations, rename, binders, budget)),
     )
 
 
@@ -311,12 +439,14 @@ def _affine(
     declarations: Mapping[str, Declaration],
     rename: Mapping[str, str],
     binders: Mapping[str, int],
+    budget: list[int],
 ) -> IndexedAffineExpression:
+    _consume_budget(budget)
     if not isinstance(node, Mapping):
         raise UnsupportedAlgebra("malformed indexed expression")
     node_type = node.get("type")
     if node_type == "parenthesized_expression":
-        return _affine(node.get("expression"), declarations, rename, binders)
+        return _affine(node.get("expression"), declarations, rename, binders, budget)
     if node_type == "number":
         return IndexedAffineExpression(sp.Rational(str(node.get("value"))), {})
     if node_type in {"name", "indexed_name"}:
@@ -324,7 +454,7 @@ def _affine(
         if not isinstance(name, str) or name not in declarations:
             raise UnsupportedAlgebra(f"unknown indexed symbol: {name}")
         declaration = declarations[name]
-        indices = tuple(_index_term(index, binders) for index in node.get("dimensions", ()))
+        indices = tuple(_index_term(index, binders, rename) for index in node.get("dimensions", ()))
         if len(indices) != len(declaration.dimensions):
             raise UnsupportedAlgebra(f"indexed rank mismatch for {name}")
         canonical_name = rename.get(name, name)
@@ -334,11 +464,11 @@ def _affine(
             raise UnsupportedAlgebra("domain declarations cannot appear as arithmetic values")
         return IndexedAffineExpression(_coefficient_atom(canonical_name, indices), {})
     if node_type == "unary" and node.get("op") == "-":
-        return _scale(_affine(node.get("operand"), declarations, rename, binders), -1)
+        return _scale(_affine(node.get("operand"), declarations, rename, binders, budget), -1)
     if node_type != "binop":
         raise UnsupportedAlgebra(f"unsupported indexed expression: {node_type}")
-    left = _affine(node.get("left"), declarations, rename, binders)
-    right = _affine(node.get("right"), declarations, rename, binders)
+    left = _affine(node.get("left"), declarations, rename, binders, budget)
+    right = _affine(node.get("right"), declarations, rename, binders, budget)
     operator = node.get("op")
     if operator == "+":
         return _add(left, right)
@@ -357,17 +487,55 @@ def _affine(
     raise UnsupportedAlgebra(f"unsupported indexed operator: {operator}")
 
 
-def _index_term(node: Any, binders: Mapping[str, int]) -> IndexTerm:
-    if not isinstance(node, Mapping) or node.get("type") != "name_reference_index":
-        raise UnsupportedAlgebra("indexed algebra supports direct binder indices only")
-    name = node.get("name")
-    if not isinstance(name, str) or name not in binders:
-        raise UnsupportedAlgebra(f"unbound indexed iterator: {name}")
-    return IndexTerm("binder", binders[name])
+def _index_term(node: Any, binders: Mapping[str, int], rename: Mapping[str, str]) -> IndexTerm:
+    if not isinstance(node, Mapping):
+        raise UnsupportedAlgebra("malformed indexed access expression")
+    node_type = node.get("type")
+    if node_type == "parenthesized_expression":
+        return _index_term(node.get("expression"), binders, rename)
+    if node_type == "name_reference_index":
+        name = node.get("name")
+        if not isinstance(name, str) or name not in binders:
+            raise UnsupportedAlgebra(f"unbound indexed iterator: {name}")
+        return IndexTerm("binder", binders[name])
+    if node_type == "name" and isinstance(node.get("value"), str):
+        name = str(node["value"])
+        if name in binders:
+            return IndexTerm("binder", binders[name])
+        return IndexTerm("declaration", rename.get(name, name))
+    if node_type == "number":
+        return IndexTerm("number", str(node.get("value")))
+    if node_type == "unary" and node.get("op") == "-":
+        return IndexTerm("negate", _index_term(node.get("operand"), binders, rename))
+    if node_type == "binop" and node.get("op") in {"+", "-", "*"}:
+        return IndexTerm(
+            "arithmetic",
+            (
+                node.get("op"),
+                _index_term(node.get("left"), binders, rename),
+                _index_term(node.get("right"), binders, rename),
+            ),
+        )
+    raise UnsupportedAlgebra("unsupported indexed access expression")
+
+
+def _contains_complex_index(node: Any) -> bool:
+    if isinstance(node, Mapping):
+        if node.get("type") == "indexed_name":
+            dimensions = node.get("dimensions", ())
+            if any(
+                not isinstance(dimension, Mapping) or dimension.get("type") != "name_reference_index"
+                for dimension in dimensions
+            ):
+                return True
+        return any(_contains_complex_index(value) for value in node.values())
+    if isinstance(node, list):
+        return any(_contains_complex_index(value) for value in node)
+    return False
 
 
 def _coefficient_atom(name: str, indices: tuple[IndexTerm, ...]) -> sp.Symbol:
-    suffix = "".join(f"[{index.value}]" for index in indices)
+    suffix = "".join(f"[{index!r}]" for index in indices)
     return sp.Symbol(f"parameter:{name}{suffix}", real=True)
 
 
@@ -414,6 +582,12 @@ def _canonical_scalar(node: Any, rename: Mapping[str, str]) -> Any:
     if node.get("type") == "name" and isinstance(node.get("value"), str):
         return "name", rename.get(str(node["value"]), str(node["value"]))
     raise UnsupportedAlgebra("indexed domain bounds must be scalar names or numbers")
+
+
+def _consume_budget(budget: list[int]) -> None:
+    budget[0] -= 1
+    if budget[0] < 0:
+        raise UnsupportedAlgebra("indexed normalization rewrite limit reached")
 
 
 __all__ = [

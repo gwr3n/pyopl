@@ -298,6 +298,7 @@ def _prove_algebraic_models(
                     variable_mapping=variable_mapping,
                     left_auxiliaries=left_auxiliaries,
                     right_auxiliaries=right_auxiliaries,
+                    max_rewrite_iterations=max_rewrite_iterations,
                 )
             if indexed_proof is not None:
                 return _indexed_algebraic_public_result(indexed_proof, context)
@@ -349,7 +350,8 @@ def _indexed_algebraic_public_result(
         arithmetic="exact_on_parsed_values",
         variable_mapping=proof.variable_mapping or context.variable_mapping,
         parameter_mapping=proof.parameter_mapping or context.parameter_mapping,
-        termination="completed",
+        termination="budget_exhausted" if proof.budget_exhausted else "completed",
+        budget_exhausted=proof.budget_exhausted,
     )
 
 
