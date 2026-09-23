@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from pyopl._index_safety import find_index_safety_issue
 from pyopl.milp_abstract_equivalence import (
     AbstractEquivalenceResult,
     compare_abstract,
@@ -586,6 +587,44 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertFalse(result.equivalent)
         self.assertIn("cannot interpret declared range", result.reason)
+
+    def test_index_safety_narrows_negated_equality_at_range_endpoint(self):
+        def number(value):
+            return {"type": "number", "value": value, "sem_type": "int"}
+
+        iterator = {"type": "name", "value": "t", "sem_type": "int"}
+        ast = {
+            "declarations": [
+                {"type": "range_declaration_inline", "name": "T", "start": number(1), "end": number(6)},
+                {
+                    "type": "dvar_indexed",
+                    "name": "inventory",
+                    "dimensions": [{"type": "named_range_dimension", "name": "T"}],
+                },
+            ],
+            "constraints": [
+                {
+                    "type": "forall_constraint",
+                    "iterators": [{"iterator": "t", "range": {"type": "named_range", "name": "T"}}],
+                    "index_constraint": {
+                        "type": "not",
+                        "value": {"type": "binop", "op": "==", "left": iterator, "right": number(1)},
+                    },
+                    "constraint": {
+                        "type": "constraint",
+                        "op": ">=",
+                        "left": {
+                            "type": "indexed_name",
+                            "name": "inventory",
+                            "dimensions": [{"type": "binop", "op": "-", "left": iterator, "right": number(1)}],
+                        },
+                        "right": number(0),
+                    },
+                }
+            ],
+        }
+
+        self.assertIsNone(find_index_safety_issue(ast))
 
     def test_algebraic_mode_normalizes_pointwise_indexed_constraint(self):
         left = """

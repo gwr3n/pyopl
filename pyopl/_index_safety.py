@@ -155,6 +155,9 @@ def _expand_binders(expression: _Affine, binders: Mapping[str, _Interval], *, up
 def _apply_filter(node: Any, binders: dict[str, _Interval]) -> None:
     if not isinstance(node, Mapping):
         return
+    if node.get("type") == "not":
+        _apply_negated_filter(node.get("value"), binders)
+        return
     if node.get("type") == "and" or (node.get("type") == "binop" and node.get("op") in {"&&", "and"}):
         _apply_filter(node.get("left"), binders)
         _apply_filter(node.get("right"), binders)
@@ -192,10 +195,28 @@ def _apply_negated_filter(node: Any, binders: dict[str, _Interval]) -> None:
     operator = node.get("op")
     if not isinstance(operator, str):
         return
+    if operator == "==":
+        _exclude_endpoint(node.get("left"), node.get("right"), binders)
+        _exclude_endpoint(node.get("right"), node.get("left"), binders)
+        return
     negated_op = {"<": ">=", "<=": ">", ">": "<=", ">=": "<"}.get(operator)
     if negated_op is None:
         return
     _apply_filter({**node, "op": negated_op}, binders)
+
+
+def _exclude_endpoint(iterator: Any, excluded: Any, binders: dict[str, _Interval]) -> None:
+    iterator_name = _name(iterator)
+    if iterator_name not in binders:
+        return
+    excluded_value = _affine(excluded, binders)
+    if excluded_value is None:
+        return
+    interval = binders[iterator_name]
+    if excluded_value == interval.lower:
+        binders[iterator_name] = _Interval(interval.lower.add(_Affine((), 1)), interval.upper)
+    elif excluded_value == interval.upper:
+        binders[iterator_name] = _Interval(interval.lower, interval.upper.add(_Affine((), -1)))
 
 
 def _validate_access(
