@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Generate nested Gurobi `forall` loops for dependent iterator ranges, avoiding unbound iterator names in models such as BM and PM.
+- Preserve precise comparison-option and report types in the MILP refusal-check runner.
+
 ### Changed
 
 ### Removed

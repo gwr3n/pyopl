@@ -93,6 +93,25 @@ class TestPyOPL(unittest.TestCase):
         self.assertIn("model.optimize(_pyopl_progress_callback)", code)
         self.assertIn("_pyopl_progress_callback = None", code)
 
+    def test_gurobi_codegen_nests_dependent_forall_ranges(self):
+        model = """
+        int N = 4;
+        dvar boolean x[1..N][1..N][1..N];
+        minimize sum(i in 1..N, j in i..N, k in j..N) x[i][j][k];
+        subject to {
+          forall(i in 1..N, j in i..N, k in j..N)
+            x[i][j][k] <= 1;
+        }
+        """
+
+        _ast, code, _data = OPLCompiler().compile_model(model, solver="gurobi")
+
+        self.assertIn(
+            "for i in range(1, N + 1):\n" "    for j in range(i, N + 1):\n" "        for k in range(j, N + 1):",
+            code,
+        )
+        self.assertNotIn("itertools.product(range(1, N + 1), range(i, N + 1)", code)
+
 
 class TestPyOPLLexer(TestPyOPL):
     def test_compiler_line_reporting_masks_details_but_keeps_lineno(self):

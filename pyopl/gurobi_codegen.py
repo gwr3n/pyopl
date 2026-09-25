@@ -2382,8 +2382,9 @@ class GurobiCodeGenerator:
         iterators = constraint_node["iterators"]
         index_constraint = constraint_node.get("index_constraint")
         loop_vars, loop_ranges = self._extract_forall_loops(iterators, current_iterators)
-        self._add_code_line(self._construct_loop_header(loop_vars, loop_ranges))
-        self.indent_level += 1
+        for loop_var, loop_range in zip(loop_vars, loop_ranges):
+            self._add_code_line(f"for {loop_var} in {loop_range}:")
+            self.indent_level += 1
         new_iterators = current_iterators.copy()
         for v in loop_vars:
             new_iterators[v] = v
@@ -2405,7 +2406,7 @@ class GurobiCodeGenerator:
             self._active_iterator_ranges = previous_active_ranges
         if index_constraint is not None:
             self.indent_level -= 1
-        self.indent_level -= 1
+        self.indent_level -= len(loop_vars)
 
     def _extract_forall_loops(self, iterators, current_iterators):
         """Helper to extract loop variables and ranges for forall constraints."""
