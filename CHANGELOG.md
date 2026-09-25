@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+### Changed
+
+### Removed
+
+## [v2.6.2] - 2026-09-26
+
+### Added
+
+### Fixed
+
+- Restore GenAI cost estimation by loading LiteLLM pricing from its stable main branch.
 - Generate nested Gurobi `forall` loops for dependent iterator ranges, avoiding unbound iterator names in models such as BM and PM.
 - Preserve precise comparison-option and report types in the MILP refusal-check runner.
 
