@@ -1828,7 +1828,17 @@ class GurobiCodeGenerator:
     def _decl_dvar(self, decl):
         name = decl["name"]
         var_type = decl["var_type"]
-        if var_type == "boolean":
+        if "lower_bound" in decl or "upper_bound" in decl:
+            vtype = {
+                "int": "GRB.INTEGER",
+                "int+": "GRB.INTEGER",
+                "float": "GRB.CONTINUOUS",
+                "float+": "GRB.CONTINUOUS",
+            }.get(var_type)
+            type_arg = "" if vtype is None else f"vtype={vtype}, "
+            bound_args = self._decl_dvar_bound_args(decl)
+            self._add_code_line(f"{name} = model.addVar({type_arg}name='{name}'{bound_args})")
+        elif var_type == "boolean":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}')")
         elif var_type == "int+":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.INTEGER, name='{name}', lb=0)")

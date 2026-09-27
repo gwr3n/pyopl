@@ -362,6 +362,63 @@ class TestPyOPLLexer(TestPyOPL):
 
 
 class TestPyOPLParser(TestPyOPL):
+    def test_explicit_dvar_domains_parse_for_scalar_and_indexed_variables(self):
+        model = """
+            int lower = -2;
+            int upper = 8;
+            range I = 1..3;
+            dvar int scalar in lower..upper;
+            dvar float indexed[I] in lower / 2..upper + 0.5;
+            dvar int dependent[i in I] in lower + i..upper - i;
+            minimize scalar + sum(i in I) (indexed[i] + dependent[i]);
+            subject to {}
+        """
+
+        ast = OPLParser().parse(OPLLexer().tokenize(model))
+        declarations = {declaration.get("name"): declaration for declaration in ast["declarations"]}
+
+        scalar = declarations["scalar"]
+        self.assertEqual(scalar["type"], "dvar")
+        self.assertEqual(scalar["lower_bound"], {"type": "name", "value": "lower", "sem_type": "int"})
+        self.assertEqual(scalar["upper_bound"], {"type": "name", "value": "upper", "sem_type": "int"})
+
+        indexed = declarations["indexed"]
+        self.assertEqual(indexed["type"], "dvar_indexed")
+        self.assertEqual(indexed["dimensions"][0]["name"], "I")
+        self.assertEqual(indexed["lower_bound"]["type"], "binop")
+        self.assertEqual(indexed["upper_bound"]["type"], "binop")
+
+        dependent = declarations["dependent"]
+        self.assertEqual(dependent["type"], "dvar_indexed")
+        self.assertEqual(dependent["iterators"][0]["iterator"], "i")
+        self.assertEqual(dependent["lower_bound"]["type"], "binop")
+        self.assertEqual(dependent["upper_bound"]["type"], "binop")
+
+    def test_explicit_dvar_domains_accept_all_numeric_dvar_types(self):
+        for var_type in ("int", "int+", "float", "float+"):
+            with self.subTest(var_type=var_type):
+                model = f"""
+                    dvar {var_type} x in -1..2;
+                    minimize x;
+                    subject to {{}}
+                """
+
+                declaration = OPLParser().parse(OPLLexer().tokenize(model))["declarations"][0]
+
+                self.assertEqual(declaration["var_type"], var_type)
+                self.assertEqual(declaration["lower_bound"]["type"], "uminus")
+                self.assertEqual(declaration["upper_bound"], {"type": "number", "value": 2, "sem_type": "int"})
+
+    def test_boolean_dvar_rejects_explicit_domain(self):
+        model = """
+            dvar boolean x in 0..1;
+            minimize x;
+            subject to {}
+        """
+
+        with self.assertRaisesRegex(SemanticError, "Boolean decision variables have the fixed domain"):
+            OPLParser().parse(OPLLexer().tokenize(model))
+
     def test_indexed_access_can_select_an_index(self):
         model = """
             range I = 1..2;

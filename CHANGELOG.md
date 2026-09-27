@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support explicit interval domains on scalar and indexed numeric decision variables, including parameter-valued and iterator-dependent bounds.
+
 ### Fixed
 
 ### Changed

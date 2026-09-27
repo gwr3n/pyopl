@@ -1707,11 +1707,31 @@ class OPLParser(Parser):
             lineno=lineno,
         )
 
+    def _validate_dvar_domain(self, var_type, lineno):
+        if var_type == "boolean":
+            raise SemanticError(
+                "Boolean decision variables have the fixed domain {0, 1} and cannot declare an explicit domain.",
+                lineno=lineno,
+            )
+
     @_('DVAR type NAME ";"')  # type: ignore
     def declaration(self, p):
         self._validate_dvar_type(p.type, p.lineno)
         self.symbol_table.add_symbol(p.NAME, p.type, is_dvar=True, lineno=p.lineno)
         return {"type": "dvar", "var_type": p.type, "name": p.NAME}
+
+    @_('DVAR type NAME IN expression DOTDOT expression ";"')  # type: ignore
+    def declaration(self, p):
+        self._validate_dvar_type(p.type, p.lineno)
+        self._validate_dvar_domain(p.type, p.lineno)
+        self.symbol_table.add_symbol(p.NAME, p.type, is_dvar=True, lineno=p.lineno)
+        return {
+            "type": "dvar",
+            "var_type": p.type,
+            "name": p.NAME,
+            "lower_bound": p.expression0,
+            "upper_bound": p.expression1,
+        }
 
     @_('DVAR type NAME indexed_dimensions ";"')  # type: ignore
     def declaration(self, p):
@@ -1741,10 +1761,42 @@ class OPLParser(Parser):
             "dimensions": processed_dimensions,
         }
 
+    @_('DVAR type NAME indexed_dimensions IN expression DOTDOT expression ";"')  # type: ignore
+    def declaration(self, p):
+        self._validate_dvar_type(p.type, p.lineno)
+        self._validate_dvar_domain(p.type, p.lineno)
+        processed_dimensions = [
+            self._normalize_declaration_dimension(
+                dim_spec,
+                p.lineno,
+                wrap_range_bounds=True,
+                undeclared_message="Undeclared symbol '{name}' used as dimension.",
+                number_literal_message="Single number index '{value}' not allowed in variable declaration dimensions. Use 'range' like [1..N] or a named 'set'/'range'.",
+            )
+            for dim_spec in p.indexed_dimensions
+        ]
+
+        self.symbol_table.add_symbol(
+            p.NAME,
+            p.type,
+            dimensions=processed_dimensions,
+            is_dvar=True,
+            lineno=p.lineno,
+        )
+        return {
+            "type": "dvar_indexed",
+            "var_type": p.type,
+            "name": p.NAME,
+            "dimensions": processed_dimensions,
+            "lower_bound": p.expression0,
+            "upper_bound": p.expression1,
+        }
+
     @_('DVAR type NAME dexpr_index_headers IN expression DOTDOT expression ";"')  # type: ignore
     def declaration(self, p):
         try:
             self._validate_dvar_type(p.type, p.lineno)
+            self._validate_dvar_domain(p.type, p.lineno)
         except SemanticError:
             self._cleanup_iterator_header(p.dexpr_index_headers)
             raise

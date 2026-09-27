@@ -74,6 +74,14 @@ Decision variables are the unknowns to be determined by the optimizer. They can 
     ```
     Declares `x` as a continuous variable, `y` as an integer variable, `z` as a binary variable, and `yplus`, `xpos` as non-negative variables.
 
+  - **Explicit interval domain:**
+    ```opl
+    dvar int quantity in 0..capacity;
+    dvar float flow[Arcs] in minFlow..maxFlow;
+    dvar int load[i in Items] in lower[i]..upper[i];
+    ```
+    Numeric decision variables can declare lower and upper bounds with `in lower..upper`. Bounds may be parameter expressions, and iterator-indexed bounds may refer to the declaration iterator. Boolean variables cannot declare an explicit interval because their domain is fixed to `{0, 1}`.
+
 - **Indexed Decision Variable:**
     ```opl
     dvar float flow[1..2][1..3];
