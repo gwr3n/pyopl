@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Rename the bounded-integer equivalence level from `presburger_proven` to `finite_domain_proven` to reflect its exhaustive finite-domain method accurately.
+
 ### Removed
 
 ## [v2.6.2] - 2026-09-26

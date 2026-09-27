@@ -40,8 +40,7 @@ Paper correspondence
     row implication), Proposition 7.5 (Equality of affine objectives on a feasible
     set), and Theorem 7.6 (Projected polyhedral equivalence) justify comparison.
 * Theorem 7.9 (Complete finite-domain comparison) justifies the integer value
-    tables. The legacy level ``presburger_proven`` names this bounded method,
-    not a general Presburger decision procedure.
+    tables and the ``finite_domain_proven`` result level.
 * Section 8 separates numerical discovery from exact checking. Theorem 9.1
     (Soundness of the layered exact procedure) and Sections 9.1--9.2 specify
     outcome semantics and the evidence required to interpret result labels.
@@ -142,7 +141,7 @@ class AlgebraicProof:
         "symbolically_normalized",
         "rewrite_certified",
         "polyhedrally_proven",
-        "presburger_proven",
+        "finite_domain_proven",
     ]
     reason: str
     steps: tuple[str, ...] = ()
@@ -569,7 +568,7 @@ def _prove_mapped_models(
         ):
             return AlgebraicProof(
                 "unknown",
-                "presburger_proven",
+                "finite_domain_proven",
                 "mixed integer/continuous projection requires a quantified MILP backend",
                 tuple(dict.fromkeys(steps)),
             )
@@ -1339,14 +1338,14 @@ def _prove_finite_integer_models(
     if left_points is None or right_points is None:
         return AlgebraicProof(
             "unknown",
-            "presburger_proven",
+            "finite_domain_proven",
             "integer projection requires finite constant bounds with at most 100000 assignments",
             tuple(dict.fromkeys(steps)),
         )
     if left_points == right_points:
         return AlgebraicProof(
             "equivalent",
-            "presburger_proven",
+            "finite_domain_proven",
             "bounded integer feasible assignments and objective values are identical",
             tuple(dict.fromkeys(steps + ("exhaustively eliminated bounded integer auxiliaries",))),
         )
@@ -1354,7 +1353,7 @@ def _prove_finite_integer_models(
     rendered_assignment = ", ".join(f"{name}={value}" for name, value in assignment)
     return AlgebraicProof(
         "different",
-        "presburger_proven",
+        "finite_domain_proven",
         "bounded integer projections differ",
         tuple(dict.fromkeys(steps + ("exhaustively eliminated bounded integer auxiliaries",))),
         counterexample=f"projected assignment/objective occurs only in {'left' if (assignment, objective) in left_points else 'right'} value table: {rendered_assignment}; objective={objective}",

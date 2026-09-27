@@ -51,7 +51,7 @@ AbstractEquivalenceLevel = Literal[
     "symbolically_normalized",
     "rewrite_certified",
     "polyhedrally_proven",
-    "presburger_proven",
+    "finite_domain_proven",
 ]
 AbstractModelInput = str | Mapping[str, Any]
 

@@ -347,7 +347,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
         from pyopl._abstract_algebra import AlgebraicProof
 
         model = " ".join(f"dvar int decision{index};" for index in range(6)) + " minimize decision0; subject to {}"
-        rejection = AlgebraicProof("different", "presburger_proven", "candidate rejected")
+        rejection = AlgebraicProof("different", "finite_domain_proven", "candidate rejected")
         with patch("pyopl._abstract_algebra._prove_candidate_mapping", return_value=rejection) as attempt:
             result = prove_abstract_equivalent(model, model, mode="algebraic")
         self.assertEqual(result.status, "unknown")
@@ -1181,7 +1181,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "equivalent")
-        self.assertEqual(result.level, "presburger_proven")
+        self.assertEqual(result.level, "finite_domain_proven")
 
     def test_algebraic_mode_preserves_integer_alias_divisibility(self):
         left = """
@@ -1205,7 +1205,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
         )
 
         self.assertEqual(result.status, "different")
-        self.assertEqual(result.level, "presburger_proven")
+        self.assertEqual(result.level, "finite_domain_proven")
         self.assertIn("x=1", result.counterexample or "")
 
     def test_algebraic_mode_saturates_chained_alias_rewrites(self):
