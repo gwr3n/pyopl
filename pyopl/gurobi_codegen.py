@@ -1319,6 +1319,8 @@ class GurobiCodeGenerator:
             "number": lambda node, _environment: self._numeric_bound_value(node.get("value")),
             "name": self._evaluate_bound_name,
             "indexed_name": self._evaluate_indexed_declaration_bound,
+            "number_literal_index": lambda node, _environment: self._numeric_bound_value(node.get("value")),
+            "name_reference_index": lambda node, environment: self._numeric_bound_value(environment.get(node.get("name"))),
             "uminus": self._evaluate_unary_declaration_bound,
             "parenthesized_expression": self._evaluate_unary_declaration_bound,
             "binop": self._evaluate_binary_declaration_bound,
