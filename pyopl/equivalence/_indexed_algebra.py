@@ -24,7 +24,7 @@ from typing import Any, Collection, Literal, Mapping, Sequence
 
 import sympy as sp
 
-from pyopl._abstract_algebra import AlgebraicProof, UnsupportedAlgebra
+from pyopl.equivalence._abstract_algebra import AlgebraicProof, UnsupportedAlgebra
 
 
 @dataclass(frozen=True)

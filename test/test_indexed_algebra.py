@@ -2,7 +2,7 @@ import unittest
 
 import sympy as sp
 
-from pyopl._indexed_algebra import (
+from pyopl.equivalence._indexed_algebra import (
     DecisionAtom,
     DomainTerm,
     IndexTerm,

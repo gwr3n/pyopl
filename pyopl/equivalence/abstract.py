@@ -1,6 +1,6 @@
 """Structural equivalence checks for abstract PyOPL MILP model schemas.
 
-Unlike :mod:`pyopl.milp_concrete_equivalence`, this module compares models before data
+Unlike :mod:`pyopl.equivalence.concrete`, this module compares models before data
 values expand indexed declarations and constraints into a concrete matrix.  It
 uses the PyOPL parser AST as its source IR and converts that AST into a
 symbol-linked graph.  Exact labelled graph isomorphism then recognizes
@@ -32,7 +32,8 @@ from typing import Any, Collection, Literal, Mapping
 import networkx as nx
 from networkx.algorithms import isomorphism
 
-from pyopl._abstract_algebra import (
+from pyopl._index_safety import find_index_safety_issue
+from pyopl.equivalence._abstract_algebra import (
     AlgebraicProof,
     SymbolicModel,
     UnsupportedAlgebra,
@@ -40,8 +41,7 @@ from pyopl._abstract_algebra import (
     lower_symbolic_model,
     prove_algebraic_equivalence,
 )
-from pyopl._index_safety import find_index_safety_issue
-from pyopl._indexed_algebra import prove_indexed_equivalence
+from pyopl.equivalence._indexed_algebra import prove_indexed_equivalence
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 from pyopl.semantic_error import SemanticError
 

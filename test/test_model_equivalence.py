@@ -2,8 +2,8 @@ import unittest
 from typing import Any
 
 from pyopl import compare_models
-from pyopl.milp_abstract_equivalence import AbstractEquivalenceResult
-from pyopl.milp_concrete_equivalence import EquivalenceResult
+from pyopl.equivalence.abstract import AbstractEquivalenceResult
+from pyopl.equivalence.concrete import EquivalenceResult
 from pyopl.model_equivalence import comparison_result_to_dict
 
 

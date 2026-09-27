@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from pyopl import solve
-from pyopl.milp_concrete_equivalence import compare
+from pyopl.equivalence.concrete import compare
 from pyopl.pyopl_core import linear_problem_from_opl
 
 

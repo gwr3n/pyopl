@@ -12,8 +12,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from typing import Collection, Literal, Mapping, TypeAlias
 
-from pyopl.milp_abstract_equivalence import AbstractEquivalenceResult, prove_abstract_equivalent
-from pyopl.milp_concrete_equivalence import EquivalenceResult, prove_equivalent
+from pyopl.equivalence.abstract import AbstractEquivalenceResult, prove_abstract_equivalent
+from pyopl.equivalence.concrete import EquivalenceResult, prove_equivalent
 from pyopl.pyopl_core import linear_problem_from_opl
 
 ComparisonStrategy = Literal["concrete", "abstract"]

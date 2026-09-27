@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from pyopl._index_safety import find_index_safety_issue
-from pyopl.milp_abstract_equivalence import (
+from pyopl.equivalence.abstract import (
     AbstractEquivalenceResult,
     compare_abstract,
     parse_abstract_model,
@@ -279,7 +279,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
     def test_objective_certificate_failure_is_unknown(self):
         left = "dvar float x; dvar float y; minimize x; subject to {x+y==1;}"
         right = left.replace("minimize x", "minimize 1-y")
-        with patch("pyopl._abstract_algebra._objectives_equal_on_polyhedron", return_value=False):
+        with patch("pyopl.equivalence._abstract_algebra._objectives_equal_on_polyhedron", return_value=False):
             result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x", "y": "y"})
         self.assertEqual(result.status, "unknown")
         self.assertIsNone(result.counterexample)
@@ -287,7 +287,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
     def test_equality_certificate_retains_both_directions(self):
         import sympy as symbolic
 
-        from pyopl._abstract_algebra import AffineConstraint, _farkas_certificate, _verify_farkas
+        from pyopl.equivalence._abstract_algebra import AffineConstraint, _farkas_certificate, _verify_farkas
 
         decision = symbolic.Symbol("decision", real=True)
         equality = AffineConstraint(decision - 1, "=")
@@ -333,7 +333,7 @@ class AbstractEquivalenceTests(unittest.TestCase):
         left = "dvar float x; minimize x; subject to { x>=0; x<=1; }"
         right = "dvar float x; minimize x; subject to { x>=0; x<=1; x<=2; }"
         for target in ("_solve_farkas_multipliers", "_verify_farkas"):
-            with self.subTest(target=target), patch("pyopl._abstract_algebra." + target, return_value=None):
+            with self.subTest(target=target), patch("pyopl.equivalence._abstract_algebra." + target, return_value=None):
                 result = prove_abstract_equivalent(left, right, mode="algebraic", variable_mapping={"x": "x"})
                 self.assertEqual(result.status, "unknown")
                 self.assertIsNone(result.counterexample)
@@ -344,11 +344,11 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(prove_abstract_equivalent(left, right, mode="auto").status, "unknown")
 
     def test_mapping_search_limit_is_unknown(self):
-        from pyopl._abstract_algebra import AlgebraicProof
+        from pyopl.equivalence._abstract_algebra import AlgebraicProof
 
         model = " ".join(f"dvar int decision{index};" for index in range(6)) + " minimize decision0; subject to {}"
         rejection = AlgebraicProof("different", "finite_domain_proven", "candidate rejected")
-        with patch("pyopl._abstract_algebra._prove_candidate_mapping", return_value=rejection) as attempt:
+        with patch("pyopl.equivalence._abstract_algebra._prove_candidate_mapping", return_value=rejection) as attempt:
             result = prove_abstract_equivalent(model, model, mode="algebraic")
         self.assertEqual(result.status, "unknown")
         self.assertIn("limit", result.reason)

@@ -3,8 +3,8 @@
 Read this module alongside *Abstract and Concrete MILP Model Equivalence:
 A Layered Proof Framework* (September 2026). The numbered results below refer to
 that paper; their titles identify them if subsequent revisions change numbering.
-Binding-aware syntax matching belongs to ``milp_abstract_equivalence``;
-numerically qualified matrix matching belongs to ``milp_concrete_equivalence``.
+Binding-aware syntax matching belongs to ``equivalence.abstract``;
+numerically qualified matrix matching belongs to ``equivalence.concrete``.
 This backend supplies symbolic normalization and the supported exact-arithmetic
 comparisons reached when syntax alone does not settle the question.
 
