@@ -80,7 +80,7 @@ Decision variables are the unknowns to be determined by the optimizer. They can 
     dvar float flow[Arcs] in minFlow..maxFlow;
     dvar int load[i in Items] in lower[i]..upper[i];
     ```
-    Numeric decision variables can declare lower and upper bounds with `in lower..upper`. Bounds must be numeric expressions independent of decision variables. They may use parameters, and iterator-indexed bounds may refer to the declaration iterator. Boolean variables cannot declare an explicit interval because their domain is fixed to `{0, 1}`.
+    Numeric decision variables can declare lower and upper bounds with `in lower..upper`. Bounds must be numeric expressions independent of decision variables. They may use parameters, and iterator-indexed bounds may refer to the declaration iterator. For `int+` and `float+`, the effective lower bound is the maximum of zero and the declared lower bound. Boolean variables cannot declare an explicit interval because their domain is fixed to `{0, 1}`.
 
 - **Indexed Decision Variable:**
     ```opl

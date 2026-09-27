@@ -1112,7 +1112,7 @@ class GurobiCodeGenerator:
             lower_bound = ", lb=0"
         else:
             lower_bound = ", lb=-GRB.INFINITY"
-        bound_args = self._decl_dvar_bound_args(decl)
+        bound_args = self._decl_dvar_bound_args(decl, [dimension["name"]])
         self._add_code_line(
             f"{decl['name']} = model.addVars({dimension['name']}, vtype={grb_var_type}, "
             f"name='{decl['name']}'{lower_bound}{bound_args})"
@@ -1854,8 +1854,8 @@ class GurobiCodeGenerator:
 
     def _decl_dvar_indexed(self, decl):
         name = decl["name"]
-        bound_args = self._decl_dvar_bound_args(decl)
         range_args = self._decl_dvar_indexed_ranges(name, decl["dimensions"])
+        bound_args = self._decl_dvar_bound_args(decl, range_args)
         index_args = ", ".join(range_args)
         if len(range_args) > 1:
             index_args = f"itertools.product({index_args})"
@@ -1908,21 +1908,69 @@ class GurobiCodeGenerator:
             default_lb = ""
         return f", vtype={vtype}{default_lb}"
 
-    def _decl_dvar_bound_args(self, decl):
-        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+    @staticmethod
+    def _dvar_bound_references_iterator(expression, iterator_names):
+        if isinstance(expression, dict):
+            if expression.get("type") == "name" and expression.get("value") in iterator_names:
+                return True
+            if expression.get("type") == "name_reference_index" and expression.get("name") in iterator_names:
+                return True
+            return any(
+                GurobiCodeGenerator._dvar_bound_references_iterator(value, iterator_names) for value in expression.values()
+            )
+        if isinstance(expression, list):
+            return any(GurobiCodeGenerator._dvar_bound_references_iterator(value, iterator_names) for value in expression)
+        return False
 
-        def emit_bound_expr(expr):
-            if isinstance(expr, dict) and expr.get("type") == "indexed_name" and len(expr.get("dimensions", [])) == 1:
-                dim = expr["dimensions"][0]
-                if isinstance(dim, dict) and dim.get("type") == "name_reference_index" and dim.get("name") in iterator_names:
-                    return expr["name"]
-            return self._traverse_expression(expr, {}, symbolic=True)
+    @staticmethod
+    def _direct_iterator_bound_mapping(expression, iterator_names):
+        if not isinstance(expression, dict) or expression.get("type") != "indexed_name":
+            return None
+        dimensions = expression.get("dimensions", [])
+        if len(dimensions) != 1:
+            return None
+        dimension = dimensions[0]
+        if (
+            isinstance(dimension, dict)
+            and dimension.get("type") == "name_reference_index"
+            and dimension.get("name") in iterator_names
+        ):
+            return expression["name"]
+        return None
+
+    def _decl_dvar_bound_args(self, decl, range_args=None):
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+        iterator_map = {name: name for name in iterator_names}
+
+        def emit_bound_expr(bound_name, expression):
+            direct_mapping = self._direct_iterator_bound_mapping(expression, iterator_names)
+            positive_lower = bound_name == "lower_bound" and decl.get("var_type") in ("int+", "float+")
+            if direct_mapping is not None and not positive_lower:
+                return direct_mapping
+
+            rendered = self._traverse_expression(expression, iterator_map, symbolic=True)
+            if positive_lower:
+                rendered = f"max(0, {rendered})"
+            if not self._dvar_bound_references_iterator(expression, iterator_names):
+                return rendered
+            if not range_args or len(range_args) != len(iterator_names):
+                raise SemanticError("Unable to materialize iterator-dependent dvar declaration bounds.")
+
+            key = iterator_names[0] if len(iterator_names) == 1 else f"({', '.join(iterator_names)})"
+            if len(iterator_names) == 1:
+                iteration = f"for {iterator_names[0]} in {range_args[0]}"
+            else:
+                iteration = f"for {', '.join(iterator_names)} in itertools.product({', '.join(range_args)})"
+            suffix = "lb" if bound_name == "lower_bound" else "ub"
+            mapping_name = f"_{decl['name']}_{suffix}"
+            self._add_code_line(f"{mapping_name} = {{{key}: {rendered} {iteration}}}")
+            return mapping_name
 
         args = []
         if "lower_bound" in decl:
-            args.append(f"lb={emit_bound_expr(decl['lower_bound'])}")
+            args.append(f"lb={emit_bound_expr('lower_bound', decl['lower_bound'])}")
         if "upper_bound" in decl:
-            args.append(f"ub={emit_bound_expr(decl['upper_bound'])}")
+            args.append(f"ub={emit_bound_expr('upper_bound', decl['upper_bound'])}")
         return "" if not args else ", " + ", ".join(args)
 
     def _decl_range_declaration_inline(self, decl):

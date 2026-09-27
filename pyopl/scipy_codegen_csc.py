@@ -1534,7 +1534,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if coef:
                     raise SemanticError("Decision variables are not supported in dvar declaration bounds.")
             if bound_name == "lower_bound":
-                lower = value
+                lower = max(lower, value) if lower is not None and value is not None else value
             else:
                 upper = value
         return [lower, upper], int_flag

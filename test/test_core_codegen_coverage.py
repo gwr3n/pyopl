@@ -228,6 +228,56 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertAlmostEqual(result["solution"]["y_1"], 1.0)
         self.assertAlmostEqual(result["solution"]["y_2"], 4.0)
 
+    def test_explicit_dvar_domains_preserve_non_negative_type_bounds(self):
+        model = """
+            range I = 1..2;
+            dvar int+ x in -2..3;
+            dvar float+ y[I] in -1.5..4;
+            minimize x + sum(i in I) y[i];
+            subject to {}
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+        _, scipy_code, _ = OPLCompiler().compile_model(model, solver="scipy")
+
+        self.assertIn("x = model.addVar(vtype=GRB.INTEGER, name='x', lb=max(0, -(2)), ub=3)", gurobi_code)
+        self.assertIn(
+            "y = model.addVars(range(1, I + 1), vtype=GRB.CONTINUOUS, name='y', lb=max(0, -(1.5)), ub=4)",
+            gurobi_code,
+        )
+        self.assertIn("bounds = [[0, 3.0], [0, 4.0], [0, 4.0]]", scipy_code)
+
+    def test_gurobi_materializes_iterator_dependent_dvar_bounds(self):
+        model = """
+            int lower = 0;
+            int upper = 10;
+            range I = 1..2;
+            range J = 1..3;
+            dvar int x[i in I] in lower + i..upper - i;
+            dvar float y[i in I, j in J] in i + j..upper - i - j;
+            minimize sum(i in I) x[i] + sum(i in I, j in J) y[i][j];
+            subject to {}
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+
+        compile(gurobi_code, "<generated-gurobi>", "exec")
+        self.assertIn("_x_lb = {i: (lower + i) for i in range(1, I + 1)}", gurobi_code)
+        self.assertIn("_x_ub = {i: (upper - i) for i in range(1, I + 1)}", gurobi_code)
+        self.assertIn("x = model.addVars(range(1, I + 1), vtype=GRB.INTEGER, name='x', lb=_x_lb, ub=_x_ub)", gurobi_code)
+        self.assertIn(
+            "_y_lb = {(i, j): (i + j) for i, j in itertools.product(range(1, I + 1), range(1, J + 1))}",
+            gurobi_code,
+        )
+        self.assertIn(
+            "_y_ub = {(i, j): ((upper - i) - j) for i, j in itertools.product(range(1, I + 1), range(1, J + 1))}",
+            gurobi_code,
+        )
+        self.assertIn(
+            "y = model.addVars(itertools.product(range(1, I + 1), range(1, J + 1)), vtype=GRB.CONTINUOUS, name='y', lb=_y_lb, ub=_y_ub)",
+            gurobi_code,
+        )
+
     def test_scipy_solve_returns_mip_statistics(self):
         model = """
         dvar int+ x;
