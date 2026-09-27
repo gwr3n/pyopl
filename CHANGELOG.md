@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Support explicit interval domains on scalar and indexed numeric decision variables, including parameter-valued and iterator-dependent bounds.
+
 ### Fixed
+
+- Reject nonnumeric or decision-variable-dependent explicit domain bounds during parsing instead of deferring invalid values to solver code generation.
+- Include explicit decision-variable domains in Gurobi bound analysis so reified comparisons and not-equal constraints use valid interval-derived big-M values.
 
 ### Changed
 

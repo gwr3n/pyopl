@@ -468,7 +468,9 @@
       "properties": {
         "type": { "const": "dvar" },
         "var_type": { "type": "string", "enum": ["int", "float", "int+", "float+", "boolean"] },
-        "name": { "type": "string" }
+        "name": { "type": "string" },
+        "lower_bound": { "$ref": "#/$defs/Expression" },
+        "upper_bound": { "$ref": "#/$defs/Expression" }
       },
       "additionalProperties": true
     },
@@ -480,6 +482,8 @@
         "type": { "const": "dvar_indexed" },
         "var_type": { "type": "string", "enum": ["int", "float", "int+", "float+", "boolean"] },
         "name": { "type": "string" },
+        "lower_bound": { "$ref": "#/$defs/Expression" },
+        "upper_bound": { "$ref": "#/$defs/Expression" },
         "dimensions": {
           "type": "array",
           "items": {

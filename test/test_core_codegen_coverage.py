@@ -166,6 +166,118 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
+    def test_explicit_dvar_domains_generate_scalar_and_indexed_bounds(self):
+        model = """
+            range I = 1..2;
+            dvar int x in -2..3;
+            dvar float y[I] in 1.5..4;
+            minimize x + sum(i in I) y[i];
+            subject to {}
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+        _, scipy_code, _ = OPLCompiler().compile_model(model, solver="scipy")
+
+        self.assertIn("x = model.addVar(vtype=GRB.INTEGER, name='x', lb=-(2), ub=3)", gurobi_code)
+        self.assertIn(
+            "y = model.addVars(range(1, I + 1), vtype=GRB.CONTINUOUS, name='y', lb=1.5, ub=4)",
+            gurobi_code,
+        )
+        self.assertIn("var_names = ['x', 'y_1', 'y_2']", scipy_code)
+        self.assertIn("bounds = [[-2.0, 3.0], [1.5, 4.0], [1.5, 4.0]]", scipy_code)
+        self.assertIn("integrality = [1, 0, 0]", scipy_code)
+
+    def test_explicit_dvar_domains_use_scalar_and_per_index_parameters(self):
+        model = """
+            int N = ...;
+            range I = 1..N;
+            float lower = ...;
+            float upper = ...;
+            float lb[I] = ...;
+            float ub[I] = ...;
+            dvar float x in lower..upper;
+            dvar int y[i in I] in lb[i]..ub[i];
+            maximize x + sum(i in I) y[i];
+            subject to {}
+        """
+        data = """
+            N = 2;
+            lower = -1.5;
+            upper = 2.5;
+            lb = [0, 3];
+            ub = [1, 4];
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, data, solver="gurobi")
+        _, scipy_code, _ = OPLCompiler().compile_model(model, data, solver="scipy")
+
+        self.assertIn("x = model.addVar(vtype=GRB.CONTINUOUS, name='x', lb=lower, ub=upper)", gurobi_code)
+        self.assertIn("y = model.addVars(range(1, I + 1), vtype=GRB.INTEGER, name='y', lb=lb, ub=ub)", gurobi_code)
+        self.assertIn("bounds = [[-1.5, 2.5], [0.0, 1.0], [3.0, 4.0]]", scipy_code)
+
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "domain.mod"
+            data_path = Path(tmpdir) / "domain.dat"
+            model_path.write_text(model, encoding="utf-8")
+            data_path.write_text(data, encoding="utf-8")
+            result = solve_with_scipy(model_path, data_path)
+
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertAlmostEqual(result["objective_value"], 7.5)
+        self.assertAlmostEqual(result["solution"]["x"], 2.5)
+        self.assertAlmostEqual(result["solution"]["y_1"], 1.0)
+        self.assertAlmostEqual(result["solution"]["y_2"], 4.0)
+
+    def test_explicit_dvar_domains_preserve_non_negative_type_bounds(self):
+        model = """
+            range I = 1..2;
+            dvar int+ x in -2..3;
+            dvar float+ y[I] in -1.5..4;
+            minimize x + sum(i in I) y[i];
+            subject to {}
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+        _, scipy_code, _ = OPLCompiler().compile_model(model, solver="scipy")
+
+        self.assertIn("x = model.addVar(vtype=GRB.INTEGER, name='x', lb=max(0, -(2)), ub=3)", gurobi_code)
+        self.assertIn(
+            "y = model.addVars(range(1, I + 1), vtype=GRB.CONTINUOUS, name='y', lb=max(0, -(1.5)), ub=4)",
+            gurobi_code,
+        )
+        self.assertIn("bounds = [[0, 3.0], [0, 4.0], [0, 4.0]]", scipy_code)
+
+    def test_gurobi_materializes_iterator_dependent_dvar_bounds(self):
+        model = """
+            int lower = 0;
+            int upper = 10;
+            range I = 1..2;
+            range J = 1..3;
+            dvar int x[i in I] in lower + i..upper - i;
+            dvar float y[i in I, j in J] in i + j..upper - i - j;
+            minimize sum(i in I) x[i] + sum(i in I, j in J) y[i][j];
+            subject to {}
+        """
+
+        _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+
+        compile(gurobi_code, "<generated-gurobi>", "exec")
+        self.assertIn("_x_lb = {i: (lower + i) for i in range(1, I + 1)}", gurobi_code)
+        self.assertIn("_x_ub = {i: (upper - i) for i in range(1, I + 1)}", gurobi_code)
+        self.assertIn("x = model.addVars(range(1, I + 1), vtype=GRB.INTEGER, name='x', lb=_x_lb, ub=_x_ub)", gurobi_code)
+        self.assertIn(
+            "_y_lb = {(i, j): (i + j) for i, j in itertools.product(range(1, I + 1), range(1, J + 1))}",
+            gurobi_code,
+        )
+        self.assertIn(
+            "_y_ub = {(i, j): ((upper - i) - j) for i, j in itertools.product(range(1, I + 1), range(1, J + 1))}",
+            gurobi_code,
+        )
+        self.assertIn(
+            "y = model.addVars(itertools.product(range(1, I + 1), range(1, J + 1)), vtype=GRB.CONTINUOUS, name='y', lb=_y_lb, ub=_y_ub)",
+            gurobi_code,
+        )
+
     def test_scipy_solve_returns_mip_statistics(self):
         model = """
         dvar int+ x;

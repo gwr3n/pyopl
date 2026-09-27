@@ -1486,25 +1486,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         name = decl["name"]
         var_names.append(name)
         self.var_indices[name] = len(var_names) - 1
-        vtype = decl.get("var_type")
-        if vtype == "boolean":
-            bounds.append([0, 1])
-            integrality.append(1)
-        elif vtype == "int+":
-            bounds.append([0, None])
-            integrality.append(1)
-        elif vtype == "int":
-            bounds.append([None, None])
-            integrality.append(1)
-        elif vtype == "float+":
-            bounds.append([0, None])
-            integrality.append(0)
-        elif vtype == "float":
-            bounds.append([None, None])
-            integrality.append(0)
-        else:
-            bounds.append([None, None])
-            integrality.append(0)
+        variable_bounds, int_flag = self._indexed_variable_bounds(decl, {})
+        bounds.append(variable_bounds)
+        integrality.append(int_flag)
 
     def _handle_indexed_variable_declaration(self, decl: dict, var_names: list, bounds: list, integrality: list) -> None:
         """
@@ -1550,7 +1534,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 if coef:
                     raise SemanticError("Decision variables are not supported in dvar declaration bounds.")
             if bound_name == "lower_bound":
-                lower = value
+                lower = max(lower, value) if lower is not None and value is not None else value
             else:
                 upper = value
         return [lower, upper], int_flag

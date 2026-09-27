@@ -69,13 +69,16 @@ declaration ::=
 
 // --- Types
 dvar_type ::= "int" | "float" | "int+" | "float+" | "boolean"
+numeric_dvar_type ::= "int" | "float" | "int+" | "float+"
 type      ::= "int" | "float" | "int+" | "float+" | "boolean" | "string" | NAME
 
 // --- dvar
 dvar_declaration ::=
       "dvar" _ dvar_type _ NAME _ ";" _
+    | "dvar" _ numeric_dvar_type _ NAME _ "in" _ expression _ ".." _ expression _ ";" _
     | "dvar" _ dvar_type _ NAME _ indexed_dimensions _ ";" _
-    | "dvar" _ dvar_type _ NAME _ dexpr_index_headers _ "in" _ expression _ ".." _ expression _ ";" _
+    | "dvar" _ numeric_dvar_type _ NAME _ indexed_dimensions _ "in" _ expression _ ".." _ expression _ ";" _
+    | "dvar" _ numeric_dvar_type _ NAME _ dexpr_index_headers _ "in" _ expression _ ".." _ expression _ ";" _
 
 // --- range
 range_declaration ::=

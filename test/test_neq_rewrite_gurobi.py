@@ -81,6 +81,35 @@ class TestNotEqualRewriteGurobi(unittest.TestCase):
         self.assertIn("x - y + 201.0 * neq_flag_c4 >= 1", code)
         self.assertIn("y - x + 201.0 * (1 - neq_flag_c4) >= 1", code)
 
+    def test_integer_neq_bigM_uses_explicit_declaration_bounds(self):
+        opl = """
+        dvar int x in 0..10;
+        dvar int y in 20..30;
+        minimize 0;
+        subject to { x != y; }
+        """
+
+        code = self.gen_code(opl)
+
+        self.assertIn("x - y + 31.0 * neq_flag_c0 >= 1", code)
+        self.assertIn("y - x + 31.0 * (1 - neq_flag_c0) >= 1", code)
+        self.assertNotIn("1000000.0", code)
+
+    def test_integer_neq_bigM_uses_envelope_of_iterator_dependent_bounds(self):
+        opl = """
+        range I = 1..2;
+        dvar int x[i in I] in i..i + 2;
+        dvar int y in 10..12;
+        minimize 0;
+        subject to { forall(i in I) x[i] != y; }
+        """
+
+        code = self.gen_code(opl)
+
+        self.assertIn("x[i] - y + 12.0 * neq_flag_c0_i >= 1", code)
+        self.assertIn("y - x[i] + 12.0 * (1 - neq_flag_c0_i) >= 1", code)
+        self.assertNotIn("1000000.0", code)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

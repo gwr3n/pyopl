@@ -1,6 +1,7 @@
 # === Standard library imports ===
 import json
 import logging
+import operator
 import re
 from dataclasses import dataclass, field
 
@@ -1112,7 +1113,7 @@ class GurobiCodeGenerator:
             lower_bound = ", lb=0"
         else:
             lower_bound = ", lb=-GRB.INFINITY"
-        bound_args = self._decl_dvar_bound_args(decl)
+        bound_args = self._decl_dvar_bound_args(decl, [dimension["name"]])
         self._add_code_line(
             f"{decl['name']} = model.addVars({dimension['name']}, vtype={grb_var_type}, "
             f"name='{decl['name']}'{lower_bound}{bound_args})"
@@ -1232,6 +1233,153 @@ class GurobiCodeGenerator:
             self._active_label_name_expr = prev
 
     # === Linear Bound Utilities (safe wrappers) ===
+    @staticmethod
+    def _numeric_bound_value(value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _evaluate_bound_name(self, expression, environment):
+        name = expression.get("value")
+        if name in environment:
+            return self._numeric_bound_value(environment[name])
+        value = self.data_dict.get(name)
+        return self._numeric_bound_value(value) if isinstance(value, (int, float)) else None
+
+    def _evaluate_bound_index(self, expression, environment):
+        indices = [self._evaluate_declaration_bound(dimension, environment) for dimension in expression.get("dimensions", [])]
+        if any(index is None for index in indices):
+            return None
+        normalized = tuple(int(index) if index.is_integer() else index for index in indices)
+        return normalized[0] if len(normalized) == 1 else normalized
+
+    def _indexed_bound_list_position(self, dimension, index, environment):
+        position = int(index)
+        if not dimension or dimension.get("type") not in ("range_index", "named_range_dimension"):
+            return position
+        start_node = dimension.get("start", {"type": "number", "value": 1})
+        start = self._evaluate_declaration_bound(start_node, environment)
+        return None if start is None else position - int(start)
+
+    def _lookup_indexed_bound_value(self, name, values, key, environment):
+        if isinstance(values, dict):
+            return self._numeric_bound_value(values.get(key))
+        indices = key if isinstance(key, tuple) else (key,)
+        declaration = self._find_declaration_by_name(name)
+        dimensions = declaration.get("dimensions", []) if declaration else []
+        result = values
+        try:
+            for offset, index in enumerate(indices):
+                dimension = dimensions[offset] if offset < len(dimensions) else None
+                position = self._indexed_bound_list_position(dimension, index, environment)
+                if position is None:
+                    return None
+                result = result[position]
+        except (IndexError, KeyError, TypeError):
+            return None
+        return self._numeric_bound_value(result)
+
+    def _evaluate_indexed_declaration_bound(self, expression, environment):
+        name = expression.get("name")
+        values = self.data_dict.get(name)
+        key = self._evaluate_bound_index(expression, environment)
+        if values is None or key is None:
+            return None
+        return self._lookup_indexed_bound_value(name, values, key, environment)
+
+    def _evaluate_unary_declaration_bound(self, expression, environment):
+        child_key = "expression" if expression.get("type") == "parenthesized_expression" else "value"
+        value = self._evaluate_declaration_bound(expression.get(child_key), environment)
+        if value is None or expression.get("type") == "parenthesized_expression":
+            return value
+        return -value
+
+    def _evaluate_binary_declaration_bound(self, expression, environment):
+        left = self._evaluate_declaration_bound(expression.get("left"), environment)
+        right = self._evaluate_declaration_bound(expression.get("right"), environment)
+        operation = {
+            "+": operator.add,
+            "-": operator.sub,
+            "*": operator.mul,
+            "/": operator.truediv,
+            "%": operator.mod,
+        }.get(expression.get("op"))
+        if left is None or right is None or operation is None:
+            return None
+        try:
+            return float(operation(left, right))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    def _evaluate_declaration_bound(self, expression, environment):
+        if not isinstance(expression, dict):
+            return self._numeric_bound_value(expression)
+        evaluator = {
+            "number": lambda node, _environment: self._numeric_bound_value(node.get("value")),
+            "name": self._evaluate_bound_name,
+            "indexed_name": self._evaluate_indexed_declaration_bound,
+            "number_literal_index": lambda node, _environment: self._numeric_bound_value(node.get("value")),
+            "name_reference_index": lambda node, environment: self._numeric_bound_value(environment.get(node.get("name"))),
+            "uminus": self._evaluate_unary_declaration_bound,
+            "parenthesized_expression": self._evaluate_unary_declaration_bound,
+            "binop": self._evaluate_binary_declaration_bound,
+        }.get(expression.get("type"))
+        return None if evaluator is None else evaluator(expression, environment)
+
+    def _declaration_iterator_values(self, iterator, environment):
+        iterator_range = iterator.get("range", {})
+        range_type = iterator_range.get("type")
+        if range_type == "range_specifier":
+            start = self._evaluate_declaration_bound(iterator_range.get("start"), environment)
+            end = self._evaluate_declaration_bound(iterator_range.get("end"), environment)
+        elif range_type == "named_range":
+            declaration = self._find_declaration_by_name(iterator_range.get("name"), types=["range_declaration_inline"])
+            if declaration is None:
+                return None
+            start = self._evaluate_declaration_bound(declaration.get("start"), environment)
+            end = self._evaluate_declaration_bound(declaration.get("end"), environment)
+        elif range_type in ("named_set", "named_set_dimension"):
+            values = self.data_dict.get(iterator_range.get("name"))
+            return list(values) if isinstance(values, (list, tuple, set, dict)) else None
+        else:
+            return None
+        if start is None or end is None or not start.is_integer() or not end.is_integer():
+            return None
+        return list(range(int(start), int(end) + 1))
+
+    def _declaration_bound_environments(self, iterators):
+        environments = [{}]
+        for iterator in iterators:
+            expanded = []
+            for environment in environments:
+                values = self._declaration_iterator_values(iterator, environment)
+                if values is None:
+                    return []
+                iterator_name = iterator.get("iterator")
+                expanded.extend({**environment, iterator_name: value} for value in values)
+            environments = expanded
+        return environments
+
+    def _declaration_bound_envelope(self, expression, environments, aggregate):
+        if expression is None:
+            return None
+        values = [self._evaluate_declaration_bound(expression, environment) for environment in environments]
+        return None if any(value is None for value in values) else aggregate(values)
+
+    def _explicit_declaration_bounds(self, declaration):
+        lower_expression = declaration.get("lower_bound")
+        upper_expression = declaration.get("upper_bound")
+        if lower_expression is None and upper_expression is None:
+            return (None, None)
+        environments = self._declaration_bound_environments(declaration.get("iterators", []))
+        if not environments:
+            return (None, None)
+        return (
+            self._declaration_bound_envelope(lower_expression, environments, min),
+            self._declaration_bound_envelope(upper_expression, environments, max),
+        )
+
     def _var_bounds_safe(self, var_node):
         if not isinstance(var_node, dict):
             return (None, None)
@@ -1247,12 +1395,10 @@ class GurobiCodeGenerator:
         vtype = decl.get("var_type")
         if vtype == "boolean":
             return (0.0, 1.0)
-        # Only '+' variants are nonnegative; plain int/float are free
+        lower, upper = self._explicit_declaration_bounds(decl)
         if vtype in ("int+", "float+"):
-            return (0.0, None)
-        if vtype in ("int", "float"):
-            return (None, None)
-        return (None, None)
+            lower = 0.0 if lower is None else max(0.0, lower)
+        return (lower, upper)
 
     def _collected_variable_bounds(self, node):
         if not hasattr(self, "_collected_lbs"):
@@ -1828,7 +1974,17 @@ class GurobiCodeGenerator:
     def _decl_dvar(self, decl):
         name = decl["name"]
         var_type = decl["var_type"]
-        if var_type == "boolean":
+        if "lower_bound" in decl or "upper_bound" in decl:
+            vtype = {
+                "int": "GRB.INTEGER",
+                "int+": "GRB.INTEGER",
+                "float": "GRB.CONTINUOUS",
+                "float+": "GRB.CONTINUOUS",
+            }.get(var_type)
+            type_arg = "" if vtype is None else f"vtype={vtype}, "
+            bound_args = self._decl_dvar_bound_args(decl)
+            self._add_code_line(f"{name} = model.addVar({type_arg}name='{name}'{bound_args})")
+        elif var_type == "boolean":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.BINARY, name='{name}')")
         elif var_type == "int+":
             self._add_code_line(f"{name} = model.addVar(vtype=GRB.INTEGER, name='{name}', lb=0)")
@@ -1844,8 +2000,8 @@ class GurobiCodeGenerator:
 
     def _decl_dvar_indexed(self, decl):
         name = decl["name"]
-        bound_args = self._decl_dvar_bound_args(decl)
         range_args = self._decl_dvar_indexed_ranges(name, decl["dimensions"])
+        bound_args = self._decl_dvar_bound_args(decl, range_args)
         index_args = ", ".join(range_args)
         if len(range_args) > 1:
             index_args = f"itertools.product({index_args})"
@@ -1898,21 +2054,69 @@ class GurobiCodeGenerator:
             default_lb = ""
         return f", vtype={vtype}{default_lb}"
 
-    def _decl_dvar_bound_args(self, decl):
-        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+    @staticmethod
+    def _dvar_bound_references_iterator(expression, iterator_names):
+        if isinstance(expression, dict):
+            if expression.get("type") == "name" and expression.get("value") in iterator_names:
+                return True
+            if expression.get("type") == "name_reference_index" and expression.get("name") in iterator_names:
+                return True
+            return any(
+                GurobiCodeGenerator._dvar_bound_references_iterator(value, iterator_names) for value in expression.values()
+            )
+        if isinstance(expression, list):
+            return any(GurobiCodeGenerator._dvar_bound_references_iterator(value, iterator_names) for value in expression)
+        return False
 
-        def emit_bound_expr(expr):
-            if isinstance(expr, dict) and expr.get("type") == "indexed_name" and len(expr.get("dimensions", [])) == 1:
-                dim = expr["dimensions"][0]
-                if isinstance(dim, dict) and dim.get("type") == "name_reference_index" and dim.get("name") in iterator_names:
-                    return expr["name"]
-            return self._traverse_expression(expr, {}, symbolic=True)
+    @staticmethod
+    def _direct_iterator_bound_mapping(expression, iterator_names):
+        if not isinstance(expression, dict) or expression.get("type") != "indexed_name":
+            return None
+        dimensions = expression.get("dimensions", [])
+        if len(dimensions) != 1:
+            return None
+        dimension = dimensions[0]
+        if (
+            isinstance(dimension, dict)
+            and dimension.get("type") == "name_reference_index"
+            and dimension.get("name") in iterator_names
+        ):
+            return expression["name"]
+        return None
+
+    def _decl_dvar_bound_args(self, decl, range_args=None):
+        iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
+        iterator_map = {name: name for name in iterator_names}
+
+        def emit_bound_expr(bound_name, expression):
+            direct_mapping = self._direct_iterator_bound_mapping(expression, iterator_names)
+            positive_lower = bound_name == "lower_bound" and decl.get("var_type") in ("int+", "float+")
+            if direct_mapping is not None and not positive_lower:
+                return direct_mapping
+
+            rendered = self._traverse_expression(expression, iterator_map, symbolic=True)
+            if positive_lower:
+                rendered = f"max(0, {rendered})"
+            if not self._dvar_bound_references_iterator(expression, iterator_names):
+                return rendered
+            if not range_args or len(range_args) != len(iterator_names):
+                raise SemanticError("Unable to materialize iterator-dependent dvar declaration bounds.")
+
+            key = iterator_names[0] if len(iterator_names) == 1 else f"({', '.join(iterator_names)})"
+            if len(iterator_names) == 1:
+                iteration = f"for {iterator_names[0]} in {range_args[0]}"
+            else:
+                iteration = f"for {', '.join(iterator_names)} in itertools.product({', '.join(range_args)})"
+            suffix = "lb" if bound_name == "lower_bound" else "ub"
+            mapping_name = f"_{decl['name']}_{suffix}"
+            self._add_code_line(f"{mapping_name} = {{{key}: {rendered} {iteration}}}")
+            return mapping_name
 
         args = []
         if "lower_bound" in decl:
-            args.append(f"lb={emit_bound_expr(decl['lower_bound'])}")
+            args.append(f"lb={emit_bound_expr('lower_bound', decl['lower_bound'])}")
         if "upper_bound" in decl:
-            args.append(f"ub={emit_bound_expr(decl['upper_bound'])}")
+            args.append(f"ub={emit_bound_expr('upper_bound', decl['upper_bound'])}")
         return "" if not args else ", " + ", ".join(args)
 
     def _decl_range_declaration_inline(self, decl):

@@ -171,8 +171,10 @@ Types include tuple type names as identifiers.
 ```
 // Decision variables (numeric/boolean only; string not allowed)
 <declaration> ::= 'dvar' <dvar_type> <NAME> ';'
+                | 'dvar' <numeric_dvar_type> <NAME> 'in' <expression> '..' <expression> ';'
                 | 'dvar' <dvar_type> <NAME> <indexed_dimensions> ';'
-                | 'dvar' <dvar_type> <NAME> <dexpr_index_headers> 'in' <expression> '..' <expression> ';'
+                | 'dvar' <numeric_dvar_type> <NAME> <indexed_dimensions> 'in' <expression> '..' <expression> ';'
+                | 'dvar' <numeric_dvar_type> <NAME> <dexpr_index_headers> 'in' <expression> '..' <expression> ';'
 
 // Ranges
                 | 'range' <NAME> '=' <range_expr> '..' <range_expr> ';'
@@ -209,6 +211,8 @@ Types include tuple type names as identifiers.
 <type> ::= 'int' | 'float' | 'int+' | 'float+' | 'boolean' | 'string' | <NAME>  // <NAME> can be a tuple type
 <dvar_type> ::= 'int' | 'float' | 'int+' | 'float+' | 'boolean'                  // string is not permitted for dvar
 ```
+
+`<numeric_dvar_type>` is `int`, `int+`, `float`, or `float+`. Explicit interval domains are not accepted for `boolean`, whose domain is fixed to `{0, 1}`. Domain bounds may use parameter expressions; bounds on iterator-indexed declarations may also refer to the declaration iterators.
 
 Typed scalar sets in models:
 
