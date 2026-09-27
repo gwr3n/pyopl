@@ -419,6 +419,86 @@ class TestPyOPLParser(TestPyOPL):
         with self.assertRaisesRegex(SemanticError, "Boolean decision variables have the fixed domain"):
             OPLParser().parse(OPLLexer().tokenize(model))
 
+    def test_explicit_dvar_domains_reject_non_numeric_bounds(self):
+        models = {
+            "scalar string literal": """
+                dvar int x in "low"..2;
+                minimize x;
+                subject to {}
+            """,
+            "indexed string parameter": """
+                range I = 1..2;
+                string upper = ...;
+                dvar float x[I] in 0..upper;
+                minimize sum(i in I) x[i];
+                subject to {}
+            """,
+            "iterator-indexed boolean": """
+                range I = 1..2;
+                dvar int x[i in I] in 0..true;
+                minimize sum(i in I) x[i];
+                subject to {}
+            """,
+        }
+
+        for case, model in models.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(SemanticError, "Decision-variable domain bounds must be numeric"):
+                    OPLParser().parse(OPLLexer().tokenize(model))
+
+    def test_explicit_dvar_domains_reject_decision_variable_references(self):
+        models = {
+            "scalar": """
+                dvar int y;
+                dvar int x in y..2;
+                minimize x;
+                subject to {}
+            """,
+            "indexed": """
+                range I = 1..2;
+                dvar float y;
+                dvar float x[I] in 0..y + 1;
+                minimize sum(i in I) x[i];
+                subject to {}
+            """,
+            "iterator-indexed": """
+                range I = 1..2;
+                dvar int y[I];
+                dvar int x[i in I] in y[i]..2;
+                minimize sum(i in I) x[i];
+                subject to {}
+            """,
+        }
+
+        for case, model in models.items():
+            with self.subTest(case=case):
+                with self.assertRaisesRegex(SemanticError, "Decision variables are not supported in dvar declaration bounds"):
+                    OPLParser().parse(OPLLexer().tokenize(model))
+
+    def test_invalid_iterator_indexed_dvar_domain_cleans_parser_state(self):
+        parser = OPLParser()
+        invalid_model = """
+            range I = 1..2;
+            dvar int y[I];
+            dvar int x[i in I] in y[i]..2;
+            minimize sum(i in I) x[i];
+            subject to {}
+        """
+        valid_model = """
+            dvar int x in 0..2;
+            minimize x;
+            subject to {}
+        """
+
+        with self.assertRaisesRegex(SemanticError, "Decision variables are not supported in dvar declaration bounds"):
+            parser.parse(OPLLexer().tokenize(invalid_model))
+
+        ast = parser.parse(OPLLexer().tokenize(valid_model))
+
+        self.assertEqual(ast["declarations"][0]["name"], "x")
+        self.assertEqual(len(parser.symbol_table.scopes), 1)
+        self.assertEqual(parser._iterator_context_stack, [])
+
     def test_indexed_access_can_select_an_index(self):
         model = """
             range I = 1..2;
