@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 	indexed mappings remain `unknown`, and generated mappings are inputs to the
 	checker rather than equivalence evidence on their own.
 
+### Fixed
+
+- Treat observables over an infeasible complete model as vacuously satisfying
+	the binary-range precondition, allowing bidirectional projection to report an
+	empty-domain counterexample instead of an inconclusive result.
+
 ## [v2.6.3] - 2026-09-27
 
 ### Added

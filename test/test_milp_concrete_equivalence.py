@@ -91,6 +91,25 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertIn("not solver-certified binary", result.reason)
 
+    def test_projected_milp_distinguishes_empty_observable_domain(self):
+        left = linear_problem_from_opl(
+            "dvar boolean x; dvar float auxiliary; minimize x; subject to { auxiliary >= 0; auxiliary <= 1; }"
+        )
+        right = linear_problem_from_opl(
+            "dvar boolean x; dvar float auxiliary; minimize x; "
+            "subject to { auxiliary <= x; auxiliary >= x + 1; }"
+        )
+        observable = ObservablePair(
+            "decision",
+            AffineObservable((("x", 1.0),)),
+            AffineObservable((("x", 1.0),)),
+        )
+
+        result = prove_equivalent(left, right, mode="projected_milp", observable_mapping=(observable,))
+
+        self.assertEqual(result.status, "different")
+        self.assertIn("feasible in only one", result.reason)
+
     def test_observable_template_expands_guarded_identity_mapping(self):
         problem = linear_problem_from_opl("dvar boolean x[1..2][1..2]; minimize 0; subject to {}")
         template = ObservableTemplate(

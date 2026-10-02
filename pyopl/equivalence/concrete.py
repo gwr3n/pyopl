@@ -713,6 +713,8 @@ def _observable_domain_issue(problem: LinearProblem, expression: AffineObservabl
             bounds=_problem_bounds(problem),
             constraints=_problem_constraints(problem),
         )
+        if result.status == 2:
+            return None
         if result.status == 3:
             return "projected MILP observable has an unbounded range"
         if result.status != 0 or result.fun is None:
