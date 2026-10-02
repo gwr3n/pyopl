@@ -126,7 +126,7 @@ def _iterator_interval(
         if declaration is None:
             return None
         return _range_interval(declaration, binders)
-    if domain.get("type") == "range_specifier":
+    if domain.get("type") in {"range_specifier", "range_index"}:
         return _range_interval(domain, binders)
     return None
 

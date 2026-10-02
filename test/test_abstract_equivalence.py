@@ -1,9 +1,31 @@
+import json
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from pyopl._index_safety import find_index_safety_issue
+from pyopl.equivalence import (
+    IndexDomain,
+    IndexedAffineExpression,
+    IndexedAffineFamily,
+    IndexedAffineTerm,
+    IndexedObservablePair,
+    ObservableTemplate,
+    ParameterContract,
+    ParameterFact,
+    SymbolicAffineExpression,
+    SymbolicDomain,
+    SymbolicPredicate,
+    ground_indexed_observable_mapping,
+    parse_indexed_observable_mapping,
+    parse_observable_mapping,
+    serialize_indexed_observable_mapping,
+    serialize_observable_mapping,
+)
+from pyopl.equivalence._projected_value import AffineObservable
 from pyopl.equivalence.abstract import (
     AbstractEquivalenceResult,
+    ObservablePair,
     compare_abstract,
     parse_abstract_model,
     prove_abstract_equivalent,
@@ -75,6 +97,580 @@ PORTFOLIO_17_DATA = {
 
 
 class AbstractEquivalenceTests(unittest.TestCase):
+    def test_parsed_indexed_mapping_can_delegate_from_supplied_instances(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "decision[{t}]",
+                        "left": {"expression": "order[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                        "right": {"expression": "y[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                    }
+                ]
+            )
+        )
+        left = "int N = ...; dvar boolean order[1..N]; minimize 0; subject to {}"
+        right = "int N = ...; dvar boolean y[1..N]; minimize 0; subject to {}"
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="auto",
+            indexed_observable_mapping=mapping,
+            left_data_text="N = 2;",
+            right_data_text="N = 2;",
+        )
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.scope, "supplied_instances")
+
+    def test_source_indexed_mapping_grounds_rs_sum_without_callbacks(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "order[{t}]",
+                        "left": {"expression": "order[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                        "right": {
+                            "expression": "sum(j in t+1..N+1) x[t][j]",
+                            "domains": [{"name": "t", "range": "1..N"}],
+                        },
+                    }
+                ]
+            )
+        )
+        model = "int N = ...; dvar boolean order[1..N]; dvar boolean x[1..N][1..N+1]; minimize 0; subject to {}"
+
+        grounded = ground_indexed_observable_mapping(mapping, model, model, "N = 2;", "N = 2;")
+
+        self.assertEqual(tuple(pair.name for pair in grounded), ("order[1]", "order[2]"))
+        self.assertEqual(grounded[0].right.coefficients, (("x_1_2", 1.0), ("x_1_3", 1.0)))
+        self.assertEqual(grounded[1].right.coefficients, (("x_2_3", 1.0),))
+
+    def test_source_indexed_mapping_decodes_direct_access_and_sum_domains(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "order[{t}]",
+                        "left": {"expression": "order[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                        "right": {
+                            "expression": "sum(j in t+1..N+1) x[t][j]",
+                            "domains": [{"name": "t", "range": "1..N"}],
+                        },
+                    }
+                ]
+            )
+        )
+
+        pair = mapping[0]
+        self.assertEqual(pair.left.expression.terms[0].declaration, "order")
+        self.assertEqual(pair.right.expression.sum_binders, ("j",))
+        self.assertEqual(pair.right.expression.sum_domains[0].lower.render(), "1*t + 1")
+        self.assertEqual(pair.right.expression.sum_domains[0].upper.render(), "1*N + 1")
+
+    def test_source_indexed_mapping_lowers_multi_binder_interval_sum(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "aggregate[{t}]",
+                        "left": {
+                            "expression": "sum(i in 1..t, j in t+1..N+1) x[i][j]",
+                            "domains": [{"name": "t", "range": "1..N"}],
+                        },
+                        "right": {
+                            "expression": "sum(i in 1..t) sum(j in t+1..N+1) x[i][j]",
+                            "domains": [{"name": "t", "range": "1..N"}],
+                        },
+                    }
+                ]
+            )
+        )
+
+        left = mapping[0].left.expression
+        right = mapping[0].right.expression
+        self.assertEqual(left.sum_binders, ("i", "j"))
+        self.assertEqual(left, right)
+
+    def test_source_indexed_mapping_rejects_symbolic_variable_coefficients(self):
+        with self.assertRaisesRegex(ValueError, "numeric coefficients; symbolic products are unsupported"):
+            parse_observable_mapping(
+                json.dumps(
+                    [
+                        {
+                            "kind": "indexed",
+                            "name": "value[{t}]",
+                            "left": {
+                                "expression": "prefixMean[t] * x[i][j]",
+                                "domains": [{"name": "t", "range": "1..N"}],
+                            },
+                            "right": {
+                                "expression": "x[t][t]",
+                                "domains": [{"name": "t", "range": "1..N"}],
+                            },
+                        }
+                    ]
+                )
+            )
+
+    def test_source_indexed_mapping_supports_independent_sum_components(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "qdiff[{t},{i}]",
+                        "left": {
+                            "expression": "q[t][i] - sum(j in 1..t-1) q[j][t]",
+                            "domains": [
+                                {"name": "t", "range": "1..N"},
+                                {"name": "i", "range": "1..N"},
+                            ],
+                        },
+                        "right": {
+                            "expression": "q[t][i]",
+                            "domains": [
+                                {"name": "t", "range": "1..N"},
+                                {"name": "i", "range": "1..N"},
+                            ],
+                        },
+                    }
+                ]
+            )
+        )
+
+        pair = mapping[0]
+        self.assertEqual(len(pair.left.expression.components), 2)
+        self.assertEqual(pair.left.expression.components[1].sum_binders, ("j",))
+        model = "int N = ...; dvar float q[1..N][1..N]; minimize 0; subject to {}"
+        grounded = ground_indexed_observable_mapping(mapping, model, model, "N = 3;", "N = 3;")
+
+        self.assertEqual(grounded[3].name, "qdiff[2,1]")
+        self.assertEqual(grounded[3].left.coefficients, (("q_1_2", -1.0), ("q_2_1", 1.0)))
+
+        round_trip = parse_observable_mapping(serialize_observable_mapping(mapping))
+        self.assertEqual(round_trip[0].left.expression.alpha_normalized(), pair.left.expression.alpha_normalized())
+
+    def test_source_indexed_mapping_accepts_unary_negative_and_rejects_shadowed_sums(self):
+        mapping = parse_observable_mapping(
+            json.dumps(
+                [
+                    {
+                        "kind": "indexed",
+                        "name": "qdiff[{t},{i}]",
+                        "left": {
+                            "expression": "-q[t][i] + sum(j in 1..t-1) q[j][t] + sum(k in 1..N) q[t][k]",
+                            "domains": [
+                                {"name": "t", "range": "1..N"},
+                                {"name": "i", "range": "1..N"},
+                            ],
+                        },
+                        "right": {
+                            "expression": "q[t][i]",
+                            "domains": [
+                                {"name": "t", "range": "1..N"},
+                                {"name": "i", "range": "1..N"},
+                            ],
+                        },
+                    }
+                ]
+            )
+        )
+        self.assertEqual(len(mapping[0].left.expression.components), 3)
+        with self.assertRaisesRegex(ValueError, "shadows"):
+            parse_observable_mapping(
+                json.dumps(
+                    [
+                        {
+                            "kind": "indexed",
+                            "name": "q[{t}]",
+                            "left": {
+                                "expression": "sum(j in 1..N) sum(j in 1..N) q[j]",
+                                "domains": [{"name": "t", "range": "1..N"}],
+                            },
+                            "right": {
+                                "expression": "q[t]",
+                                "domains": [{"name": "t", "range": "1..N"}],
+                            },
+                        }
+                    ]
+                )
+            )
+
+    def test_parsed_indexed_mapping_without_data_is_unsupported(self):
+        left_model = "int N = ...; range I = 1..N; dvar boolean x[I]; minimize 0; subject to {}"
+        right_model = "int N = ...; range J = 1..N; dvar boolean x[J]; minimize 0; subject to {}"
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        mapping = parse_observable_mapping(serialize_observable_mapping((IndexedObservablePair("x[{t}]", family, family),)))
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), ">=", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = prove_abstract_equivalent(
+            left_model,
+            right_model,
+            mode="auto",
+            indexed_observable_mapping=mapping,
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.unresolved_obligations, ("indexed_observable_mapping",))
+
+    def test_observable_mapping_serializer_preserves_grounded_entries(self):
+        pair = ObservablePair(
+            "decision",
+            AffineObservable((("x", 1.0),), 2.0),
+            AffineObservable((("y", -0.5),), -1.0),
+        )
+
+        self.assertEqual(parse_observable_mapping(serialize_observable_mapping((pair,))), (pair,))
+
+    def test_index_domain_can_resolve_a_model_data_named_range(self):
+        domain = IndexDomain.from_model(
+            "Items",
+            "int N = ...; range Items = 1..N; dvar boolean x[Items]; minimize 0; subject to {}",
+            "N = 3;",
+        )
+
+        self.assertEqual(domain.values, (1, 2, 3))
+
+    def test_observable_mapping_parser_decodes_tagged_indexed_entries(self):
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        pair = IndexedObservablePair("x[{t}]", family, family)
+
+        decoded = parse_observable_mapping(serialize_observable_mapping((pair,)))
+
+        self.assertEqual(decoded, (pair,))
+
+    def test_uniform_indexed_mapping_envelope_round_trips_contract(self):
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        pair = IndexedObservablePair("x[{t}]", family, family)
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), ">=", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        encoded = serialize_indexed_observable_mapping((pair,), contract)
+        decoded_mapping, decoded_contract = parse_indexed_observable_mapping(encoded)
+
+        self.assertEqual(decoded_mapping, (pair,))
+        self.assertEqual(decoded_contract, contract)
+        self.assertEqual(json.loads(encoded)["schema"], "pyopl.uniform_indexed_observable_mapping")
+
+    def test_uniform_indexed_mapping_envelope_rejects_missing_contract(self):
+        with self.assertRaisesRegex(ValueError, "parameter_contract object"):
+            parse_indexed_observable_mapping(
+                json.dumps(
+                    {
+                        "schema": "pyopl.uniform_indexed_observable_mapping",
+                        "version": 1,
+                        "observables": [
+                            {
+                                "kind": "indexed",
+                                "name": "x[{t}]",
+                                "left": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                                "right": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                            }
+                        ],
+                    }
+                )
+            )
+
+    def test_observable_mapping_parser_rejects_unrecognised_indexed_entry(self):
+        with self.assertRaisesRegex(ValueError, "missing left"):
+            parse_observable_mapping('[{"name": "x[{t}]", "kind": "indexed"}]')
+
+    def test_data_free_indexed_identity_is_unsupported_even_with_contract(self):
+        left_model = """
+            int N = ...;
+            range I = 1..N;
+            dvar boolean x[I];
+            minimize 0;
+            subject to {}
+        """
+        right_model = """
+            int N = ...;
+            range J = 1..N;
+            dvar boolean x[J];
+            minimize 0;
+            subject to {}
+        """
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"),
+                        ">=",
+                        SymbolicAffineExpression.constant_value(1),
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = prove_abstract_equivalent(
+            left_model,
+            right_model,
+            mode="auto",
+            indexed_observable_mapping=(
+                IndexedObservablePair(
+                    "x[{t}]",
+                    family,
+                    IndexedAffineFamily(
+                        ("u",),
+                        family.domains,
+                        IndexedAffineExpression((IndexedAffineTerm("x", ("u",)),)),
+                    ),
+                ),
+            ),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.unresolved_obligations, ("indexed_observable_mapping",))
+
+    def test_data_free_indexed_mapping_does_not_compare_renamed_models(self):
+        left_model = """
+            int N = ...;
+            range Periods = 1..N;
+            dvar boolean activate[Periods];
+            minimize sum(t in Periods) activate[t];
+            subject to {}
+        """
+        right_model = """
+            int periodCount = ...;
+            range Slots = 1..periodCount;
+            dvar boolean activate[Slots];
+            minimize sum(slot in Slots) activate[slot];
+            subject to {}
+        """
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("activate", ("t",)),)),
+        )
+        renamed_family = IndexedAffineFamily(
+            ("u",),
+            (SymbolicDomain("u", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("activate", ("u",)),)),
+        )
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"),
+                        ">=",
+                        SymbolicAffineExpression.constant_value(1),
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = prove_abstract_equivalent(
+            left_model,
+            right_model,
+            mode="auto",
+            indexed_observable_mapping=(IndexedObservablePair("activate[{t}]", family, renamed_family),),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+
+    def test_data_free_indexed_mapping_does_not_check_family_rewrites(self):
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        different_family = IndexedAffineFamily(
+            ("t",),
+            family.domains,
+            IndexedAffineExpression((IndexedAffineTerm("y", ("t",)),)),
+        )
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), ">=", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = prove_abstract_equivalent(
+            "int N = ...; dvar boolean x[1..N]; minimize 0; subject to {}",
+            "int N = ...; dvar boolean y[1..N]; minimize 0; subject to {}",
+            mode="auto",
+            indexed_observable_mapping=(IndexedObservablePair("x[{t}]", family, different_family),),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.unresolved_obligations, ("indexed_observable_mapping",))
+
+    def test_data_free_rs_mapping_is_unsupported(self):
+        base = Path("test/fixtures/affine_observable/rs")
+        parameter = SymbolicAffineExpression.parameter("N")
+        one = SymbolicAffineExpression.constant_value(1)
+        period = SymbolicDomain("t", one, parameter)
+        left_family = IndexedAffineFamily(
+            ("t",),
+            (period,),
+            IndexedAffineExpression((IndexedAffineTerm("order", ("t",)),)),
+        )
+        right_family = IndexedAffineFamily(
+            ("t",),
+            (period,),
+            IndexedAffineExpression(
+                (IndexedAffineTerm("x", ("t", "j")),),
+                0,
+                ("j",),
+                (
+                    SymbolicDomain(
+                        "j",
+                        SymbolicAffineExpression.parameter("t").add(one),
+                        parameter.add(one),
+                    ),
+                ),
+            ),
+        )
+        contract = ParameterContract((ParameterFact(SymbolicPredicate(parameter, ">=", one), "declared"),))
+
+        result = prove_abstract_equivalent(
+            (base / "bm/bm.mod").read_text(),
+            (base / "pm/pm.mod").read_text(),
+            mode="auto",
+            indexed_observable_mapping=(IndexedObservablePair("order[{t}]", left_family, right_family),),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.unresolved_obligations, ("indexed_observable_mapping",))
+
+    def test_data_free_indexed_mapping_does_not_check_contract_consistency(self):
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), ">=", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), "<", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = prove_abstract_equivalent(
+            "int N = ...; dvar boolean x[1..N]; minimize 0; subject to {}",
+            "int N = ...; dvar boolean x[1..N]; minimize 0; subject to {}",
+            mode="auto",
+            indexed_observable_mapping=(IndexedObservablePair("x[{t}]", family, family),),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.termination, "unsupported_input")
+
+    def test_grounded_observable_template_delegates_after_guarded_expansion(self):
+        model = "dvar boolean x[1..2][1..2]; minimize 0; subject to {}"
+        template = ObservableTemplate(
+            "arc_{i}_{j}",
+            (IndexDomain("i", (1, 2)), IndexDomain("j", (1, 2))),
+            lambda indices: AffineObservable(((f"x_{indices['i']}_{indices['j']}", 1.0),)),
+            lambda indices: AffineObservable(((f"x_{indices['i']}_{indices['j']}", 1.0),)),
+            guard=lambda indices: indices["i"] != indices["j"],
+        )
+
+        result = prove_abstract_equivalent(
+            model,
+            model,
+            mode="algebraic",
+            left_data_text="",
+            right_data_text="",
+            observable_templates=(template,),
+        )
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(len(result.observable_mapping), 2)
+        self.assertNotIn("x_1_1", " ".join(result.observable_mapping))
+
+    def test_grounded_affine_observable_delegates_to_concrete_verifier(self):
+        left = "dvar boolean x; minimize x; subject to {}"
+        right = "dvar boolean y; minimize y; subject to {}"
+
+        result = prove_abstract_equivalent(
+            left,
+            right,
+            mode="algebraic",
+            left_data_text="",
+            right_data_text="",
+            observable_mapping=(ObservablePair("decision", AffineObservable((("x", 1.0),)), AffineObservable((("y", 1.0),))),),
+        )
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.scope, "supplied_instances")
+        self.assertEqual(result.relation, "projected_value")
+
+    def test_affine_observable_without_data_is_unknown(self):
+        observable = ObservablePair("decision", AffineObservable((("x", 1.0),)), AffineObservable((("x", 1.0),)))
+        result = prove_abstract_equivalent(
+            "dvar boolean x; minimize x; subject to {}",
+            "dvar boolean x; minimize x; subject to {}",
+            mode="auto",
+            observable_mapping=(observable,),
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("both supplied data texts", result.reason)
+
     def test_abstract_comparison_rejects_provably_out_of_range_index(self):
         model = """
             int N = ...;
@@ -587,6 +1183,30 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(result.status, "unknown")
         self.assertFalse(result.equivalent)
         self.assertIn("cannot interpret declared range", result.reason)
+
+    def test_index_safety_interprets_inline_range_dimensions(self):
+        ast = {
+            "declarations": [
+                {
+                    "type": "dvar_indexed",
+                    "name": "x",
+                    "dimensions": [
+                        {"type": "range_index", "start": {"type": "number", "value": 1}, "end": {"type": "number", "value": 3}}
+                    ],
+                }
+            ],
+            "objective": {
+                "type": "minimize",
+                "expression": {
+                    "type": "indexed_name",
+                    "name": "x",
+                    "dimensions": [{"type": "number_literal_index", "value": 1}],
+                },
+            },
+            "constraints": [],
+        }
+
+        self.assertIsNone(find_index_safety_issue(ast))
 
     def test_index_safety_narrows_negated_equality_at_range_endpoint(self):
         def number(value):

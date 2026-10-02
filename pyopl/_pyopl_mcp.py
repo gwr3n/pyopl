@@ -22,6 +22,7 @@ Example VS Code MCP config (.vscode/mcp.json):
 
 from __future__ import annotations
 
+import json
 import tempfile
 from importlib.resources import files
 from pathlib import Path
@@ -30,6 +31,8 @@ from typing import Any, Optional, TypeVar, Union
 from mcp.server.fastmcp import FastMCP
 
 from . import solve
+from .equivalence import parse_indexed_observable_mapping, parse_observable_mapping
+from .genai.pyopl_generative import generative_indexed_observable_mapping, generative_observable_mapping
 from .model_equivalence import compare_models, comparison_result_to_dict
 from .pyopl_core import OPLCompiler
 
@@ -154,16 +157,78 @@ def compare_model_strings(
     left_data_text: Optional[str] = None,
     right_data_text: Optional[str] = None,
     strategy: str = "abstract",
+    observable_mapping_json: Optional[str] = None,
+    generate_mapping: bool = False,
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
 ) -> dict:
-    """Compare two OPL models provided as strings for MILP equivalence."""
+    """Compare two OPL models with optional manual or LLM-generated mapping JSON."""
+    if observable_mapping_json is not None and generate_mapping:
+        raise ValueError("supply either observable_mapping_json or generate_mapping, not both")
+    if generate_mapping:
+        if strategy == "abstract" and left_data_text is None and right_data_text is None:
+            observable_mapping_json = generative_indexed_observable_mapping(
+                left_model_text,
+                right_model_text,
+                model_name=model_name,
+                llm_provider=provider,
+            )
+        else:
+            observable_mapping_json = generative_observable_mapping(
+                left_model_text,
+                right_model_text,
+                left_data_text or "",
+                right_data_text or "",
+                model_name=model_name,
+                llm_provider=provider,
+            )
+    if strategy == "abstract" and observable_mapping_json is not None:
+        try:
+            payload = json.loads(observable_mapping_json)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("schema") == "pyopl.uniform_indexed_observable_mapping":
+            indexed_mapping, parameter_contract = parse_indexed_observable_mapping(observable_mapping_json)
+            result = compare_models(
+                left_model_text,
+                right_model_text,
+                strategy=strategy,
+                left_data_text=left_data_text,
+                right_data_text=right_data_text,
+                indexed_observable_mapping=indexed_mapping,
+                parameter_contract=parameter_contract,
+            )
+            return comparison_result_to_dict(result, strategy=strategy)
     result = compare_models(
         left_model_text,
         right_model_text,
         strategy=strategy,
         left_data_text=left_data_text,
         right_data_text=right_data_text,
+        observable_mapping=(
+            parse_observable_mapping(observable_mapping_json) if observable_mapping_json is not None else None
+        ),
     )
     return comparison_result_to_dict(result, strategy=strategy)
+
+
+def generate_observable_mapping_from_strings(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: Optional[str] = None,
+    right_data_text: Optional[str] = None,
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
+) -> str:
+    """Generate reusable affine-observable mapping JSON from OPL model strings."""
+    return generative_observable_mapping(
+        left_model_text,
+        right_model_text,
+        left_data_text or "",
+        right_data_text or "",
+        model_name=model_name,
+        llm_provider=provider,
+    )
 
 
 def read_pyopl_grammar() -> str:
@@ -288,6 +353,10 @@ def compare_model_strings_tool(
     left_data_text: Optional[str] = None,
     right_data_text: Optional[str] = None,
     strategy: str = "abstract",
+    observable_mapping_json: Optional[str] = None,
+    generate_mapping: bool = False,
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
 ) -> dict:
     """Compare two OPL models provided as strings for MILP equivalence.
 
@@ -301,12 +370,58 @@ def compare_model_strings_tool(
         left_data_text: Optional OPL data contents for the left model.
         right_data_text: Optional OPL data contents for the right model.
         strategy: Comparison strategy: ``concrete`` or ``abstract``.
+        observable_mapping_json: Optional JSON list of affine-observable pairs.
+        generate_mapping: Ask the selected GenAI provider/model to generate the mapping.
+        provider: GenAI provider used when ``generate_mapping`` is true.
+        model_name: GenAI model used when ``generate_mapping`` is true.
 
     Returns:
         A dictionary containing status, equivalent, level, reason, proof_steps,
         and counterexample fields.
     """
-    return compare_model_strings(left_model_text, right_model_text, left_data_text, right_data_text, strategy)
+    if (
+        observable_mapping_json is None
+        and not generate_mapping
+        and provider == DEFAULT_PROVIDER
+        and model_name == DEFAULT_MODEL
+    ):
+        return compare_model_strings(left_model_text, right_model_text, left_data_text, right_data_text, strategy)
+    return compare_model_strings(
+        left_model_text,
+        right_model_text,
+        left_data_text,
+        right_data_text,
+        strategy,
+        observable_mapping_json,
+        generate_mapping,
+        provider,
+        model_name,
+    )
+
+
+@mcp.tool()
+def generate_observable_mapping_tool(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: Optional[str] = None,
+    right_data_text: Optional[str] = None,
+    provider: str = DEFAULT_PROVIDER,
+    model_name: str = DEFAULT_MODEL,
+) -> str:
+    """Generate reusable affine-observable mapping JSON for two OPL models.
+
+    The result is a JSON list accepted by ``compare_model_strings_tool`` as
+    ``observable_mapping_json``. Generation is grounded in the supplied model
+    and data texts and uses the selected GenAI provider and model.
+    """
+    return generate_observable_mapping_from_strings(
+        left_model_text,
+        right_model_text,
+        left_data_text,
+        right_data_text,
+        provider,
+        model_name,
+    )
 
 
 if __name__ == "__main__":

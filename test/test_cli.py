@@ -170,6 +170,113 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(json.loads(buf.getvalue()), result)
             compare_mock.assert_called_once_with(left_model, right_model, left_data, right_data, "abstract")
 
+    def test_cli_compare_passes_manual_observable_mapping(self):
+        result = {"status": "equivalent", "equivalent": True}
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            mapping = td_path / "mapping.json"
+            left_model.write_text("left", encoding="utf-8")
+            right_model.write_text("right", encoding="utf-8")
+            mapping.write_text("[]", encoding="utf-8")
+
+            with patch("pyopl.pyopl_cli._compare_models", return_value=result) as compare_mock:
+                ret = pyopl_cli.main(
+                    [
+                        "compare",
+                        str(left_model),
+                        str(right_model),
+                        "--observable-mapping",
+                        str(mapping),
+                    ]
+                )
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(compare_mock.call_args.args[-1], "[]")
+
+    def test_cli_compare_dispatches_uniform_indexed_mapping_envelope(self):
+        envelope = {
+            "schema": "pyopl.uniform_indexed_observable_mapping",
+            "version": 1,
+            "observables": [
+                {
+                    "kind": "indexed",
+                    "name": "x[{t}]",
+                    "left": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                    "right": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                }
+            ],
+            "parameter_contract": {"facts": [], "indexed_facts": []},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            mapping = td_path / "mapping.json"
+            left_model.write_text("left", encoding="utf-8")
+            right_model.write_text("right", encoding="utf-8")
+            mapping.write_text(json.dumps(envelope), encoding="utf-8")
+
+            with (
+                patch("pyopl.pyopl_cli.compare_models", return_value=object()) as compare_mock,
+                patch("pyopl.pyopl_cli.comparison_result_to_dict", return_value={"status": "unknown"}),
+            ):
+                result = pyopl_cli._compare_models(left_model, right_model, None, None, "abstract", json.dumps(envelope))
+
+        self.assertEqual(result, {"status": "unknown"})
+        self.assertIn("indexed_observable_mapping", compare_mock.call_args.kwargs)
+        self.assertIn("parameter_contract", compare_mock.call_args.kwargs)
+
+    def test_cli_compare_generates_and_can_save_observable_mapping(self):
+        result = {"status": "equivalent", "equivalent": True}
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            mapping = td_path / "generated.json"
+            left_model.write_text("left model", encoding="utf-8")
+            right_model.write_text("right model", encoding="utf-8")
+
+            with (
+                patch(
+                    "pyopl.pyopl_cli.generative_indexed_observable_mapping", return_value='[{"name": "x"}]'
+                ) as generate_mock,
+                patch("pyopl.pyopl_cli._compare_models", return_value=result) as compare_mock,
+            ):
+                ret = pyopl_cli.main(
+                    [
+                        "compare",
+                        str(left_model),
+                        str(right_model),
+                        "--generate-mapping",
+                        "--mapping-out-file",
+                        str(mapping),
+                    ]
+                )
+            mapping_text = mapping.read_text(encoding="utf-8")
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(mapping_text, '[{"name": "x"}]')
+        self.assertEqual(generate_mock.call_args.args[:2], ("left model", "right model"))
+        self.assertEqual(compare_mock.call_args.args[-1], '[{"name": "x"}]')
+
+    def test_cli_genai_generate_mapping_emits_json(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            left_model = td_path / "left.mod"
+            right_model = td_path / "right.mod"
+            left_model.write_text("left", encoding="utf-8")
+            right_model.write_text("right", encoding="utf-8")
+            with patch("pyopl.pyopl_cli.generative_observable_mapping", return_value="[]") as generate_mock:
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    ret = pyopl_cli.main(["genai", "generate-mapping", str(left_model), str(right_model)])
+
+        self.assertEqual(ret, 0)
+        self.assertEqual(output.getvalue().strip(), "[]")
+        generate_mock.assert_called_once()
+
     def test_cli_compare_selects_abstract_strategy(self):
         result = {
             "strategy": "abstract",

@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import asdict, replace
 from typing import Collection, Literal, Mapping, TypeAlias
 
+from pyopl.equivalence._indexed_projection import IndexedObservablePair, ParameterContract
+from pyopl.equivalence._projected_value import ObservablePair
 from pyopl.equivalence.abstract import AbstractEquivalenceResult, prove_abstract_equivalent
 from pyopl.equivalence.concrete import EquivalenceResult, prove_equivalent
 from pyopl.pyopl_core import linear_problem_from_opl
@@ -32,6 +34,11 @@ def compare_models(
     left_auxiliaries: Collection[str] = (),
     right_auxiliaries: Collection[str] = (),
     assumptions: Mapping[str, str] | None = None,
+    observable_mapping: tuple[ObservablePair, ...] | None = None,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...] | None = None,
+    parameter_contract: ParameterContract | None = None,
+    tolerance: float = 1e-9,
+    max_projected_assignments: int = 100_000,
 ) -> ModelComparisonResult:
     """Compare two PyOPL models using the selected equivalence strategy.
 
@@ -66,41 +73,147 @@ def compare_models(
     """
 
     if strategy == "concrete":
-        if parameter_mapping is not None or assumptions is not None:
-            raise ValueError("concrete strategy does not accept parameter mappings or assumptions")
-        left_problem = linear_problem_from_opl(left_model_text, left_data_text)
-        right_problem = linear_problem_from_opl(right_model_text, right_data_text)
-        if left_auxiliaries or right_auxiliaries:
-            if variable_mapping is None:
-                raise ValueError("concrete auxiliary partitions require a retained variable mapping")
-            if set(left_auxiliaries) != set(left_problem.var_names) - set(variable_mapping) or set(right_auxiliaries) != set(
-                right_problem.var_names
-            ) - set(variable_mapping.values()):
-                raise ValueError("concrete auxiliary partitions must exactly complement the retained mapping")
-        result = prove_equivalent(
-            left_problem,
-            right_problem,
-            mode="auto",
-            variable_mapping=None if variable_mapping is None else dict(variable_mapping),
-        )
-        return replace(
-            result,
-            scope="supplied_instances" if left_data_text is not None or right_data_text is not None else "compiled_instances",
-        )
-    if strategy == "abstract":
-        return prove_abstract_equivalent(
+        return _compare_concrete_models(
             left_model_text,
             right_model_text,
-            mode="auto",
-            left_data_text=left_data_text,
-            right_data_text=right_data_text,
-            variable_mapping=variable_mapping,
-            parameter_mapping=parameter_mapping,
-            left_auxiliaries=left_auxiliaries,
-            right_auxiliaries=right_auxiliaries,
-            assumptions=assumptions,
+            left_data_text,
+            right_data_text,
+            variable_mapping,
+            parameter_mapping,
+            left_auxiliaries,
+            right_auxiliaries,
+            assumptions,
+            observable_mapping,
+            indexed_observable_mapping,
+            parameter_contract,
+            tolerance,
+            max_projected_assignments,
+        )
+    if strategy == "abstract":
+        return _compare_abstract_models(
+            left_model_text,
+            right_model_text,
+            left_data_text,
+            right_data_text,
+            variable_mapping,
+            parameter_mapping,
+            left_auxiliaries,
+            right_auxiliaries,
+            assumptions,
+            observable_mapping,
+            indexed_observable_mapping,
+            parameter_contract,
+            tolerance,
+            max_projected_assignments,
         )
     raise ValueError(f"unsupported model comparison strategy: {strategy}")
+
+
+def _validate_concrete_comparison_options(
+    parameter_mapping: Mapping[str, str] | None,
+    assumptions: Mapping[str, str] | None,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...] | None,
+    parameter_contract: ParameterContract | None,
+    variable_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    left_var_names: Collection[str],
+    right_var_names: Collection[str],
+    observable_mapping: tuple[ObservablePair, ...] | None,
+) -> None:
+    if parameter_mapping is not None or assumptions is not None or indexed_observable_mapping is not None:
+        raise ValueError("concrete strategy does not accept parameter mappings or assumptions")
+    if parameter_contract is not None:
+        raise ValueError("concrete strategy does not accept parameter mappings or assumptions")
+    if left_auxiliaries or right_auxiliaries:
+        if variable_mapping is None:
+            raise ValueError("concrete auxiliary partitions require a retained variable mapping")
+        if set(left_auxiliaries) != set(left_var_names) - set(variable_mapping) or set(right_auxiliaries) != set(
+            right_var_names
+        ) - set(variable_mapping.values()):
+            raise ValueError("concrete auxiliary partitions must exactly complement the retained mapping")
+    if observable_mapping is not None and variable_mapping is not None:
+        raise ValueError("supply either variable_mapping or observable_mapping, not both")
+
+
+def _compare_concrete_models(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    variable_mapping: Mapping[str, str] | None,
+    parameter_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    assumptions: Mapping[str, str] | None,
+    observable_mapping: tuple[ObservablePair, ...] | None,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...] | None,
+    parameter_contract: ParameterContract | None,
+    tolerance: float,
+    max_projected_assignments: int,
+) -> EquivalenceResult:
+    left_problem = linear_problem_from_opl(left_model_text, left_data_text)
+    right_problem = linear_problem_from_opl(right_model_text, right_data_text)
+    _validate_concrete_comparison_options(
+        parameter_mapping,
+        assumptions,
+        indexed_observable_mapping,
+        parameter_contract,
+        variable_mapping,
+        left_auxiliaries,
+        right_auxiliaries,
+        left_problem.var_names,
+        right_problem.var_names,
+        observable_mapping,
+    )
+    result = prove_equivalent(
+        left_problem,
+        right_problem,
+        mode="projected_milp" if observable_mapping is not None else "auto",
+        variable_mapping=None if variable_mapping is None else dict(variable_mapping),
+        observable_mapping=observable_mapping,
+        tolerance=tolerance,
+        max_projected_assignments=max_projected_assignments,
+    )
+    return replace(
+        result,
+        scope="supplied_instances" if left_data_text is not None or right_data_text is not None else "compiled_instances",
+    )
+
+
+def _compare_abstract_models(
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    variable_mapping: Mapping[str, str] | None,
+    parameter_mapping: Mapping[str, str] | None,
+    left_auxiliaries: Collection[str],
+    right_auxiliaries: Collection[str],
+    assumptions: Mapping[str, str] | None,
+    observable_mapping: tuple[ObservablePair, ...] | None,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...] | None,
+    parameter_contract: ParameterContract | None,
+    tolerance: float,
+    max_projected_assignments: int,
+) -> AbstractEquivalenceResult:
+    return prove_abstract_equivalent(
+        left_model_text,
+        right_model_text,
+        mode="auto",
+        left_data_text=left_data_text,
+        right_data_text=right_data_text,
+        variable_mapping=variable_mapping,
+        parameter_mapping=parameter_mapping,
+        left_auxiliaries=left_auxiliaries,
+        right_auxiliaries=right_auxiliaries,
+        assumptions=assumptions,
+        observable_mapping=observable_mapping,
+        indexed_observable_mapping=indexed_observable_mapping,
+        parameter_contract=parameter_contract,
+        tolerance=tolerance,
+        max_projected_assignments=max_projected_assignments,
+    )
 
 
 def comparison_result_to_dict(

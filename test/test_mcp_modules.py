@@ -175,6 +175,57 @@ class TestPyOPLMCP(unittest.TestCase):
         self.assertEqual(result["status"], "equivalent")
         self.assertEqual(result["level"], "schema_isomorphic")
 
+    def test_compare_model_strings_accepts_manual_mapping_json(self):
+        with (
+            patch.object(_pyopl_mcp, "compare_models", return_value=object()) as compare_mock,
+            patch.object(_pyopl_mcp, "comparison_result_to_dict", return_value={"equivalent": True}),
+        ):
+            result = _pyopl_mcp.compare_model_strings(
+                "left",
+                "right",
+                strategy="concrete",
+                observable_mapping_json='[{"name": "x", "left": {"x": 1}, "right": {"y": 1}}]',
+            )
+
+        self.assertEqual(result, {"equivalent": True})
+        self.assertEqual(len(compare_mock.call_args.kwargs["observable_mapping"]), 1)
+
+    def test_mcp_can_generate_mapping_during_comparison(self):
+        with (
+            patch.object(_pyopl_mcp, "generative_indexed_observable_mapping", return_value="[]") as generate_mock,
+            patch.object(_pyopl_mcp, "compare_models", return_value=object()),
+            patch.object(_pyopl_mcp, "comparison_result_to_dict", return_value={"equivalent": True}),
+        ):
+            result = _pyopl_mcp.compare_model_strings(
+                "left",
+                "right",
+                generate_mapping=True,
+                provider="ollama",
+                model_name="local-model",
+            )
+
+        self.assertEqual(result, {"equivalent": True})
+        generate_mock.assert_called_once_with(
+            "left",
+            "right",
+            model_name="local-model",
+            llm_provider="ollama",
+        )
+
+    def test_mcp_mapping_generation_tool_returns_json(self):
+        with patch.object(_pyopl_mcp, "generative_observable_mapping", return_value="[]") as generate_mock:
+            result = _pyopl_mcp.generate_observable_mapping_tool("left", "right")
+
+        self.assertEqual(result, "[]")
+        generate_mock.assert_called_once_with(
+            "left",
+            "right",
+            "",
+            "",
+            model_name="gpt-5",
+            llm_provider="openai",
+        )
+
 
 class TestRhetorMCP(unittest.TestCase):
     def test_request_running_ide_rejects_invalid_connection_info(self):

@@ -7,11 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-### Fixed
+- Add affine-observable mappings for projected MILP comparisons, including
+	affine expressions over decision variables and indexed families grounded from
+	supplied model/data instances.
+- Add a versioned, round-trippable JSON format for observable mappings and
+	parameter contracts, with mapping generation and reuse through the CLI, IDE,
+	and MCP using a selected GenAI provider and model.
+- Add regression fixtures for TSP, BM/PM, and service-route formulations,
+	covering grounded projected equivalence and feasibility or objective
+	counterexamples.
 
 ### Changed
 
-### Removed
+- Extend projected MILP comparison from shared binary columns to solver-checked
+	affine binary observables; compare feasible observable assignments and
+	conditional objective values over each complete formulation.
+- Keep indexed observable comparisons scoped to supplied instances. Data-free
+	indexed mappings remain `unknown`, and generated mappings are inputs to the
+	checker rather than equivalence evidence on their own.
 
 ## [v2.6.3] - 2026-09-27
 

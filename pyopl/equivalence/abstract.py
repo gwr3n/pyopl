@@ -42,6 +42,17 @@ from pyopl.equivalence._abstract_algebra import (
     prove_algebraic_equivalence,
 )
 from pyopl.equivalence._indexed_algebra import prove_indexed_equivalence
+from pyopl.equivalence._indexed_projection import (
+    IndexedObservablePair,
+    ParameterContract,
+)
+from pyopl.equivalence._projected_value import (
+    ObservablePair,
+    ObservableTemplate,
+    expand_observable_templates,
+    ground_indexed_observable_mapping,
+)
+from pyopl.equivalence.concrete import prove_equivalent
 from pyopl.pyopl_core import OPLLexer, OPLParser, linear_problem_from_opl
 from pyopl.semantic_error import SemanticError
 
@@ -52,6 +63,7 @@ AbstractEquivalenceLevel = Literal[
     "rewrite_certified",
     "polyhedrally_proven",
     "finite_domain_proven",
+    "indexed_projection_proven",
 ]
 AbstractModelInput = str | Mapping[str, Any]
 
@@ -93,6 +105,10 @@ class AbstractEquivalenceResult:
     assumptions: tuple[tuple[str, str], ...] = ()
     budget_exhausted: bool = False
     evidence_kind: str = "internal_checks_only"
+    observable_mapping: tuple[str, ...] = ()
+    projected_assignment_counts: tuple[int, ...] = ()
+    unresolved_obligations: tuple[str, ...] = ()
+    proof_certificate: Mapping[str, Any] | None = None
 
     @property
     def equivalent(self) -> bool:
@@ -142,6 +158,12 @@ def prove_abstract_equivalent(
     max_rewrite_iterations: int = 12,
     left_data_text: str | None = None,
     right_data_text: str | None = None,
+    observable_mapping: tuple[ObservablePair, ...] | None = None,
+    observable_templates: tuple[ObservableTemplate, ...] | None = None,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...] | None = None,
+    parameter_contract: ParameterContract | None = None,
+    tolerance: float = 1e-9,
+    max_projected_assignments: int = 100_000,
 ) -> AbstractEquivalenceResult:
     """Compare two abstract PyOPL models using exact labelled graph isomorphism.
 
@@ -167,10 +189,42 @@ def prove_abstract_equivalent(
     data instances, not universally for every parameter assignment. Algebraic
     mode otherwise returns ``unknown`` for unsupported indexed, nonlinear,
     parameterized-implication, or unbounded-integer fragments.
+    ``observable_mapping`` or ``observable_templates`` selects the grounded
+    projected-value route and has the same supplied-instance scope.
+    ``indexed_observable_mapping`` is accepted only with both data texts;
+    without data, indexed family comparison returns ``unknown``.
+    When both data texts are supplied, source-level indexed families are
+    finitely grounded and delegated to the concrete projected-value verifier.
     """
 
     left_ast = _coerce_ast(left)
     right_ast = _coerce_ast(right)
+    if indexed_observable_mapping is not None:
+        return _prove_indexed_observable_route(
+            left,
+            right,
+            indexed_observable_mapping,
+            observable_mapping,
+            observable_templates,
+            left_data_text,
+            right_data_text,
+            tolerance,
+            max_projected_assignments,
+        )
+    if observable_mapping is not None or observable_templates is not None:
+        return _prove_grounded_observable_route(
+            left,
+            right,
+            observable_mapping,
+            observable_templates,
+            left_data_text,
+            right_data_text,
+            variable_mapping,
+            parameter_mapping,
+            assumptions,
+            tolerance,
+            max_projected_assignments,
+        )
     preflight_result = _abstract_model_preflight(left_ast, right_ast, left_data_text, right_data_text)
     if preflight_result is not None:
         return preflight_result
@@ -218,6 +272,138 @@ def prove_abstract_equivalent(
         right_auxiliaries,
         max_rewrite_iterations,
         context,
+    )
+
+
+def _prove_indexed_observable_route(
+    left: AbstractModelInput,
+    right: AbstractModelInput,
+    indexed_observable_mapping: tuple[IndexedObservablePair, ...],
+    observable_mapping: tuple[ObservablePair, ...] | None,
+    observable_templates: tuple[ObservableTemplate, ...] | None,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    tolerance: float,
+    max_projected_assignments: int,
+) -> AbstractEquivalenceResult:
+    if observable_mapping is not None or observable_templates is not None:
+        raise ValueError("supply either indexed or grounded observable mappings, not both")
+    if left_data_text is not None or right_data_text is not None:
+        if left_data_text is None or right_data_text is None:
+            return AbstractEquivalenceResult(
+                status="unknown",
+                level="finite_domain_proven",
+                reason="indexed observable grounding requires both supplied data texts",
+                relation="projected_value",
+                scope="source_schemas",
+                arithmetic="not_applicable",
+                termination="unsupported_input",
+            )
+        if not isinstance(left, str) or not isinstance(right, str):
+            raise ValueError("grounded indexed observable comparison requires model source strings")
+        grounded_mapping = ground_indexed_observable_mapping(
+            indexed_observable_mapping,
+            left,
+            right,
+            left_data_text,
+            right_data_text,
+        )
+        return _prove_grounded_observables(
+            left,
+            right,
+            left_data_text,
+            right_data_text,
+            grounded_mapping,
+            tolerance,
+            max_projected_assignments,
+        )
+    return AbstractEquivalenceResult(
+        status="unknown",
+        level="schema_isomorphic",
+        reason="data-free indexed observable comparison is not supported by the abstract route",
+        relation="schema_structural",
+        scope="source_schemas",
+        arithmetic="parsed_ast_labels",
+        termination="unsupported_input",
+        unresolved_obligations=("indexed_observable_mapping",),
+    )
+
+
+def _prove_grounded_observable_route(
+    left: AbstractModelInput,
+    right: AbstractModelInput,
+    observable_mapping: tuple[ObservablePair, ...] | None,
+    observable_templates: tuple[ObservableTemplate, ...] | None,
+    left_data_text: str | None,
+    right_data_text: str | None,
+    variable_mapping: Mapping[str, str] | None,
+    parameter_mapping: Mapping[str, str] | None,
+    assumptions: Mapping[str, str] | None,
+    tolerance: float,
+    max_projected_assignments: int,
+) -> AbstractEquivalenceResult:
+    if observable_mapping is not None and observable_templates is not None:
+        raise ValueError("supply either observable_mapping or observable_templates, not both")
+    if left_data_text is None or right_data_text is None:
+        return AbstractEquivalenceResult(
+            status="unknown",
+            level="finite_domain_proven",
+            reason="affine observable comparison requires both supplied data texts",
+            relation="projected_value",
+            scope="source_schemas",
+            arithmetic="not_applicable",
+            termination="unsupported_input",
+        )
+    if not isinstance(left, str) or not isinstance(right, str):
+        raise ValueError("grounded affine observable comparison requires model source strings")
+    if variable_mapping is not None:
+        raise ValueError("supply either variable_mapping or observable_mapping, not both")
+    if parameter_mapping or assumptions:
+        raise ValueError("parameter mappings and assumptions apply to schemas, not supplied instances")
+    grounded_mapping = observable_mapping or expand_observable_templates(observable_templates or ())
+    return _prove_grounded_observables(
+        left,
+        right,
+        left_data_text,
+        right_data_text,
+        grounded_mapping,
+        tolerance,
+        max_projected_assignments,
+    )
+
+
+def _prove_grounded_observables(
+    left: str,
+    right: str,
+    left_data_text: str,
+    right_data_text: str,
+    observable_mapping: tuple[ObservablePair, ...],
+    tolerance: float,
+    max_projected_assignments: int,
+) -> AbstractEquivalenceResult:
+    """Delegate supplied-instance observable proofs to the concrete backend."""
+    concrete = prove_equivalent(
+        linear_problem_from_opl(left, left_data_text),
+        linear_problem_from_opl(right, right_data_text),
+        mode="projected_milp",
+        observable_mapping=observable_mapping,
+        tolerance=tolerance,
+        max_projected_assignments=max_projected_assignments,
+    )
+    return AbstractEquivalenceResult(
+        status=concrete.status,
+        level="finite_domain_proven",
+        reason=concrete.reason,
+        relation="projected_value",
+        scope="supplied_instances",
+        arithmetic=concrete.arithmetic,
+        termination=concrete.termination,
+        proof_steps=("grounded finite models with supplied data",) + concrete.proof_steps,
+        counterexample=concrete.counterexample,
+        observable_mapping=concrete.observable_mapping,
+        projected_assignment_counts=concrete.projected_assignment_counts,
+        budget_exhausted=concrete.budget_exhausted,
+        evidence_kind=concrete.evidence_kind,
     )
 
 
@@ -846,6 +1032,7 @@ class _AbstractGraphBuilder:
 
 __all__ = [
     "AbstractEquivalenceResult",
+    "ObservablePair",
     "compare_abstract",
     "parse_abstract_model",
     "prove_abstract_equivalent",

@@ -883,39 +883,39 @@ class OPLParser(Parser):
                 "value": p.STRING_LITERAL[1:-1],
                 "sem_type": "string",
             }
-        elif hasattr(p, "NAME"):
-            # SLY attributes are typed as Any; narrow to str for mypy before dict indexing.
-            name_any = p.NAME
-            if not isinstance(name_any, str):
-                raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
-            name = name_any
+        return self._parse_name_primary(p.NAME, p)
 
-            # NEW: check current iterator context first (only active inside sum/forall bodies)
-            if self._iterator_context_stack:
-                top = self._iterator_context_stack[-1]
-                sem = top.get(name)
-                if sem is not None:
-                    return {"type": "name", "value": name, "sem_type": sem}
-
-            # Fallback: regular symbol table lookup
+    def _parse_name_primary(self, name_any, p):
+        if not isinstance(name_any, str):
+            raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
+        name = name_any
+        if self._iterator_context_stack:
+            iterator_type = self._iterator_context_stack[-1].get(name)
+            if iterator_type is not None:
+                return {"type": "name", "value": name, "sem_type": iterator_type}
+        try:
             symbol_info = self.symbol_table.get_symbol(name)
-            # Inline scalar dexpr on use
-            if symbol_info.get("type") == "dexpr":
-                val = symbol_info.get("value") or {}
-                iters = val.get("iterators") or []
-                dims = val.get("dimensions") or []
-                if iters or dims:
-                    raise SemanticError(
-                        f"Expected indexed dexpr, but '{name}' is declared with indices. Missing dimensions.",
-                        lineno=p.lineno,
-                    )
-                return self._subst_iterators(val.get("expression"), {})
-            if symbol_info.get("dimensions"):
+        except SemanticError:
+            if getattr(self, "_syntax_only", False):
+                return {"type": "name", "value": name, "sem_type": "int"}
+            raise
+        return self._name_primary_from_symbol(name, symbol_info, p)
+
+    def _name_primary_from_symbol(self, name, symbol_info, p):
+        if symbol_info.get("type") == "dexpr":
+            value = symbol_info.get("value") or {}
+            if value.get("iterators") or value.get("dimensions"):
                 raise SemanticError(
-                    f"Expected scalar variable, but '{name}' is an indexed variable. Missing dimensions.",
+                    f"Expected indexed dexpr, but '{name}' is declared with indices. Missing dimensions.",
                     lineno=p.lineno,
                 )
-            return {"type": "name", "value": name, "sem_type": symbol_info["type"]}
+            return self._subst_iterators(value.get("expression"), {})
+        if symbol_info.get("dimensions"):
+            raise SemanticError(
+                f"Expected scalar variable, but '{name}' is an indexed variable. Missing dimensions.",
+                lineno=p.lineno,
+            )
+        return {"type": "name", "value": name, "sem_type": symbol_info["type"]}
 
     # --- sum_expression and forall_expression nonterminals ---
 
@@ -1620,6 +1620,9 @@ class OPLParser(Parser):
     def parse(self, tokens):
         # Materialize tokens so we can track the last line for EOF diagnostics
         self.symbol_table = SymbolTable()
+        if getattr(self, "_syntax_only", False):
+            for binder in getattr(self, "_syntax_only_binders", ()):
+                self.symbol_table.add_symbol(binder, "int")
         self._iterator_context_stack = []
         self.current_tokens = list(tokens)
         if self.current_tokens:
@@ -2502,7 +2505,16 @@ class OPLParser(Parser):
                 "sem_type": expr.get("sem_type", None),
             }
         if expr["type"] == "name":
-            symbol_info = self.symbol_table.get_symbol(expr["value"])
+            try:
+                symbol_info = self.symbol_table.get_symbol(expr["value"])
+            except SemanticError:
+                if getattr(self, "_syntax_only", False):
+                    return {
+                        "type": "name_reference_index",
+                        "name": expr["value"],
+                        "sem_type": "int",
+                    }
+                raise
             return {
                 "type": "name_reference_index",
                 "name": expr["value"],
@@ -2905,33 +2917,38 @@ class OPLParser(Parser):
         try:
             symbol_info = self.symbol_table.get_symbol(p.NAME)
         except SemanticError as e:
+            if getattr(self, "_syntax_only", False):
+                return self._syntax_only_indexed_reference(p)
             raise SemanticError(e.message, lineno=p.lineno) from e
-
-        # Special case: dexpr expansion on use
         if symbol_info.get("type") == "dexpr":
-            val = symbol_info.get("value") or {}
-            decl_dims = symbol_info.get("dimensions") or val.get("dimensions") or []
-            used_dims = p.indexed_dimensions
-            if len(decl_dims) != len(used_dims):
-                raise SemanticError(
-                    f"Incorrect number of dimensions for dexpr '{p.NAME}'. Declared {len(decl_dims)}, but used {len(used_dims)}.",
-                    lineno=p.lineno,
-                )
-            # Build iterator -> used index mapping using declared iterator order
-            iterators = val.get("iterators") or []
-            idx_map = {}
-            for it, used in zip(iterators, used_dims):
-                idx_map[it["iterator"]] = used
-            # Inline expression with substitution
-            inlined = self._subst_iterators(val.get("expression"), idx_map)
-            return inlined
+            return self._expand_indexed_dexpr(p, symbol_info)
+        return self._validated_indexed_reference(p, symbol_info)
 
-        if not symbol_info.get("dimensions"):
+    @staticmethod
+    def _syntax_only_indexed_reference(p):
+        return {
+            "type": "indexed_name",
+            "name": p.NAME,
+            "dimensions": p.indexed_dimensions,
+            "sem_type": "float",
+        }
+
+    def _expand_indexed_dexpr(self, p, symbol_info):
+        value = symbol_info.get("value") or {}
+        declared_dimensions = symbol_info.get("dimensions") or value.get("dimensions") or []
+        used_dimensions = p.indexed_dimensions
+        if len(declared_dimensions) != len(used_dimensions):
             raise SemanticError(
-                f"Expected indexed variable, but '{p.NAME}' is a scalar variable.",
+                f"Incorrect number of dimensions for dexpr '{p.NAME}'. Declared {len(declared_dimensions)}, but used {len(used_dimensions)}.",
                 lineno=p.lineno,
             )
+        iterators = value.get("iterators") or []
+        index_mapping = {iterator["iterator"]: used for iterator, used in zip(iterators, used_dimensions)}
+        return self._subst_iterators(value.get("expression"), index_mapping)
 
+    def _validated_indexed_reference(self, p, symbol_info):
+        if not symbol_info.get("dimensions"):
+            raise SemanticError(f"Expected indexed variable, but '{p.NAME}' is a scalar variable.", lineno=p.lineno)
         declared_dims = symbol_info["dimensions"]
         used_dims = p.indexed_dimensions
         if len(declared_dims) != len(used_dims):
@@ -3083,6 +3100,20 @@ class OPLParser(Parser):
     @_("BOOLEAN_LITERAL")
     def scalar_value(self, p):
         return p.BOOLEAN_LITERAL
+
+
+def parse_expression_ast(source: str, binders=()):
+    """Parse one source expression through PyOPL's existing model grammar."""
+    lexer = OPLLexer()
+    parser = OPLParser()
+    parser._syntax_only = True
+    parser._syntax_only_binders = binders
+    model = f"int pyopl_expression_placeholder = 0; minimize {source}; subject to {{}}"
+    ast = parser.parse(lexer.tokenize(model))
+    objective = ast.get("objective")
+    if not isinstance(objective, dict) or not isinstance(objective.get("expression"), dict):
+        raise SemanticError("PyOPL expression parser did not produce an objective expression.")
+    return objective["expression"]
 
 
 # --- Parser for .dat files ---
@@ -5929,6 +5960,14 @@ def parse_model(model_code: str):
     compiler = OPLCompiler()
     ast, _code, _data = compiler.compile_model(model_code, data_code=None, solver="gurobi")
     return ast
+
+
+def resolve_named_range(model_code: str, data_code: Optional[str], range_name: str) -> tuple[int, int]:
+    """Resolve one model/data named range without compiling the optimization model."""
+    compiler = OPLCompiler()
+    model_ast, data_dict = compiler._parse_model_inputs(model_code, data_code)
+    working_data = compiler._merge_declaration_data(model_ast.get("declarations", []), data_dict)
+    return compiler._resolve_named_range(model_ast, working_data, range_name, context="observable mapping")
 
 
 def linear_problem_from_opl(model_code: str, data_code: Optional[str] = None) -> LinearProblem:
