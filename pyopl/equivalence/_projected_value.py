@@ -266,15 +266,21 @@ def ground_indexed_observable_mapping(
         right_domains = tuple(_ground_domain_values(domain, right_values, {}) for domain in pair.right.domains)
         if left_domains != right_domains:
             raise ValueError(f"indexed observable {pair.name_template} has mismatched grounded domains")
-        index_names = tuple(domain.name for domain in pair.left.domains)
         for values in product(*left_domains) if left_domains else ((),):
-            environment = dict(zip(index_names, values))
-            name = pair.name_template.format(**environment)
+            left_environment = dict(zip(pair.left.binders, values))
+            right_environment = dict(zip(pair.right.binders, values))
+            left_included = _evaluate_symbolic_predicate(pair.left.guard, left_environment, left_values)
+            right_included = _evaluate_symbolic_predicate(pair.right.guard, right_environment, right_values)
+            if left_included != right_included:
+                raise ValueError(f"indexed observable {pair.name_template} has mismatched grounded guards")
+            if not left_included:
+                continue
+            name = pair.name_template.format(**left_environment)
             pairs.append(
                 ObservablePair(
                     name,
-                    _ground_indexed_expression(pair.left.expression, environment, left_values),
-                    _ground_indexed_expression(pair.right.expression, environment, right_values),
+                    _ground_indexed_expression(pair.left.expression, left_environment, left_values),
+                    _ground_indexed_expression(pair.right.expression, right_environment, right_values),
                 )
             )
     return tuple(pairs)
@@ -298,6 +304,25 @@ def _evaluate_symbolic_value(expression: Any, environment: Mapping[str, Any], da
     if not value.is_integer():
         raise ValueError(f"symbolic index value is not integral: {value}")
     return int(value)
+
+
+def _evaluate_symbolic_predicate(predicate: Any | None, environment: Mapping[str, Any], data: Mapping[str, Any]) -> bool:
+    if predicate is None:
+        return True
+    left = _evaluate_symbolic_value(predicate.left, environment, data)
+    right = _evaluate_symbolic_value(predicate.right, environment, data)
+    comparisons = {
+        "==": left == right,
+        "!=": left != right,
+        "<=": left <= right,
+        "<": left < right,
+        ">=": left >= right,
+        ">": left > right,
+    }
+    try:
+        return comparisons[predicate.relation]
+    except KeyError as exc:
+        raise ValueError(f"unsupported symbolic relation: {predicate.relation}") from exc
 
 
 def _ground_domain_values(domain: Any, data: Mapping[str, Any], environment: Mapping[str, Any]) -> tuple[int, ...]:

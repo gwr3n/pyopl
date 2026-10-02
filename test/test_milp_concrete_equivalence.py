@@ -96,8 +96,7 @@ class CompareTests(unittest.TestCase):
             "dvar boolean x; dvar float auxiliary; minimize x; subject to { auxiliary >= 0; auxiliary <= 1; }"
         )
         right = linear_problem_from_opl(
-            "dvar boolean x; dvar float auxiliary; minimize x; "
-            "subject to { auxiliary <= x; auxiliary >= x + 1; }"
+            "dvar boolean x; dvar float auxiliary; minimize x; " "subject to { auxiliary <= x; auxiliary >= x + 1; }"
         )
         observable = ObservablePair(
             "decision",

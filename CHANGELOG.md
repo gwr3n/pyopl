@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Treat observables over an infeasible complete model as vacuously satisfying
 	the binary-range precondition, allowing bidirectional projection to report an
 	empty-domain counterexample instead of an inconclusive result.
+- Ground each side of an indexed observable mapping with its own binder names,
+	allowing equivalent families to use alpha-renamed indices.
+- Enforce symbolic family guards while grounding indexed observable mappings,
+	excluding guarded-out tuples and rejecting mappings whose guards disagree.
 
 ## [v2.6.3] - 2026-09-27
 

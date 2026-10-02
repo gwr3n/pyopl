@@ -149,6 +149,51 @@ class AbstractEquivalenceTests(unittest.TestCase):
         self.assertEqual(grounded[0].right.coefficients, (("x_1_2", 1.0), ("x_1_3", 1.0)))
         self.assertEqual(grounded[1].right.coefficients, (("x_2_3", 1.0),))
 
+    def test_source_indexed_mapping_grounds_alpha_renamed_family_binders(self):
+        one = SymbolicAffineExpression.constant_value(1)
+        two = SymbolicAffineExpression.constant_value(2)
+        left = IndexedAffineFamily(
+            ("i",),
+            (SymbolicDomain("i", one, two),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("i",)),)),
+        )
+        right = IndexedAffineFamily(
+            ("u",),
+            (SymbolicDomain("u", one, two),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("u",)),)),
+        )
+        model = "dvar boolean x[1..2]; minimize 0; subject to {}"
+
+        grounded = ground_indexed_observable_mapping((IndexedObservablePair("x[{i}]", left, right),), model, model, "", "")
+
+        self.assertEqual(tuple(pair.name for pair in grounded), ("x[1]", "x[2]"))
+        self.assertEqual(grounded[0].right.coefficients, (("x_1", 1.0),))
+        self.assertEqual(grounded[1].right.coefficients, (("x_2", 1.0),))
+
+    def test_source_indexed_mapping_filters_grounded_family_guards(self):
+        one = SymbolicAffineExpression.constant_value(1)
+        two = SymbolicAffineExpression.constant_value(2)
+        first = SymbolicDomain("i", one, two)
+        second = SymbolicDomain("j", one, two)
+        guard = SymbolicPredicate(
+            SymbolicAffineExpression.parameter("i"),
+            "!=",
+            SymbolicAffineExpression.parameter("j"),
+        )
+        family = IndexedAffineFamily(
+            ("i", "j"),
+            (first, second),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("i", "j")),)),
+            guard,
+        )
+        model = "dvar boolean x[1..2][1..2]; minimize 0; subject to {}"
+
+        grounded = ground_indexed_observable_mapping(
+            (IndexedObservablePair("x[{i}][{j}]", family, family),), model, model, "", ""
+        )
+
+        self.assertEqual(tuple(pair.name for pair in grounded), ("x[1][2]", "x[2][1]"))
+
     def test_source_indexed_mapping_decodes_direct_access_and_sum_domains(self):
         mapping = parse_observable_mapping(
             json.dumps(
