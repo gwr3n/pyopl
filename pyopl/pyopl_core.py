@@ -3962,7 +3962,7 @@ class OPLCompiler:
         field_resolver: Optional[Callable[[dict[str, Any]], Any]] = None,
     ) -> Any:
         expr_type = expr.get("type")
-        if expr_type == "number_literal_index":
+        if expr_type in ("number_literal_index", "number"):
             return expr.get("value")
         if expr_type in ("name_reference_index", "name"):
             key = "name" if expr_type == "name_reference_index" else "value"
@@ -4075,13 +4075,68 @@ class OPLCompiler:
         kind = "index name" if index else "name"
         raise SemanticError(f"Unknown {kind} '{name}' in set comprehension.")
 
-    def _eval_comprehension_indexed_name(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _parameter_list_position(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        parameter_name: str,
+        dimension_index: int,
+        logical_index: Any,
+    ) -> int:
+        declaration = next(
+            (
+                candidate
+                for candidate in model_ast.get("declarations", [])
+                if candidate.get("name") == parameter_name and candidate.get("dimensions")
+            ),
+            None,
+        )
+        if declaration is None:
+            raise SemanticError(f"Cannot resolve declared dimensions for parameter '{parameter_name}'.")
+        dimensions = declaration.get("dimensions", [])
+        if dimension_index >= len(dimensions):
+            raise SemanticError(f"Too many indices for parameter '{parameter_name}'.")
+        dimension = dimensions[dimension_index]
+        dimension_type = dimension.get("type")
+        if dimension_type == "range_index":
+            start = self._eval_bound_expr(dimension["start"], working_data)
+            end = self._eval_bound_expr(dimension["end"], working_data)
+            domain = list(range(start, end + 1))
+        elif dimension_type in ("named_range", "named_range_dimension"):
+            start, end = self._resolve_named_range(
+                model_ast,
+                working_data,
+                dimension["name"],
+                context=f"indexed access to '{parameter_name}'",
+            )
+            domain = list(range(start, end + 1))
+        elif dimension_type in ("named_set", "named_set_dimension"):
+            set_value = working_data.get(dimension["name"], [])
+            domain = list(set_value.get("elements", []) if isinstance(set_value, dict) else set_value)
+        else:
+            raise SemanticError(
+                f"Unsupported dimension type '{dimension_type}' for indexed parameter '{parameter_name}'."
+            )
+        try:
+            return domain.index(logical_index)
+        except ValueError as exc:
+            raise SemanticError(
+                f"Index {logical_index!r} is outside dimension {dimension_index + 1} of parameter '{parameter_name}'."
+            ) from exc
+
+    def _eval_comprehension_indexed_name(
+        self,
+        expr: dict[str, Any],
+        env: dict[str, Any],
+        working_data: dict[str, Any],
+        model_ast: dict[str, Any],
+    ) -> Any:
         name = expr.get("name")
         if not isinstance(name, str):
             raise SemanticError("Indexed name in set comprehension is missing a name.")
         value = working_data.get(name)
-        indices = [self._eval_comprehension_expr(index, env, working_data) for index in expr.get("dimensions", [])]
-        for index in indices:
+        indices = [self._eval_comprehension_expr(index, env, working_data, model_ast) for index in expr.get("dimensions", [])]
+        for dimension_index, index in enumerate(indices):
             if isinstance(value, dict):
                 value = value[index]
             elif isinstance(value, (list, tuple)):
@@ -4089,15 +4144,18 @@ class OPLCompiler:
                     index = int(index)
                 if not isinstance(index, int):
                     raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
-                value = value[index - 1]
+                position = self._parameter_list_position(model_ast, working_data, name, dimension_index, index)
+                value = value[position]
             else:
                 raise SemanticError(f"Cannot index '{name}' in set comprehension.")
         return value
 
-    def _eval_comprehension_binop(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _eval_comprehension_binop(
+        self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> Any:
         op = expr.get("op")
-        left = self._eval_comprehension_expr(expr.get("left"), env, working_data)
-        right = self._eval_comprehension_expr(expr.get("right"), env, working_data)
+        left = self._eval_comprehension_expr(expr.get("left"), env, working_data, model_ast)
+        right = self._eval_comprehension_expr(expr.get("right"), env, working_data, model_ast)
         operations = {
             "+": lambda: left + right,
             "-": lambda: left - right,
@@ -4118,7 +4176,9 @@ class OPLCompiler:
             return operation()
         raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
 
-    def _eval_comprehension_expr(self, expr: Any, env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _eval_comprehension_expr(
+        self, expr: Any, env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> Any:
         if not isinstance(expr, dict):
             return expr
         expr_type = expr.get("type")
@@ -4132,17 +4192,17 @@ class OPLCompiler:
         ):
             return self._eval_comprehension_atom(expr, env, working_data)
         if expr_type == "indexed_name":
-            return self._eval_comprehension_indexed_name(expr, env, working_data)
+            return self._eval_comprehension_indexed_name(expr, env, working_data, model_ast)
         if expr_type == "parenthesized_expression":
-            return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
+            return self._eval_comprehension_expr(expr.get("expression"), env, working_data, model_ast)
         if expr_type == "uminus":
-            return -self._eval_comprehension_expr(expr.get("value"), env, working_data)
+            return -self._eval_comprehension_expr(expr.get("value"), env, working_data, model_ast)
         if expr_type == "not":
-            return self._eval_comprehension_logical(expr, env, working_data)
+            return self._eval_comprehension_logical(expr, env, working_data, model_ast)
         if expr_type in ("and", "or"):
-            return self._eval_comprehension_logical(expr, env, working_data)
+            return self._eval_comprehension_logical(expr, env, working_data, model_ast)
         if expr_type == "binop":
-            return self._eval_comprehension_binop(expr, env, working_data)
+            return self._eval_comprehension_binop(expr, env, working_data, model_ast)
         raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
 
     def _eval_comprehension_atom(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
@@ -4159,11 +4219,13 @@ class OPLCompiler:
             return self._resolve_comprehension_name(expr.get("name"), env, working_data, index=True)
         return expr.get("value")
 
-    def _eval_comprehension_logical(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> bool:
+    def _eval_comprehension_logical(
+        self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> bool:
         if expr.get("type") == "not":
-            return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data))
-        left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data))
-        right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
+            return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data, model_ast))
+        left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data, model_ast))
+        right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data, model_ast))
         return left and right if expr.get("type") == "and" else left or right
 
     def _materialize_set_of_tuples_comprehensions(
@@ -4215,7 +4277,7 @@ class OPLCompiler:
                 if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
                     return tuple(eval_tuple(element, env) for element in expr.get("elements", []))
                 if isinstance(expr, dict):
-                    return self._eval_comprehension_expr(expr, env, working_data)
+                    return self._eval_comprehension_expr(expr, env, working_data, model_ast)
                 return expr
 
             def normalize_tuple_value(value: Any) -> Any:
@@ -4231,7 +4293,9 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
+                    if index_constraint is None or bool(
+                        self._eval_comprehension_expr(index_constraint, env, working_data, model_ast)
+                    ):
                         tuple_value = eval_tuple(tuple_expr, env)
                         tuples.append(normalize_tuple_value(tuple_value))
                     return
@@ -4295,8 +4359,10 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
-                        value = self._eval_comprehension_expr(expr, env, working_data)
+                    if index_constraint is None or bool(
+                        self._eval_comprehension_expr(index_constraint, env, working_data, model_ast)
+                    ):
+                        value = self._eval_comprehension_expr(expr, env, working_data, model_ast)
                         if isinstance(value, float) and value.is_integer():
                             value = int(value)
                         values.append(value)
@@ -4419,7 +4485,7 @@ class OPLCompiler:
             current = working_data.get(base)
             if current is None:
                 raise SemanticError(f"Parameter '{base}' not found for indexed access.")
-            for dimension in expr.get("dimensions", []):
+            for dimension_index, dimension in enumerate(expr.get("dimensions", [])):
                 index_value = self._eval_computed_parameter_index(
                     dimension,
                     env,
@@ -4434,7 +4500,10 @@ class OPLCompiler:
                             f"{type(index_value).__name__}: {index_value!r}"
                         )
                     try:
-                        current = current[int(index_value) - 1]
+                        position = self._parameter_list_position(
+                            model_ast, working_data, base, dimension_index, int(index_value)
+                        )
+                        current = current[position]
                     except Exception as exc:
                         raise SemanticError(f"Index out of bounds for '{base}' at {index_value}: {exc}") from exc
                     continue

@@ -148,6 +148,57 @@ class TestTupleParsing(unittest.TestCase):
                 _, _, data = OPLCompiler().compile_model(code, solver=solver)
                 self.assertEqual(data["Rows"], expected)
 
+    def test_tuple_comprehension_uses_declared_parameter_domains(self):
+        code = """
+            range ZeroBased = 0..2;
+            range Shifted = 5..7;
+            {int} Sparse = {2, 4, 8};
+            int zeroValue[ZeroBased] = [10, 20, 30];
+            int shiftedValue[Shifted] = [50, 60, 70];
+            int sparseValue[Sparse] = [200, 400, 800];
+            int matrix[ZeroBased][Shifted] = [[15, 16, 17], [25, 26, 27], [35, 36, 37]];
+            tuple Pair { int index; int value; };
+            {Pair} ZeroRows = { <i, zeroValue[i]> | i in ZeroBased };
+            {Pair} ShiftedRows = { <i, shiftedValue[i]> | i in Shifted };
+            {Pair} SparseRows = { <i, sparseValue[i]> | i in Sparse };
+            {Pair} MatrixRows = { <i, matrix[i][i + 5]> | i in ZeroBased };
+            minimize 0;
+            subject to {}
+        """
+
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                _, _, data = OPLCompiler().compile_model(code, solver=solver)
+                self.assertEqual(data["ZeroRows"], [(0, 10), (1, 20), (2, 30)])
+                self.assertEqual(data["ShiftedRows"], [(5, 50), (6, 60), (7, 70)])
+                self.assertEqual(data["SparseRows"], [(2, 200), (4, 400), (8, 800)])
+                self.assertEqual(data["MatrixRows"], [(0, 15), (1, 26), (2, 37)])
+
+    def test_computed_parameters_use_declared_parameter_domains(self):
+        code = """
+            range ZeroBased = 0..2;
+            range Shifted = 5..7;
+            {int} Sparse = {2, 4, 8};
+            int zeroValue[ZeroBased] = [10, 20, 30];
+            int shiftedValue[Shifted] = [50, 60, 70];
+            int sparseValue[Sparse] = [200, 400, 800];
+            int matrix[ZeroBased][Shifted] = [[15, 16, 17], [25, 26, 27], [35, 36, 37]];
+            int ZeroSelected[i in ZeroBased] = zeroValue[i];
+            int ShiftedSelected[i in Shifted] = shiftedValue[i];
+            int SparseSelected[i in Sparse] = sparseValue[i];
+            int MatrixSelected[i in ZeroBased] = matrix[i][i + 5];
+            minimize 0;
+            subject to {}
+        """
+
+        for solver in ("gurobi", "scipy"):
+            with self.subTest(solver=solver):
+                _, _, data = OPLCompiler().compile_model(code, solver=solver)
+                self.assertEqual(data["ZeroSelected__map"], {0: 10, 1: 20, 2: 30})
+                self.assertEqual(data["ShiftedSelected__map"], {5: 50, 6: 60, 7: 70})
+                self.assertEqual(data["SparseSelected__map"], {2: 200, 4: 400, 8: 800})
+                self.assertEqual(data["MatrixSelected__map"], {0: 15, 1: 26, 2: 37})
+
     def test_tuple_field_access_in_computed_parameter_index(self):
         code = """
         range Nodes = 1..3;
