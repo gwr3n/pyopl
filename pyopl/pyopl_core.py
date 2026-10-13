@@ -4082,18 +4082,21 @@ class OPLCompiler:
         parameter_name: str,
         dimension_index: int,
         logical_index: Any,
+        dimension_size: Optional[int] = None,
     ) -> int:
         declaration = next(
-            (
-                candidate
-                for candidate in model_ast.get("declarations", [])
-                if candidate.get("name") == parameter_name and candidate.get("dimensions")
-            ),
+            (candidate for candidate in model_ast.get("declarations", []) if candidate.get("name") == parameter_name),
             None,
         )
         if declaration is None:
             raise SemanticError(f"Cannot resolve declared dimensions for parameter '{parameter_name}'.")
         dimensions = declaration.get("dimensions", [])
+        if not dimensions and dimension_size is not None:
+            if not isinstance(logical_index, int) or not 1 <= logical_index <= dimension_size:
+                raise SemanticError(
+                    f"Index {logical_index!r} is outside dimension {dimension_index + 1} " f"of parameter '{parameter_name}'."
+                )
+            return logical_index - 1
         if dimension_index >= len(dimensions):
             raise SemanticError(f"Too many indices for parameter '{parameter_name}'.")
         dimension = dimensions[dimension_index]
@@ -4114,9 +4117,7 @@ class OPLCompiler:
             set_value = working_data.get(dimension["name"], [])
             domain = list(set_value.get("elements", []) if isinstance(set_value, dict) else set_value)
         else:
-            raise SemanticError(
-                f"Unsupported dimension type '{dimension_type}' for indexed parameter '{parameter_name}'."
-            )
+            raise SemanticError(f"Unsupported dimension type '{dimension_type}' for indexed parameter '{parameter_name}'.")
         try:
             return domain.index(logical_index)
         except ValueError as exc:
@@ -4144,7 +4145,7 @@ class OPLCompiler:
                     index = int(index)
                 if not isinstance(index, int):
                     raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
-                position = self._parameter_list_position(model_ast, working_data, name, dimension_index, index)
+                position = self._parameter_list_position(model_ast, working_data, name, dimension_index, index, len(value))
                 value = value[position]
             else:
                 raise SemanticError(f"Cannot index '{name}' in set comprehension.")
@@ -4501,7 +4502,12 @@ class OPLCompiler:
                         )
                     try:
                         position = self._parameter_list_position(
-                            model_ast, working_data, base, dimension_index, int(index_value)
+                            model_ast,
+                            working_data,
+                            base,
+                            dimension_index,
+                            int(index_value),
+                            len(current),
                         )
                         current = current[position]
                     except Exception as exc:

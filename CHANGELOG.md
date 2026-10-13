@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve one-based indexing for inline list parameters that omit an explicit
+	dimension declaration during computed-parameter and comprehension evaluation.
 - Resolve list-backed parameter indices against their declared ranges or sets
 	during set-comprehension and computed-parameter materialization, preserving
 	zero-based, non-unit, sparse-set, and multidimensional indexing semantics.

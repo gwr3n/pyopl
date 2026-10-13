@@ -1393,6 +1393,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(working_data["computed"][1][1], 33.0)
         self.assertEqual(working_data["computed__map"][(("B", 3), 2)], 33.0)
 
+    def test_core_resolves_implicit_list_dimensions_as_one_based(self):
+        compiler = OPLCompiler()
+        ast = {"declarations": [{"type": "parameter_inline", "name": "arr", "value": [10, 20]}]}
+
+        self.assertEqual(compiler._parameter_list_position(ast, {"arr": [10, 20]}, "arr", 0, 1, 2), 0)
+        with self.assertRaisesRegex(SemanticError, "Index 0 is outside dimension 1"):
+            compiler._parameter_list_position(ast, {"arr": [10, 20]}, "arr", 0, 0, 2)
+
     def test_core_computed_parameter_error_branches(self):
         compiler = OPLCompiler()
         ast = {
