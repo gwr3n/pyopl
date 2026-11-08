@@ -139,12 +139,12 @@ See `tools/examples.py` for a repository of examples.
 
 ### Classical problems from the Operational Research literature
 
-| Problem | Notebook | 
-| --- | --- | 
-| Stigler's Diet Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb) |
-| Dantzig's Truck Dispatching Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Dantzig_Truck_Dispatching_Problem_in_PyOPL.ipynb) |
-| Wagner-Whitin's Dynamic Lot Sizing Problem | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Wagner_Whitin_Economic_Lot_Size_in_PyOPL.ipynb) |
-| Dantzig-Fulkerson-Johnson's Large Scale TSP | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Dantzig_Fulkerson_Johnson_Large_Scale_TSP_in_PyOPL.ipynb) |
+| Problem | Notebook |
+| --- | --- |
+| [Stigler's Diet Problem](https://www.linkedin.com/pulse/stiglers-diet-problem-revisited-pyopl-roberto-rossi-qgbge/) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Stigler_Diet_Problem_in_PyOPL.ipynb) |
+| [Dantzig's Truck Dispatching Problem](https://www.linkedin.com/pulse/dantzig-ramsers-truck-dispatching-problem-revisited-pyopl-rossi-zufxe/) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Dantzig_Truck_Dispatching_Problem_in_PyOPL.ipynb) |
+| [Wagner-Whitin's Dynamic Lot Sizing Problem](https://www.linkedin.com/pulse/wagner-whitins-dynamic-lot-sizing-problem-roberto-rossi-to2ue/) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Wagner_Whitin_Economic_Lot_Size_in_PyOPL.ipynb) |
+| [Dantzig-Fulkerson-Johnson's Large Scale TSP](https://www.linkedin.com/pulse/dantzig-fulkerson-johnsons-large-scale-problem-roberto-rossi-pjxye/) | [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Dantzig_Fulkerson_Johnson_Large_Scale_TSP_in_PyOPL.ipynb) |
 
 ## PyOPL IME
 
