@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.6.3] - 2026-11-08
+
+### Added
+
 - Add affine-observable mappings for projected MILP comparisons, including
 	affine expressions over decision variables and indexed families grounded from
 	supplied model/data instances.
