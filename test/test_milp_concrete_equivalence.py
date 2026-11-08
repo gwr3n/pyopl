@@ -1,13 +1,185 @@
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from pyopl.equivalence.concrete import EquivalenceResult, compare, prove_equivalent
+from pyopl.equivalence import IndexDomain, ObservableTemplate
+from pyopl.equivalence.concrete import (
+    AffineObservable,
+    EquivalenceResult,
+    ObservablePair,
+    _projected_observable_issue,
+    compare,
+    prove_equivalent,
+)
 from pyopl.linear_problem import LinearProblem
 from pyopl.pyopl_core import linear_problem_from_opl
 from pyopl.pyopl_ide_bootstrap import OPLIDE
 
 
 class CompareTests(unittest.TestCase):
+    def test_projected_domain_checks_cache_repeated_expressions(self):
+        problem = linear_problem_from_opl("dvar boolean x; minimize 0; subject to {}")
+        other_problem = replace(problem)
+        expression = AffineObservable((("x", 1.0),))
+        mapping = (
+            ObservablePair("first", expression, expression),
+            ObservablePair("second", expression, expression),
+        )
+
+        with patch("pyopl.equivalence.concrete.milp", return_value=SimpleNamespace(status=0, fun=0.0)) as solve:
+            self.assertIsNone(_projected_observable_issue(problem, other_problem, mapping, 1e-9))
+
+        self.assertEqual(solve.call_count, 4)
+
+    def test_projected_milp_supports_objective_bearing_continuous_auxiliary(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x", "aux"],
+            bounds=[[0, 1], [0, 1]],
+            integrality=[1, 0],
+            c=[0.0, 2.0],
+            A_eq=[[1.0, -1.0]],
+            b_eq=[0.0],
+            A_ub=[],
+            b_ub=[],
+        )
+        right = replace(left, var_names=["y", "flow"])
+
+        result = prove_equivalent(
+            left,
+            right,
+            mode="projected_milp",
+            observable_mapping=(ObservablePair("decision", AffineObservable((("x", 1.0),)), AffineObservable((("y", 1.0),))),),
+        )
+
+        self.assertTrue(result.equivalent)
+
+    def test_projected_milp_ignores_omitted_unconstrained_zero_objective_columns(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["x", "aux"],
+            bounds=[[0, 1], [0, 1]],
+            integrality=[1, 0],
+            c=[1.0, 0.0],
+            A_eq=[],
+            b_eq=[],
+            A_ub=[],
+            b_ub=[],
+        )
+        right = replace(left, var_names=["y"], bounds=[[0, 1]], integrality=[1], c=[1.0])
+
+        result = prove_equivalent(
+            left,
+            right,
+            mode="projected_milp",
+            observable_mapping=(ObservablePair("decision", AffineObservable((("x", 1.0),)), AffineObservable((("y", 1.0),))),),
+        )
+
+        self.assertTrue(result.equivalent)
+
+    def test_projected_milp_refuses_observable_outside_binary_range(self):
+        problem = linear_problem_from_opl("dvar boolean x; dvar boolean y; minimize 0; subject to {}")
+        pair = ObservablePair(
+            "sum",
+            AffineObservable((("x", 1.0), ("y", 1.0))),
+            AffineObservable((("x", 1.0), ("y", 1.0))),
+        )
+
+        result = prove_equivalent(problem, problem, mode="projected_milp", observable_mapping=(pair,))
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("not solver-certified binary", result.reason)
+
+    def test_projected_milp_distinguishes_empty_observable_domain(self):
+        left = linear_problem_from_opl(
+            "dvar boolean x; dvar float auxiliary; minimize x; subject to { auxiliary >= 0; auxiliary <= 1; }"
+        )
+        right = linear_problem_from_opl(
+            "dvar boolean x; dvar float auxiliary; minimize x; " "subject to { auxiliary <= x; auxiliary >= x + 1; }"
+        )
+        observable = ObservablePair(
+            "decision",
+            AffineObservable((("x", 1.0),)),
+            AffineObservable((("x", 1.0),)),
+        )
+
+        result = prove_equivalent(left, right, mode="projected_milp", observable_mapping=(observable,))
+
+        self.assertEqual(result.status, "different")
+        self.assertIn("feasible in only one", result.reason)
+
+    def test_observable_template_expands_guarded_identity_mapping(self):
+        problem = linear_problem_from_opl("dvar boolean x[1..2][1..2]; minimize 0; subject to {}")
+        template = ObservableTemplate(
+            "arc_{i}_{j}",
+            (IndexDomain("i", (1, 2)), IndexDomain("j", (1, 2))),
+            lambda indices: AffineObservable(((f"x_{indices['i']}_{indices['j']}", 1.0),)),
+            lambda indices: AffineObservable(((f"x_{indices['i']}_{indices['j']}", 1.0),)),
+            guard=lambda indices: indices["i"] != indices["j"],
+        )
+
+        mapping = template.expand()
+        result = prove_equivalent(problem, problem, mode="projected_milp", observable_mapping=mapping)
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(len(mapping), 2)
+        self.assertEqual({pair.name for pair in mapping}, {"arc_1_2", "arc_2_1"})
+        self.assertNotIn("x_1_1", " ".join(result.observable_mapping))
+
+    def test_projected_milp_accepts_sum_observable_and_objective_integer_auxiliary(self):
+        left = LinearProblem(
+            sense="minimize",
+            var_names=["order", "load"],
+            bounds=[[0, 1], [0, 2]],
+            integrality=[1, 1],
+            c=[0.0, 1.0],
+            A_eq=[[1.0, -1.0]],
+            b_eq=[0.0],
+            A_ub=[],
+            b_ub=[],
+        )
+        right = LinearProblem(
+            sense="minimize",
+            var_names=["arc_a", "arc_b", "load"],
+            bounds=[[0, 1], [0, 1], [0, 2]],
+            integrality=[1, 1, 1],
+            c=[0.0, 0.0, 1.0],
+            A_eq=[[1.0, 1.0, -1.0]],
+            b_eq=[0.0],
+            A_ub=[[1.0, 1.0, 0.0]],
+            b_ub=[1.0],
+        )
+
+        result = prove_equivalent(
+            left,
+            right,
+            mode="projected_milp",
+            observable_mapping=(
+                ObservablePair(
+                    "order",
+                    AffineObservable((("order", 1.0),)),
+                    AffineObservable((("arc_a", 1.0), ("arc_b", 1.0))),
+                ),
+            ),
+        )
+
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.observable_mapping, ("order: 1*order <-> 1*arc_a + 1*arc_b",))
+
+    def test_projected_milp_refuses_fractional_observable_coefficients(self):
+        problem = linear_problem_from_opl("dvar boolean x; minimize x; subject to {}")
+
+        result = prove_equivalent(
+            problem,
+            problem,
+            mode="projected_milp",
+            observable_mapping=(ObservablePair("half", AffineObservable((("x", 0.5),)), AffineObservable((("x", 0.5),))),),
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("fractional", result.reason)
+
     def test_fixed_integer_infeasibility_survives_normalization(self):
         feasible = linear_problem_from_opl("dvar float+ x; minimize x; subject to { x <= 1; }")
         infeasible = replace(
@@ -81,6 +253,7 @@ class CompareTests(unittest.TestCase):
                 result = prove_equivalent(problem, problem, mode="projected_milp", max_projected_assignments=budget)
 
                 self.assertEqual(result.status, expected)
+                self.assertEqual(result.budget_exhausted, expected == "unknown")
 
     def test_compare_accepts_equivalent_opl_models_compiled_by_scipy_codegen(self):
         first = linear_problem_from_opl("""

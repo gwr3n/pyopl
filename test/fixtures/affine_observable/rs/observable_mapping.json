@@ -1,0 +1,57 @@
+[
+  {
+    "name": "order_1",
+    "left": {"coefficients": {"order_1": 1.0}},
+    "right": {
+      "coefficients": {
+        "x_1_2": 1.0,
+        "x_1_3": 1.0,
+        "x_1_4": 1.0,
+        "x_1_5": 1.0,
+        "x_1_6": 1.0
+      }
+    }
+  },
+  {
+    "name": "order_2",
+    "left": {"coefficients": {"order_2": 1.0}},
+    "right": {
+      "coefficients": {
+        "x_2_3": 1.0,
+        "x_2_4": 1.0,
+        "x_2_5": 1.0,
+        "x_2_6": 1.0
+      }
+    }
+  },
+  {
+    "name": "order_3",
+    "left": {"coefficients": {"order_3": 1.0}},
+    "right": {
+      "coefficients": {
+        "x_3_4": 1.0,
+        "x_3_5": 1.0,
+        "x_3_6": 1.0
+      }
+    }
+  },
+  {
+    "name": "order_4",
+    "left": {"coefficients": {"order_4": 1.0}},
+    "right": {
+      "coefficients": {
+        "x_4_5": 1.0,
+        "x_4_6": 1.0
+      }
+    }
+  },
+  {
+    "name": "order_5",
+    "left": {"coefficients": {"order_5": 1.0}},
+    "right": {
+      "coefficients": {
+        "x_5_6": 1.0
+      }
+    }
+  }
+]

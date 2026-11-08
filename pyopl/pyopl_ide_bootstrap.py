@@ -29,6 +29,8 @@ import ttkbootstrap as tb
 from platformdirs import user_config_dir
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+# --- Local Imports ---
+from .equivalence import parse_indexed_observable_mapping, parse_observable_mapping
 from .genai._strategy_base import GenAIStrategyBase
 from .genai.exemplar_distillation import ExemplarDraft, distill_exemplar_description
 from .genai.exemplar_ranking_worker import ExemplarRankingWorker
@@ -40,16 +42,19 @@ from .genai.model_discovery import (
     list_ollama_models,
     list_openai_models,
 )
-from .genai.pyopl_generative import generative_feedback
+from .genai.pyopl_generative import (
+    generative_feedback,
+    generative_indexed_observable_mapping,
+    generative_observable_mapping,
+)
 from .genai.rag_helper import rank_problem_descriptions
-
-# --- Local Imports ---
 from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
     OPLDataParser,
     OPLLexer,
     OPLParser,
+    linear_problem_from_opl,
 )
 from .pyopl_core import (
     export_model as export_opl_model,
@@ -665,6 +670,7 @@ def _compare_models_wrapper(
     right_data: str,
     strategy: str,
     q: multiprocessing.Queue,
+    observable_mapping_file: str = "",
 ) -> None:
     """Wrapper to compare models in a separate process."""
 
@@ -680,18 +686,126 @@ def _compare_models_wrapper(
             return file_obj.read()
 
     try:
+        mapping_text = read_optional_file(observable_mapping_file)
+        indexed_mapping = None
+        parameter_contract = None
+        grounded_mapping = None
+        if mapping_text:
+            payload = json.loads(mapping_text)
+            if (
+                strategy == "abstract"
+                and isinstance(payload, dict)
+                and payload.get("schema") == "pyopl.uniform_indexed_observable_mapping"
+            ):
+                indexed_mapping, parameter_contract = parse_indexed_observable_mapping(mapping_text)
+            else:
+                grounded_mapping = parse_observable_mapping(mapping_text)
         result = compare_models(
             read_model(left_model),
             read_model(right_model),
             strategy=strategy,
             left_data_text=read_optional_file(left_data),
             right_data_text=read_optional_file(right_data),
+            observable_mapping=grounded_mapping,
+            indexed_observable_mapping=indexed_mapping,
+            parameter_contract=parameter_contract,
         )
         q.put(("success", result))
     except SemanticError as exc:
         q.put(("validation_error", exc.message))
     except Exception as exc:
         q.put(("error", f"{type(exc).__name__}: {exc}\n\n{traceback.format_exc()}"))
+
+
+def _data_paths_are_paired(left_data: str, right_data: str) -> bool:
+    """Return whether both comparison sides provide data or neither does."""
+    return bool(left_data) == bool(right_data)
+
+
+def _read_mapping_generation_inputs(
+    left_model: str,
+    right_model: str,
+    left_data: str,
+    right_data: str,
+) -> tuple[str, str, str, str]:
+    """Read model and optional data files used for mapping generation."""
+
+    def read_file(path: str) -> str:
+        if not path:
+            return ""
+        with open(path, "r", encoding="utf-8") as file_obj:
+            return file_obj.read()
+
+    return read_file(left_model), read_file(right_model), read_file(left_data), read_file(right_data)
+
+
+def _validate_grounded_generated_mapping(
+    mapping_text: str,
+    left_model_text: str,
+    right_model_text: str,
+    left_data_text: str,
+    right_data_text: str,
+) -> None:
+    """Validate generated concrete mapping columns against both model instances."""
+    mapping = parse_observable_mapping(mapping_text)
+    left_problem = linear_problem_from_opl(left_model_text, left_data_text or None)
+    right_problem = linear_problem_from_opl(right_model_text, right_data_text or None)
+    left_columns = {name for pair in mapping for name, _ in pair.left.coefficients}
+    right_columns = {name for pair in mapping for name, _ in pair.right.coefficients}
+    unknown_left = sorted(left_columns - set(left_problem.var_names))
+    unknown_right = sorted(right_columns - set(right_problem.var_names))
+    if unknown_left or unknown_right:
+        details = []
+        if unknown_left:
+            details.append(f"left: {', '.join(unknown_left)}")
+        if unknown_right:
+            details.append(f"right: {', '.join(unknown_right)}")
+        raise ValueError("Generated mapping references non-grounded columns (" + "; ".join(details) + ")")
+
+
+def _generate_dialog_mapping_text(
+    left_model: str,
+    right_model: str,
+    left_data: str,
+    right_data: str,
+    strategy: str,
+    model_name: str,
+    llm_provider: Optional[str],
+    progress: Callable[[str], None],
+) -> str:
+    """Generate and validate the mapping selected by the comparison dialog."""
+    left_model_text, right_model_text, left_data_text, right_data_text = _read_mapping_generation_inputs(
+        left_model, right_model, left_data, right_data
+    )
+    indexed_mode = strategy == "abstract" and not left_data and not right_data
+    if indexed_mode:
+        mapping_text = generative_indexed_observable_mapping(
+            left_model_text,
+            right_model_text,
+            model_name=model_name,
+            llm_provider=llm_provider,
+            progress=progress,
+        )
+        parse_indexed_observable_mapping(mapping_text)
+        return mapping_text
+
+    mapping_text = generative_observable_mapping(
+        left_model_text,
+        right_model_text,
+        left_data_text,
+        right_data_text,
+        model_name=model_name,
+        llm_provider=llm_provider,
+        progress=progress,
+    )
+    _validate_grounded_generated_mapping(
+        mapping_text,
+        left_model_text,
+        right_model_text,
+        left_data_text,
+        right_data_text,
+    )
+    return mapping_text
 
 
 def _format_comparison_validation_error(detail: str) -> str:
@@ -4033,8 +4147,8 @@ class OPLIDE(TkinterDnD.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Compare models")
         dialog.transient(self)
-        dialog.geometry("760x560")
-        dialog.minsize(680, 460)
+        dialog.geometry("760x600")
+        dialog.minsize(680, 500)
 
         root = ttk.Frame(dialog, padding=12)
         root.pack(fill=tk.BOTH, expand=True)
@@ -4075,11 +4189,13 @@ class OPLIDE(TkinterDnD.Tk):
         path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
         path_frame.grid(row=1, column=0, sticky="ew")
         path_frame.columnconfigure(1, weight=1)
+        path_frame.columnconfigure(3, minsize=90)
 
         left_model_var = tk.StringVar(value=self.model_file or "")
         left_data_var = tk.StringVar(value=self.data_file or "")
         right_model_var = tk.StringVar()
         right_data_var = tk.StringVar()
+        observable_mapping_var = tk.StringVar()
 
         def browse_model(target: tk.StringVar) -> None:
             fname = filedialog.askopenfilename(
@@ -4098,6 +4214,15 @@ class OPLIDE(TkinterDnD.Tk):
             )
             if fname:
                 target.set(fname)
+
+        def browse_observable_mapping() -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select observable mapping JSON",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            if fname:
+                observable_mapping_var.set(fname)
 
         browse_buttons: list[ttk.Button] = []
         compare_process: Optional[multiprocessing.Process] = None
@@ -4120,6 +4245,9 @@ class OPLIDE(TkinterDnD.Tk):
         add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
         add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
         add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
+        add_path_row(4, "Observable mapping", observable_mapping_var, browse_observable_mapping)
+        mapping_generate_button = ttk.Button(path_frame, text="Generate")
+        mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
 
         result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
         result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
@@ -4143,12 +4271,27 @@ class OPLIDE(TkinterDnD.Tk):
             state = "disabled" if running else "normal"
             for control in browse_buttons:
                 control.config(state=state)
+            mapping_generate_button.config(state=state)
             abstract_button.config(state=state)
             concrete_button.config(state=state)
             close_button.config(state=state)
             compare_button.config(
                 text=("Interrupt" if running else "Compare"),
                 command=(interrupt_compare if running else do_compare),
+                state="normal",
+            )
+
+        def set_mapping_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
+            compare_button.config(state=state)
+            close_button.config(state=state)
+            mapping_generate_button.config(
+                text=("Interrupt" if running else "Generate"),
+                command=(interrupt_mapping if running else generate_observable_mapping),
                 state="normal",
             )
 
@@ -4176,6 +4319,133 @@ class OPLIDE(TkinterDnD.Tk):
                     q.join_thread()
             except Exception:
                 pass
+
+        def interrupt_mapping() -> None:
+            active = getattr(self, "_active_operation", None)
+            if active is None or active.kind != "genai-observable-mapping":
+                return
+            self.interrupt_active_operation()
+            set_mapping_running(False)
+            set_result("Observable mapping generation interrupted.\n")
+
+        def generate_observable_mapping() -> None:
+            left_model = left_model_var.get().strip()
+            right_model = right_model_var.get().strip()
+            left_data = left_data_var.get().strip()
+            right_data = right_data_var.get().strip()
+
+            if not left_model or not right_model:
+                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
+                return
+            if not _data_paths_are_paired(left_data, right_data):
+                messagebox.showwarning(
+                    "Compare models",
+                    "Choose both data files or leave both data fields empty.",
+                    parent=dialog,
+                )
+                return
+            for label, path in (
+                ("Left model", left_model),
+                ("Right model", right_model),
+                ("Left data", left_data),
+                ("Right data", right_data),
+            ):
+                if path and not os.path.exists(path):
+                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
+                    return
+            selected_genai_model = self.genai_model
+            if not self.genai_provider or not selected_genai_model:
+                messagebox.showwarning(
+                    "Compare models", "Select a GenAI provider and model before generating a mapping.", parent=dialog
+                )
+                return
+
+            operation = self._start_foreground_operation(
+                kind="genai-observable-mapping",
+                label="Generate Observable Mapping",
+                header="GenAI: Generating observable mapping...",
+                status=f"GenAI: generating observable mapping with {self.genai_provider} - {self.genai_model} ...",
+                model_file=left_model,
+                data_file=left_data,
+            )
+            if operation is None:
+                return
+            set_mapping_running(True)
+            self._append_output(
+                f"Generating an observable mapping for:\n{left_model}\n{right_model}\n",
+                operation.session_id,
+            )
+
+            def progress(message: str) -> None:
+                if not operation.cancel_requested:
+                    self.after(
+                        0,
+                        self._append_output,
+                        (message if message.endswith("\n") else message + "\n"),
+                        operation.session_id,
+                    )
+
+            def finish_cancelled() -> None:
+                set_mapping_running(False)
+                self._finish_foreground_operation(operation)
+
+            def run() -> None:
+                try:
+                    mapping_text = _generate_dialog_mapping_text(
+                        left_model,
+                        right_model,
+                        left_data,
+                        right_data,
+                        strategy_var.get(),
+                        selected_genai_model,
+                        self.genai_provider,
+                        progress,
+                    )
+                    if operation.cancel_requested:
+                        self.after(0, finish_cancelled)
+                        return
+
+                    tmp_dir = Path.cwd() / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    descriptor, mapping_path = tempfile.mkstemp(
+                        prefix="observable_mapping_",
+                        suffix=".json",
+                        dir=str(tmp_dir),
+                        text=True,
+                    )
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as file_obj:
+                        file_obj.write(mapping_text)
+
+                    def apply_mapping() -> None:
+                        if operation.cancel_requested:
+                            try:
+                                os.unlink(mapping_path)
+                            except OSError:
+                                pass
+                            finish_cancelled()
+                            return
+                        observable_mapping_var.set(mapping_path)
+                        set_mapping_running(False)
+                        self._finish_foreground_operation(operation)
+                        set_result(f"Generated observable mapping:\n{mapping_path}\n\n{mapping_text}")
+                        self.status_var.set("GenAI: observable mapping generated")
+
+                    self.after(0, apply_mapping)
+                except Exception as exc:
+
+                    def on_error(error: Exception) -> None:
+                        set_mapping_running(False)
+                        self._finish_foreground_operation(operation)
+                        if operation.cancel_requested:
+                            return
+                        detail = _concise_genai_error(error)
+                        set_result(f"Observable mapping generation failed.\n\n{detail}\n")
+                        messagebox.showerror("GenAI Error", detail, parent=dialog)
+                        self.status_var.set("GenAI: observable mapping error")
+
+                    self.after(0, on_error, exc)
+
+            threading.Thread(target=run, daemon=True).start()
 
         def interrupt_compare() -> None:
             p = compare_process
@@ -4254,16 +4524,25 @@ class OPLIDE(TkinterDnD.Tk):
             right_model = right_model_var.get().strip()
             left_data = left_data_var.get().strip()
             right_data = right_data_var.get().strip()
+            observable_mapping_file = observable_mapping_var.get().strip()
             strategy = strategy_var.get()
 
             if not left_model or not right_model:
                 messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
+                return
+            if not _data_paths_are_paired(left_data, right_data):
+                messagebox.showwarning(
+                    "Compare models",
+                    "Choose both data files or leave both data fields empty.",
+                    parent=dialog,
+                )
                 return
             paths = [
                 ("Left model", left_model),
                 ("Right model", right_model),
                 ("Left data", left_data),
                 ("Right data", right_data),
+                ("Observable mapping", observable_mapping_file),
             ]
             for label, path in paths:
                 if path and not os.path.exists(path):
@@ -4274,7 +4553,15 @@ class OPLIDE(TkinterDnD.Tk):
                 compare_queue = multiprocessing.Queue()
                 compare_process = multiprocessing.Process(
                     target=_compare_models_wrapper,
-                    args=(left_model, left_data, right_model, right_data, strategy, compare_queue),
+                    args=(
+                        left_model,
+                        left_data,
+                        right_model,
+                        right_data,
+                        strategy,
+                        compare_queue,
+                        observable_mapping_file,
+                    ),
                 )
                 compare_process.start()
                 set_compare_running(True)
@@ -4290,9 +4577,36 @@ class OPLIDE(TkinterDnD.Tk):
                 messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
 
         compare_button.config(command=do_compare)
-        dialog.bind("<Return>", lambda _event: interrupt_compare() if compare_process is not None else do_compare())
-        dialog.bind("<Escape>", lambda _event: interrupt_compare() if compare_process is not None else dialog.destroy())
-        dialog.protocol("WM_DELETE_WINDOW", lambda: interrupt_compare() if compare_process is not None else dialog.destroy())
+        mapping_generate_button.config(command=generate_observable_mapping)
+
+        def mapping_is_running() -> bool:
+            active = getattr(self, "_active_operation", None)
+            return active is not None and active.kind == "genai-observable-mapping"
+
+        dialog.bind(
+            "<Return>",
+            lambda _event: (
+                interrupt_compare()
+                if compare_process is not None
+                else interrupt_mapping() if mapping_is_running() else do_compare()
+            ),
+        )
+        dialog.bind(
+            "<Escape>",
+            lambda _event: (
+                interrupt_compare()
+                if compare_process is not None
+                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
+            ),
+        )
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (
+                interrupt_compare()
+                if compare_process is not None
+                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
+            ),
+        )
         dialog.grab_set()
         dialog.focus_set()
 

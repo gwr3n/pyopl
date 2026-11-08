@@ -144,6 +144,22 @@ def generative_feedback(
     validation_iterations: int = ...,
     syntax_error_reporting: str = ...,
 ) -> Dict[str, str]: ...
+def generative_observable_mapping(
+    left_model: str,
+    right_model: str,
+    left_data: str = ...,
+    right_data: str = ...,
+    model_name: str = ...,
+    llm_provider: Optional[str] = ...,
+    progress: Optional[Callable[[str], None]] = ...,
+) -> str: ...
+def generative_indexed_observable_mapping(
+    left_model: str,
+    right_model: str,
+    model_name: str = ...,
+    llm_provider: Optional[str] = ...,
+    progress: Optional[Callable[[str], None]] = ...,
+) -> str: ...
 def list_models(llm_provider: Optional[str] = ..., model_name: str = ...) -> List[str]: ...
 def list_openai_models(prefix: Optional[str] = "gpt") -> List[str]: ...
 def list_gemini_models(prefix: Optional[str] = "gemini") -> List[str]: ...

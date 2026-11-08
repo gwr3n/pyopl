@@ -13,6 +13,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+## [v2.6.3] - 2026-11-08
+
+### Added
+
+- Add affine-observable mappings for projected MILP comparisons, including
+	affine expressions over decision variables and indexed families grounded from
+	supplied model/data instances.
+- Add a versioned, round-trippable JSON format for observable mappings and
+	parameter contracts, with mapping generation and reuse through the CLI, IDE,
+	and MCP using a selected GenAI provider and model.
+- Add regression fixtures for TSP, BM/PM, and service-route formulations,
+	covering grounded projected equivalence and feasibility or objective
+	counterexamples.
+
+### Changed
+
+- Extend projected MILP comparison from shared binary columns to solver-checked
+	affine binary observables; compare feasible observable assignments and
+	conditional objective values over each complete formulation.
+- Keep indexed observable comparisons scoped to supplied instances. Data-free
+	indexed mappings remain `unknown`, and generated mappings are inputs to the
+	checker rather than equivalence evidence on their own.
+
+### Fixed
+
+- Preserve one-based indexing for inline list parameters that omit an explicit
+	dimension declaration during computed-parameter and comprehension evaluation.
+- Resolve list-backed parameter indices against their declared ranges or sets
+	during set-comprehension and computed-parameter materialization, preserving
+	zero-based, non-unit, sparse-set, and multidimensional indexing semantics.
+- Treat observables over an infeasible complete model as vacuously satisfying
+	the binary-range precondition, allowing bidirectional projection to report an
+	empty-domain counterexample instead of an inconclusive result.
+- Ground each side of an indexed observable mapping with its own binder names,
+	allowing equivalent families to use alpha-renamed indices.
+- Enforce symbolic family guards while grounding indexed observable mappings,
+	excluding guarded-out tuples and rejecting mappings whose guards disagree.
+
 ## [v2.6.3] - 2026-09-27
 
 ### Added

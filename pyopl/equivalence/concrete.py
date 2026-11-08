@@ -56,6 +56,12 @@ import numpy as np
 from networkx.algorithms import isomorphism
 from scipy.optimize import Bounds, LinearConstraint, linprog, milp
 
+from pyopl.equivalence._projected_value import (
+    AffineObservable,
+    ObservablePair,
+    legacy_observables,
+    render_observable_mapping,
+)
 from pyopl.linear_problem import BoundValue, LinearProblem, Number, ObjectiveSense
 
 EquivalenceStatus = Literal["equivalent", "different", "unknown"]
@@ -87,6 +93,8 @@ class EquivalenceResult:
     termination: str = "not_recorded"
     budget_exhausted: bool = False
     evidence_kind: str = "numerical_checks_only"
+    observable_mapping: tuple[str, ...] = ()
+    projected_assignment_counts: tuple[int, ...] = ()
 
     @property
     def equivalent(self) -> bool:
@@ -153,6 +161,7 @@ def _prove_equivalent(
     *,
     mode: Literal["structural", "normalized", "solver", "projection", "projected_milp", "auto"] = "solver",
     variable_mapping: dict[str, str] | None = None,
+    observable_mapping: tuple[ObservablePair, ...] | None = None,
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
     max_projected_assignments: int = 100_000,
@@ -191,6 +200,11 @@ def _prove_equivalent(
     current implementation accepts ``"structural"`` and ``"normalized"`` modes
     as aliases of the same canonicalized graph comparison used by ``"solver"``.
 
+    With ``mode="projected_milp"`` and ``observable_mapping``, an equivalent
+    result proves equality of the projected feasible observable domains and of
+    the conditional optimal values for the supplied matrix instances. It is
+    not a uniform proof over future data or parameter values.
+
     The returned ``EquivalenceResult`` has status ``"equivalent"`` only when
     the selected proof path establishes equivalence.  It has status
     ``"different"`` when the implemented normalization, mapping, or graph
@@ -219,6 +233,7 @@ def _prove_equivalent(
             left,
             right,
             variable_mapping,
+            observable_mapping,
             tolerance,
             max_projected_assignments,
         )
@@ -242,6 +257,7 @@ def _prove_equivalent(
         right,
         mode,
         variable_mapping,
+        observable_mapping,
         tolerance,
         max_iterations,
         max_projected_assignments,
@@ -254,6 +270,7 @@ def prove_equivalent(
     *,
     mode: Literal["structural", "normalized", "solver", "projection", "projected_milp", "auto"] = "solver",
     variable_mapping: dict[str, str] | None = None,
+    observable_mapping: tuple[ObservablePair, ...] | None = None,
     tolerance: float = 1e-9,
     max_iterations: int | None = None,
     max_projected_assignments: int = 100_000,
@@ -269,16 +286,39 @@ def prove_equivalent(
     _validate(left, tolerance)
     _validate(right, tolerance)
     _validate_variable_mapping(left, right, variable_mapping)
+    _validate_observable_mapping(left, right, observable_mapping)
+    if variable_mapping is not None and observable_mapping is not None:
+        raise ValueError("supply either variable_mapping or observable_mapping, not both")
     result = _prove_equivalent(
         left,
         right,
         mode=mode,
         variable_mapping=variable_mapping,
+        observable_mapping=observable_mapping,
         tolerance=tolerance,
         max_iterations=max_iterations,
         max_projected_assignments=max_projected_assignments,
     )
-    return _concrete_result_metadata(result, left, right, variable_mapping, tolerance)
+    return _concrete_result_metadata(result, left, right, variable_mapping, observable_mapping, tolerance)
+
+
+def _validate_observable_mapping(
+    left: LinearProblem,
+    right: LinearProblem,
+    mapping: tuple[ObservablePair, ...] | None,
+) -> None:
+    if mapping is None:
+        return
+    names = [pair.name for pair in mapping]
+    if not mapping or len(set(names)) != len(names):
+        raise ValueError("observable mapping must be nonempty and have unique names")
+    left_names = set(left.var_names)
+    right_names = set(right.var_names)
+    for pair in mapping:
+        if not set(name for name, _ in pair.left.coefficients) <= left_names:
+            raise ValueError(f"observable {pair.name} references an unknown left column")
+        if not set(name for name, _ in pair.right.coefficients) <= right_names:
+            raise ValueError(f"observable {pair.name} references an unknown right column")
 
 
 def _validate_variable_mapping(left: LinearProblem, right: LinearProblem, variable_mapping: dict[str, str] | None) -> None:
@@ -296,6 +336,7 @@ def _concrete_result_metadata(
     left: LinearProblem,
     right: LinearProblem,
     variable_mapping: dict[str, str] | None,
+    observable_mapping: tuple[ObservablePair, ...] | None,
     tolerance: float,
 ) -> EquivalenceResult:
     """Qualify the selected proof route with the numerical semantics of Section 9.2."""
@@ -304,12 +345,14 @@ def _concrete_result_metadata(
     if result.level == "projected_milp_proven" and variable_mapping is None:
         mapping = _infer_shared_binary_mapping(left, right, tolerance)
     exhausted = result.budget_exhausted or (result.status == "unknown" and "exceeded" in result.reason)
+    effective_observables = observable_mapping or legacy_observables(mapping)
     return replace(
         result,
         relation="projected_value" if projected else "normalized_structural",
         scope="matrix_instances",
         arithmetic="numerical_solver" if result.level == "projected_milp_proven" else "quantized_with_numerical_reductions",
         variable_mapping=tuple(sorted(mapping.items())),
+        observable_mapping=result.observable_mapping or render_observable_mapping(effective_observables),
         left_auxiliaries=tuple(sorted(set(left.var_names) - set(mapping))) if projected else (),
         right_auxiliaries=tuple(sorted(set(right.var_names) - set(mapping.values()))) if projected else (),
         termination="budget_exhausted" if exhausted else ("completed" if result.status != "unknown" else "inconclusive"),
@@ -365,6 +408,7 @@ def _prove_normalized_equivalent(
     right: LinearProblem,
     mode: Literal["structural", "normalized", "solver", "auto"],
     variable_mapping: dict[str, str] | None,
+    observable_mapping: tuple[ObservablePair, ...] | None,
     tolerance: float,
     max_iterations: int | None,
     max_projected_assignments: int,
@@ -395,7 +439,14 @@ def _prove_normalized_equivalent(
     )
     result = _compare_normalized_models(left_normalized, right_normalized, variable_mapping, proof_steps)
     if result.status == "different" and mode == "auto":
-        return _prove_projected_milp_equivalent(left, right, variable_mapping, tolerance, max_projected_assignments)
+        return _prove_projected_milp_equivalent(
+            left,
+            right,
+            variable_mapping,
+            observable_mapping,
+            tolerance,
+            max_projected_assignments,
+        )
     return result
 
 
@@ -478,10 +529,11 @@ def _prove_projected_milp_equivalent(
     left: LinearProblem,
     right: LinearProblem,
     variable_mapping: dict[str, str] | None,
+    observable_mapping: tuple[ObservablePair, ...] | None,
     tolerance: float,
     max_assignments: int,
 ) -> EquivalenceResult:
-    """Enumerate shared binary decisions in both directions.
+    """Enumerate certified binary affine observables in both directions.
 
     This is the algorithm of Theorem 7.11.  The implementation
     reports the solver-qualified level documented in
@@ -498,8 +550,13 @@ def _prove_projected_milp_equivalent(
             reason="max_projected_assignments must be positive",
         )
 
-    mapping = variable_mapping if variable_mapping is not None else _infer_shared_binary_mapping(left, right, tolerance)
-    issue = _projected_mapping_issue(left, right, mapping, tolerance)
+    if observable_mapping is None:
+        mapping = variable_mapping if variable_mapping is not None else _infer_shared_binary_mapping(left, right, tolerance)
+        observables = legacy_observables(mapping)
+    else:
+        mapping = variable_mapping or {}
+        observables = observable_mapping
+    issue = _projected_observable_issue(left, right, observables, tolerance)
     if issue is not None:
         return EquivalenceResult(
             status="unknown",
@@ -507,18 +564,21 @@ def _prove_projected_milp_equivalent(
             reason=issue,
         )
     checked = 0
+    assignment_counts: list[int] = []
     for source, target, source_to_target in (
-        (left, right, mapping),
-        (right, left, {right_name: left_name for left_name, right_name in mapping.items()}),
+        (left, right, tuple((pair.left, pair.right) for pair in observables)),
+        (right, left, tuple((pair.right, pair.left) for pair in observables)),
     ):
         direction = _find_projected_counterexample(
             source,
             target,
             source_to_target,
+            observables,
             tolerance,
             max_assignments - checked,
         )
         checked += direction[1]
+        assignment_counts.append(direction[1])
         result = _projected_direction_result(direction, max_assignments, "left" if source is left else "right")
         if result is not None:
             return result
@@ -528,11 +588,13 @@ def _prove_projected_milp_equivalent(
         level="projected_milp_proven",
         reason=f"all {checked} directed feasible shared assignments agree after auxiliary projection",
         proof_steps=(
-            "validated shared binary variables and objective-neutral auxiliaries",
-            "enumerated feasible shared binary assignments with no-good cuts in both directions",
-            "checked continuous auxiliary feasibility in the other formulation",
-            "compared objective values on shared feasible assignments",
+            "certified every affine observable has binary range on both complete MILPs",
+            "enumerated feasible observable assignments with affine no-good cuts in both directions",
+            "optimized both complete MILPs under each observable assignment",
+            "compared conditional objective values on shared feasible assignments",
         ),
+        observable_mapping=render_observable_mapping(observables),
+        projected_assignment_counts=tuple(assignment_counts),
     )
 
 
@@ -612,42 +674,62 @@ def _is_binary_column(problem: LinearProblem, index: int, tolerance: float) -> b
     )
 
 
-def _projected_mapping_issue(
+def _projected_observable_issue(
     left: LinearProblem,
     right: LinearProblem,
-    mapping: dict[str, str],
+    mapping: tuple[ObservablePair, ...],
     tolerance: float,
 ) -> str | None:
     if not mapping:
-        return "projected MILP comparison requires at least one shared binary variable"
-    left_index = {name: index for index, name in enumerate(left.var_names)}
-    right_index = {name: index for index, name in enumerate(right.var_names)}
-    if len(set(mapping.values())) != len(mapping):
-        return "projected MILP variable mapping must be injective"
-    for left_name, right_name in mapping.items():
-        if left_name not in left_index or right_name not in right_index:
-            return "projected MILP variable mapping references an unknown variable"
-        if not _is_binary_column(left, left_index[left_name], tolerance) or not _is_binary_column(
-            right, right_index[right_name], tolerance
-        ):
-            return "projected MILP comparison currently supports shared binary variables only"
-    mapped_left = set(mapping)
-    mapped_right = set(mapping.values())
-    for problem, mapped in ((left, mapped_left), (right, mapped_right)):
-        for index, name in enumerate(problem.var_names):
-            if name in mapped:
-                continue
-            if problem.integrality[index] != 0:
-                return "projected MILP comparison requires all unmapped auxiliaries to be continuous"
-            if abs(float(problem.c[index])) > tolerance:
-                return "projected MILP comparison requires zero-objective auxiliary variables"
+        return "projected MILP comparison requires at least one observable"
+    cache: dict[tuple[int, AffineObservable], str | None] = {}
+    for problem, expressions in ((left, [pair.left for pair in mapping]), (right, [pair.right for pair in mapping])):
+        for expression in expressions:
+            cache_key = (id(problem), expression)
+            if cache_key not in cache:
+                cache[cache_key] = _observable_domain_issue(problem, expression, tolerance)
+            issue = cache[cache_key]
+            if issue is not None:
+                return issue
+    return None
+
+
+def _observable_domain_issue(problem: LinearProblem, expression: AffineObservable, tolerance: float) -> str | None:
+    index_by_name = {name: index for index, name in enumerate(problem.var_names)}
+    if any(problem.integrality[index_by_name[name]] == 0 for name, _ in expression.coefficients):
+        return "projected MILP observable domain is unknown for continuous columns"
+    if abs(float(expression.constant) - round(float(expression.constant))) > tolerance or any(
+        abs(coefficient - round(coefficient)) > tolerance for _, coefficient in expression.coefficients
+    ):
+        return "projected MILP observable domain is unknown for fractional affine coefficients"
+    vector = np.zeros(len(problem.var_names))
+    for name, coefficient in expression.coefficients:
+        vector[index_by_name[name]] = coefficient
+    values = []
+    for sign in (1.0, -1.0):
+        result = milp(
+            c=sign * vector,
+            integrality=np.asarray(problem.integrality, dtype=np.int8),
+            bounds=_problem_bounds(problem),
+            constraints=_problem_constraints(problem),
+        )
+        if result.status == 2:
+            return None
+        if result.status == 3:
+            return "projected MILP observable has an unbounded range"
+        if result.status != 0 or result.fun is None:
+            return "projected MILP observable range could not be certified"
+        values.append(sign * float(result.fun) + float(expression.constant))
+    if values[0] < -tolerance or values[1] > 1.0 + tolerance:
+        return "projected MILP observable is not solver-certified binary"
     return None
 
 
 def _find_projected_counterexample(
     source: LinearProblem,
     target: LinearProblem,
-    mapping: dict[str, str],
+    mapping: tuple[tuple[AffineObservable, AffineObservable], ...],
+    observable_pairs: tuple[ObservablePair, ...],
     tolerance: float,
     remaining: int,
 ) -> tuple[Literal["complete", "counterexample", "limit", "objective", "solver"], int, dict[str, int] | None]:
@@ -658,7 +740,6 @@ def _find_projected_counterexample(
     the second inclusion required by Theorem 7.11.
     """
 
-    source_indices = {name: source.var_names.index(name) for name in mapping}
     cuts: list[LinearConstraint] = []
     checked = 0
     while True:
@@ -674,33 +755,84 @@ def _find_projected_counterexample(
             return "solver", checked, None
         if checked >= remaining:
             return "limit", checked, None
-        assignment = {name: int(round(float(result.x[index]))) for name, index in source_indices.items()}
+        assignment = {
+            pair.name: int(round(_evaluate_observable(expressions[0], source, result.x)))
+            for pair, expressions in zip(observable_pairs, mapping)
+        }
         checked += 1
-        target_assignment = {mapping[name]: value for name, value in assignment.items()}
-        feasibility = _fixed_assignment_feasibility(target, target_assignment)
-        if feasibility == "infeasible":
+        target_expressions = {pair.name: expressions[1] for pair, expressions in zip(observable_pairs, mapping)}
+        target_constraints = [
+            _observable_equal_constraint(target, target_expressions[name], value) for name, value in assignment.items()
+        ]
+        target_optimum = _conditional_objective(target, target_constraints)
+        if target_optimum == "infeasible":
             return "counterexample", checked, assignment
-        if feasibility != "feasible":
+        if not isinstance(target_optimum, float):
             return "solver", checked, None
-        if (
-            abs(
-                _normalized_assignment_objective(source, assignment)
-                - _normalized_assignment_objective(target, target_assignment)
-            )
-            > tolerance
-        ):
+        source_constraints = [
+            _observable_equal_constraint(source, expressions[0], value)
+            for expressions, value in zip(mapping, assignment.values())
+        ]
+        source_optimum = _conditional_objective(source, source_constraints)
+        if not isinstance(source_optimum, float):
+            return "solver", checked, None
+        if abs(source_optimum - target_optimum) > tolerance:
             return "objective", checked, assignment
-        cuts.append(_no_good_cut(source, assignment, source_indices))
+        cuts.append(
+            _observable_no_good_cut(
+                source,
+                tuple((expressions[0], value) for expressions, value in zip(mapping, assignment.values())),
+            )
+        )
 
 
-def _normalized_assignment_objective(problem: LinearProblem, assignment: dict[str, int]) -> float:
-    index_by_name = {name: index for index, name in enumerate(problem.var_names)}
-    value = float(problem.objective_offset) + sum(
-        float(problem.c[index_by_name[name]]) * assigned_value for name, assigned_value in assignment.items()
+def _evaluate_observable(expression: AffineObservable, problem: LinearProblem, values: np.ndarray) -> float:
+    indices = {name: index for index, name in enumerate(problem.var_names)}
+    return expression.constant + sum(coefficient * values[indices[name]] for name, coefficient in expression.coefficients)
+
+
+def _observable_equal_constraint(problem: LinearProblem, expression: AffineObservable, value: int) -> LinearConstraint:
+    coefficients = np.zeros(len(problem.var_names))
+    indices = {name: index for index, name in enumerate(problem.var_names)}
+    for name, coefficient in expression.coefficients:
+        coefficients[indices[name]] = coefficient
+    rhs = float(value) - expression.constant
+    return LinearConstraint(coefficients, rhs, rhs)
+
+
+def _conditional_objective(
+    problem: LinearProblem, constraints: list[LinearConstraint]
+) -> float | Literal["infeasible", "unknown"]:
+    sign = -1.0 if problem.sense == "maximize" and not problem.objective_is_minimization_form else 1.0
+    result = milp(
+        c=sign * np.asarray(problem.c, dtype=float),
+        integrality=np.asarray(problem.integrality, dtype=np.int8),
+        bounds=_problem_bounds(problem),
+        constraints=[*_problem_constraints(problem), *constraints],
     )
-    if problem.objective_is_minimization_form or problem.sense != "maximize":
-        return value
-    return -value
+    if result.status == 2:
+        return "infeasible"
+    if result.status != 0 or result.fun is None:
+        return "unknown"
+    return float(result.fun + sign * problem.objective_offset)
+
+
+def _observable_no_good_cut(
+    problem: LinearProblem,
+    assignment: tuple[tuple[AffineObservable, int], ...],
+) -> LinearConstraint:
+    coefficients = np.zeros(len(problem.var_names))
+    constant = 0.0
+    one_count = 0
+    indices = {name: index for index, name in enumerate(problem.var_names)}
+    for expression, value in assignment:
+        sign = 1.0 if value == 1 else -1.0
+        if value == 1:
+            one_count += 1
+        constant += sign * expression.constant
+        for name, coefficient in expression.coefficients:
+            coefficients[indices[name]] += sign * coefficient
+    return LinearConstraint(coefficients, -float("inf"), float(one_count - 1) - constant)
 
 
 def _problem_bounds(problem: LinearProblem) -> Bounds:
@@ -1474,10 +1606,12 @@ def _quantize(value: float, tolerance: float) -> int:
 
 
 __all__ = [
+    "AffineObservable",
     "BoundValue",
     "EquivalenceResult",
     "LinearProblem",
     "Number",
+    "ObservablePair",
     "ObjectiveSense",
     "compare",
     "prove_equivalent",

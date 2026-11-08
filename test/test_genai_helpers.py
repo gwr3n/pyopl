@@ -941,6 +941,101 @@ class TestRagHelper(unittest.TestCase):
 
 
 class TestStrategyModuleHelpers(unittest.TestCase):
+    def test_generate_observable_mapping_parses_fenced_json_and_grounds_prompt(self) -> None:
+        response = """Here is the mapping:
+```json
+[{"name": "flow", "left": {"coefficients": {"x[1]": 1}},
+  "right": {"coefficients": {"y[1]": 1}}}]
+```"""
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value=response) as llm:
+            mapping_text = pyopl_generative.generative_observable_mapping(
+                "left model text",
+                "right model text",
+                "left data text",
+                "right data text",
+                model_name="test-model",
+                llm_provider="openai",
+            )
+
+        self.assertEqual(
+            json.loads(mapping_text),
+            [
+                {
+                    "name": "flow",
+                    "left": {"coefficients": {"x[1]": 1}},
+                    "right": {"coefficients": {"y[1]": 1}},
+                }
+            ],
+        )
+        prompt = llm.call_args.args[2]
+        self.assertIn("left model text", prompt)
+        self.assertIn("right model text", prompt)
+        self.assertIn("left data text", prompt)
+        self.assertIn("right data text", prompt)
+        self.assertIn("concrete supplied-instance mapping", prompt)
+        self.assertIn("order_t", prompt)
+        self.assertIn("x_1_2 + x_1_3 + x_1_4 + x_1_5 + x_1_6", prompt)
+        self.assertIn("do not add inventory or backorder pairs", prompt)
+        self.assertTrue(llm.call_args.kwargs["expected_json"])
+
+    def test_generate_observable_mapping_rejects_missing_mapping_list(self) -> None:
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value='{"observables": []}'):
+            with self.assertRaisesRegex(ValueError, "mapping.*list"):
+                pyopl_generative.generative_observable_mapping("left", "right")
+
+    def test_generate_observable_mapping_rejects_incomplete_entry(self) -> None:
+        response = '{"mapping": [{"name": "flow", "left": {}}]}'
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value=response):
+            with self.assertRaisesRegex(ValueError, "left and right expressions"):
+                pyopl_generative.generative_observable_mapping("left", "right")
+
+    def test_generate_indexed_observable_mapping_validates_and_canonicalizes_candidate(self) -> None:
+        response = json.dumps(
+            {
+                "schema": "pyopl.uniform_indexed_observable_mapping",
+                "version": 1,
+                "observables": [
+                    {
+                        "kind": "indexed",
+                        "name": "x[{t}]",
+                        "left": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                        "right": {"expression": "x[t]", "domains": [{"name": "t", "range": "1..N"}]},
+                    }
+                ],
+                "parameter_contract": {"facts": [], "indexed_facts": []},
+            }
+        )
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value=response) as llm:
+            mapping_text = pyopl_generative.generative_indexed_observable_mapping(
+                "left model text",
+                "right model text",
+                model_name="test-model",
+                llm_provider="openai",
+            )
+
+        payload = json.loads(mapping_text)
+        self.assertEqual(payload["schema"], "pyopl.uniform_indexed_observable_mapping")
+        self.assertEqual(payload["observables"][0]["name"], "x[{t}]")
+        self.assertIn("parameter_contract", payload)
+        self.assertIn("left model text", llm.call_args.args[2])
+        self.assertTrue(llm.call_args.kwargs["expected_json"])
+
+        indexed_prompt = llm.call_args.args[2]
+        self.assertIn("compact source form", indexed_prompt)
+        self.assertIn("The observable list defines the projection being compared", indexed_prompt)
+        self.assertIn("discrete choice and the other", indexed_prompt)
+        self.assertIn("Do not add continuous quantity, flow", indexed_prompt)
+        self.assertIn("smallest set of directly corresponding decision families", indexed_prompt)
+        self.assertIn('such as "1..N" alone does not establish', indexed_prompt)
+        self.assertIn('"N >= 1"', indexed_prompt)
+        self.assertIn('"nonempty": false', indexed_prompt)
+        self.assertIn('"facts": []', indexed_prompt)
+
+    def test_generate_indexed_observable_mapping_rejects_invalid_schema(self) -> None:
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value='{"schema": "wrong"}'):
+            with self.assertRaisesRegex(ValueError, "unsupported uniform indexed mapping schema"):
+                pyopl_generative.generative_indexed_observable_mapping("left", "right")
+
     def test_strategy_json_extractors_parse_fenced_objects(self) -> None:
         payload = 'lead in```json\n{"model": "m", "data": "d"}\n```tail'
 

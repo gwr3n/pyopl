@@ -670,6 +670,214 @@ except ImportError:
     generative_solve_graphchain = None
 
 
+def generative_observable_mapping(
+    left_model: str,
+    right_model: str,
+    left_data: str = "",
+    right_data: str = "",
+    model_name: str = MODEL_NAME,
+    llm_provider: Optional[str] = LLM_PROVIDER,
+    progress: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Generate a validated JSON observable mapping for two model instances."""
+    provider = _infer_provider(llm_provider, model_name)
+    prompt = f"""
+You are constructing an observable mapping for two mathematical optimization models.
+The mapping will be consumed by a MILP projected-value equivalence checker.
+
+This is a concrete supplied-instance mapping, not a symbolic schema. First
+determine every finite index domain from the model declarations and data. Then
+expand all indexed expressions over those finite domains.
+
+Return exactly one JSON object with this shape:
+{{
+  "mapping": [
+    {{
+      "name": "observable_1",
+      "left": {{"coefficients": {{"compiled_column_1": 1.0}}, "constant": 0.0}},
+      "right": {{"coefficients": {{"compiled_column_2": 1.0}}, "constant": 0.0}}
+    }}
+  ]
+}}
+
+The coefficient keys must be exact grounded ``LinearProblem.var_names`` after
+PyOPL compiles the supplied model and data. For example, use ``order_1`` and
+``x_1_2``, never ``order[t]``, ``x[t][j]``, ``x[1][2]``, or a bare symbolic
+name containing an unbound ``i``, ``j``, or ``t``. Do not invent columns.
+
+Choose the smallest set of formulation-independent decisions whose feasible
+projected domain and conditional objective value are being compared. Do not
+map every variable with a similar name. Variables that only implement an
+auxiliary representation of a decision, including state, quantity, slack,
+loss, or envelope variables, must remain inside their original MILP unless
+the model constraints prove that they are the retained decision itself.
+
+Derive each correspondence from the constraints, not from variable names. In
+particular, when one formulation has a period binary ``order[t]`` and the
+other has cycle-selection binaries ``x[i][j]`` with arcs ``[i,j)``, the
+correspondence for each concrete period ``t`` is:
+
+    left: ``order_t``
+    right: the sum of every grounded ``x_t_j`` for ``j=t+1,...,N+1``
+
+Thus for ``N=5`` the first correspondence must use
+``x_1_2 + x_1_3 + x_1_4 + x_1_5 + x_1_6``. Do not replace this sum with one
+arc, and do not add inventory or backorder pairs merely because those names
+occur in both objectives.
+
+Every mapping entry must contain a nonempty name, both affine expressions, and
+only finite numeric coefficients/constants. Return no markdown or explanatory
+text. If the supplied models and data do not establish a finite, grounded,
+constraint-supported mapping, return no guessed mapping.
+
+<left_model>
+{left_model}
+</left_model>
+<left_data>
+{left_data}
+</left_data>
+<right_model>
+{right_model}
+</right_model>
+<right_data>
+{right_data}
+</right_data>
+""".strip()
+
+    _notify(progress, "Generating observable mapping")
+    raw = _llm_generate_text(
+        provider,
+        model_name,
+        prompt,
+        progress=progress,
+        expected_json=True,
+    )
+    content = raw[0] if isinstance(raw, tuple) else raw
+    payload = None
+    root_starts = [start for start in (content.find("{"), content.find("[")) if start >= 0]
+    if root_starts:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(content[min(root_starts) :])
+        except json.JSONDecodeError:
+            pass
+    if payload is None:
+        payload = _BASE.json_loads_relaxed(content)
+    mapping = payload if isinstance(payload, list) else payload.get("mapping") if isinstance(payload, dict) else None
+    if not isinstance(mapping, list):
+        raise ValueError("GenAI observable mapping must contain a JSON 'mapping' list")
+    if not mapping:
+        raise ValueError("GenAI observable mapping must contain at least one observable")
+    for entry in mapping:
+        if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+            raise ValueError("GenAI observable mapping entries require string names")
+        if not isinstance(entry.get("left"), dict) or not isinstance(entry.get("right"), dict):
+            raise ValueError(f"observable {entry['name']} requires left and right expressions")
+    _notify(progress, f"Generated {len(mapping)} observable mappings")
+    return json.dumps(mapping, indent=2, sort_keys=True)
+
+
+def generative_indexed_observable_mapping(
+    left_model: str,
+    right_model: str,
+    model_name: str = MODEL_NAME,
+    llm_provider: Optional[str] = LLM_PROVIDER,
+    progress: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Generate and validate a contract-aware uniform indexed mapping envelope."""
+    provider = _infer_provider(llm_provider, model_name)
+    prompt = f"""
+You are constructing a candidate uniform indexed observable mapping for two
+parameterized PyOPL MILP schemas. No finite data is supplied. Return exactly
+one JSON object with this schema. Use the compact source form shown below for
+every indexed family; do not expand it into a binders/domains/expression
+object:
+
+{{
+    "schema": "pyopl.uniform_indexed_observable_mapping",
+    "version": 1,
+    "observables": [
+        {{
+            "kind": "indexed",
+            "name": "observable[{{t}}]",
+            "left": {{"expression": "x[t]", "domains": [{{"name": "t", "range": "1..N", "nonempty": false}}]}},
+            "right": {{"expression": "y[t]", "domains": [{{"name": "t", "range": "1..N", "nonempty": false}}]}}
+        }}
+    ],
+    "parameter_contract": {{
+        "facts": [],
+        "indexed_facts": []
+    }}
+}}
+
+Use exact source declaration names, bind every index, preserve symbolic sums,
+and include only facts justified by the schemas. Set a domain's `nonempty` to
+true only when the source or an explicit parameter-contract fact establishes
+that its interval is nonempty; otherwise set it to false. A symbolic interval
+such as "1..N" alone does not establish "N >= 1". This is a candidate input to
+an exact checker: do not claim equivalence and do not use model names as proof.
+Write symbolic bounds in domain range strings such as "1..N" and write
+symbolic sums as "sum(j in t+1..N+1) x[t][j]". Numeric coefficients and
+constants, when used in the parameter contract, must be finite rational
+numbers such as "1", "-1", or "1/2"; never put a parameter name such as "N"
+in a coefficient or constant field. Observable expressions must be affine
+combinations of indexed declarations with numeric rational coefficients,
+constants, and symbolic interval sums. Sums may use comma-separated binders,
+each with a closed affine interval. Do not multiply indexed declarations
+together or use indexed parameters as coefficients of decision variables;
+symbolic coefficients are not represented by the uniform observable proof IR.
+Do not expose variables merely because their names resemble variables on the
+other side; derive observables from the model structure.
+
+The observable list defines the projection being compared: every additional
+family adds another retained dimension. Return the minimal projection needed
+to represent the models' shared structural decisions, not a catalogue of
+related variables. When one model has an indexed discrete choice and the other
+encodes that same choice through lower-level arcs or assignments, retain the
+discrete choice and express its counterpart as the sum of the corresponding
+selected alternatives for each index. Do not add continuous quantity, flow,
+inventory, cost, cumulative-state, slack, or auxiliary-selector families
+unless the caller explicitly requests that those values be retained. Decide
+whether a variable is structural or auxiliary from its role in the model,
+not its name. Do not add speculative families merely because an algebraic
+relation can be written. If no clear shared structural decision exists,
+return the smallest set of directly corresponding decision families and
+avoid speculative extras. Preserve the parameter contract and include only
+assumptions justified by the model schemas.
+
+<left_model>
+{left_model}
+</left_model>
+<right_model>
+{right_model}
+</right_model>
+""".strip()
+
+    _notify(progress, "Generating indexed observable mapping")
+    raw = _llm_generate_text(
+        provider,
+        model_name,
+        prompt,
+        progress=progress,
+        expected_json=True,
+    )
+    content = raw[0] if isinstance(raw, tuple) else raw
+    root_starts = [start for start in (content.find("{"), content.find("[")) if start >= 0]
+    payload: Any = None
+    if root_starts:
+        try:
+            payload, _ = json.JSONDecoder().raw_decode(content[min(root_starts) :])
+        except json.JSONDecodeError:
+            pass
+    if payload is None:
+        payload = _BASE.json_loads_relaxed(content)
+    from pyopl.equivalence import parse_indexed_observable_mapping, serialize_indexed_observable_mapping
+
+    mapping_text = json.dumps(payload, sort_keys=True)
+    mapping, contract = parse_indexed_observable_mapping(mapping_text)
+    _notify(progress, f"Generated {len(mapping)} indexed observable mappings")
+    return serialize_indexed_observable_mapping(mapping, contract)
+
+
 def generative_solve(
     prompt: PromptInput,
     model_file,
@@ -978,4 +1186,4 @@ def generative_solve(
         return assessment_text.strip()
 
 
-__all__ = ["generative_feedback"]
+__all__ = ["generative_feedback", "generative_observable_mapping", "generative_indexed_observable_mapping"]

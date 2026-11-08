@@ -25,6 +25,12 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_data_paths_must_be_paired(self):
+        self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("", ""))
+        self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", "right.dat"))
+        self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", ""))
+        self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("", "right.dat"))
+
     def test_compare_wrapper_reports_semantic_error_without_traceback(self):
         result_queue = mock.Mock()
         error = SemanticError("index 2 of 'shipment' can exceed its declared range")
@@ -43,6 +49,74 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(kind, "validation_error")
         self.assertEqual(detail, "index 2 of 'shipment' can exceed its declared range")
         self.assertNotIn("Traceback", detail)
+
+    def test_compare_wrapper_accepts_observable_mapping_file(self):
+        result_queue = mock.Mock()
+        fixture_root = Path(__file__).parent / "fixtures" / "affine_observable" / "rs"
+        left_model = fixture_root / "bm" / "bm.mod"
+        right_model = fixture_root / "pm" / "pm.mod"
+        data_file = fixture_root / "common" / "sample.dat"
+        mapping_file = fixture_root / "observable_mapping.json"
+
+        pyopl_ide_bootstrap._compare_models_wrapper(
+            str(left_model),
+            str(data_file),
+            str(right_model),
+            str(data_file),
+            "concrete",
+            result_queue,
+            str(mapping_file),
+        )
+
+        kind, result = result_queue.put.call_args.args[0]
+        self.assertEqual(kind, "success")
+        self.assertTrue(result.equivalent)
+        self.assertEqual(result.projected_assignment_counts, (16, 16))
+
+    def test_compare_wrapper_accepts_uniform_indexed_mapping_file(self):
+        from pyopl.equivalence import (
+            IndexedAffineExpression,
+            IndexedAffineFamily,
+            IndexedAffineTerm,
+            IndexedObservablePair,
+            ParameterContract,
+            SymbolicAffineExpression,
+            SymbolicDomain,
+            serialize_indexed_observable_mapping,
+        )
+
+        result_queue = mock.Mock()
+        result = SimpleNamespace(status="unknown", proof_steps=())
+        one = SymbolicAffineExpression.constant_value(1)
+        domain = SymbolicDomain("t", one, SymbolicAffineExpression.parameter("N"))
+        family = IndexedAffineFamily(
+            ("t",),
+            (domain,),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            left_model = Path(tmpdir) / "left.mod"
+            right_model = Path(tmpdir) / "right.mod"
+            mapping_file = Path(tmpdir) / "mapping.json"
+            left_model.write_text("minimize 0; subject to {}", encoding="utf-8")
+            right_model.write_text("minimize 0; subject to {}", encoding="utf-8")
+            mapping_file.write_text(
+                serialize_indexed_observable_mapping(
+                    (IndexedObservablePair("x[{t}]", family, family),),
+                    ParameterContract(),
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(pyopl_ide_bootstrap, "compare_models", return_value=result) as compare:
+                pyopl_ide_bootstrap._compare_models_wrapper(
+                    str(left_model), "", str(right_model), "", "abstract", result_queue, str(mapping_file)
+                )
+
+        kwargs = compare.call_args.kwargs
+        self.assertIsNotNone(kwargs["indexed_observable_mapping"])
+        self.assertIsNotNone(kwargs["parameter_contract"])
+        self.assertIsNone(kwargs["observable_mapping"])
 
     def test_comparison_validation_error_has_index_repair_hint(self):
         message = pyopl_ide_bootstrap._format_comparison_validation_error(

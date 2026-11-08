@@ -1,0 +1,62 @@
+[
+  {
+    "name": "trip_1_2",
+    "left": {"coefficients": {"trip_1_2": 1.0}},
+    "right": {"coefficients": {"link_1_2": 1.0}}
+  },
+  {
+    "name": "trip_1_3",
+    "left": {"coefficients": {"trip_1_3": 1.0}},
+    "right": {"coefficients": {"link_1_3": 1.0}}
+  },
+  {
+    "name": "trip_1_4",
+    "left": {"coefficients": {"trip_1_4": 1.0}},
+    "right": {"coefficients": {"link_1_4": 1.0}}
+  },
+  {
+    "name": "trip_2_1",
+    "left": {"coefficients": {"trip_2_1": 1.0}},
+    "right": {"coefficients": {"link_2_1": 1.0}}
+  },
+  {
+    "name": "trip_2_3",
+    "left": {"coefficients": {"trip_2_3": 1.0}},
+    "right": {"coefficients": {"link_2_3": 1.0}}
+  },
+  {
+    "name": "trip_2_4",
+    "left": {"coefficients": {"trip_2_4": 1.0}},
+    "right": {"coefficients": {"link_2_4": 1.0}}
+  },
+  {
+    "name": "trip_3_1",
+    "left": {"coefficients": {"trip_3_1": 1.0}},
+    "right": {"coefficients": {"link_3_1": 1.0}}
+  },
+  {
+    "name": "trip_3_2",
+    "left": {"coefficients": {"trip_3_2": 1.0}},
+    "right": {"coefficients": {"link_3_2": 1.0}}
+  },
+  {
+    "name": "trip_3_4",
+    "left": {"coefficients": {"trip_3_4": 1.0}},
+    "right": {"coefficients": {"link_3_4": 1.0}}
+  },
+  {
+    "name": "trip_4_1",
+    "left": {"coefficients": {"trip_4_1": 1.0}},
+    "right": {"coefficients": {"link_4_1": 1.0}}
+  },
+  {
+    "name": "trip_4_2",
+    "left": {"coefficients": {"trip_4_2": 1.0}},
+    "right": {"coefficients": {"link_4_2": 1.0}}
+  },
+  {
+    "name": "trip_4_3",
+    "left": {"coefficients": {"trip_4_3": 1.0}},
+    "right": {"coefficients": {"link_4_3": 1.0}}
+  }
+]

@@ -1,0 +1,39 @@
+// Small Set-A-style instance derived from the experiment design in Section 6.1.
+// It is not an original row from the unavailable online appendix.
+// Demand is independent normal with an erratic mean profile and rho = 0.2.
+
+N = 5;
+setupCost = 225;
+holdingCost = 1;
+backorderCost = 5;
+bigM = 200;
+lossBigM = 400;
+
+meanDemand = [20, 40, 30, 10, 50];
+stdDemand = [4, 8, 6, 2, 10];
+prefixMean = [0, 20, 60, 90, 100, 150];
+cycleMean = [
+  [20, 60, 90, 100, 150],
+  [0, 40, 70, 80, 130],
+  [0, 0, 30, 40, 90],
+  [0, 0, 0, 10, 60],
+  [0, 0, 0, 0, 50]
+];
+cycleStd = [
+  [4, 8.944272, 10.770330, 10.954451, 14.832397],
+  [0, 8, 10, 10.198039, 14.282857],
+  [0, 0, 6, 6.324555, 11.832160],
+  [0, 0, 0, 2, 10.198039],
+  [0, 0, 0, 0, 10]
+];
+
+// Tangents at z = -3.5, -2.8, ..., 3.5.
+pieces = 11;
+normalTail = [
+  0.999767, 0.997445, 0.982136, 0.919243, 0.758036, 0.5,
+  0.241964, 0.080757, 0.017864, 0.002555, 0.000233
+];
+normalDensity = [
+  0.000873, 0.007915, 0.043984, 0.149727, 0.312254, 0.398942,
+  0.312254, 0.149727, 0.043984, 0.007915, 0.000873
+];

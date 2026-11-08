@@ -883,39 +883,39 @@ class OPLParser(Parser):
                 "value": p.STRING_LITERAL[1:-1],
                 "sem_type": "string",
             }
-        elif hasattr(p, "NAME"):
-            # SLY attributes are typed as Any; narrow to str for mypy before dict indexing.
-            name_any = p.NAME
-            if not isinstance(name_any, str):
-                raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
-            name = name_any
+        return self._parse_name_primary(p.NAME, p)
 
-            # NEW: check current iterator context first (only active inside sum/forall bodies)
-            if self._iterator_context_stack:
-                top = self._iterator_context_stack[-1]
-                sem = top.get(name)
-                if sem is not None:
-                    return {"type": "name", "value": name, "sem_type": sem}
-
-            # Fallback: regular symbol table lookup
+    def _parse_name_primary(self, name_any, p):
+        if not isinstance(name_any, str):
+            raise SemanticError("Invalid identifier token (expected NAME).", lineno=p.lineno)
+        name = name_any
+        if self._iterator_context_stack:
+            iterator_type = self._iterator_context_stack[-1].get(name)
+            if iterator_type is not None:
+                return {"type": "name", "value": name, "sem_type": iterator_type}
+        try:
             symbol_info = self.symbol_table.get_symbol(name)
-            # Inline scalar dexpr on use
-            if symbol_info.get("type") == "dexpr":
-                val = symbol_info.get("value") or {}
-                iters = val.get("iterators") or []
-                dims = val.get("dimensions") or []
-                if iters or dims:
-                    raise SemanticError(
-                        f"Expected indexed dexpr, but '{name}' is declared with indices. Missing dimensions.",
-                        lineno=p.lineno,
-                    )
-                return self._subst_iterators(val.get("expression"), {})
-            if symbol_info.get("dimensions"):
+        except SemanticError:
+            if getattr(self, "_syntax_only", False):
+                return {"type": "name", "value": name, "sem_type": "int"}
+            raise
+        return self._name_primary_from_symbol(name, symbol_info, p)
+
+    def _name_primary_from_symbol(self, name, symbol_info, p):
+        if symbol_info.get("type") == "dexpr":
+            value = symbol_info.get("value") or {}
+            if value.get("iterators") or value.get("dimensions"):
                 raise SemanticError(
-                    f"Expected scalar variable, but '{name}' is an indexed variable. Missing dimensions.",
+                    f"Expected indexed dexpr, but '{name}' is declared with indices. Missing dimensions.",
                     lineno=p.lineno,
                 )
-            return {"type": "name", "value": name, "sem_type": symbol_info["type"]}
+            return self._subst_iterators(value.get("expression"), {})
+        if symbol_info.get("dimensions"):
+            raise SemanticError(
+                f"Expected scalar variable, but '{name}' is an indexed variable. Missing dimensions.",
+                lineno=p.lineno,
+            )
+        return {"type": "name", "value": name, "sem_type": symbol_info["type"]}
 
     # --- sum_expression and forall_expression nonterminals ---
 
@@ -1620,6 +1620,9 @@ class OPLParser(Parser):
     def parse(self, tokens):
         # Materialize tokens so we can track the last line for EOF diagnostics
         self.symbol_table = SymbolTable()
+        if getattr(self, "_syntax_only", False):
+            for binder in getattr(self, "_syntax_only_binders", ()):
+                self.symbol_table.add_symbol(binder, "int")
         self._iterator_context_stack = []
         self.current_tokens = list(tokens)
         if self.current_tokens:
@@ -2502,7 +2505,16 @@ class OPLParser(Parser):
                 "sem_type": expr.get("sem_type", None),
             }
         if expr["type"] == "name":
-            symbol_info = self.symbol_table.get_symbol(expr["value"])
+            try:
+                symbol_info = self.symbol_table.get_symbol(expr["value"])
+            except SemanticError:
+                if getattr(self, "_syntax_only", False):
+                    return {
+                        "type": "name_reference_index",
+                        "name": expr["value"],
+                        "sem_type": "int",
+                    }
+                raise
             return {
                 "type": "name_reference_index",
                 "name": expr["value"],
@@ -2905,33 +2917,38 @@ class OPLParser(Parser):
         try:
             symbol_info = self.symbol_table.get_symbol(p.NAME)
         except SemanticError as e:
+            if getattr(self, "_syntax_only", False):
+                return self._syntax_only_indexed_reference(p)
             raise SemanticError(e.message, lineno=p.lineno) from e
-
-        # Special case: dexpr expansion on use
         if symbol_info.get("type") == "dexpr":
-            val = symbol_info.get("value") or {}
-            decl_dims = symbol_info.get("dimensions") or val.get("dimensions") or []
-            used_dims = p.indexed_dimensions
-            if len(decl_dims) != len(used_dims):
-                raise SemanticError(
-                    f"Incorrect number of dimensions for dexpr '{p.NAME}'. Declared {len(decl_dims)}, but used {len(used_dims)}.",
-                    lineno=p.lineno,
-                )
-            # Build iterator -> used index mapping using declared iterator order
-            iterators = val.get("iterators") or []
-            idx_map = {}
-            for it, used in zip(iterators, used_dims):
-                idx_map[it["iterator"]] = used
-            # Inline expression with substitution
-            inlined = self._subst_iterators(val.get("expression"), idx_map)
-            return inlined
+            return self._expand_indexed_dexpr(p, symbol_info)
+        return self._validated_indexed_reference(p, symbol_info)
 
-        if not symbol_info.get("dimensions"):
+    @staticmethod
+    def _syntax_only_indexed_reference(p):
+        return {
+            "type": "indexed_name",
+            "name": p.NAME,
+            "dimensions": p.indexed_dimensions,
+            "sem_type": "float",
+        }
+
+    def _expand_indexed_dexpr(self, p, symbol_info):
+        value = symbol_info.get("value") or {}
+        declared_dimensions = symbol_info.get("dimensions") or value.get("dimensions") or []
+        used_dimensions = p.indexed_dimensions
+        if len(declared_dimensions) != len(used_dimensions):
             raise SemanticError(
-                f"Expected indexed variable, but '{p.NAME}' is a scalar variable.",
+                f"Incorrect number of dimensions for dexpr '{p.NAME}'. Declared {len(declared_dimensions)}, but used {len(used_dimensions)}.",
                 lineno=p.lineno,
             )
+        iterators = value.get("iterators") or []
+        index_mapping = {iterator["iterator"]: used for iterator, used in zip(iterators, used_dimensions)}
+        return self._subst_iterators(value.get("expression"), index_mapping)
 
+    def _validated_indexed_reference(self, p, symbol_info):
+        if not symbol_info.get("dimensions"):
+            raise SemanticError(f"Expected indexed variable, but '{p.NAME}' is a scalar variable.", lineno=p.lineno)
         declared_dims = symbol_info["dimensions"]
         used_dims = p.indexed_dimensions
         if len(declared_dims) != len(used_dims):
@@ -3083,6 +3100,20 @@ class OPLParser(Parser):
     @_("BOOLEAN_LITERAL")
     def scalar_value(self, p):
         return p.BOOLEAN_LITERAL
+
+
+def parse_expression_ast(source: str, binders=()):
+    """Parse one source expression through PyOPL's existing model grammar."""
+    lexer = OPLLexer()
+    parser = OPLParser()
+    parser._syntax_only = True
+    parser._syntax_only_binders = binders
+    model = f"int pyopl_expression_placeholder = 0; minimize {source}; subject to {{}}"
+    ast = parser.parse(lexer.tokenize(model))
+    objective = ast.get("objective")
+    if not isinstance(objective, dict) or not isinstance(objective.get("expression"), dict):
+        raise SemanticError("PyOPL expression parser did not produce an objective expression.")
+    return objective["expression"]
 
 
 # --- Parser for .dat files ---
@@ -3931,7 +3962,7 @@ class OPLCompiler:
         field_resolver: Optional[Callable[[dict[str, Any]], Any]] = None,
     ) -> Any:
         expr_type = expr.get("type")
-        if expr_type == "number_literal_index":
+        if expr_type in ("number_literal_index", "number"):
             return expr.get("value")
         if expr_type in ("name_reference_index", "name"):
             key = "name" if expr_type == "name_reference_index" else "value"
@@ -4044,13 +4075,69 @@ class OPLCompiler:
         kind = "index name" if index else "name"
         raise SemanticError(f"Unknown {kind} '{name}' in set comprehension.")
 
-    def _eval_comprehension_indexed_name(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _parameter_list_position(
+        self,
+        model_ast: dict[str, Any],
+        working_data: dict[str, Any],
+        parameter_name: str,
+        dimension_index: int,
+        logical_index: Any,
+        dimension_size: Optional[int] = None,
+    ) -> int:
+        declaration = next(
+            (candidate for candidate in model_ast.get("declarations", []) if candidate.get("name") == parameter_name),
+            None,
+        )
+        if declaration is None:
+            raise SemanticError(f"Cannot resolve declared dimensions for parameter '{parameter_name}'.")
+        dimensions = declaration.get("dimensions", [])
+        if not dimensions and dimension_size is not None:
+            if not isinstance(logical_index, int) or not 1 <= logical_index <= dimension_size:
+                raise SemanticError(
+                    f"Index {logical_index!r} is outside dimension {dimension_index + 1} " f"of parameter '{parameter_name}'."
+                )
+            return logical_index - 1
+        if dimension_index >= len(dimensions):
+            raise SemanticError(f"Too many indices for parameter '{parameter_name}'.")
+        dimension = dimensions[dimension_index]
+        dimension_type = dimension.get("type")
+        if dimension_type == "range_index":
+            start = self._eval_bound_expr(dimension["start"], working_data)
+            end = self._eval_bound_expr(dimension["end"], working_data)
+            domain = list(range(start, end + 1))
+        elif dimension_type in ("named_range", "named_range_dimension"):
+            start, end = self._resolve_named_range(
+                model_ast,
+                working_data,
+                dimension["name"],
+                context=f"indexed access to '{parameter_name}'",
+            )
+            domain = list(range(start, end + 1))
+        elif dimension_type in ("named_set", "named_set_dimension"):
+            set_value = working_data.get(dimension["name"], [])
+            domain = list(set_value.get("elements", []) if isinstance(set_value, dict) else set_value)
+        else:
+            raise SemanticError(f"Unsupported dimension type '{dimension_type}' for indexed parameter '{parameter_name}'.")
+        try:
+            return domain.index(logical_index)
+        except ValueError as exc:
+            raise SemanticError(
+                f"Index {logical_index!r} is outside dimension {dimension_index + 1} of parameter '{parameter_name}'."
+            ) from exc
+
+    def _eval_comprehension_indexed_name(
+        self,
+        expr: dict[str, Any],
+        env: dict[str, Any],
+        working_data: dict[str, Any],
+        model_ast: dict[str, Any],
+    ) -> Any:
         name = expr.get("name")
         if not isinstance(name, str):
             raise SemanticError("Indexed name in set comprehension is missing a name.")
         value = working_data.get(name)
-        indices = [self._eval_comprehension_expr(index, env, working_data) for index in expr.get("dimensions", [])]
-        for index in indices:
+        indices = [self._eval_comprehension_expr(index, env, working_data, model_ast) for index in expr.get("dimensions", [])]
+        for dimension_index, index in enumerate(indices):
             if isinstance(value, dict):
                 value = value[index]
             elif isinstance(value, (list, tuple)):
@@ -4058,15 +4145,18 @@ class OPLCompiler:
                     index = int(index)
                 if not isinstance(index, int):
                     raise SemanticError(f"Non-integer list index {index!r} for '{name}' in set comprehension.")
-                value = value[index - 1]
+                position = self._parameter_list_position(model_ast, working_data, name, dimension_index, index, len(value))
+                value = value[position]
             else:
                 raise SemanticError(f"Cannot index '{name}' in set comprehension.")
         return value
 
-    def _eval_comprehension_binop(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _eval_comprehension_binop(
+        self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> Any:
         op = expr.get("op")
-        left = self._eval_comprehension_expr(expr.get("left"), env, working_data)
-        right = self._eval_comprehension_expr(expr.get("right"), env, working_data)
+        left = self._eval_comprehension_expr(expr.get("left"), env, working_data, model_ast)
+        right = self._eval_comprehension_expr(expr.get("right"), env, working_data, model_ast)
         operations = {
             "+": lambda: left + right,
             "-": lambda: left - right,
@@ -4087,7 +4177,9 @@ class OPLCompiler:
             return operation()
         raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
 
-    def _eval_comprehension_expr(self, expr: Any, env: dict[str, Any], working_data: dict[str, Any]) -> Any:
+    def _eval_comprehension_expr(
+        self, expr: Any, env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> Any:
         if not isinstance(expr, dict):
             return expr
         expr_type = expr.get("type")
@@ -4101,17 +4193,17 @@ class OPLCompiler:
         ):
             return self._eval_comprehension_atom(expr, env, working_data)
         if expr_type == "indexed_name":
-            return self._eval_comprehension_indexed_name(expr, env, working_data)
+            return self._eval_comprehension_indexed_name(expr, env, working_data, model_ast)
         if expr_type == "parenthesized_expression":
-            return self._eval_comprehension_expr(expr.get("expression"), env, working_data)
+            return self._eval_comprehension_expr(expr.get("expression"), env, working_data, model_ast)
         if expr_type == "uminus":
-            return -self._eval_comprehension_expr(expr.get("value"), env, working_data)
+            return -self._eval_comprehension_expr(expr.get("value"), env, working_data, model_ast)
         if expr_type == "not":
-            return self._eval_comprehension_logical(expr, env, working_data)
+            return self._eval_comprehension_logical(expr, env, working_data, model_ast)
         if expr_type in ("and", "or"):
-            return self._eval_comprehension_logical(expr, env, working_data)
+            return self._eval_comprehension_logical(expr, env, working_data, model_ast)
         if expr_type == "binop":
-            return self._eval_comprehension_binop(expr, env, working_data)
+            return self._eval_comprehension_binop(expr, env, working_data, model_ast)
         raise SemanticError(f"Unsupported expression in set comprehension: {expr}")
 
     def _eval_comprehension_atom(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> Any:
@@ -4128,11 +4220,13 @@ class OPLCompiler:
             return self._resolve_comprehension_name(expr.get("name"), env, working_data, index=True)
         return expr.get("value")
 
-    def _eval_comprehension_logical(self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any]) -> bool:
+    def _eval_comprehension_logical(
+        self, expr: dict[str, Any], env: dict[str, Any], working_data: dict[str, Any], model_ast: dict[str, Any]
+    ) -> bool:
         if expr.get("type") == "not":
-            return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data))
-        left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data))
-        right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data))
+            return not bool(self._eval_comprehension_expr(expr.get("value"), env, working_data, model_ast))
+        left = bool(self._eval_comprehension_expr(expr.get("left"), env, working_data, model_ast))
+        right = bool(self._eval_comprehension_expr(expr.get("right"), env, working_data, model_ast))
         return left and right if expr.get("type") == "and" else left or right
 
     def _materialize_set_of_tuples_comprehensions(
@@ -4184,7 +4278,7 @@ class OPLCompiler:
                 if isinstance(expr, dict) and expr.get("type") == "tuple_literal":
                     return tuple(eval_tuple(element, env) for element in expr.get("elements", []))
                 if isinstance(expr, dict):
-                    return self._eval_comprehension_expr(expr, env, working_data)
+                    return self._eval_comprehension_expr(expr, env, working_data, model_ast)
                 return expr
 
             def normalize_tuple_value(value: Any) -> Any:
@@ -4200,7 +4294,9 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
+                    if index_constraint is None or bool(
+                        self._eval_comprehension_expr(index_constraint, env, working_data, model_ast)
+                    ):
                         tuple_value = eval_tuple(tuple_expr, env)
                         tuples.append(normalize_tuple_value(tuple_value))
                     return
@@ -4264,8 +4360,10 @@ class OPLCompiler:
 
             def recurse(depth: int, env: dict[str, Any]) -> None:
                 if depth == len(iterator_names):
-                    if index_constraint is None or bool(self._eval_comprehension_expr(index_constraint, env, working_data)):
-                        value = self._eval_comprehension_expr(expr, env, working_data)
+                    if index_constraint is None or bool(
+                        self._eval_comprehension_expr(index_constraint, env, working_data, model_ast)
+                    ):
+                        value = self._eval_comprehension_expr(expr, env, working_data, model_ast)
                         if isinstance(value, float) and value.is_integer():
                             value = int(value)
                         values.append(value)
@@ -4388,7 +4486,7 @@ class OPLCompiler:
             current = working_data.get(base)
             if current is None:
                 raise SemanticError(f"Parameter '{base}' not found for indexed access.")
-            for dimension in expr.get("dimensions", []):
+            for dimension_index, dimension in enumerate(expr.get("dimensions", [])):
                 index_value = self._eval_computed_parameter_index(
                     dimension,
                     env,
@@ -4403,7 +4501,15 @@ class OPLCompiler:
                             f"{type(index_value).__name__}: {index_value!r}"
                         )
                     try:
-                        current = current[int(index_value) - 1]
+                        position = self._parameter_list_position(
+                            model_ast,
+                            working_data,
+                            base,
+                            dimension_index,
+                            int(index_value),
+                            len(current),
+                        )
+                        current = current[position]
                     except Exception as exc:
                         raise SemanticError(f"Index out of bounds for '{base}' at {index_value}: {exc}") from exc
                     continue
@@ -5929,6 +6035,14 @@ def parse_model(model_code: str):
     compiler = OPLCompiler()
     ast, _code, _data = compiler.compile_model(model_code, data_code=None, solver="gurobi")
     return ast
+
+
+def resolve_named_range(model_code: str, data_code: Optional[str], range_name: str) -> tuple[int, int]:
+    """Resolve one model/data named range without compiling the optimization model."""
+    compiler = OPLCompiler()
+    model_ast, data_dict = compiler._parse_model_inputs(model_code, data_code)
+    working_data = compiler._merge_declaration_data(model_ast.get("declarations", []), data_dict)
+    return compiler._resolve_named_range(model_ast, working_data, range_name, context="observable mapping")
 
 
 def linear_problem_from_opl(model_code: str, data_code: Optional[str] = None) -> LinearProblem:

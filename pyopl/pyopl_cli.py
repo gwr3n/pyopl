@@ -25,12 +25,14 @@ from typing import Optional
 from . import generative_feedback, generative_solve, solve
 from .batch_compare import batch_compare
 from .batch_solve import batch_solve, batch_solve_with_progress
+from .equivalence import parse_indexed_observable_mapping, parse_observable_mapping
 from .genai._strategy_base import (
     list_elm_models,
     list_gemini_models,
     list_ollama_models,
     list_openai_models,
 )
+from .genai.pyopl_generative import generative_indexed_observable_mapping, generative_observable_mapping
 from .model_equivalence import compare_models, comparison_result_to_dict
 from .pyopl_core import OPLCompiler, export_model
 from .pyopl_ide_bootstrap import OPLIDE
@@ -84,19 +86,60 @@ def _compare_models(
     left_data_path: Optional[Path],
     right_data_path: Optional[Path],
     strategy: str = "abstract",
+    observable_mapping_text: Optional[str] = None,
 ) -> dict:
     left_model_code = _read_text(left_model_path)
     right_model_code = _read_text(right_model_path)
     left_data_code = _read_text(left_data_path) if left_data_path else None
     right_data_code = _read_text(right_data_path) if right_data_path else None
+    if observable_mapping_text is not None and strategy == "abstract":
+        try:
+            payload = json.loads(observable_mapping_text)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict) and payload.get("schema") == "pyopl.uniform_indexed_observable_mapping":
+            indexed_mapping, parameter_contract = parse_indexed_observable_mapping(observable_mapping_text)
+            result = compare_models(
+                left_model_code,
+                right_model_code,
+                strategy=strategy,
+                left_data_text=left_data_code,
+                right_data_text=right_data_code,
+                indexed_observable_mapping=indexed_mapping,
+                parameter_contract=parameter_contract,
+            )
+            return comparison_result_to_dict(result, strategy=strategy)
     result = compare_models(
         left_model_code,
         right_model_code,
         strategy=strategy,
         left_data_text=left_data_code,
         right_data_text=right_data_code,
+        observable_mapping=parse_observable_mapping(observable_mapping_text) if observable_mapping_text is not None else None,
     )
     return comparison_result_to_dict(result, strategy=strategy)
+
+
+def _generate_observable_mapping(
+    left_model_path: Path,
+    right_model_path: Path,
+    left_data_path: Optional[Path],
+    right_data_path: Optional[Path],
+    args: argparse.Namespace,
+) -> str:
+    if getattr(args, "strategy", "concrete") == "abstract" and left_data_path is None and right_data_path is None:
+        return generative_indexed_observable_mapping(
+            _read_text(left_model_path),
+            _read_text(right_model_path),
+            **_genai_kwargs(args),
+        )
+    return generative_observable_mapping(
+        _read_text(left_model_path),
+        _read_text(right_model_path),
+        _read_text(left_data_path) if left_data_path else "",
+        _read_text(right_data_path) if right_data_path else "",
+        **_genai_kwargs(args),
+    )
 
 
 def _validate_input_file(path: Path, label: str) -> bool:
@@ -203,6 +246,25 @@ def _build_parser() -> argparse.ArgumentParser:
         default="abstract",
         help="Comparison strategy (default abstract)",
     )
+    p_compare.add_argument(
+        "--observable-mapping",
+        help="Path to a JSON affine-observable mapping; retained for manual mapping selection",
+    )
+    p_compare.add_argument(
+        "--generate-mapping",
+        action="store_true",
+        help="Generate the affine-observable mapping with the selected GenAI provider and model",
+    )
+    p_compare.add_argument(
+        "--mapping-out-file",
+        help="Write a generated observable mapping JSON file for reuse",
+    )
+    p_compare.add_argument("--llm-model", dest="llm_model", help="LLM model for generated mappings")
+    p_compare.add_argument(
+        "--provider",
+        choices=["openai", "elm", "google", "ollama"],
+        help="LLM provider for generated mappings",
+    )
     p_compare.add_argument("--out-file", help="Write comparison JSON to file instead of stdout")
 
     # genai group
@@ -244,6 +306,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p_genai_ask.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
     p_genai_ask.add_argument("--provider", choices=["openai", "elm", "google", "ollama"], help="LLM provider to use")
     p_genai_ask.add_argument("--out-file", help="Write feedback JSON to file")
+
+    p_genai_mapping = genai_sub.add_parser(
+        "generate-mapping",
+        help="Generate a reusable affine-observable mapping JSON file",
+    )
+    p_genai_mapping.add_argument("left_model", help="Path to the left model (.mod)")
+    p_genai_mapping.add_argument("right_model", help="Path to the right model (.mod)")
+    p_genai_mapping.add_argument("--left-data", help="Optional left data (.dat)")
+    p_genai_mapping.add_argument("--right-data", help="Optional right data (.dat)")
+    p_genai_mapping.add_argument("--llm-model", dest="llm_model", help="LLM model name (e.g. gpt-5)")
+    p_genai_mapping.add_argument("--provider", choices=["openai", "elm", "google", "ollama"], help="LLM provider to use")
+    p_genai_mapping.add_argument("--out-file", help="Write mapping JSON to a file instead of stdout")
 
     return parser
 
@@ -316,6 +390,45 @@ def _handle_batch_compare(args: argparse.Namespace) -> int:
         return 1
 
 
+def _validate_compare_request(args: argparse.Namespace, input_files: tuple[tuple[Optional[Path], str], ...]) -> bool:
+    for path, label in input_files:
+        if path and not _validate_input_file(path, label):
+            return False
+    if args.observable_mapping and args.generate_mapping:
+        print("Error: --observable-mapping and --generate-mapping are mutually exclusive", file=sys.stderr)
+        return False
+    if args.mapping_out_file and not args.generate_mapping:
+        print("Error: --mapping-out-file requires --generate-mapping", file=sys.stderr)
+        return False
+    return True
+
+
+def _prepare_compare_mapping(
+    args: argparse.Namespace,
+    left_model_path: Path,
+    right_model_path: Path,
+    left_data_path: Optional[Path],
+    right_data_path: Optional[Path],
+) -> tuple[bool, Optional[str]]:
+    if args.observable_mapping:
+        mapping_path = Path(args.observable_mapping)
+        if not _validate_input_file(mapping_path, "observable mapping"):
+            return False, None
+        return True, _read_text(mapping_path)
+    if not args.generate_mapping:
+        return True, None
+    mapping_text = _generate_observable_mapping(
+        left_model_path,
+        right_model_path,
+        left_data_path,
+        right_data_path,
+        args,
+    )
+    if args.mapping_out_file:
+        _write_text(Path(args.mapping_out_file), mapping_text)
+    return True, mapping_text
+
+
 def _handle_compare(args: argparse.Namespace) -> int:
     left_model_path = Path(args.left_model)
     right_model_path = Path(args.right_model)
@@ -328,19 +441,37 @@ def _handle_compare(args: argparse.Namespace) -> int:
         (left_data_path, "left data"),
         (right_data_path, "right data"),
     )
-    for path, label in input_files:
-        if path and not _validate_input_file(path, label):
-            return 2
+    if not _validate_compare_request(args, input_files):
+        return 2
 
     try:
+        mapping_valid, mapping_text = _prepare_compare_mapping(
+            args,
+            left_model_path,
+            right_model_path,
+            left_data_path,
+            right_data_path,
+        )
+        if not mapping_valid:
+            return 2
         with redirect_stdout(sys.stderr):
-            result = _compare_models(
-                left_model_path,
-                right_model_path,
-                left_data_path,
-                right_data_path,
-                args.strategy,
-            )
+            if mapping_text is None:
+                result = _compare_models(
+                    left_model_path,
+                    right_model_path,
+                    left_data_path,
+                    right_data_path,
+                    args.strategy,
+                )
+            else:
+                result = _compare_models(
+                    left_model_path,
+                    right_model_path,
+                    left_data_path,
+                    right_data_path,
+                    args.strategy,
+                    mapping_text,
+                )
         out_text = json.dumps(result, indent=2, sort_keys=True, default=str)
         if args.out_file:
             _write_text(Path(args.out_file), out_text)
@@ -436,6 +567,34 @@ def _handle_genai_ask(args: argparse.Namespace) -> int:
         return 4
 
 
+def _handle_genai_generate_mapping(args: argparse.Namespace) -> int:
+    left_model_path = Path(args.left_model)
+    right_model_path = Path(args.right_model)
+    left_data_path = Path(args.left_data) if args.left_data else None
+    right_data_path = Path(args.right_data) if args.right_data else None
+    for path, label in (
+        (left_model_path, "left model"),
+        (right_model_path, "right model"),
+        (left_data_path, "left data"),
+        (right_data_path, "right data"),
+    ):
+        if path and not _validate_input_file(path, label):
+            return 2
+    try:
+        mapping_text = _generate_observable_mapping(
+            left_model_path,
+            right_model_path,
+            left_data_path,
+            right_data_path,
+            args,
+        )
+        _emit_output(mapping_text, getattr(args, "out_file", None))
+        return 0
+    except Exception as exc:
+        print(f"Error during observable mapping generation: {exc}", file=sys.stderr)
+        return 4
+
+
 def _unique_insight_paths() -> tuple[Path, Path]:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     tmp_dir = Path(os.getcwd()) / "tmp"
@@ -510,6 +669,7 @@ def _handle_genai(args: argparse.Namespace) -> int:
         "list-methods": _handle_genai_list_methods,
         "generate": _handle_genai_generate,
         "ask": _handle_genai_ask,
+        "generate-mapping": _handle_genai_generate_mapping,
     }
     command = getattr(args, "genai_cmd", None)
     handler = handlers.get(command) if isinstance(command, str) else None

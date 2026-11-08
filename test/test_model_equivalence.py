@@ -2,12 +2,51 @@ import unittest
 from typing import Any
 
 from pyopl import compare_models
+from pyopl.equivalence import (
+    IndexedAffineExpression,
+    IndexedAffineFamily,
+    IndexedAffineTerm,
+    IndexedObservablePair,
+    ParameterContract,
+    ParameterFact,
+    SymbolicAffineExpression,
+    SymbolicDomain,
+    SymbolicPredicate,
+)
 from pyopl.equivalence.abstract import AbstractEquivalenceResult
 from pyopl.equivalence.concrete import EquivalenceResult
 from pyopl.model_equivalence import comparison_result_to_dict
 
 
 class ModelEquivalenceApiTests(unittest.TestCase):
+    def test_public_api_rejects_data_free_indexed_mapping(self):
+        model = "int N = ...; range I = 1..N; dvar boolean x[I]; minimize 0; subject to {}"
+        family = IndexedAffineFamily(
+            ("t",),
+            (SymbolicDomain("t", SymbolicAffineExpression.constant_value(1), SymbolicAffineExpression.parameter("N")),),
+            IndexedAffineExpression((IndexedAffineTerm("x", ("t",)),)),
+        )
+        contract = ParameterContract(
+            (
+                ParameterFact(
+                    SymbolicPredicate(
+                        SymbolicAffineExpression.parameter("N"), ">=", SymbolicAffineExpression.constant_value(1)
+                    ),
+                    "declared",
+                ),
+            )
+        )
+
+        result = compare_models(
+            model,
+            model,
+            indexed_observable_mapping=(IndexedObservablePair("x[{t}]", family, family),),
+            parameter_contract=contract,
+        )
+
+        self.assertEqual(result.status, "unknown")
+        self.assertEqual(result.unresolved_obligations, ("indexed_observable_mapping",))
+
     def test_public_auxiliary_examples(self):
         cases = (
             (

@@ -935,7 +935,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it). For a solve, pass a settings object from a file with `--solver-settings <file.json>`.
   - `batch-solve <archive.zip>`: solve every folder containing exactly one `.mod` file and one or more `.dat` files, including nested folders, with `--solver highs|gurobi` (default: `highs`). Each data file is an independent instance; failed instances are recorded while other instances continue. Optional `highs.json` or `gurobi.json` files provide solver settings. Writes `.json` and `.md` reports beside the archive.
   - `batch-compare <left.zip> <right.zip>`: compare data instances with matching filenames across two batch archives using `--strategy abstract|concrete` (default: `abstract`). Each archive must contain exactly one model. Writes paired `.json` and `.md` reports beside the left archive.
-  - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--out-file <path>` to write the comparison JSON to a file.
+  - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--observable-mapping <mapping.json>` for a manual affine-observable mapping, or `--generate-mapping` with `--provider <openai|elm|google|ollama>` and `--llm-model <model>` to generate one. Add `--mapping-out-file <path>` to save generated JSON, and use `genai generate-mapping` to generate a mapping without comparison. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
     - `list-models`: list available LLM models for a provider (openai/elm/google/ollama).
     - `generate`: produce a draft `.mod` and `.dat` from a natural-language prompt.
@@ -974,6 +974,11 @@ python -m pyopl batch-compare baseline.zip candidate.zip --strategy concrete
 # Compare two concrete model instances
 python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --out-file tmp/comparison.json
 
+# Compare with a manual or generated affine-observable mapping
+python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --observable-mapping mapping.json
+python -m pyopl compare left.mod right.mod --strategy concrete --left-data left.dat --right-data right.dat --generate-mapping --provider openai --llm-model gpt-5 --mapping-out-file tmp/mapping.json
+python -m pyopl genai generate-mapping left.mod right.mod --left-data left.dat --right-data right.dat --provider openai --llm-model gpt-5 --out-file tmp/mapping.json
+
 # Compare parameterized model schemas without instantiating data
 python -m pyopl compare left.mod right.mod --strategy abstract
 
@@ -985,6 +990,7 @@ Notes:
 - LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
 - `compare` returns JSON with `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`. The IDE's Compare models dialog exposes the same concrete/abstract strategy selector. Concrete comparison first tries normalized graph isomorphism, then falls back to projected MILP comparison when models share binary decision variables but use different continuous auxiliary formulations. A successful fallback reports level `projected_milp_proven`.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
+- Generated affine-observable mappings are grounded to the supplied finite model/data instances and must reference compiled column names. Manual and generated mappings are mutually exclusive; review generated JSON before using it for equivalence certification because an LLM can still propose an incomplete or semantically inappropriate correspondence.
 - CLI unit tests are included in the repository (`test/test_cli.py`) and mock GenAI calls to keep tests deterministic.
 
 ---
@@ -998,10 +1004,12 @@ PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so exter
   - **read_pyopl_grammar_tool**: Return the bundled grammar text.
   - **solve_strings_tool**: Compile and solve a model from `model_text` and optional `data_text`.
   - **export_py_strings_tool**: Compile `model_text` and optional `data_text` to generated Python source and return it as a string.
-  - **compare_model_strings_tool**: Compare two OPL models from strings using `strategy="concrete"` or `strategy="abstract"`, matching the IDE's Compare models workflow. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
+  - **compare_model_strings_tool**: Compare two OPL models from strings using `strategy="concrete"` or `strategy="abstract"`, matching the IDE's Compare models workflow. Pass `observable_mapping_json` for a manual mapping, or set `generate_mapping=true` and choose `provider` and `model_name` to generate one. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
+  - **generate_observable_mapping_tool**: Generate reusable affine-observable mapping JSON from two model strings and optional data strings. Pass the returned JSON to `compare_model_strings_tool` as `observable_mapping_json`.
 - **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
 - **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
 - **Solver settings**: `solve_strings_tool` accepts an optional `solver_settings` JSON object containing backend-native parameter names and values. For example, use `{"time_limit": 60.0}` with `solver="highs"` or `{"TimeLimit": 60.0}` with `solver="gurobi"`. Unlike the IDE, the MCP tool does not discover settings files; the client supplies the object directly.
+- **Mapping boundary**: Generated mappings are grounded to supplied finite instances, not all future parameter valuations. The comparison path parses the mapping and rejects unknown compiled columns; generated output should still be reviewed before it is used as a proof input.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:
 ```json
 {
