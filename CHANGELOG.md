@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add focused coverage for projected observable mappings, indexed expressions,
+  parameter contracts, grounding, and input validation.
+- Add tests for index safety, parser errors, solver code generation, and HiGHS export.
+- Expand coverage for tuple and parameter validation, filtered constraints,
+  solver bounds, Boolean code generation, and linear-expression handling.
+
 ### Fixed
 
 ### Changed
