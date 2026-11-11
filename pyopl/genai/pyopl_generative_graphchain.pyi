@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional, Union, overload
 
+from ._strategy_base import PromptInput
 from .pyopl_generative import Grammar, LLMProvider
 
 @dataclass
@@ -59,7 +60,7 @@ class GraphChainExecutor:
 
 @overload
 async def generative_solve_async(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,
@@ -75,7 +76,7 @@ async def generative_solve_async(
 ) -> Dict[str, Any]: ...
 @overload
 async def generative_solve_async(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,
@@ -91,7 +92,7 @@ async def generative_solve_async(
 ) -> str: ...
 @overload
 async def generative_solve_async(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,
@@ -107,7 +108,7 @@ async def generative_solve_async(
 ) -> Union[str, Dict[str, Any]]: ...
 @overload
 def generative_solve_graphchain(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,
@@ -123,7 +124,7 @@ def generative_solve_graphchain(
 ) -> Dict[str, Any]: ...
 @overload
 def generative_solve_graphchain(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,
@@ -139,7 +140,7 @@ def generative_solve_graphchain(
 ) -> str: ...
 @overload
 def generative_solve_graphchain(
-    prompt: str,
+    prompt: PromptInput,
     model_file: str,
     data_file: str,
     model_name: str = ...,

@@ -521,8 +521,11 @@ class SaveFilesNode(GraphNode):
             except Exception:
                 try:
                     os.close(model_fd)
+                except OSError:
+                    pass
+                try:
                     os.unlink(model_temp)
-                except Exception:
+                except FileNotFoundError:
                     pass
                 raise
 
@@ -535,8 +538,11 @@ class SaveFilesNode(GraphNode):
             except Exception:
                 try:
                     os.close(data_fd)
+                except OSError:
+                    pass
+                try:
                     os.unlink(data_temp)
-                except Exception:
+                except FileNotFoundError:
                     pass
                 raise
 

@@ -260,7 +260,7 @@ def _build_create_params(
     # Preserve prior behavior: always request JSON from OpenAI when possible.
     return _BASE._build_openai_create_params(
         model_name=model_name,
-        input_text=input_text,
+        input_content=input_text,
         max_tokens=max_tokens,
         temperature=temperature,
         stop=stop,

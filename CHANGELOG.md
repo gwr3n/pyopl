@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.
 - Add focused coverage for projected observable mappings, indexed expressions,
   parameter contracts, grounding, and input validation.
 - Add tests for index safety, parser errors, solver code generation, and HiGHS export.
@@ -18,10 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   GenAI failures, and IDE dispatch.
 - Add core compiler tests for boolean simplification, implication rewriting,
   min/max lowering, and ground conditional evaluation.
+- Expand unittest coverage for shared GenAI helpers and generative solve flows.
+- Expand GraphChain coverage for retries, node failures, recovery, and async execution.
 
 ### Fixed
 
+- Pass the OpenAI input content using the shared strategy helper's current
+  parameter name.
+- Remove temporary output files even when an atomic rename fails.
+
 ### Changed
+
+- Align GraphChain type stubs with multimodal prompt support in the implementation.
 
 ### Removed
 

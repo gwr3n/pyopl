@@ -279,15 +279,15 @@ A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `
 
 ## Code complexity
 
-Generating 23,000 lines of executable code that hits 84% test coverage is difficult.
-Additionally, we maintained an average function length of 13 lines and a CCN of 4.6 across 1,635 functions without a single complexity warning.
+The codebased comprises 28,923 lines of executable code with 84% test coverage.
+Additionally, we maintained an average function length of 13.8 lines and a CCN of 4.7 across 1,995 functions without a single complexity warning.
 We use [Lizard](https://github.com/terryyin/lizard) to measure code complexity.
 
 No thresholds exceeded: `cyclomatic_complexity > 15`, `length > 1000`, `nloc > 1000000`, or `parameter_count > 100`.
 
 | Total nloc | Avg. NLOC | Avg. CCN | Avg. token | Function count | Warning count | Function rate | NLOC rate |
 |-----------:|----------:|---------:|-----------:|---------------:|--------------:|--------------:|----------:|
-| 23,692     | 13.4      | 4.6      | 107.3      | 1,687          | 0             | 0.00          | 0.00      |
+| 28,923     | 13.8      | 4.7      | 109.9      | 1,995          | 0             | 0.00          | 0.00      |
 
 
 
@@ -308,5 +308,4 @@ No thresholds exceeded: `cyclomatic_complexity > 15`, `length > 1000`, `nloc > 1
   url={https://arxiv.org/abs/2601.17670},
 }
 ```
-
 

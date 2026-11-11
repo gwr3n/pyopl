@@ -1,5 +1,6 @@
 # mypy: disable-error-code="attr-defined,name-defined,call-arg"
 import asyncio
+import base64
 import concurrent.futures
 import json
 import queue
@@ -9,9 +10,9 @@ import threading
 import unittest
 from importlib import import_module
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, mock_open, patch
 
 import pyopl.genai._strategy_base as strategy_base
 import pyopl.genai.exemplar_ranking_worker as exemplar_ranking_worker
@@ -326,20 +327,149 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
 
         self.assertEqual(GenAIStrategyBase.extract_json_from_markdown(fenced), '{"model": {"name": "x"}, "ok": true}')
         self.assertEqual(GenAIStrategyBase.json_loads_relaxed(prose), {"outer": {"inner": 3}, "items": [1, 2]})
+        self.assertEqual(GenAIStrategyBase.extract_json_from_markdown("plain answer"), "plain answer")
+        self.assertEqual(GenAIStrategyBase.extract_json_from_markdown("partial {json"), "partial {json")
 
     def test_normalize_prompt_input_accepts_text_and_images(self) -> None:
         text, images = GenAIStrategyBase.normalize_prompt_input(
-            {
-                "text": "build a model",
-                "images": [
-                    Path("diagram.png"),
-                    {"url": "https://example.test/img.png", "mime_type": "image/png", "extra": "ignored"},
-                ],
-            }
+            cast(
+                strategy_base.PromptWithImages,
+                {
+                    "text": "build a model",
+                    "images": [
+                        Path("diagram.png"),
+                        {"url": "https://example.test/img.png", "mime_type": "image/png", "extra": "ignored"},
+                    ],
+                },
+            )
         )
 
         self.assertEqual(text, "build a model")
         self.assertEqual(images, [{"path": "diagram.png"}, {"url": "https://example.test/img.png", "mime_type": "image/png"}])
+
+    def test_prompt_normalization_coerces_text_and_discards_invalid_images(self) -> None:
+        self.assertEqual(GenAIStrategyBase.normalize_prompt_input("plain text"), ("plain text", []))
+        self.assertEqual(GenAIStrategyBase._normalize_images(None), [])
+        self.assertEqual(GenAIStrategyBase.normalize_prompt_input({}), ("", []))
+        self.assertEqual(
+            GenAIStrategyBase.normalize_prompt_input(cast(Any, {"text": 12, "image": Path("diagram.png")})),
+            ("12", [{"path": "diagram.png"}]),
+        )
+        self.assertEqual(
+            GenAIStrategyBase._normalize_images("diagram.png"),
+            [{"path": "diagram.png"}],
+        )
+        self.assertEqual(
+            GenAIStrategyBase._normalize_images({"data_base64": "YWJj"}),
+            [{"data_base64": "YWJj"}],
+        )
+        self.assertEqual(
+            GenAIStrategyBase._normalize_images({"path": "diagram.png"}),
+            [{"path": "diagram.png"}],
+        )
+        self.assertEqual(
+            GenAIStrategyBase._normalize_images([{"url": 5, "extra": "ignored"}, object()]),
+            [],
+        )
+        prompt = object()
+        self.assertEqual(GenAIStrategyBase.normalize_prompt_input(cast(Any, prompt)), (str(prompt), []))
+
+    def test_notify_handles_logger_progress_and_callback_errors(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        messages: list[str] = []
+        with patch.object(base._logger, "debug") as debug:
+            base.notify(None, "logged")
+        debug.assert_called_once_with("logged")
+
+        base.notify(messages.append, "shown")
+        self.assertEqual(messages, ["shown"])
+        base.notify(lambda _message: (_ for _ in ()).throw(RuntimeError("UI closed")), "ignored")
+
+    def test_grammar_and_file_resources_are_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "input.txt"
+            path.write_text("contents", encoding="utf-8")
+            self.assertEqual(GenAIStrategyBase.read_file(str(path)), "contents")
+
+        self.assertTrue(GenAIStrategyBase.read_pyopl_GBNF())
+        self.assertTrue(GenAIStrategyBase.read_pyopl_grammar())
+        self.assertEqual(
+            GenAIStrategyBase.get_grammar_implementation(Grammar.CODE),
+            GenAIStrategyBase.read_pyopl_code(),
+        )
+
+    def test_safe_read_text_limits_content_and_handles_read_errors(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger, few_shot_max_chars=4)
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "description.md"
+            path.write_text("abcdef", encoding="utf-8")
+            self.assertEqual(base.safe_read_text(path), "abcd")
+            self.assertEqual(base.safe_read_text(path, max_chars=7), "abcdef")
+            self.assertEqual(base.safe_read_text(Path(td) / "missing.md"), "")
+
+    def test_default_model_directory_falls_back_when_resources_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with (
+                patch.object(strategy_base, "files", side_effect=RuntimeError("resources unavailable")),
+                patch.object(strategy_base.Path, "cwd", return_value=Path(td)),
+            ):
+                model_dirs = GenAIStrategyBase.default_models_dirs()
+
+        self.assertEqual(model_dirs, [Path(strategy_base.__file__).parent / "opl_models"])
+
+    def test_default_model_directory_falls_back_when_packaged_root_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with (
+                patch.object(strategy_base, "files", return_value=root),
+                patch.object(strategy_base.Path, "cwd", return_value=root / "workspace"),
+            ):
+                model_dirs = GenAIStrategyBase.default_models_dirs()
+
+        self.assertEqual(model_dirs, [Path(strategy_base.__file__).parent / "opl_models"])
+
+    def test_few_shot_retrieval_failure_is_reported_and_skipped(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        messages: list[str] = []
+        with patch.object(strategy_base, "rag_rank", side_effect=RuntimeError("index unavailable")):
+            examples = base.gather_few_shots("query", models_dir="models", progress=messages.append)
+
+        self.assertEqual(examples, [])
+        self.assertTrue(any("retrieval failed" in message for message in messages))
+
+    def test_few_shot_retrieval_skips_incomplete_hits_and_stops_at_limit(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            missing_folder = root / "missing"
+            missing_folder.mkdir()
+            missing_pair = missing_folder / "missing.md"
+            missing_pair.write_text("description without files", encoding="utf-8")
+            empty_pair = root / "empty.md"
+            empty_pair.write_text("empty example", encoding="utf-8")
+            (root / "empty.mod").write_text("", encoding="utf-8")
+            (root / "empty.dat").write_text("data", encoding="utf-8")
+            first = root / "first.md"
+            first.write_text("first description", encoding="utf-8")
+            (root / "first.mod").write_text("first model", encoding="utf-8")
+            (root / "first.dat").write_text("first data", encoding="utf-8")
+            second = root / "second.md"
+            second.write_text("second description", encoding="utf-8")
+            (root / "second.mod").write_text("second model", encoding="utf-8")
+            (root / "second.dat").write_text("second data", encoding="utf-8")
+
+            hits = [{"path": str(path)} for path in (missing_pair, empty_pair, first, second)]
+            with patch.object(strategy_base, "rag_rank", return_value=hits):
+                examples = base.gather_few_shots("query", k=1, models_dir=root)
+
+        self.assertEqual(len(examples), 1)
+        self.assertEqual(examples[0]["description"], "first description")
+
+    def test_few_shot_retrieval_skips_hits_that_raise_while_reading(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        with patch.object(strategy_base, "rag_rank", return_value=[{"path": "broken.md"}]):
+            with patch.object(base, "safe_read_text", side_effect=OSError("read failed")):
+                self.assertEqual(base.gather_few_shots("query", models_dir="models"), [])
 
     def test_get_grammar_implementation_rejects_invalid_mode(self) -> None:
         self.assertEqual(GenAIStrategyBase.get_grammar_implementation(Grammar.NONE), "")
@@ -359,13 +489,55 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
             self.assertEqual(mod, folder / "fallback.mod")
             self.assertEqual(dat, folder / "fallback.dat")
 
+    def test_find_pair_in_folder_prefers_exact_stem_and_handles_missing_pairs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            desc = folder / "problem.md"
+            desc.write_text("description", encoding="utf-8")
+            (folder / "problem.mod").write_text("matching model", encoding="utf-8")
+            (folder / "problem.dat").write_text("matching data", encoding="utf-8")
+            (folder / "other.mod").write_text("other model", encoding="utf-8")
+
+            self.assertEqual(
+                GenAIStrategyBase.find_pair_in_folder(desc),
+                (folder / "problem.mod", folder / "problem.dat"),
+            )
+            (folder / "problem.mod").unlink()
+            (folder / "problem.dat").unlink()
+            self.assertEqual(GenAIStrategyBase.find_pair_in_folder(desc), (folder / "other.mod", None))
+
     def test_usage_and_response_helpers_cover_fallback_shapes(self) -> None:
         usage = Usage()
         usage.add({"prompt_tokens": 4, "completion_tokens": 9})
-        response = SimpleNamespace(output=[SimpleNamespace(text="loose"), SimpleNamespace(content=[{"text": " dict"}])])
+        response = SimpleNamespace(
+            output=[
+                SimpleNamespace(text="loose"),
+                SimpleNamespace(content=[{"text": " dict"}, SimpleNamespace(text=" object"), object()]),
+                SimpleNamespace(content=[object()]),
+                SimpleNamespace(content=None),
+            ]
+        )
 
         self.assertEqual(usage.as_dict(), {"prompt_tokens": 4, "completion_tokens": 9})
-        self.assertEqual(GenAIStrategyBase._coalesce_response_text(response), "loose dict")
+        self.assertEqual(GenAIStrategyBase._coalesce_response_text(response), "loose dict object")
+
+    def test_response_text_coalescing_uses_legacy_fallback(self) -> None:
+        class FallbackOutput:
+            def __iter__(self):
+                raise RuntimeError("not iterable")
+
+            def __getitem__(self, _index):
+                return SimpleNamespace(content=[SimpleNamespace(text="fallback")])
+
+        self.assertEqual(GenAIStrategyBase._coalesce_response_text(SimpleNamespace(output_text="direct")), "direct")
+        self.assertEqual(GenAIStrategyBase._coalesce_response_text(SimpleNamespace(output=FallbackOutput())), "fallback")
+        self.assertEqual(GenAIStrategyBase._coalesce_response_text(SimpleNamespace(output=[])), "")
+
+        class NoTextFallbackOutput(FallbackOutput):
+            def __getitem__(self, _index):
+                return SimpleNamespace(content=[object()])
+
+        self.assertEqual(GenAIStrategyBase._coalesce_response_text(SimpleNamespace(output=NoTextFallbackOutput())), "")
 
     def test_base_gather_and_render_few_shots(self) -> None:
         base = GenAIStrategyBase(logger=genai_pricing.logger, few_shot_max_chars=100)
@@ -433,6 +605,12 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertEqual(
             GenAIStrategyBase._image_to_openai_image_url({"url": "https://example.test/i.png"}), "https://example.test/i.png"
         )
+        self.assertEqual(
+            GenAIStrategyBase._image_to_openai_image_url({"data_base64": "data:image/png;base64,abc"}),
+            "data:image/png;base64,abc",
+        )
+        with self.assertRaisesRegex(ValueError, "missing 'path', 'url', or 'data_base64'"):
+            GenAIStrategyBase._image_to_openai_image_url({})
 
     def test_base_gemini_part_helpers_with_fake_types(self) -> None:
         class FakePart:
@@ -456,6 +634,25 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
             ),
             ("bytes", b"abc", "text/plain"),
         )
+        with patch.object(strategy_base.base64, "b64decode", return_value=b"raw"):
+            self.assertEqual(
+                GenAIStrategyBase._image_to_gemini_part(img={"data_base64": "data:broken"}, genai_types=fake_types),
+                ("bytes", b"raw", "image/png"),
+            )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "image.png"
+            path.write_bytes(b"image-bytes")
+            self.assertEqual(
+                GenAIStrategyBase._image_to_gemini_part(img={"path": str(path)}, genai_types=fake_types),
+                ("bytes", b"image-bytes", "image/png"),
+            )
+        with self.assertRaisesRegex(RuntimeError, "Part.from_uri support"):
+            GenAIStrategyBase._image_to_gemini_part(
+                img={"url": "https://example.test/image.png"},
+                genai_types=SimpleNamespace(Part=SimpleNamespace()),
+            )
+        with self.assertRaisesRegex(ValueError, "missing 'path', 'url', or 'data_base64'"):
+            GenAIStrategyBase._image_to_gemini_part(img={}, genai_types=fake_types)
 
     def test_base_openai_params_retry_and_generation(self) -> None:
         base = GenAIStrategyBase(logger=genai_pricing.logger)
@@ -541,6 +738,589 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertEqual(ollama_text, "ollama")
         self.assertEqual(ollama_usage, {"prompt_tokens": 1, "completion_tokens": 2})
 
+    def test_google_client_prefers_new_sdk_and_falls_back_to_legacy(self) -> None:
+        google_package = ModuleType("google")
+        google_package.__path__ = []
+        new_client = object()
+        new_sdk = ModuleType("google.genai")
+        new_sdk.Client = lambda **kwargs: (kwargs["api_key"], new_client)
+        google_package.genai = new_sdk
+
+        with (
+            patch.dict(sys.modules, {"google": google_package, "google.genai": new_sdk}),
+            patch.dict("os.environ", {"GEMINI_API_KEY": "new-key"}),
+        ):
+            result = GenAIStrategyBase._google_client()
+
+        self.assertEqual(result.kind, "new")
+        self.assertEqual(result.client, ("new-key", new_client))
+
+        legacy_configuration = []
+        legacy_sdk = ModuleType("google.generativeai")
+        legacy_sdk.configure = lambda **kwargs: legacy_configuration.append(kwargs)
+        google_package = ModuleType("google")
+        google_package.__path__ = []
+        google_package.generativeai = legacy_sdk
+        with (
+            patch.dict(
+                sys.modules,
+                {"google": google_package, "google.genai": None, "google.generativeai": legacy_sdk},
+            ),
+            patch.dict("os.environ", {"GEMINI_API_KEY": "legacy-key"}),
+        ):
+            result = GenAIStrategyBase._google_client()
+
+        self.assertEqual(result.kind, "legacy")
+        self.assertIs(result.client, legacy_sdk)
+        self.assertEqual(legacy_configuration, [{"api_key": "legacy-key"}])
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "GEMINI_API_KEY"):
+                GenAIStrategyBase._google_client()
+
+        google_package = ModuleType("google")
+        google_package.__path__ = []
+        with (
+            patch.dict(
+                sys.modules,
+                {"google": google_package, "google.genai": None, "google.generativeai": None},
+            ),
+            patch.dict("os.environ", {"GEMINI_API_KEY": "missing-sdk-key"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "google-genai is not installed"):
+                GenAIStrategyBase._google_client()
+
+    def test_ollama_generation_shapes_and_response_error(self) -> None:
+        calls: list[dict[str, Any]] = []
+        fake_ollama = ModuleType("ollama")
+
+        def fake_generate(**kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {"response": "answer", "prompt_eval_count": 3, "eval_count": 5}
+
+        fake_ollama.generate = fake_generate
+
+        with patch.dict(sys.modules, {"ollama": fake_ollama}):
+            result = GenAIStrategyBase._ollama_generate_text(
+                model_name="llama",
+                prompt="prompt",
+                num_predict=20,
+                return_usage=True,
+                enforce_json=True,
+            )
+
+        self.assertEqual(result, ("answer", {"prompt_tokens": 3, "completion_tokens": 5}))
+        self.assertEqual(calls, [{"model": "llama", "prompt": "prompt", "options": {"num_predict": 20, "format": "json"}}])
+
+        fake_ollama.generate = lambda **_kwargs: {"response": "plain answer"}
+        with patch.dict(sys.modules, {"ollama": fake_ollama}):
+            self.assertEqual(
+                GenAIStrategyBase._ollama_generate_text(
+                    model_name="llama",
+                    prompt="prompt",
+                    num_predict=None,
+                    return_usage=False,
+                    enforce_json=False,
+                ),
+                "plain answer",
+            )
+
+        class BadResponse:
+            def get(self, _key, _default=None):
+                raise KeyError("response")
+
+        fake_ollama.generate = lambda **_kwargs: BadResponse()
+        with patch.dict(sys.modules, {"ollama": fake_ollama}):
+            with self.assertRaisesRegex(RuntimeError, "Failed to retrieve response text"):
+                GenAIStrategyBase._ollama_generate_text(
+                    model_name="llama",
+                    prompt="prompt",
+                    num_predict=None,
+                    return_usage=False,
+                    enforce_json=False,
+                )
+
+        with patch.dict(sys.modules, {"ollama": None}):
+            with self.assertRaisesRegex(RuntimeError, "ollama package is not installed"):
+                GenAIStrategyBase._ollama_generate_text(
+                    model_name="llama",
+                    prompt="prompt",
+                    num_predict=None,
+                    return_usage=False,
+                    enforce_json=False,
+                )
+
+    def test_ollama_generation_without_usage_rejects_images(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        with patch.object(base, "_ollama_generate_text", return_value="answer") as generate:
+            self.assertEqual(
+                base._generate_ollama(
+                    model_name="llama",
+                    input_text="prompt",
+                    images=None,
+                    mt=7,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                ),
+                ("answer", None),
+            )
+        self.assertFalse(generate.call_args.kwargs["return_usage"])
+
+        with self.assertRaisesRegex(RuntimeError, "image prompts are not supported"):
+            base._generate_ollama(
+                model_name="llama",
+                input_text="prompt",
+                images=[{"path": "image.png"}],
+                mt=7,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
+    def test_gemini_legacy_generation_handles_images_and_candidate_text(self) -> None:
+        from PIL import Image
+
+        image_bytes = b"image-bytes"
+        image_data = base64.b64encode(image_bytes).decode("ascii")
+        with tempfile.TemporaryDirectory() as td:
+            image_path = Path(td) / "image.png"
+            image_path.write_bytes(image_bytes)
+            captured = []
+            response = SimpleNamespace(
+                text=None,
+                candidates=[
+                    SimpleNamespace(
+                        content=SimpleNamespace(
+                            parts=[SimpleNamespace(text="legacy "), SimpleNamespace(text="answer"), object()]
+                        )
+                    ),
+                    SimpleNamespace(content=None),
+                ],
+                usage_metadata={"prompt_token_count": 2, "candidates_token_count": 4},
+            )
+
+            def generate_content(parts, generation_config):
+                captured.append((parts, generation_config))
+                return response
+
+            legacy_client = SimpleNamespace(GenerativeModel=lambda _name: SimpleNamespace(generate_content=generate_content))
+            with patch.object(Image, "open", side_effect=lambda source: ("opened", source)):
+                result = GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                    legacy_client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=[
+                        {"data_base64": f"data:image/png;base64,{image_data}"},
+                        {"data_base64": image_data},
+                        {"path": str(image_path)},
+                    ],
+                    mt=12,
+                    temperature=0.1,
+                    progress=None,
+                    capture_usage=True,
+                    expected_json=True,
+                )
+
+        self.assertEqual(result, ("legacy answer", {"prompt_tokens": 2, "completion_tokens": 4}))
+        self.assertEqual(len(captured[0][0]), 4)
+        self.assertEqual(
+            captured[0][1],
+            {
+                "max_output_tokens": 12,
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+            },
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not support URL images"):
+            GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                legacy_client,
+                model_name="gemini-test",
+                input_text="prompt",
+                images=[{"url": "https://example.test/image.png"}],
+                mt=None,
+                temperature=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
+        with self.assertRaisesRegex(ValueError, "missing 'path' or 'data_base64'"):
+            GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                legacy_client,
+                model_name="gemini-test",
+                input_text="prompt",
+                images=[{}],
+                mt=None,
+                temperature=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
+        with (
+            patch.object(strategy_base.base64, "b64decode", return_value=b"malformed"),
+            patch.object(Image, "open", return_value="decoded image"),
+        ):
+            self.assertEqual(
+                GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                    legacy_client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=[{"data_base64": "data:broken"}],
+                    mt=None,
+                    temperature=None,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                ),
+                ("legacy answer", None),
+            )
+
+        with (
+            patch.dict(sys.modules, {"PIL": None}),
+            self.assertRaisesRegex(RuntimeError, "image prompts require Pillow"),
+        ):
+            GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                legacy_client,
+                model_name="gemini-test",
+                input_text="prompt",
+                images=[{"path": "image.png"}],
+                mt=None,
+                temperature=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
+        direct_response = SimpleNamespace(text="direct response")
+        direct_client = SimpleNamespace(
+            GenerativeModel=lambda _name: SimpleNamespace(generate_content=lambda *_args, **_kwargs: direct_response)
+        )
+        self.assertEqual(
+            GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_legacy(
+                direct_client,
+                model_name="gemini-test",
+                input_text="prompt",
+                images=None,
+                mt=None,
+                temperature=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            ),
+            ("direct response", None),
+        )
+
+    def test_gemini_new_sdk_falls_back_to_inline_image_parts(self) -> None:
+        fake_types = SimpleNamespace(
+            Part=SimpleNamespace(
+                from_text=lambda **kwargs: ("text", kwargs),
+                from_bytes=lambda **kwargs: ("bytes", kwargs),
+            ),
+            Content=lambda **kwargs: kwargs,
+            GenerateContentConfig=lambda **kwargs: kwargs,
+        )
+        google_package = ModuleType("google")
+        google_package.__path__ = []
+        genai_module = ModuleType("google.genai")
+        genai_module.types = fake_types
+        google_package.genai = genai_module
+        calls = []
+        response = SimpleNamespace(
+            candidates=[
+                SimpleNamespace(
+                    content=SimpleNamespace(parts=[SimpleNamespace(text="candidate text"), SimpleNamespace(text=1), object()])
+                ),
+                SimpleNamespace(content=None),
+            ],
+            usage_metadata={"prompt_token_count": 5, "candidates_token_count": 2},
+        )
+
+        def generate_content(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("force dictionary-config fallback")
+            return response
+
+        client = SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+        with patch.dict(sys.modules, {"google": google_package, "google.genai": genai_module}):
+            result = GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                client,
+                model_name="gemini-test",
+                input_text="prompt",
+                images=[{"data_base64": "YWJj", "mime_type": "image/png"}],
+                mt=8,
+                temperature=0.2,
+                progress=None,
+                capture_usage=True,
+                expected_json=True,
+            )
+            base64_contents = calls[1]["contents"]
+
+            with self.assertRaisesRegex(RuntimeError, "image URLs require google.genai typed parts"):
+                GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                    client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=[{"url": "https://example.test/image.png"}],
+                    mt=None,
+                    temperature=None,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                )
+
+            with self.assertRaisesRegex(ValueError, "missing 'path' or 'data_base64'"):
+                GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                    client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=[{}],
+                    mt=None,
+                    temperature=None,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                )
+
+            calls.clear()
+            with patch.object(Path, "read_bytes", return_value=b"path-bytes"):
+                path_result = GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                    client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=[{"path": "image.png"}],
+                    mt=None,
+                    temperature=None,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                )
+            path_contents = calls[1]["contents"]
+
+            calls.clear()
+            no_image_result = GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                client,
+                model_name="gemini-test",
+                input_text="plain prompt",
+                images=None,
+                mt=None,
+                temperature=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
+        self.assertEqual(result, ("candidate text", {"prompt_tokens": 5, "completion_tokens": 2}))
+        self.assertEqual(
+            base64_contents,
+            [{"role": "user", "parts": [{"text": "prompt"}, {"inline_data": {"mime_type": "image/png", "data": "YWJj"}}]}],
+        )
+        self.assertEqual(path_result, ("candidate text", None))
+        self.assertEqual(
+            path_contents,
+            [
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": "prompt"},
+                        {"inline_data": {"mime_type": "image/png", "data": "cGF0aC1ieXRlcw=="}},
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(no_image_result, ("candidate text", None))
+        self.assertEqual(calls[1]["contents"], "plain prompt")
+
+        class BrokenCandidates:
+            text = None
+
+            @property
+            def candidates(self):
+                raise RuntimeError("unreadable candidates")
+
+        broken_client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **_kwargs: BrokenCandidates()))
+        with patch.dict(sys.modules, {"google": google_package, "google.genai": genai_module}):
+            self.assertEqual(
+                GenAIStrategyBase(logger=genai_pricing.logger)._generate_gemini_newsdk(
+                    broken_client,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    images=None,
+                    mt=None,
+                    temperature=None,
+                    progress=None,
+                    capture_usage=False,
+                    expected_json=False,
+                ),
+                ("", None),
+            )
+
+    def test_llm_dispatch_routes_openai_and_google_providers(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger, max_output_tokens=19)
+        usage = {"prompt_tokens": 2, "completion_tokens": 4}
+
+        with patch.object(base, "_generate_openai", return_value=("openai", usage)) as openai:
+            self.assertEqual(
+                base.llm_generate_text(provider=LLMProvider.OPENAI, model_name="gpt-test", input_text="prompt"),
+                "openai",
+            )
+        self.assertEqual(openai.call_args.kwargs["mt"], 19)
+        with patch.object(base, "_generate_openai", return_value=("openai", usage)):
+            self.assertEqual(
+                base.llm_generate_text(
+                    provider=LLMProvider.OPENAI,
+                    model_name="gpt-test",
+                    input_text="prompt",
+                    capture_usage=True,
+                ),
+                ("openai", usage),
+            )
+
+        with (
+            patch.object(base, "_google_client", return_value=GoogleClient(kind="new", client="new-client")),
+            patch.object(base, "_generate_gemini_newsdk", return_value=("new gemini", usage)) as generate_new,
+        ):
+            self.assertEqual(
+                base.llm_generate_text(
+                    provider=LLMProvider.GOOGLE,
+                    model_name="gemini-test",
+                    input_text="prompt",
+                    capture_usage=True,
+                ),
+                ("new gemini", usage),
+            )
+        self.assertEqual(generate_new.call_args.args[0], "new-client")
+
+        with (
+            patch.object(base, "_google_client", return_value=GoogleClient(kind="legacy", client="legacy-client")),
+            patch.object(base, "_generate_gemini_legacy", return_value=("legacy gemini", None)) as generate_legacy,
+        ):
+            self.assertEqual(
+                base.llm_generate_text(provider=LLMProvider.GOOGLE, model_name="gemini-test", input_text="prompt"),
+                "legacy gemini",
+            )
+        self.assertEqual(generate_legacy.call_args.args[0], "legacy-client")
+
+        with patch.object(base, "_generate_ollama", return_value=("ollama", None)):
+            self.assertEqual(
+                base.llm_generate_text(
+                    provider=LLMProvider.OLLAMA,
+                    model_name="llama",
+                    input_text="prompt",
+                ),
+                "ollama",
+            )
+
+        with self.assertRaisesRegex(ValueError, "Unsupported LLM provider"):
+            base.llm_generate_text(provider=cast(LLMProvider, "invalid"), model_name="test", input_text="prompt")
+
+    def test_openai_retry_reports_exhaustion_without_sleeping(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        create = MagicMock(side_effect=RuntimeError("temporary failure"))
+        client = SimpleNamespace(responses=SimpleNamespace(create=create))
+        progress_messages: list[str] = []
+
+        with patch.object(strategy_base, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "OpenAI request failed after 2 attempts: temporary failure"):
+                base._call_openai_with_retry(
+                    client,
+                    {"model": "gpt-test", "input": "prompt"},
+                    retries=2,
+                    backoff_sec=0.5,
+                    progress=progress_messages.append,
+                )
+
+        self.assertEqual(create.call_count, 2)
+        sleep.assert_any_call(0.5)
+        sleep.assert_any_call(1.0)
+        self.assertTrue(any("failed after 2 attempts" in message for message in progress_messages))
+
+    def test_openai_retry_prunes_signature_and_unknown_parameters(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        accepted = []
+
+        def restricted_create(model, input):
+            accepted.append((model, input))
+            return "accepted"
+
+        client = SimpleNamespace(responses=SimpleNamespace(create=restricted_create))
+        self.assertEqual(
+            base._call_openai_with_retry(
+                client,
+                {"model": "gpt-test", "input": "prompt", "temperature": 0.2},
+            ),
+            "accepted",
+        )
+        self.assertEqual(accepted, [("gpt-test", "prompt")])
+
+        calls = []
+
+        def unsupported_create(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise RuntimeError("unsupported parameter: 'max_output_tokens'")
+            return "retried"
+
+        client = SimpleNamespace(responses=SimpleNamespace(create=unsupported_create))
+        self.assertEqual(
+            base._call_openai_with_retry(
+                client,
+                {"model": "gpt-test", "input": "prompt", "max_output_tokens": 10},
+                retries=2,
+                backoff_sec=0,
+            ),
+            "retried",
+        )
+        self.assertIn("max_output_tokens", calls[0])
+        self.assertNotIn("max_output_tokens", calls[1])
+
+        def retry_with_unrecognized_message(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 3:
+                raise RuntimeError("parameter 'max_output_tokens' is not supported")
+            return "supported after retry"
+
+        client = SimpleNamespace(responses=SimpleNamespace(create=retry_with_unrecognized_message))
+        self.assertEqual(
+            base._call_openai_with_retry(
+                client,
+                {"model": "gpt-test", "input": "prompt", "max_output_tokens": 10},
+                retries=2,
+                backoff_sec=0,
+            ),
+            "supported after retry",
+        )
+        self.assertNotIn("max_output_tokens", calls[3])
+
+        opaque_client = SimpleNamespace(responses=SimpleNamespace(create=lambda **_kwargs: "opaque"))
+        with patch.object(strategy_base.inspect, "signature", side_effect=ValueError("signature unavailable")):
+            self.assertEqual(
+                base._call_openai_with_retry(opaque_client, {"model": "gpt-test", "input": "prompt"}),
+                "opaque",
+            )
+
+    def test_openai_generation_rejects_empty_response(self) -> None:
+        base = GenAIStrategyBase(logger=genai_pricing.logger)
+        with (
+            patch.object(base, "_call_openai_with_retry", return_value=SimpleNamespace(output_text="")),
+            self.assertRaisesRegex(RuntimeError, "Empty OpenAI response"),
+        ):
+            base._generate_openai(
+                client=object(),
+                model_name="gpt-test",
+                input_text="prompt",
+                images=None,
+                mt=None,
+                temperature=None,
+                stop=None,
+                progress=None,
+                capture_usage=False,
+                expected_json=False,
+            )
+
     def test_base_dispatch_compile_write_and_cost_helpers(self) -> None:
         base = GenAIStrategyBase(logger=genai_pricing.logger)
 
@@ -573,6 +1353,38 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
         self.assertEqual(GenAIStrategyBase.infer_provider(None, "gemini-2"), LLMProvider.GOOGLE)
         self.assertEqual(GenAIStrategyBase.infer_provider(None, "llama3"), LLMProvider.OLLAMA)
         self.assertEqual(GenAIStrategyBase.infer_provider("elm", "gpt-test"), LLMProvider.ELM)
+        self.assertEqual(GenAIStrategyBase.infer_provider(" OAI ", "model"), LLMProvider.OPENAI)
+        self.assertEqual(GenAIStrategyBase.infer_provider("ollama", "model"), LLMProvider.OLLAMA)
+        self.assertEqual(GenAIStrategyBase.infer_provider(None, "gpt-oss-20b"), LLMProvider.OLLAMA)
+        self.assertEqual(GenAIStrategyBase.infer_provider("unsupported", "model"), LLMProvider.OPENAI)
+
+    def test_compile_and_cost_helpers_return_errors_without_raising(self) -> None:
+        with patch.object(
+            strategy_base.OPLCompiler,
+            "compile_model",
+            side_effect=strategy_base.SemanticError("semantic problem"),
+        ):
+            self.assertEqual(
+                GenAIStrategyBase.compile_model_data("model", "data"),
+                [str(strategy_base.SemanticError("semantic problem"))],
+            )
+        with patch.object(strategy_base.OPLCompiler, "compile_model", side_effect=ValueError("invalid input")):
+            self.assertEqual(
+                GenAIStrategyBase.compile_model_data("model", "data"),
+                ["ValueError: invalid input"],
+            )
+
+        usage = Usage(prompt_tokens=1)
+        with patch.object(strategy_base, "_estimate_costs", side_effect=RuntimeError("pricing unavailable")):
+            result = GenAIStrategyBase.estimate_cost("model", usage)
+        self.assertEqual(result["estimated_costs"], {})
+
+        with (
+            patch.object(strategy_base.os.path, "dirname", return_value=""),
+            patch("builtins.open", mock_open()) as open_file,
+        ):
+            GenAIStrategyBase.write_model_data_files("model.mod", "data.dat", "model", "data")
+        self.assertEqual(open_file.call_count, 2)
 
     def test_base_elm_dispatch_uses_elm_client(self) -> None:
         base = GenAIStrategyBase(logger=genai_pricing.logger)
@@ -610,6 +1422,12 @@ class TestGenAIStrategyBaseHelpers(unittest.TestCase):
 
         with patch.dict("os.environ", {}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "ELM_API_KEY environment variable not set"):
+                GenAIStrategyBase._ELM_client()
+        with (
+            patch.dict(sys.modules, {"openai": None}),
+            patch.dict("os.environ", {"ELM_API_KEY": "elm-key"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "openai is not installed"):
                 GenAIStrategyBase._ELM_client()
 
     def test_base_elm_dispatch_returns_captured_usage(self) -> None:
@@ -820,6 +1638,167 @@ class TestModelDiscovery(unittest.TestCase):
         with patch.dict(sys.modules, {"ollama": None}):
             with self.assertRaisesRegex(RuntimeError, "ollama package is not installed"):
                 model_discovery.list_ollama_models()
+
+    def test_shared_openai_listing_accepts_iterable_sdk_responses(self) -> None:
+        client = SimpleNamespace(
+            models=SimpleNamespace(
+                list=lambda: [
+                    SimpleNamespace(id="gpt-z"),
+                    {"id": "gpt-a"},
+                    {"id": "other"},
+                    {"name": "ignored"},
+                    SimpleNamespace(id=5),
+                ]
+            )
+        )
+
+        self.assertEqual(
+            strategy_base._list_openai_compatible_models(client, prefix=None, provider_name="OpenAI"),
+            ["gpt-a", "gpt-z", "other"],
+        )
+        with patch.object(GenAIStrategyBase, "_openai_client", return_value=client):
+            self.assertEqual(strategy_base.list_openai_models(), ["gpt-a", "gpt-z"])
+        data_client = SimpleNamespace(
+            models=SimpleNamespace(list=lambda: SimpleNamespace(data=[{"id": "gpt-c"}, SimpleNamespace(id="gpt-b")]))
+        )
+        self.assertEqual(
+            strategy_base._list_openai_compatible_models(data_client, prefix="gpt", provider_name="OpenAI"),
+            ["gpt-b", "gpt-c"],
+        )
+
+    def test_openai_client_uses_configured_api_key(self) -> None:
+        created_with: list[dict[str, Any]] = []
+        fake_openai = ModuleType("openai")
+
+        def fake_openai_constructor(**kwargs: Any) -> str:
+            created_with.append(kwargs)
+            return "openai-client"
+
+        fake_openai.OpenAI = fake_openai_constructor
+
+        with (
+            patch.dict(sys.modules, {"openai": fake_openai}),
+            patch.dict("os.environ", {"OPENAI_API_KEY": "openai-key"}),
+        ):
+            self.assertEqual(GenAIStrategyBase._openai_client(), "openai-client")
+        self.assertEqual(created_with, [{"api_key": "openai-key"}])
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY"):
+                GenAIStrategyBase._openai_client()
+
+        with (
+            patch.dict(sys.modules, {"openai": None}),
+            patch.dict("os.environ", {"OPENAI_API_KEY": "openai-key"}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "openai is not installed"):
+                GenAIStrategyBase._openai_client()
+
+    def test_gemini_listing_handles_new_and_legacy_sdk_results(self) -> None:
+        new_client = SimpleNamespace(
+            models=SimpleNamespace(
+                list=lambda: [
+                    SimpleNamespace(name="models/gemini-z"),
+                    {"name": "models/gemini-a"},
+                    {"name": "other"},
+                    {"name": None},
+                    {"name": "models/gemini-a"},
+                ]
+            )
+        )
+        self.assertEqual(
+            strategy_base._list_gemini_models_newsdk(new_client, prefix="gemini"),
+            ["gemini-a", "gemini-z"],
+        )
+
+        legacy_client = SimpleNamespace(
+            list_models=lambda: [
+                SimpleNamespace(name="models/gemini-z", supported_generation_methods=["generateContent"]),
+                SimpleNamespace(name="models/text-only", supported_generation_methods=["embedContent"]),
+                SimpleNamespace(name="models/gemini-a", supported_generation_methods=["generateContent"]),
+                SimpleNamespace(name="gemini-unprefixed", supported_generation_methods=["generateContent"]),
+            ]
+        )
+        self.assertEqual(
+            strategy_base._list_gemini_models_legacy(legacy_client, prefix="gemini"),
+            ["gemini-a", "gemini-z"],
+        )
+        self.assertEqual(strategy_base._list_gemini_models_legacy(legacy_client, prefix=None), [])
+
+        with patch.object(
+            GenAIStrategyBase,
+            "_google_client",
+            return_value=GoogleClient(kind="legacy", client=legacy_client),
+        ):
+            self.assertEqual(strategy_base.list_gemini_models(), ["gemini-a", "gemini-z"])
+
+        with patch.object(
+            GenAIStrategyBase,
+            "_google_client",
+            return_value=GoogleClient(kind="new", client=new_client),
+        ):
+            self.assertEqual(strategy_base.list_gemini_models(prefix=None), ["gemini-a", "gemini-z", "other"])
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to list Gemini models"):
+            strategy_base._list_gemini_models_legacy(
+                SimpleNamespace(list_models=lambda: (_ for _ in ()).throw(RuntimeError("offline"))),
+                prefix="gemini",
+            )
+        with self.assertRaisesRegex(RuntimeError, "Failed to list Gemini models \\(google.genai\\)"):
+            strategy_base._list_gemini_models_newsdk(
+                SimpleNamespace(models=SimpleNamespace(list=lambda: (_ for _ in ()).throw(RuntimeError("offline")))),
+                prefix=None,
+            )
+
+    def test_ollama_listing_shapes_errors_and_provider_dispatch(self) -> None:
+        fake_ollama = ModuleType("ollama")
+        fake_ollama.list = lambda: {
+            "models": [
+                {"model": "llama-z"},
+                {"name": "llama-a"},
+                SimpleNamespace(model="mistral"),
+                {"model": 4},
+            ]
+        }
+        with patch.dict(sys.modules, {"ollama": fake_ollama}):
+            self.assertEqual(strategy_base.list_ollama_models(prefix="llama"), ["llama-a", "llama-z"])
+            self.assertEqual(strategy_base.list_ollama_models(), ["llama-a", "llama-z", "mistral"])
+
+        fake_ollama.list = lambda: (_ for _ in ()).throw(RuntimeError("offline"))
+        with patch.dict(sys.modules, {"ollama": fake_ollama}):
+            with self.assertRaisesRegex(RuntimeError, "Failed to list Ollama models: offline"):
+                strategy_base.list_ollama_models()
+
+        with patch.dict(sys.modules, {"ollama": None}):
+            with self.assertRaisesRegex(RuntimeError, "ollama package is not installed"):
+                strategy_base.list_ollama_models()
+
+        with (
+            patch.object(GenAIStrategyBase, "infer_provider", return_value=LLMProvider.OPENAI),
+            patch.object(strategy_base, "list_openai_models", return_value=["openai"]) as list_openai,
+        ):
+            self.assertEqual(strategy_base.list_models(model_name="test"), ["openai"])
+        list_openai.assert_called_once_with()
+
+        with (
+            patch.object(GenAIStrategyBase, "infer_provider", return_value=LLMProvider.GOOGLE),
+            patch.object(strategy_base, "list_gemini_models", return_value=["gemini"]) as list_gemini,
+        ):
+            self.assertEqual(strategy_base.list_models(model_name="test"), ["gemini"])
+        list_gemini.assert_called_once_with()
+
+        with (
+            patch.object(GenAIStrategyBase, "infer_provider", return_value=cast(LLMProvider, "invalid")),
+            self.assertRaisesRegex(ValueError, "Unsupported LLM provider"),
+        ):
+            strategy_base.list_models(model_name="test")
+
+        with (
+            patch.object(GenAIStrategyBase, "infer_provider", return_value=LLMProvider.OLLAMA),
+            patch.object(strategy_base, "list_ollama_models", return_value=["local"]) as list_ollama,
+        ):
+            self.assertEqual(strategy_base.list_models(model_name="test"), ["local"])
+        list_ollama.assert_called_once_with()
 
 
 class TestRagHelper(unittest.TestCase):
@@ -1167,6 +2146,170 @@ class TestStrategyModuleHelpers(unittest.TestCase):
 
         self.assertTrue(any("Ollama" in message for message in messages))
 
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value=(" tuple description ", {})):
+            self.assertEqual(
+                pyopl_generative._describe_images_for_rag(
+                    provider=pyopl_generative.LLMProvider.OPENAI,
+                    model_name="gpt",
+                    images=[{"path": "image.png"}],
+                ),
+                "tuple description",
+            )
+        with patch.object(pyopl_generative, "_llm_generate_text", side_effect=RuntimeError("provider unavailable")):
+            self.assertEqual(
+                pyopl_generative._describe_images_for_rag(
+                    provider=pyopl_generative.LLMProvider.OPENAI,
+                    model_name="gpt",
+                    images=[{"path": "image.png"}],
+                    progress=messages.append,
+                ),
+                "",
+            )
+        self.assertTrue(any("generation failed" in message for message in messages))
+
+    def test_generative_utility_wrappers_delegate_to_base(self) -> None:
+        base = pyopl_generative._BASE
+        with (
+            patch.object(base, "read_file", return_value="file contents") as read_file,
+            patch.object(base, "read_pyopl_GBNF", return_value="bnf") as read_bnf,
+            patch.object(base, "read_pyopl_grammar", return_value="grammar") as read_grammar,
+            patch.object(base, "read_pyopl_code", return_value="code") as read_code,
+        ):
+            self.assertEqual(pyopl_generative._read_file("model.mod"), "file contents")
+            self.assertEqual(pyopl_generative._read_pyopl_GBNF(), "bnf")
+            self.assertEqual(pyopl_generative._read_pyopl_grammar(), "grammar")
+            self.assertEqual(pyopl_generative._read_pyopl_code(), "code")
+        read_file.assert_called_once_with("model.mod")
+        read_bnf.assert_called_once_with()
+        read_grammar.assert_called_once_with()
+        read_code.assert_called_once_with()
+
+        with patch.object(base, "get_grammar_implementation", return_value="implementation") as grammar:
+            self.assertEqual(pyopl_generative._get_grammar_implementation(pyopl_generative.Grammar.CODE), "implementation")
+        grammar.assert_called_once_with(strategy_base.Grammar.CODE)
+
+        with (
+            patch.object(base, "safe_read_text", return_value="text") as read_text,
+            patch.object(base, "find_pair_in_folder", return_value=(Path("model.mod"), Path("data.dat"))) as find_pair,
+            patch.object(base, "gather_few_shots", return_value=[]) as gather,
+            patch.object(base, "render_few_shots_section", return_value="examples") as render,
+        ):
+            self.assertEqual(pyopl_generative._safe_read_text(Path("desc.md"), max_chars=10), "text")
+            self.assertEqual(
+                pyopl_generative._find_pair_in_folder(Path("desc.md")),
+                (Path("model.mod"), Path("data.dat")),
+            )
+            self.assertEqual(pyopl_generative._gather_few_shots("query", k=2, models_dir="models"), [])
+            self.assertEqual(pyopl_generative._render_few_shots_section([]), "examples")
+        read_text.assert_called_once_with(Path("desc.md"), max_chars=10)
+        find_pair.assert_called_once_with(Path("desc.md"))
+        gather.assert_called_once_with("query", k=2, models_dir="models", progress=None)
+        render.assert_called_once_with([])
+
+        with (
+            patch.object(base, "_openai_client", return_value="openai") as openai,
+            patch.object(base, "_google_client", return_value="google") as google,
+            patch.object(base, "_ollama_generate_text", return_value="ollama") as ollama,
+        ):
+            self.assertEqual(pyopl_generative._openai_client(), "openai")
+            self.assertEqual(pyopl_generative._google_client(), "google")
+            self.assertEqual(pyopl_generative._ollama_generate_text("llama", "prompt", 10), "ollama")
+        openai.assert_called_once_with()
+        google.assert_called_once_with()
+        ollama.assert_called_once_with(
+            model_name="llama",
+            prompt="prompt",
+            num_predict=10,
+            return_usage=False,
+            enforce_json=True,
+        )
+
+        self.assertEqual(
+            pyopl_generative._build_create_params("gpt", "prompt", max_tokens=8, temperature=0.1, stop=["END"]),
+            {
+                "model": "gpt",
+                "input": "prompt",
+                "response_format": {"type": "json_object"},
+                "max_output_tokens": 8,
+                "temperature": 0.1,
+                "stop": ["END"],
+            },
+        )
+        self.assertEqual(
+            pyopl_generative._coalesce_response_text(SimpleNamespace(output_text="response")),
+            "response",
+        )
+
+    def test_generative_json_and_response_text_fallback_helpers(self) -> None:
+        fenced = 'prefix\n```json\n{"model": "m", "data": "d"}\n```\nsuffix'
+        nested = 'extra text {"outer": {"value": 1}} trailing text'
+
+        self.assertEqual(
+            pyopl_generative.extract_json_from_markdown(fenced),
+            '{"model": "m", "data": "d"}',
+        )
+        self.assertEqual(
+            pyopl_generative.extract_json_from_markdown(nested),
+            '{"outer": {"value": 1}}',
+        )
+        self.assertEqual(pyopl_generative.extract_json_from_markdown("no object here"), "no object here")
+        self.assertEqual(
+            pyopl_generative._json_loads_relaxed(fenced),
+            {"model": "m", "data": "d"},
+        )
+        self.assertEqual(
+            pyopl_generative._coalesce_response_text(
+                SimpleNamespace(
+                    output=[
+                        SimpleNamespace(content=None, text="first"),
+                        SimpleNamespace(
+                            content=[
+                                SimpleNamespace(text="second"),
+                                {"text": "third"},
+                                {"text": 4},
+                                SimpleNamespace(),
+                            ]
+                        ),
+                    ]
+                )
+            ),
+            "firstsecondthird",
+        )
+        self.assertEqual(pyopl_generative._coalesce_response_text(SimpleNamespace(output=[])), "")
+
+    def test_generative_revision_feedback_and_assessment_prompts(self) -> None:
+        syntax_revision = pyopl_generative._build_revision_prompt(
+            "question",
+            "grammar",
+            "old model",
+            "old data",
+            compile_errors=["missing declaration"],
+            few_shots=[],
+        )
+        alignment_revision = pyopl_generative._build_revision_prompt(
+            "question",
+            "grammar",
+            "old model",
+            "old data",
+            alignment_assessment="capacity constraint is missing",
+        )
+        feedback = pyopl_generative._build_feedback_prompt("question", "grammar", "model", "data")
+        final_assessment = pyopl_generative._build_final_assessment_prompt(
+            "question",
+            "grammar",
+            "model",
+            "data",
+            ["syntax error"],
+        )
+
+        self.assertIn("missing declaration", syntax_revision)
+        self.assertIn("capacity constraint is missing", alignment_revision)
+        self.assertIn("question", feedback)
+        self.assertIn("model", feedback)
+        self.assertIn("data", feedback)
+        self.assertIn("SYNTAX ERRORS", final_assessment)
+        self.assertIn("syntax error", final_assessment)
+
     def test_strategy_grammar_wrappers_delegate_to_base_helper(self) -> None:
         for module_name in STRATEGY_MODULE_NAMES:
             module = import_module(module_name)
@@ -1270,6 +2413,35 @@ class TestGraphChainHelpers(unittest.TestCase):
         self.assertIn("retry_instruction", calls[1])
         self.assertTrue(progress_messages)
 
+    def test_graphchain_generate_json_object_raises_after_invalid_retry(self) -> None:
+        calls = []
+
+        def fake_llm_generate_text(**kwargs):
+            calls.append(kwargs["input_text"])
+            if len(calls) == 1:
+                return "", {"prompt_tokens": 1, "completion_tokens": 2}
+            return '{"model": "m"}', {"prompt_tokens": 3, "completion_tokens": 4}
+
+        with (
+            patch.object(pyopl_generative_graphchain, "_llm_generate_text", side_effect=fake_llm_generate_text),
+            self.assertRaisesRegex(RuntimeError, 'missing string key "data"'),
+        ):
+            pyopl_generative_graphchain._generate_json_object(
+                provider=pyopl_generative_graphchain.LLMProvider.OPENAI,
+                model_name="gpt-test",
+                input_text="make json",
+                images=None,
+                max_tokens=10,
+                temperature=None,
+                stop=None,
+                progress=None,
+                validator=pyopl_generative_graphchain._validate_model_data_payload,
+                retry_label="generate",
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("retry_instruction", calls[1])
+
     def test_graphchain_context_validation_and_callable_error_wrapper(self) -> None:
         with self.assertRaisesRegex(ValueError, "max_iterations"):
             self.make_context().__class__(
@@ -1345,6 +2517,51 @@ class TestGraphChainHelpers(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(context.alignment_assessment, "final assessment")
 
+    def test_graphchain_nodes_report_errors_and_empty_assessment_fallback(self) -> None:
+        context = self.make_context()
+        with patch.object(
+            pyopl_generative_graphchain,
+            "_generate_json_object",
+            side_effect=RuntimeError("provider failed"),
+        ):
+            result = asyncio.run(pyopl_generative_graphchain.GenerateNode("generate").execute(context))
+        self.assertFalse(result.success)
+        self.assertIn("provider failed", result.error)
+
+        context = self.make_context()
+        with patch.object(
+            pyopl_generative_graphchain.OPLCompiler,
+            "compile_model",
+            side_effect=pyopl_generative_graphchain.SemanticError("invalid model"),
+        ):
+            result = asyncio.run(pyopl_generative_graphchain.CheckSyntaxNode("syntax").execute(context))
+        self.assertTrue(result.success)
+        self.assertFalse(context.syntax_valid)
+        self.assertEqual(context.syntax_errors, ["Semantic Error: invalid model"])
+
+        for node in (
+            pyopl_generative_graphchain.CheckAlignmentNode("alignment"),
+            pyopl_generative_graphchain.ReviseSyntaxNode("revise_syntax"),
+            pyopl_generative_graphchain.ReviseAlignmentNode("revise_alignment"),
+        ):
+            with (
+                self.subTest(node=node.name),
+                patch.object(
+                    pyopl_generative_graphchain,
+                    "_generate_json_object",
+                    side_effect=RuntimeError("provider failed"),
+                ),
+            ):
+                result = asyncio.run(node.execute(self.make_context()))
+                self.assertFalse(result.success)
+                self.assertIn("provider failed", result.error)
+
+        context = self.make_context()
+        with patch.object(pyopl_generative_graphchain, "_llm_generate_text", return_value=("", {})):
+            result = asyncio.run(pyopl_generative_graphchain.FinalAssessmentNode("assessment").execute(context))
+        self.assertTrue(result.success)
+        self.assertEqual(context.alignment_assessment, "Unable to generate assessment.")
+
     def test_graphchain_syntax_and_save_nodes_are_offline(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             model_file = str(Path(td) / "nested" / "model.mod")
@@ -1362,6 +2579,21 @@ class TestGraphChainHelpers(unittest.TestCase):
             self.assertTrue(save_result.success)
             self.assertEqual(Path(model_file).read_text(encoding="utf-8"), context.model_code)
             self.assertEqual(Path(data_file).read_text(encoding="utf-8"), context.data_code)
+
+    def test_graphchain_save_node_cleans_up_after_atomic_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            context = self.make_context(model_file=model_file, data_file=data_file)
+            context.model_code = "model"
+            context.data_code = "data"
+
+            with patch.object(pyopl_generative_graphchain.os, "replace", side_effect=OSError("disk full")):
+                result = asyncio.run(pyopl_generative_graphchain.SaveFilesNode("save").execute(context))
+
+            self.assertFalse(result.success)
+            self.assertIn("disk full", result.error)
+            self.assertEqual(list(Path(td).iterdir()), [])
 
     def test_graphchain_executor_happy_path_with_mocked_nodes(self) -> None:
         context = self.make_context(alignment_check=False)
@@ -1457,6 +2689,128 @@ class TestGraphChainHelpers(unittest.TestCase):
         self.assertEqual(stats["cost"]["estimated_costs"], {"total_cost": 0.25})
         self.assertEqual(assessment, "wrapped assessment")
 
+    def test_graphchain_async_alignment_revision_uses_image_context(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "first model", "data": "first data"}), {"prompt_tokens": 1, "completion_tokens": 2}),
+                (json.dumps({"aligned": False, "assessment": "add capacity"}), {"prompt_tokens": 3, "completion_tokens": 4}),
+                (json.dumps({"model": "revised model", "data": "revised data"}), {"prompt_tokens": 5, "completion_tokens": 6}),
+                (json.dumps({"aligned": True, "assessment": "aligned"}), {"prompt_tokens": 7, "completion_tokens": 8}),
+            ]
+
+            with (
+                patch.object(pyopl_generative_graphchain, "_llm_generate_text", side_effect=responses) as llm,
+                patch.object(pyopl_generative_graphchain, "_describe_images_for_rag", return_value="image context"),
+                patch.object(pyopl_generative_graphchain, "_gather_few_shots", return_value=[]) as gather,
+                patch.object(pyopl_generative_graphchain.OPLCompiler, "compile_model", return_value=None),
+                patch.object(pyopl_generative_graphchain, "_estimate_costs", side_effect=RuntimeError("pricing unavailable")),
+            ):
+                stats = cast(
+                    Dict[str, Any],
+                    asyncio.run(
+                        pyopl_generative_graphchain.generative_solve_async(
+                            cast(
+                                strategy_base.PromptWithImages,
+                                {"text": "solve the pictured problem", "image": "problem.png"},
+                            ),
+                            model_file,
+                            data_file,
+                            model_name="gpt-test",
+                            mode=pyopl_generative_graphchain.Grammar.NONE,
+                            iterations=2,
+                            return_statistics=True,
+                            few_shot=True,
+                        )
+                    ),
+                )
+
+            generated_model = Path(model_file).read_text(encoding="utf-8")
+            generated_data = Path(data_file).read_text(encoding="utf-8")
+
+        self.assertEqual(stats["assessment"], "aligned")
+        self.assertEqual(stats["iterations"], 2)
+        self.assertEqual(stats["syntax_errors"], [])
+        self.assertEqual(stats["cost"]["usage"], {"prompt_tokens": 16, "completion_tokens": 20})
+        self.assertEqual(stats["cost"]["estimated_costs"], {})
+        self.assertIn("image context", gather.call_args.args[0])
+        self.assertEqual(llm.call_count, 4)
+        self.assertEqual(generated_model, "revised model")
+        self.assertEqual(generated_data, "revised data")
+
+    def test_graphchain_async_recovers_syntax_and_returns_final_assessment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "invalid model", "data": "data"}), {"prompt_tokens": 1, "completion_tokens": 1}),
+                (
+                    json.dumps({"model": "repaired model", "data": "repaired data"}),
+                    {"prompt_tokens": 2, "completion_tokens": 2},
+                ),
+                ("syntax repaired", {"prompt_tokens": 3, "completion_tokens": 3}),
+            ]
+
+            with (
+                patch.object(pyopl_generative_graphchain, "_llm_generate_text", side_effect=responses) as llm,
+                patch.object(
+                    pyopl_generative_graphchain.OPLCompiler,
+                    "compile_model",
+                    side_effect=[
+                        pyopl_generative_graphchain.SemanticError("first syntax error"),
+                        None,
+                    ],
+                ),
+                patch.object(pyopl_generative_graphchain, "_estimate_costs", return_value={}),
+            ):
+                stats = cast(
+                    Dict[str, Any],
+                    asyncio.run(
+                        pyopl_generative_graphchain.generative_solve_async(
+                            "repair this model",
+                            model_file,
+                            data_file,
+                            model_name="gpt-test",
+                            mode=pyopl_generative_graphchain.Grammar.NONE,
+                            iterations=2,
+                            return_statistics=True,
+                            alignment_check=False,
+                            few_shot=False,
+                        )
+                    ),
+                )
+
+            generated_model = Path(model_file).read_text(encoding="utf-8")
+
+        self.assertEqual(stats["assessment"], "syntax repaired")
+        self.assertEqual(stats["iterations"], 2)
+        self.assertEqual(stats["syntax_errors"], [])
+        self.assertIn("first syntax error", llm.call_args_list[1].kwargs["input_text"])
+        self.assertEqual(generated_model, "repaired model")
+
+    def test_graphchain_public_wrappers_surface_execution_errors(self) -> None:
+        async def fail_execute(self, context):
+            raise ValueError("executor failed")
+
+        with patch.object(pyopl_generative_graphchain.GraphChainExecutor, "execute", fail_execute):
+            with self.assertRaisesRegex(RuntimeError, "Generative solve failed: executor failed"):
+                asyncio.run(
+                    pyopl_generative_graphchain.generative_solve_async(
+                        "problem",
+                        "model.mod",
+                        "data.dat",
+                        few_shot=False,
+                    )
+                )
+
+        async def call_sync_wrapper_inside_loop():
+            with self.assertWarnsRegex(UserWarning, "use generative_solve_async instead"):
+                pyopl_generative_graphchain.generative_solve_graphchain("problem", "model.mod", "data.dat")
+
+        with self.assertRaisesRegex(RuntimeError, "Cannot use sync wrapper from async context"):
+            asyncio.run(call_sync_wrapper_inside_loop())
+
 
 class TestStrategySolveLoops(unittest.TestCase):
     def test_common_strategy_solve_loops_with_mocked_llm(self) -> None:
@@ -1537,6 +2891,200 @@ class TestStrategySolveLoops(unittest.TestCase):
 
         self.assertEqual(stats["assessment"], "legacy assessment")
         self.assertEqual(stats["cost"]["estimated_costs"], {"total_cost": 0.6})
+
+    def test_generative_alignment_success_aggregates_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "dvar int x;", "data": "x=1;"}), {"prompt_tokens": 2, "completion_tokens": 3}),
+                (
+                    json.dumps({"aligned": True, "assessment": "  aligned well  "}),
+                    {"prompt_tokens": 5, "completion_tokens": 7},
+                ),
+            ]
+
+            with (
+                patch.object(pyopl_generative.OPLCompiler, "compile_model", return_value=None),
+                patch.object(pyopl_generative, "_llm_generate_text", side_effect=responses) as llm,
+                patch.object(pyopl_generative, "_estimate_costs", return_value={"total_cost": 0.4}),
+            ):
+                stats = pyopl_generative.generative_solve(
+                    "make a tiny model",
+                    model_file,
+                    data_file,
+                    model_name="gpt-test",
+                    mode=pyopl_generative.Grammar.NONE,
+                    iterations=1,
+                    return_statistics=True,
+                    alignment_check=True,
+                    few_shot=False,
+                    use_graphchain=False,
+                )
+
+        self.assertEqual(stats["assessment"], "aligned well")
+        self.assertEqual(stats["syntax_errors"], [])
+        self.assertEqual(stats["cost"]["usage"], {"prompt_tokens": 7, "completion_tokens": 10})
+        self.assertEqual(llm.call_count, 2)
+
+    def test_generative_alignment_failure_revises_before_success(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "first model", "data": "first data"}), {"prompt_tokens": 1, "completion_tokens": 2}),
+                (
+                    json.dumps({"aligned": False, "assessment": "missing a capacity constraint"}),
+                    {"prompt_tokens": 3, "completion_tokens": 4},
+                ),
+                (json.dumps({"model": "revised model", "data": "revised data"}), {"prompt_tokens": 5, "completion_tokens": 6}),
+                (json.dumps({"aligned": True, "assessment": "now aligned"}), {"prompt_tokens": 7, "completion_tokens": 8}),
+            ]
+
+            with (
+                patch.object(pyopl_generative.OPLCompiler, "compile_model", return_value=None),
+                patch.object(pyopl_generative, "_llm_generate_text", side_effect=responses) as llm,
+                patch.object(pyopl_generative, "_estimate_costs", return_value={}),
+            ):
+                stats = pyopl_generative.generative_solve(
+                    "make a tiny model",
+                    model_file,
+                    data_file,
+                    model_name="gpt-test",
+                    mode=pyopl_generative.Grammar.NONE,
+                    iterations=2,
+                    return_statistics=True,
+                    alignment_check=True,
+                    few_shot=False,
+                    use_graphchain=False,
+                )
+            generated_model = Path(model_file).read_text(encoding="utf-8")
+
+        self.assertEqual(stats["assessment"], "now aligned")
+        self.assertEqual(stats["iterations"], 2)
+        self.assertIn("missing a capacity constraint", llm.call_args_list[2].kwargs["input_text"])
+        self.assertEqual(generated_model, "revised model")
+
+    def test_generative_compile_errors_trigger_revision_and_final_assessment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "first model", "data": "first data"}), {"prompt_tokens": 1, "completion_tokens": 2}),
+                (json.dumps({"model": "second model", "data": "second data"}), {"prompt_tokens": 3, "completion_tokens": 4}),
+                ("final assessment", {"prompt_tokens": 5, "completion_tokens": 6}),
+            ]
+            compile_errors = [
+                strategy_base.SemanticError("first semantic failure"),
+                RuntimeError("second parse failure"),
+            ]
+
+            with (
+                patch.object(pyopl_generative.OPLCompiler, "compile_model", side_effect=compile_errors),
+                patch.object(pyopl_generative, "_llm_generate_text", side_effect=responses) as llm,
+                patch.object(pyopl_generative, "_estimate_costs", return_value={}),
+            ):
+                stats = pyopl_generative.generative_solve(
+                    "make a tiny model",
+                    model_file,
+                    data_file,
+                    model_name="gpt-test",
+                    mode=pyopl_generative.Grammar.NONE,
+                    iterations=2,
+                    return_statistics=True,
+                    alignment_check=True,
+                    few_shot=False,
+                    use_graphchain=False,
+                )
+
+        self.assertEqual(stats["assessment"], "final assessment")
+        self.assertEqual(stats["syntax_errors"], ["RuntimeError: second parse failure"])
+        self.assertIn("first semantic failure", llm.call_args_list[1].kwargs["input_text"])
+        self.assertIn("second parse failure", llm.call_args_list[2].kwargs["input_text"])
+
+    def test_generative_image_context_enriches_few_shot_query(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            model_file = str(Path(td) / "model.mod")
+            data_file = str(Path(td) / "data.dat")
+            responses = [
+                (json.dumps({"model": "dvar int x;", "data": "x=1;"}), {"prompt_tokens": 1, "completion_tokens": 2}),
+                ("image assessment", {"prompt_tokens": 3, "completion_tokens": 4}),
+            ]
+
+            with (
+                patch.object(pyopl_generative.OPLCompiler, "compile_model", return_value=None),
+                patch.object(pyopl_generative, "_describe_images_for_rag", return_value="image-derived context"),
+                patch.object(pyopl_generative, "_gather_few_shots", return_value=[]) as gather,
+                patch.object(pyopl_generative, "_llm_generate_text", side_effect=responses),
+                patch.object(pyopl_generative, "_estimate_costs", return_value={}),
+            ):
+                pyopl_generative.generative_solve(
+                    {"text": "describe this problem", "image": "problem.png"},
+                    model_file,
+                    data_file,
+                    model_name="gpt-test",
+                    mode=pyopl_generative.Grammar.NONE,
+                    iterations=1,
+                    alignment_check=False,
+                    few_shot=True,
+                    use_graphchain=False,
+                )
+
+        rag_query = gather.call_args.args[0]
+        self.assertIn("describe this problem", rag_query)
+        self.assertIn("image-derived context", rag_query)
+
+    def test_generative_solve_delegates_to_graphchain_by_default(self) -> None:
+        with patch.object(pyopl_generative, "generative_solve_graphchain", return_value="delegated") as graphchain:
+            result = pyopl_generative.generative_solve("prompt", "model.mod", "data.dat")
+
+        self.assertEqual(result, "delegated")
+        self.assertEqual(graphchain.call_args.kwargs["prompt"], "prompt")
+        self.assertEqual(graphchain.call_args.kwargs["model_file"], "model.mod")
+
+    def test_generative_legacy_loop_rejects_empty_generation_and_invalid_alignment(self) -> None:
+        for responses, expected_error in [
+            ([""], "Empty model response"),
+            (["not json"], "Failed to parse model response as JSON"),
+            (
+                [
+                    json.dumps({"model": "dvar int x;", "data": "x=1;"}),
+                    "{}",
+                ],
+                "Invalid alignment response JSON",
+            ),
+            (
+                [
+                    json.dumps({"model": "dvar int x;", "data": "x=1;"}),
+                    "",
+                ],
+                "Empty alignment response",
+            ),
+        ]:
+            with self.subTest(expected_error=expected_error), tempfile.TemporaryDirectory() as td:
+                model_file = str(Path(td) / "model.mod")
+                data_file = str(Path(td) / "data.dat")
+                with (
+                    patch.object(pyopl_generative.OPLCompiler, "compile_model", return_value=None),
+                    patch.object(
+                        pyopl_generative,
+                        "_llm_generate_text",
+                        side_effect=[(response, {}) for response in responses],
+                    ),
+                    patch.object(pyopl_generative, "_estimate_costs", return_value={}),
+                    self.assertRaisesRegex(RuntimeError, expected_error),
+                ):
+                    pyopl_generative.generative_solve(
+                        "make a tiny model",
+                        model_file,
+                        data_file,
+                        model_name="gpt-test",
+                        mode=pyopl_generative.Grammar.NONE,
+                        iterations=1,
+                        alignment_check=True,
+                        few_shot=False,
+                        use_graphchain=False,
+                    )
 
     def test_tree_of_thoughts_solve_loop_with_mocked_llm(self) -> None:
         with tempfile.TemporaryDirectory() as td:
