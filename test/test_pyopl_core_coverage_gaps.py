@@ -39,9 +39,7 @@ class TestPyOPLCoreCoverageGaps(unittest.TestCase):
     def test_condition_conversion_normalizes_supported_node_shapes(self):
         expression = {"type": "boolean_literal", "value": True}
         self.assertIs(
-            self.compiler._condition_to_boolean_expr(
-                {"type": "parenthesized_expression", "expression": expression}
-            ),
+            self.compiler._condition_to_boolean_expr({"type": "parenthesized_expression", "expression": expression}),
             expression,
         )
 
@@ -64,7 +62,13 @@ class TestPyOPLCoreCoverageGaps(unittest.TestCase):
         )
         self.assertEqual(
             self.compiler._condition_to_boolean_expr(name("x")),
-            {"type": "binop", "op": "==", "left": name("x"), "right": self.compiler._boolean_literal(True), "sem_type": "boolean"},
+            {
+                "type": "binop",
+                "op": "==",
+                "left": name("x"),
+                "right": self.compiler._boolean_literal(True),
+                "sem_type": "boolean",
+            },
         )
         self.assertEqual(self.compiler._condition_to_boolean_expr(True), self.compiler._boolean_literal(True))
         self.assertEqual(
