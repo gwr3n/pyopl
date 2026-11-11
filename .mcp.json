@@ -1,0 +1,26 @@
+{
+	"mcpServers": {
+		"PyOPL MCP": {
+			"type": "stdio",
+			"command": "./venv/bin/python",
+			"args": [
+				"-m",
+				"pyopl.pyopl_mcp"
+			],
+			"tools": [
+				"*"
+			]
+		},
+		"Rhetor MCP": {
+			"type": "stdio",
+			"command": "./venv/bin/python",
+			"args": [
+				"-m",
+				"pyopl.rhetor_mcp"
+			],
+			"tools": [
+				"*"
+			]
+		}
+	}
+}
