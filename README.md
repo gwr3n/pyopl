@@ -279,7 +279,7 @@ A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `
 
 ## Code complexity
 
-The codebased comprises 28,923 lines of executable code with 84% test coverage.
+The codebased comprises 28,923 lines of executable code with 90% test coverage.
 Additionally, we maintained an average function length of 13.8 lines and a CCN of 4.7 across 1,995 functions without a single complexity warning.
 We use [Lizard](https://github.com/terryyin/lizard) to measure code complexity.
 
