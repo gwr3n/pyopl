@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pyopl import pyopl_cli
 
@@ -119,6 +119,21 @@ class TestCLI(unittest.TestCase):
 
         self.assertNotEqual(ret, 0)
 
+    def test_cli_batch_handlers_report_exceptions(self):
+        err_buf = io.StringIO()
+        with patch("pyopl.pyopl_cli.batch_solve", side_effect=RuntimeError("archive failed")), redirect_stderr(err_buf):
+            ret = pyopl_cli.main(["batch-solve", "batch.zip"])
+
+        self.assertEqual(ret, 1)
+        self.assertIn("Error during batch solve: archive failed", err_buf.getvalue())
+
+        err_buf = io.StringIO()
+        with patch("pyopl.pyopl_cli.batch_compare", side_effect=RuntimeError("comparison failed")), redirect_stderr(err_buf):
+            ret = pyopl_cli.main(["batch-compare", "left.zip", "right.zip"])
+
+        self.assertEqual(ret, 1)
+        self.assertIn("Error during batch comparison: comparison failed", err_buf.getvalue())
+
     def test_cli_loads_solver_settings_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             model = Path(tmp_dir) / "model.mod"
@@ -131,6 +146,55 @@ class TestCLI(unittest.TestCase):
 
         self.assertEqual(ret, 0)
         solve_mock.assert_called_once_with(model, None, "scipy", {"time_limit": 2.5})
+
+    def test_cli_solver_settings_loader_rejects_missing_and_non_object_json(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing = Path(tmp_dir) / "missing.json"
+            with redirect_stderr(io.StringIO()), self.assertRaises(FileNotFoundError):
+                pyopl_cli._load_solver_settings(str(missing))
+
+            settings = Path(tmp_dir) / "settings.json"
+            settings.write_text("[]", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "must contain an object"):
+                pyopl_cli._load_solver_settings(str(settings))
+
+    def test_cli_solver_validation_and_error_paths(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            model = Path(tmp_dir) / "model.mod"
+            model.write_text("model", encoding="utf-8")
+
+            err_buf = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                ret = pyopl_cli.main(["solve", str(model), str(Path(tmp_dir) / "missing.dat")])
+            self.assertEqual(ret, 2)
+            self.assertIn("data file not found", err_buf.getvalue())
+
+            err_buf = io.StringIO()
+            with (
+                patch("pyopl.pyopl_cli._run_solve", side_effect=RuntimeError("solver failed")),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(["solve", str(model)])
+            self.assertEqual(ret, 1)
+            self.assertIn("Error during solve/export: solver failed", err_buf.getvalue())
+
+            out_buf = io.StringIO()
+            with patch("pyopl.pyopl_cli._export_py", return_value="compiled code"), redirect_stdout(out_buf):
+                ret = pyopl_cli.main(["solve", str(model), "--out", "py"])
+            self.assertEqual(ret, 0)
+            self.assertEqual(out_buf.getvalue().strip(), "compiled code")
+
+            err_buf = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err_buf):
+                ret = pyopl_cli.main(["solve", str(model), "--out", "lp", "--out-file", str(Path(tmp_dir) / "model.txt")])
+            self.assertEqual(ret, 2)
+            self.assertIn("ending in .lp", err_buf.getvalue())
+
+    def test_run_solve_propagates_backend_errors(self):
+        with patch("pyopl.pyopl_cli.solve", side_effect=RuntimeError("backend failed")):
+            with self.assertRaisesRegex(RuntimeError, "backend failed"):
+                pyopl_cli._run_solve(Path("model.mod"), None, "scipy")
 
     def test_cli_compare_models_json(self):
         result = {
@@ -227,6 +291,68 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(result, {"status": "unknown"})
         self.assertIn("indexed_observable_mapping", compare_mock.call_args.kwargs)
         self.assertIn("parameter_contract", compare_mock.call_args.kwargs)
+
+    def test_cli_compare_models_uses_grounded_mapping_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            left_model = Path(td) / "left.mod"
+            right_model = Path(td) / "right.mod"
+            left_model.write_text("left model", encoding="utf-8")
+            right_model.write_text("right model", encoding="utf-8")
+
+            with (
+                patch("pyopl.pyopl_cli.compare_models", return_value=object()) as compare_mock,
+                patch("pyopl.pyopl_cli.comparison_result_to_dict", return_value={"status": "equivalent"}),
+            ):
+                result = pyopl_cli._compare_models(left_model, right_model, None, None, "abstract", "[]")
+
+            self.assertEqual(result, {"status": "equivalent"})
+            compare_mock.assert_called_once_with(
+                "left model",
+                "right model",
+                strategy="abstract",
+                left_data_text=None,
+                right_data_text=None,
+                observable_mapping=(),
+            )
+
+            with self.assertRaisesRegex(ValueError, "invalid observable mapping JSON"):
+                pyopl_cli._compare_models(left_model, right_model, None, None, "abstract", "{")
+
+    def test_cli_compare_rejects_invalid_mapping_options(self):
+        with tempfile.TemporaryDirectory() as td:
+            left_model = Path(td) / "left.mod"
+            right_model = Path(td) / "right.mod"
+            left_model.write_text("left", encoding="utf-8")
+            right_model.write_text("right", encoding="utf-8")
+            missing_mapping = Path(td) / "missing.json"
+
+            invalid_requests = (
+                [
+                    "compare",
+                    str(left_model),
+                    str(right_model),
+                    "--observable-mapping",
+                    str(missing_mapping),
+                    "--generate-mapping",
+                ],
+                [
+                    "compare",
+                    str(left_model),
+                    str(right_model),
+                    "--mapping-out-file",
+                    str(Path(td) / "generated.json"),
+                ],
+                [
+                    "compare",
+                    str(left_model),
+                    str(right_model),
+                    "--observable-mapping",
+                    str(missing_mapping),
+                ],
+            )
+            for argv in invalid_requests:
+                with self.subTest(argv=argv), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(pyopl_cli.main(argv), 2)
 
     def test_cli_compare_generates_and_can_save_observable_mapping(self):
         result = {"status": "equivalent", "equivalent": True}
@@ -366,6 +492,14 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(ret, 0)
         self.assertIn("elm-model", buf.getvalue())
 
+    def test_genai_list_models_reports_provider_errors(self):
+        err_buf = io.StringIO()
+        with patch("pyopl.pyopl_cli.list_openai_models", side_effect=RuntimeError("offline")), redirect_stderr(err_buf):
+            ret = pyopl_cli.main(["genai", "list-models", "openai", "--prefix", "gpt"])
+
+        self.assertEqual(ret, 3)
+        self.assertIn("Error listing models for openai: offline", err_buf.getvalue())
+
     def test_genai_list_methods(self):
         argv = ["genai", "list-methods"]
         buf = io.StringIO()
@@ -411,6 +545,106 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(ret, 0)
             out = buf.getvalue()
             self.assertIn("feedback", out)
+
+    def test_genai_generate_and_ask_report_backend_errors(self):
+        err_buf = io.StringIO()
+        with (
+            patch("pyopl.pyopl_cli.generative_solve", side_effect=RuntimeError("generation failed")) as generate_mock,
+            redirect_stderr(err_buf),
+        ):
+            ret = pyopl_cli.main(
+                [
+                    "genai",
+                    "generate",
+                    "prompt",
+                    "--model-file",
+                    "model.mod",
+                    "--data-file",
+                    "data.dat",
+                    "--llm-model",
+                    "local-model",
+                    "--provider",
+                    "ollama",
+                ]
+            )
+
+        self.assertEqual(ret, 4)
+        self.assertIn("Error during generative_solve: generation failed", err_buf.getvalue())
+        self.assertEqual(
+            generate_mock.call_args.kwargs,
+            {
+                "iterations": 5,
+                "return_statistics": True,
+                "model_name": "local-model",
+                "llm_provider": "ollama",
+            },
+        )
+
+        err_buf = io.StringIO()
+        with (
+            patch("pyopl.pyopl_cli.generative_feedback", side_effect=RuntimeError("feedback failed")) as feedback_mock,
+            redirect_stderr(err_buf),
+        ):
+            ret = pyopl_cli.main(
+                [
+                    "genai",
+                    "ask",
+                    "prompt",
+                    "--model-file",
+                    "model.mod",
+                    "--data-file",
+                    "data.dat",
+                    "--llm-model",
+                    "local-model",
+                    "--provider",
+                    "ollama",
+                ]
+            )
+
+        self.assertEqual(ret, 4)
+        self.assertIn("Error during generative_feedback: feedback failed", err_buf.getvalue())
+        self.assertEqual(
+            feedback_mock.call_args.kwargs,
+            {"model_name": "local-model", "llm_provider": "ollama"},
+        )
+
+    def test_genai_generate_mapping_handles_missing_inputs_and_errors(self):
+        with tempfile.TemporaryDirectory() as td:
+            left_model = Path(td) / "left.mod"
+            right_model = Path(td) / "right.mod"
+            right_model.write_text("right", encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    pyopl_cli.main(["genai", "generate-mapping", str(left_model), str(right_model)]),
+                    2,
+                )
+
+            left_model.write_text("left", encoding="utf-8")
+            err_buf = io.StringIO()
+            with (
+                patch(
+                    "pyopl.pyopl_cli.generative_observable_mapping",
+                    side_effect=RuntimeError("mapping failed"),
+                ) as generate_mock,
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(
+                    [
+                        "genai",
+                        "generate-mapping",
+                        str(left_model),
+                        str(right_model),
+                        "--llm-model",
+                        "local-model",
+                        "--provider",
+                        "ollama",
+                    ]
+                )
+
+        self.assertEqual(ret, 4)
+        self.assertIn("Error during observable mapping generation: mapping failed", err_buf.getvalue())
+        self.assertEqual(generate_mock.call_args.kwargs, {"model_name": "local-model", "llm_provider": "ollama"})
 
     def test_cli_outfile_json_and_py(self):
         model = Path("pyopl/opl_models/lot_sizing/lot_sizing.mod")
@@ -526,6 +760,71 @@ class TestCLI(unittest.TestCase):
                 mdtxt = out_md.read_text(encoding="utf-8")
                 self.assertIn("GenAI Insight", mdtxt)
                 self.assertIn("optimal", mdtxt.lower())
+
+    def test_genai_insight_reports_generation_solve_and_feedback_errors(self):
+        with tempfile.TemporaryDirectory() as td, patch("pyopl.pyopl_cli.os.getcwd", return_value=td):
+            err_buf = io.StringIO()
+            with (
+                patch("pyopl.pyopl_cli.generative_solve", side_effect=RuntimeError("generation failed")),
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(["genai", "insight", "prompt"])
+            self.assertEqual(ret, 4)
+            self.assertIn("Error during generation: generation failed", err_buf.getvalue())
+
+            err_buf = io.StringIO()
+            with (
+                patch("pyopl.pyopl_cli.generative_solve", return_value={}),
+                patch("pyopl.pyopl_cli._run_solve", side_effect=RuntimeError("solve failed")),
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(["genai", "insight", "prompt"])
+            self.assertEqual(ret, 1)
+            self.assertIn("Error solving generated model: solve failed", err_buf.getvalue())
+
+            err_buf = io.StringIO()
+            with (
+                patch("pyopl.pyopl_cli.generative_solve", return_value={}),
+                patch("pyopl.pyopl_cli._run_solve", return_value={"status": "OPTIMAL"}),
+                patch("pyopl.pyopl_cli.generative_feedback", side_effect=RuntimeError("feedback failed")),
+                redirect_stderr(err_buf),
+            ):
+                ret = pyopl_cli.main(["genai", "insight", "prompt"])
+            self.assertEqual(ret, 4)
+            self.assertIn("Error during feedback/translation: feedback failed", err_buf.getvalue())
+
+    def test_insight_helpers_summarize_feedback_and_avoid_path_collisions(self):
+        self.assertEqual(pyopl_cli._insight_summary({"feedback": "feedback"}), "feedback")
+        self.assertEqual(pyopl_cli._insight_summary({"summary": "summary"}), "summary")
+        self.assertEqual(pyopl_cli._insight_summary({"details": "other"}), '{\n  "details": "other"\n}')
+        self.assertEqual(pyopl_cli._insight_summary("plain feedback"), "plain feedback")
+
+        fixed_datetime = Mock()
+        fixed_datetime.now.return_value.strftime.return_value = "2026-01-02_03-04-05"
+        with tempfile.TemporaryDirectory() as td:
+            tmp_dir = Path(td) / "tmp"
+            tmp_dir.mkdir()
+            (tmp_dir / "gen_pyopl_2026-01-02_03-04-05.mod").touch()
+
+            with patch.object(pyopl_cli, "datetime", fixed_datetime), patch("pyopl.pyopl_cli.os.getcwd", return_value=td):
+                model_path, data_path = pyopl_cli._unique_insight_paths()
+
+        self.assertEqual(model_path.name, "gen_pyopl_2026-01-02_03-04-05_1.mod")
+        self.assertEqual(data_path.name, "gen_pyopl_2026-01-02_03-04-05_1.dat")
+
+    def test_cli_dispatches_ide_and_reports_unknown_genai_command(self):
+        with patch("pyopl.pyopl_cli.OPLIDE") as ide_cls:
+            self.assertEqual(pyopl_cli.main([]), 0)
+            self.assertEqual(pyopl_cli.main(["ide", "--debug"]), 0)
+
+        self.assertEqual(ide_cls.call_args_list[0].kwargs, {"debug": False})
+        self.assertEqual(ide_cls.call_args_list[1].kwargs, {"debug": True})
+        self.assertEqual(ide_cls.return_value.mainloop.call_count, 2)
+
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            self.assertEqual(pyopl_cli.main(["genai"]), 2)
+        self.assertIn("Unknown command", err_buf.getvalue())
 
 
 if __name__ == "__main__":

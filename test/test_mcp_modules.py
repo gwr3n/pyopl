@@ -8,6 +8,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 _ROOT_LOGGER = logging.getLogger()
@@ -131,6 +132,142 @@ class TestPyOPLMCP(unittest.TestCase):
         with patch.object(pyopl_mcp.mcp, "run") as run_mock:
             pyopl_mcp.main()
         run_mock.assert_called_once_with()
+
+    def test_file_solver_tools_forward_solver_settings(self):
+        settings = {"TimeLimit": 3.0}
+        with patch.object(_pyopl_mcp, "solve", return_value={"status": "OK"}) as solve_mock:
+            result = _pyopl_mcp.solve_from_files("m.mod", "d.dat", "highs", settings)
+
+        self.assertEqual(result, {"status": "OK"})
+        solve_mock.assert_called_once_with("m.mod", "d.dat", solver="scipy", solver_settings=settings)
+
+        with patch.object(_pyopl_mcp, "solve_from_files", return_value={"status": "OK"}) as solve_files_mock:
+            result = _pyopl_mcp.solve_files_tool("m.mod", "d.dat", "gurobi", settings)
+
+        self.assertEqual(result, {"status": "OK"})
+        solve_files_mock.assert_called_once_with("m.mod", "d.dat", "gurobi", settings)
+
+    def test_string_solver_tool_forwards_solver_settings(self):
+        settings = {"TimeLimit": 3.0}
+        with patch.object(_pyopl_mcp, "solve_from_strings", return_value={"status": "OK"}) as solve_mock:
+            result = _pyopl_mcp.solve_strings_tool("model")
+
+        self.assertEqual(result, {"status": "OK"})
+        solve_mock.assert_called_once_with("model", None, "highs")
+
+        with patch.object(_pyopl_mcp, "solve_from_strings", return_value={"status": "OK"}) as solve_mock:
+            result = _pyopl_mcp.solve_strings_tool("model", "data", "gurobi", settings)
+
+        self.assertEqual(result, {"status": "OK"})
+        solve_mock.assert_called_once_with("model", "data", "gurobi", settings)
+
+    def test_file_export_tool_delegates_to_file_compiler(self):
+        with patch.object(_pyopl_mcp, "export_py_from_files", return_value="compiled") as export_mock:
+            result = _pyopl_mcp.export_py_files_tool("m.mod", "d.dat", "scipy")
+
+        self.assertEqual(result, "compiled")
+        export_mock.assert_called_once_with("m.mod", "d.dat", "scipy")
+
+    def test_grammar_tool_returns_packaged_grammar(self):
+        grammar = _pyopl_mcp.read_pyopl_grammar()
+
+        self.assertTrue(grammar)
+        self.assertEqual(_pyopl_mcp.read_pyopl_grammar_tool(), grammar)
+
+    def test_compare_model_strings_rejects_multiple_mapping_sources(self):
+        with self.assertRaisesRegex(ValueError, "supply either observable_mapping_json or generate_mapping"):
+            _pyopl_mcp.compare_model_strings(
+                "left",
+                "right",
+                observable_mapping_json="[]",
+                generate_mapping=True,
+            )
+
+    def test_compare_model_strings_dispatches_indexed_mapping(self):
+        mapping_json = json.dumps({"schema": "pyopl.uniform_indexed_observable_mapping"})
+        indexed_mapping = object()
+        parameter_contract = object()
+        comparison_result = object()
+
+        with (
+            patch.object(
+                _pyopl_mcp,
+                "parse_indexed_observable_mapping",
+                return_value=(indexed_mapping, parameter_contract),
+            ) as parse_mock,
+            patch.object(_pyopl_mcp, "compare_models", return_value=comparison_result) as compare_mock,
+            patch.object(
+                _pyopl_mcp,
+                "comparison_result_to_dict",
+                return_value={"equivalent": True},
+            ) as result_mock,
+        ):
+            result = _pyopl_mcp.compare_model_strings("left", "right", observable_mapping_json=mapping_json)
+
+        self.assertEqual(result, {"equivalent": True})
+        parse_mock.assert_called_once_with(mapping_json)
+        compare_mock.assert_called_once_with(
+            "left",
+            "right",
+            strategy="abstract",
+            left_data_text=None,
+            right_data_text=None,
+            indexed_observable_mapping=indexed_mapping,
+            parameter_contract=parameter_contract,
+        )
+        result_mock.assert_called_once_with(comparison_result, strategy="abstract")
+
+    def test_compare_model_strings_rejects_malformed_mapping_json(self):
+        with self.assertRaisesRegex(ValueError, "invalid observable mapping JSON"):
+            _pyopl_mcp.compare_model_strings("left", "right", observable_mapping_json="{")
+
+    def test_compare_model_strings_generates_mapping_when_data_is_present(self):
+        with (
+            patch.object(_pyopl_mcp, "generative_observable_mapping", return_value="[]") as generate_mock,
+            patch.object(_pyopl_mcp, "compare_models", return_value=object()) as compare_mock,
+            patch.object(_pyopl_mcp, "comparison_result_to_dict", return_value={"equivalent": True}),
+        ):
+            result = _pyopl_mcp.compare_model_strings(
+                "left",
+                "right",
+                left_data_text="left data",
+                generate_mapping=True,
+                provider="ollama",
+                model_name="local-model",
+            )
+
+        self.assertEqual(result, {"equivalent": True})
+        generate_mock.assert_called_once_with(
+            "left",
+            "right",
+            "left data",
+            "",
+            model_name="local-model",
+            llm_provider="ollama",
+        )
+        self.assertEqual(compare_mock.call_args.kwargs["observable_mapping"], ())
+
+    def test_compare_tool_forwards_non_default_arguments(self):
+        with patch.object(_pyopl_mcp, "compare_model_strings", return_value={"equivalent": True}) as compare_mock:
+            result = _pyopl_mcp.compare_model_strings_tool(
+                "left",
+                "right",
+                observable_mapping_json="[]",
+                provider="ollama",
+            )
+
+        self.assertEqual(result, {"equivalent": True})
+        compare_mock.assert_called_once_with(
+            "left",
+            "right",
+            None,
+            None,
+            "abstract",
+            "[]",
+            False,
+            "ollama",
+            "gpt-5",
+        )
 
     def test_compare_model_strings_returns_equivalence_result_dict(self):
         left_model = """
@@ -309,6 +446,21 @@ class TestRhetorMCP(unittest.TestCase):
             _rhetor_mcp.list_models("unsupported")
         with patch.dict("sys.modules", {"pyopl.genai.pyopl_generative_graphchain": None}):
             self.assertIsNone(_rhetor_mcp._try_import_graphchain())
+
+    def test_graphchain_import_returns_async_generator_when_available(self):
+        graphchain_module = ModuleType("pyopl.genai.pyopl_generative_graphchain")
+        async_generator = object()
+        graphchain_module.generative_solve_async = async_generator
+
+        with patch.dict("sys.modules", {"pyopl.genai.pyopl_generative_graphchain": graphchain_module}):
+            self.assertIs(_rhetor_mcp._try_import_graphchain(), async_generator)
+
+    def test_list_models_rejects_unexpected_normalized_provider(self):
+        with (
+            patch.object(_rhetor_mcp, "_normalize_provider", return_value="unexpected"),
+            self.assertRaisesRegex(ValueError, "Unsupported provider"),
+        ):
+            _rhetor_mcp.list_models("openai")
 
     def test_public_listing_wrapper_and_string_feedback(self):
         with patch.object(_rhetor_mcp, "list_providers", return_value=["openai"]) as providers:

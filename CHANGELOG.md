@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add tests for index safety, parser errors, solver code generation, and HiGHS export.
 - Expand coverage for tuple and parameter validation, filtered constraints,
   solver bounds, Boolean code generation, and linear-expression handling.
+- Expand PyOPL and Rhetor MCP coverage for tool routing, mapping dispatch,
+  solver settings, provider fallbacks, and error handling.
+- Expand CLI coverage for input validation, mapping comparisons, solver errors,
+  GenAI failures, and IDE dispatch.
+- Add core compiler tests for boolean simplification, implication rewriting,
+  min/max lowering, and ground conditional evaluation.
 
 ### Fixed
 
