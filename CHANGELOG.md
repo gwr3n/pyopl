@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Align GraphChain type stubs with multimodal prompt support in the implementation.
+- Separate IDE settings parsing and persistence from Tk preference application while preserving the settings format.
+- Centralize output-session creation and append mutations without changing session storage or UI behavior.
+- Group IDE output-session history, snapshots, and fold state behind one in-file state object.
+- Centralize session-list rename and viewing-selection updates without changing persisted metadata.
+- Build and parse existing session-history JSON through the state owner while keeping disk I/O in the IDE.
+- Route session snapshot and fold-state updates through state helpers, normalizing folds before restoring editor widgets.
+- Move history create, append, remove, rename, select, and reset operations onto the in-file session-state object.
 
 ### Removed
 

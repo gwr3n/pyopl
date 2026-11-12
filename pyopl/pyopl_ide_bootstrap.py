@@ -118,6 +118,59 @@ GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
 
 
+@dataclass(frozen=True)
+class _IDEPreferences:
+    font_size: int
+    theme: Optional[str]
+    solver: Optional[str]
+    verbose_llm_logs: bool
+    display_solver_progress: bool
+    genai_method: str
+
+
+def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool) -> _IDEPreferences:
+    try:
+        saved_font_size = int(settings.get("font-size", font_size))
+    except (TypeError, ValueError):
+        saved_font_size = font_size
+    theme = settings.get("theme")
+    solver = settings.get("solver")
+    display_progress = settings.get("display-solver-progress", True)
+    genai_method = settings.get("genai-method")
+    return _IDEPreferences(
+        font_size=saved_font_size,
+        theme=theme if isinstance(theme, str) and theme in ("flatly", "darkly") else None,
+        solver=solver if solver in ("gurobi", "scipy") else None,
+        verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
+        display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
+        genai_method=genai_method if isinstance(genai_method, str) and genai_method else "pyopl_generative",
+    )
+
+
+def _parse_genai_selection(saved_selection: Any) -> Optional[tuple[str, str]]:
+    if isinstance(saved_selection, str) and "|" in saved_selection:
+        provider, model = saved_selection.split("|", 1)
+        return (provider, model) if provider and model else None
+    if isinstance(saved_selection, dict):
+        provider_value, model_value = saved_selection.get("provider"), saved_selection.get("model")
+        if provider_value and model_value:
+            return str(provider_value), str(model_value)
+    return None
+
+
+def _read_ide_settings(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as settings_file:
+        payload = json.load(settings_file)
+    if not isinstance(payload, dict):
+        raise ValueError("IDE settings must contain a JSON object")
+    return payload
+
+
+def _write_ide_settings(path: Path, payload: dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as settings_file:
+        json.dump(payload, settings_file, indent=4)
+
+
 def _concise_genai_error(exc: Exception) -> str:
     """Return a short, actionable message for GenAI error dialogs."""
     detail = str(exc).strip()
@@ -848,6 +901,220 @@ class _ForegroundOperation:
     cancel_requested: bool = False
 
 
+@dataclass
+class _OutputSessionState:
+    sessions: dict[str, str] = field(default_factory=dict)
+    ids: list[str] = field(default_factory=list)
+    display: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    timestamps: dict[str, str] = field(default_factory=dict)
+    artifacts: dict[str, dict[str, str]] = field(default_factory=dict)
+    model_snapshots: dict[str, str] = field(default_factory=dict)
+    data_snapshots: dict[str, str] = field(default_factory=dict)
+    fold_view_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    current_id: Optional[str] = None
+    viewing_id: Optional[str] = None
+
+    @staticmethod
+    def label_for_header(header: str) -> str:
+        header_lower = header.strip().lower()
+        if header_lower.startswith("genai: generating"):
+            return "Generate"
+        if header_lower.startswith("genai: requesting feedback"):
+            return "Ask"
+        if header_lower.startswith("solve:"):
+            return "Solve"
+        if header_lower.startswith("export model"):
+            return "Export"
+        if header_lower.startswith("genai:"):
+            return "GenAI"
+        return "Session"
+
+    def make_display(self, timestamp: str, label: str, exclude_session_id: Optional[str] = None) -> str:
+        base = f"{timestamp} • {label}"
+        existing = {display for sid, display in self.display.items() if sid != exclude_session_id}
+        if base not in existing:
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base} ({suffix})"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
+
+    def begin(self, header: str, created_at: datetime) -> tuple[str, str]:
+        timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S")
+        label = self.label_for_header(header)
+        display = self.make_display(timestamp, label)
+        session_id = created_at.strftime("%Y-%m-%d %H:%M:%S.%f")
+        self.sessions[session_id] = (header + "\n") if header else ""
+        self.display[session_id] = display
+        self.labels[session_id] = label
+        self.timestamps[session_id] = timestamp
+        self.artifacts.setdefault(session_id, {})
+        self.ids.insert(0, session_id)
+        return session_id, display
+
+    def append(self, text: str, session_id: Optional[str] = None) -> Optional[str]:
+        sid = session_id or self.current_id
+        if sid:
+            self.sessions[sid] = self.sessions.get(sid, "") + text
+        return sid
+
+    def remove(self, session_id: str, index: int) -> None:
+        self.ids.pop(index)
+        self.sessions.pop(session_id, None)
+        self.display.pop(session_id, None)
+        self.labels.pop(session_id, None)
+        self.timestamps.pop(session_id, None)
+        self.artifacts.pop(session_id, None)
+        self.model_snapshots, self.data_snapshots = self.prune_snapshots(
+            self.artifacts, self.model_snapshots, self.data_snapshots
+        )
+        if self.current_id == session_id:
+            self.current_id = None
+        if self.viewing_id == session_id:
+            self.viewing_id = None
+
+    def rename(self, session_id: str, label: str) -> str:
+        timestamp = self.timestamps.get(session_id, session_id)
+        display = self.make_display(timestamp, label, exclude_session_id=session_id)
+        self.labels[session_id] = label
+        self.display[session_id] = display
+        return display
+
+    def select(self, session_id: Optional[str], *, make_current: bool = False) -> None:
+        self.viewing_id = session_id
+        if session_id is not None and (make_current or not self.current_id):
+            self.current_id = session_id
+
+    def clear_history(self) -> None:
+        self.sessions.clear()
+        self.ids.clear()
+        self.display.clear()
+        self.labels.clear()
+        self.timestamps.clear()
+        self.artifacts.clear()
+        self.fold_view_states.clear()
+        self.current_id = None
+        self.viewing_id = None
+
+    def to_payload(self, model_file: Optional[str], data_file: Optional[str], saved_at: str) -> dict[str, Any]:
+        return {
+            "output_sessions": self.sessions,
+            "output_session_ids": self.ids,
+            "output_session_display": self.display,
+            "output_session_label": self.labels,
+            "output_session_timestamp": self.timestamps,
+            "output_session_artifacts": self.artifacts,
+            "model_snapshots": self.model_snapshots,
+            "data_snapshots": self.data_snapshots,
+            "current_output_session_id": self.current_id,
+            "viewing_output_session_id": self.viewing_id,
+            "model_file": model_file,
+            "data_file": data_file,
+            "fold_view_states": self.fold_view_states,
+            "saved_at": saved_at,
+        }
+
+    @classmethod
+    def from_payload(
+        cls, payload: dict[str, Any], current_id: Optional[str], viewing_id: Optional[str]
+    ) -> "_OutputSessionState":
+        return cls(
+            sessions=payload.get("output_sessions", {}) or {},
+            ids=payload.get("output_session_ids", []) or [],
+            display=payload.get("output_session_display", {}) or {},
+            labels=payload.get("output_session_label", {}) or {},
+            timestamps=payload.get("output_session_timestamp", {}) or {},
+            artifacts=_normalize_session_artifacts(payload.get("output_session_artifacts")),
+            model_snapshots=_normalize_session_snapshots(payload.get("model_snapshots")),
+            data_snapshots=_normalize_session_snapshots(payload.get("data_snapshots")),
+            current_id=payload.get("current_output_session_id") or current_id,
+            viewing_id=payload.get("viewing_output_session_id") or viewing_id,
+        )
+
+    @staticmethod
+    def snapshot_hash(content: str) -> str:
+        return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+    @staticmethod
+    def record_artifacts(
+        artifacts: dict[str, dict[str, str]],
+        model_snapshots: dict[str, str],
+        data_snapshots: dict[str, str],
+        session_id: str,
+        model_text: Any,
+        data_text: Any,
+    ) -> None:
+        artifact = dict(artifacts.get(session_id, {}))
+        if model_text is not _SESSION_ARTIFACT_UNSET:
+            content = str(model_text)
+            content_hash = _OutputSessionState.snapshot_hash(content)
+            model_snapshots[content_hash] = content
+            artifact["model_hash"] = content_hash
+        if data_text is not _SESSION_ARTIFACT_UNSET:
+            content = str(data_text)
+            content_hash = _OutputSessionState.snapshot_hash(content)
+            data_snapshots[content_hash] = content
+            artifact["data_hash"] = content_hash
+        artifacts[session_id] = artifact
+
+    @staticmethod
+    def prune_snapshots(
+        artifacts: dict[str, dict[str, str]], model_snapshots: dict[str, str], data_snapshots: dict[str, str]
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        model_hashes = {artifact.get("model_hash") for artifact in artifacts.values()}
+        data_hashes = {artifact.get("data_hash") for artifact in artifacts.values()}
+        return (
+            {key: value for key, value in model_snapshots.items() if key in model_hashes},
+            {key: value for key, value in data_snapshots.items() if key in data_hashes},
+        )
+
+    @staticmethod
+    def store_fold_state(states: dict[str, dict[str, Any]], path: str, folded_lines: set[int], *, touch: bool) -> None:
+        key = _fold_state_key(path)
+        previous = states.get(key, {})
+        if not touch and not previous and not folded_lines:
+            return
+        edited_at = datetime.now(timezone.utc).isoformat() if touch else str(previous.get("edited_at") or "")
+        states[key] = {"folded_lines": sorted(int(line) for line in folded_lines), "edited_at": edited_at}
+        while len(states) > MAX_FOLD_VIEW_STATES:
+            oldest_key = min(states, key=lambda state_key: (str(states[state_key].get("edited_at") or ""), state_key))
+            del states[oldest_key]
+
+    @staticmethod
+    def normalize_fold_view_states(raw_states: Any) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for path, state in (raw_states or {}).items():
+            if not isinstance(path, str) or not isinstance(state, dict):
+                continue
+            raw_lines = state.get("folded_lines", [])
+            if not isinstance(raw_lines, list):
+                continue
+            lines = sorted({line for line in raw_lines if isinstance(line, int) and line > 0})
+            states[_fold_state_key(path)] = {"folded_lines": lines, "edited_at": str(state.get("edited_at") or "")}
+        return dict(
+            sorted(states.items(), key=lambda item: (item[1]["edited_at"], item[0]), reverse=True)[:MAX_FOLD_VIEW_STATES]
+        )
+
+
+def _normalize_session_snapshots(raw_snapshots: Any) -> dict[str, str]:
+    return {str(content_hash): str(content) for content_hash, content in (raw_snapshots or {}).items()}
+
+
+def _normalize_session_artifacts(raw_artifacts: Any) -> dict[str, dict[str, str]]:
+    return {
+        str(session_id): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
+        for session_id, artifact in (raw_artifacts or {}).items()
+        if isinstance(artifact, dict)
+    }
+
+
+def _fold_state_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+
+
 class _StatusVarProxy:
     """Adapter that preserves StringVar-like status_var.set(...) writes."""
 
@@ -941,18 +1208,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_pdf_temp_dir: Optional[str] = None
         self._genai_pending_revisions: Optional[dict[str, Any]] = None
 
-        # Output sessions
-        self._output_sessions: dict[str, str] = {}
-        self._output_session_ids: list[str] = []
-        self._output_session_display: dict[str, str] = {}
-        self._output_session_label: dict[str, str] = {}
-        self._output_session_timestamp: dict[str, str] = {}
-        self._output_session_artifacts: dict[str, dict[str, str]] = {}
-        self._model_snapshots: dict[str, str] = {}
-        self._data_snapshots: dict[str, str] = {}
-        self._fold_view_states: dict[str, dict[str, Any]] = {}
-        self._current_output_session_id: Optional[str] = None
-        self._viewing_output_session_id: Optional[str] = None
+        self._session_state = _OutputSessionState()
         self._active_operation: Optional[_ForegroundOperation] = None
 
         desired_theme, loaded_settings = self._initialize_preferences()
@@ -999,6 +1255,94 @@ class OPLIDE(TkinterDnD.Tk):
             self.after(50, self._poll_ide_bridge)
         except OSError as exc:
             logging.getLogger(__name__).warning("Could not start Rhetor IDE MCP bridge: %s", exc)
+
+    @property
+    def _output_sessions(self) -> dict[str, str]:
+        return self._session_state.sessions
+
+    @_output_sessions.setter
+    def _output_sessions(self, value: dict[str, str]) -> None:
+        self._session_state.sessions = value
+
+    @property
+    def _output_session_ids(self) -> list[str]:
+        return self._session_state.ids
+
+    @_output_session_ids.setter
+    def _output_session_ids(self, value: list[str]) -> None:
+        self._session_state.ids = value
+
+    @property
+    def _output_session_display(self) -> dict[str, str]:
+        return self._session_state.display
+
+    @_output_session_display.setter
+    def _output_session_display(self, value: dict[str, str]) -> None:
+        self._session_state.display = value
+
+    @property
+    def _output_session_label(self) -> dict[str, str]:
+        return self._session_state.labels
+
+    @_output_session_label.setter
+    def _output_session_label(self, value: dict[str, str]) -> None:
+        self._session_state.labels = value
+
+    @property
+    def _output_session_timestamp(self) -> dict[str, str]:
+        return self._session_state.timestamps
+
+    @_output_session_timestamp.setter
+    def _output_session_timestamp(self, value: dict[str, str]) -> None:
+        self._session_state.timestamps = value
+
+    @property
+    def _output_session_artifacts(self) -> dict[str, dict[str, str]]:
+        return self._session_state.artifacts
+
+    @_output_session_artifacts.setter
+    def _output_session_artifacts(self, value: dict[str, dict[str, str]]) -> None:
+        self._session_state.artifacts = value
+
+    @property
+    def _model_snapshots(self) -> dict[str, str]:
+        return self._session_state.model_snapshots
+
+    @_model_snapshots.setter
+    def _model_snapshots(self, value: dict[str, str]) -> None:
+        self._session_state.model_snapshots = value
+
+    @property
+    def _data_snapshots(self) -> dict[str, str]:
+        return self._session_state.data_snapshots
+
+    @_data_snapshots.setter
+    def _data_snapshots(self, value: dict[str, str]) -> None:
+        self._session_state.data_snapshots = value
+
+    @property
+    def _fold_view_states(self) -> dict[str, dict[str, Any]]:
+        return self._session_state.fold_view_states
+
+    @_fold_view_states.setter
+    def _fold_view_states(self, value: dict[str, dict[str, Any]]) -> None:
+        self._session_state.fold_view_states = value
+
+    @property
+    def _current_output_session_id(self) -> Optional[str]:
+        return self._session_state.current_id
+
+    @_current_output_session_id.setter
+    def _current_output_session_id(self, value: Optional[str]) -> None:
+        self._session_state.current_id = value
+
+    @property
+    def _viewing_output_session_id(self) -> Optional[str]:
+        return self._session_state.viewing_id
+
+    @_viewing_output_session_id.setter
+    def _viewing_output_session_id(self, value: Optional[str]) -> None:
+        self._session_state.viewing_id = value
 
     def _poll_ide_bridge(self) -> None:
         """Dispatch pending MCP bridge requests on Tk's event thread."""
@@ -1053,23 +1397,14 @@ class OPLIDE(TkinterDnD.Tk):
         if not isinstance(loaded_settings, dict):
             loaded_settings = {}
 
-        desired_theme: Optional[str] = None
-        try:
-            self.current_font_size = int(loaded_settings.get("font-size", self.current_font_size))
-            desired_theme = loaded_settings.get("theme")
-            saved_solver = loaded_settings.get("solver")
-            if saved_solver in ("gurobi", "scipy"):
-                self.solver.set(saved_solver)
-                self._current_solver_choice = saved_solver
-        except Exception:
-            pass
+        preferences = _parse_ide_preferences(loaded_settings, self.current_font_size, self.debug)
+        self.current_font_size = preferences.font_size
+        if preferences.solver is not None:
+            self.solver.set(preferences.solver)
+            self._current_solver_choice = preferences.solver
 
-        default_verbose = bool(loaded_settings.get("verbose-llm-logs", self.debug))
-        self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
-        display_solver_progress = loaded_settings.get("display-solver-progress", True)
-        if not isinstance(display_solver_progress, bool):
-            display_solver_progress = True
-        self.display_solver_progress_var = tk.BooleanVar(value=display_solver_progress)
+        self.verbose_llm_var = tk.BooleanVar(value=preferences.verbose_llm_logs)
+        self.display_solver_progress_var = tk.BooleanVar(value=preferences.display_solver_progress)
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
         self._genai_methods = [
@@ -1081,32 +1416,17 @@ class OPLIDE(TkinterDnD.Tk):
             ("Chain of Experts", "pyopl_chain_of_experts"),
             ("Reflexion", "pyopl_reflexion"),
         ]
-        saved_method = loaded_settings.get("genai-method")
-        if not isinstance(saved_method, str) or not saved_method:
-            saved_method = "pyopl_generative"
-        self.genai_method_var = tk.StringVar(value=saved_method)
+        self.genai_method_var = tk.StringVar(value=preferences.genai_method)
         self._desired_genai_provider: Optional[str] = None
         self._desired_genai_model: Optional[str] = None
         self._restore_genai_selection(loaded_settings.get("genai-selection"))
-        return desired_theme, loaded_settings
+        return preferences.theme, loaded_settings
 
     def _restore_genai_selection(self, saved_selection: Any) -> None:
-        try:
-            if isinstance(saved_selection, str) and "|" in saved_selection:
-                provider, model = saved_selection.split("|", 1)
-                if provider and model:
-                    self._desired_genai_provider = provider
-                    self._desired_genai_model = model
-                    self.genai_selection_var.set(saved_selection)
-            elif isinstance(saved_selection, dict):
-                provider_value = saved_selection.get("provider")
-                model_value = saved_selection.get("model")
-                if provider_value and model_value:
-                    self._desired_genai_provider = str(provider_value)
-                    self._desired_genai_model = str(model_value)
-                    self.genai_selection_var.set(f"{provider_value}|{model_value}")
-        except Exception:
-            pass
+        selection = _parse_genai_selection(saved_selection)
+        if selection is not None:
+            self._desired_genai_provider, self._desired_genai_model = selection
+            self.genai_selection_var.set("|".join(selection))
 
     def _register_macos_quit_handler(self) -> None:
         """Route macOS app-menu Quit through the IDE close handler."""
@@ -1591,22 +1911,7 @@ class OPLIDE(TkinterDnD.Tk):
             pass
 
     def _clear_output_session_state(self) -> None:
-        defaults: dict[str, dict[Any, Any] | list[Any]] = {
-            "_output_sessions": {},
-            "_output_session_ids": [],
-            "_output_session_display": {},
-            "_output_session_label": {},
-            "_output_session_timestamp": {},
-            "_output_session_artifacts": {},
-            "_fold_view_states": {},
-        }
-        for attribute, fallback in defaults.items():
-            try:
-                getattr(self, attribute).clear()
-            except Exception:
-                setattr(self, attribute, fallback)
-        self._current_output_session_id = None
-        self._viewing_output_session_id = None
+        self._session_state.clear_history()
 
     def _remove_persisted_session(self) -> None:
         try:
@@ -1844,32 +2149,18 @@ class OPLIDE(TkinterDnD.Tk):
             self._model_snapshots = {}
         if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
             self._data_snapshots = {}
-        artifact = dict(self._output_session_artifacts.get(session_id, {}))
-        if model_text is not _SESSION_ARTIFACT_UNSET:
-            content = str(model_text)
-            content_hash = OPLIDE._session_snapshot_hash(content)
-            self._model_snapshots[content_hash] = content
-            artifact["model_hash"] = content_hash
-        if data_text is not _SESSION_ARTIFACT_UNSET:
-            content = str(data_text)
-            content_hash = OPLIDE._session_snapshot_hash(content)
-            self._data_snapshots[content_hash] = content
-            artifact["data_hash"] = content_hash
-        self._output_session_artifacts[session_id] = artifact
+        _OutputSessionState.record_artifacts(
+            self._output_session_artifacts, self._model_snapshots, self._data_snapshots, session_id, model_text, data_text
+        )
 
     @staticmethod
     def _session_snapshot_hash(content: str) -> str:
-        return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+        return _OutputSessionState.snapshot_hash(content)
 
     def _prune_session_snapshots(self) -> None:
-        model_hashes = {artifact.get("model_hash") for artifact in self._output_session_artifacts.values()}
-        data_hashes = {artifact.get("data_hash") for artifact in self._output_session_artifacts.values()}
-        self._model_snapshots = {
-            content_hash: content for content_hash, content in self._model_snapshots.items() if content_hash in model_hashes
-        }
-        self._data_snapshots = {
-            content_hash: content for content_hash, content in self._data_snapshots.items() if content_hash in data_hashes
-        }
+        self._model_snapshots, self._data_snapshots = _OutputSessionState.prune_snapshots(
+            self._output_session_artifacts, self._model_snapshots, self._data_snapshots
+        )
 
     def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
         """Snapshot the current editor state for a session when possible."""
@@ -3468,7 +3759,7 @@ class OPLIDE(TkinterDnD.Tk):
             if not messagebox.askyesno("Delete Session", "Delete the selected session?"):
                 return
 
-            self._remove_output_session(sid, index)
+            self._session_state.remove(sid, index)
             self._select_session_after_delete(index)
             self.status_var.set("Session deleted.")
         except Exception:
@@ -3490,19 +3781,6 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
 
-    def _remove_output_session(self, session_id: str, index: int) -> None:
-        self._output_session_ids.pop(index)
-        self._output_sessions.pop(session_id, None)
-        self._output_session_display.pop(session_id, None)
-        self._output_session_label.pop(session_id, None)
-        self._output_session_timestamp.pop(session_id, None)
-        self._output_session_artifacts.pop(session_id, None)
-        OPLIDE._prune_session_snapshots(self)
-        if self._current_output_session_id == session_id:
-            self._current_output_session_id = None
-        if self._viewing_output_session_id == session_id:
-            self._viewing_output_session_id = None
-
     def _select_session_after_delete(self, deleted_index: int) -> None:
         try:
             self.request_listbox.delete(deleted_index)
@@ -3510,7 +3788,7 @@ class OPLIDE(TkinterDnD.Tk):
             pass
         count = self.request_listbox.size()
         if count <= 0:
-            self._viewing_output_session_id = None
+            self._session_state.select(None)
             self._clear_output_widget_after_delete()
             return
         new_index = min(deleted_index, count - 1)
@@ -3518,7 +3796,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.request_listbox.selection_set(new_index)
         self.request_listbox.activate(new_index)
         new_sid = self._output_session_ids[new_index]
-        self._viewing_output_session_id = new_sid
+        self._session_state.select(new_sid)
         self._show_output_session(new_sid)
 
     def _clear_output_widget_after_delete(self) -> None:
@@ -3556,9 +3834,7 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showerror("Change label", "The session label cannot exceed 50 characters.")
             return
 
-        display = self._make_output_session_display(timestamp, new_label, exclude_session_id=session_id)
-        self._output_session_label[session_id] = new_label
-        self._output_session_display[session_id] = display
+        display = self._session_state.rename(session_id, new_label)
 
         try:
             index = self._output_session_ids.index(session_id)
@@ -6273,9 +6549,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _append_output(self, text: str, session_id: Optional[str] = None) -> None:
         """Append text to the current output session and update the Output panel if visible."""
-        sid = session_id or getattr(self, "_current_output_session_id", None)
-        if sid:
-            self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
+        sid = self._session_state.append(text, session_id)
         if (
             sid
             and getattr(self, "_viewing_output_session_id", None) == sid
@@ -6312,63 +6586,10 @@ class OPLIDE(TkinterDnD.Tk):
         text = str(prompt_input).strip()
         return f"\n{label}:\n{text}\n\n"
 
-    def _label_for_output_session(self, header: str) -> str:
-        """Derive a short session label from the session header."""
-        header_lower = header.strip().lower()
-        if header_lower.startswith("genai: generating"):
-            return "Generate"
-        if header_lower.startswith("genai: requesting feedback"):
-            return "Ask"
-        if header_lower.startswith("solve:"):
-            return "Solve"
-        if header_lower.startswith("export model"):
-            return "Export"
-        if header_lower.startswith("genai:"):
-            return "GenAI"
-        return "Session"
-
-    def _make_output_session_display(self, timestamp: str, label: str, exclude_session_id: Optional[str] = None) -> str:
-        """Return a request-list label that stays unique even for same-second requests."""
-        base = f"{timestamp} • {label}"
-        existing = {
-            display for sid, display in getattr(self, "_output_session_display", {}).items() if sid != exclude_session_id
-        }
-        if base not in existing:
-            return base
-        suffix = 2
-        while True:
-            candidate = f"{base} ({suffix})"
-            if candidate not in existing:
-                return candidate
-            suffix += 1
-
-    # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
-        dt = datetime.now()
-        timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
-        if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
-            self._output_session_timestamp = {}
-        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
-            self._output_session_artifacts = {}
-        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
-            self._model_snapshots = {}
-        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
-            self._data_snapshots = {}
-        if not hasattr(self, "_output_session_label") or self._output_session_label is None:
-            self._output_session_label = {}
-        label = OPLIDE._label_for_output_session(self, header)
-        display = OPLIDE._make_output_session_display(self, timestamp, label)
-        session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-        initial = (header + "\n") if header else ""
-        self._output_sessions[session_id] = initial
-        self._output_session_display[session_id] = display
-        self._output_session_label[session_id] = label
-        self._output_session_timestamp[session_id] = timestamp
-        self._output_session_artifacts.setdefault(session_id, {})
+        session_id, display = self._session_state.begin(header, datetime.now())
         OPLIDE._snapshot_output_session_artifacts(self, session_id)
-        self._output_session_ids.insert(0, session_id)
 
         # Update UI list (most recent at top)
         if hasattr(self, "request_listbox"):
@@ -6380,8 +6601,7 @@ class OPLIDE(TkinterDnD.Tk):
             except Exception:
                 pass
 
-        self._current_output_session_id = session_id
-        self._viewing_output_session_id = session_id
+        self._session_state.select(session_id, make_current=True)
         self._show_output_session(session_id)
         # Persist new session immediately
         try:
@@ -6401,8 +6621,7 @@ class OPLIDE(TkinterDnD.Tk):
             self.output_text.config(state="disabled")
         # Remember viewing session and persist
         try:
-            self._viewing_output_session_id = session_id
-            self._current_output_session_id = self._current_output_session_id or session_id
+            self._session_state.select(session_id)
             self._save_session()
         except Exception:
             pass
@@ -6417,26 +6636,12 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _fold_state_key(path: str) -> str:
-        return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+        return _fold_state_key(path)
 
     def _store_fold_state(self, path: Optional[str], gutter: Any, *, touch: bool) -> None:
         if not path or gutter is None:
             return
-        key = OPLIDE._fold_state_key(path)
-        previous = self._fold_view_states.get(key, {})
-        if not touch and not previous and not gutter.folded_lines:
-            return
-        edited_at = datetime.now(timezone.utc).isoformat() if touch else str(previous.get("edited_at") or "")
-        self._fold_view_states[key] = {
-            "folded_lines": sorted(int(line) for line in gutter.folded_lines),
-            "edited_at": edited_at,
-        }
-        while len(self._fold_view_states) > MAX_FOLD_VIEW_STATES:
-            oldest_key = min(
-                self._fold_view_states,
-                key=lambda state_key: (str(self._fold_view_states[state_key].get("edited_at") or ""), state_key),
-            )
-            del self._fold_view_states[oldest_key]
+        _OutputSessionState.store_fold_state(self._fold_view_states, path, gutter.folded_lines, touch=touch)
 
     def _restore_fold_state(self, path: Optional[str], gutter: Any) -> None:
         if not path or gutter is None:
@@ -6468,22 +6673,7 @@ class OPLIDE(TkinterDnD.Tk):
             OPLIDE._prune_session_snapshots(self)
             path = self._session_file_path()
             tmp_path = path + ".tmp"
-            payload = {
-                "output_sessions": self._output_sessions,
-                "output_session_ids": self._output_session_ids,
-                "output_session_display": self._output_session_display,
-                "output_session_label": self._output_session_label,
-                "output_session_timestamp": self._output_session_timestamp,
-                "output_session_artifacts": self._output_session_artifacts,
-                "model_snapshots": self._model_snapshots,
-                "data_snapshots": self._data_snapshots,
-                "current_output_session_id": self._current_output_session_id,
-                "viewing_output_session_id": self._viewing_output_session_id,
-                "model_file": self.model_file,
-                "data_file": self.data_file,
-                "fold_view_states": self._fold_view_states,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-            }
+            payload = self._session_state.to_payload(self.model_file, self.data_file, datetime.now(timezone.utc).isoformat())
             # Write atomically
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -6521,28 +6711,25 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _normalize_session_snapshots(raw_snapshots: Any) -> dict[str, str]:
-        return {str(content_hash): str(content) for content_hash, content in (raw_snapshots or {}).items()}
+        return _normalize_session_snapshots(raw_snapshots)
 
     @staticmethod
     def _normalize_session_artifacts(raw_artifacts: Any) -> dict[str, dict[str, str]]:
-        return {
-            str(session_id): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
-            for session_id, artifact in (raw_artifacts or {}).items()
-            if isinstance(artifact, dict)
-        }
+        return _normalize_session_artifacts(raw_artifacts)
 
     def _restore_session_history(self, session: dict[str, Any]) -> None:
-        self._output_sessions = session.get("output_sessions", {}) or {}
-        self._output_session_ids = session.get("output_session_ids", []) or []
-        self._output_session_display = session.get("output_session_display", {}) or {}
-        self._output_session_label = session.get("output_session_label", {}) or {}
-        self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
-        self._model_snapshots = OPLIDE._normalize_session_snapshots(session.get("model_snapshots"))
-        self._data_snapshots = OPLIDE._normalize_session_snapshots(session.get("data_snapshots"))
-        self._output_session_artifacts = OPLIDE._normalize_session_artifacts(session.get("output_session_artifacts"))
+        history = _OutputSessionState.from_payload(session, self._current_output_session_id, self._viewing_output_session_id)
+        self._output_sessions = history.sessions
+        self._output_session_ids = history.ids
+        self._output_session_display = history.display
+        self._output_session_label = history.labels
+        self._output_session_timestamp = history.timestamps
+        self._model_snapshots = history.model_snapshots
+        self._data_snapshots = history.data_snapshots
+        self._output_session_artifacts = history.artifacts
         OPLIDE._prune_session_snapshots(self)
-        self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
-        self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
+        self._current_output_session_id = history.current_id
+        self._viewing_output_session_id = history.viewing_id
 
         for sid in self._output_session_ids:
             display = self._output_session_display.get(sid, sid)
@@ -6552,22 +6739,7 @@ class OPLIDE(TkinterDnD.Tk):
         OPLIDE._restore_session_history_widgets(self)
 
     def _restore_fold_view_states(self, session: dict[str, Any]) -> None:
-        raw_states = session.get("fold_view_states", {}) or {}
-        states: dict[str, dict[str, Any]] = {}
-        for path, state in raw_states.items():
-            if not isinstance(path, str) or not isinstance(state, dict):
-                continue
-            raw_lines = state.get("folded_lines", [])
-            if not isinstance(raw_lines, list):
-                continue
-            lines = sorted({line for line in raw_lines if isinstance(line, int) and line > 0})
-            states[OPLIDE._fold_state_key(path)] = {
-                "folded_lines": lines,
-                "edited_at": str(state.get("edited_at") or ""),
-            }
-        self._fold_view_states = dict(
-            sorted(states.items(), key=lambda item: (item[1]["edited_at"], item[0]), reverse=True)[:MAX_FOLD_VIEW_STATES]
-        )
+        self._fold_view_states = _OutputSessionState.normalize_fold_view_states(session.get("fold_view_states"))
 
     @staticmethod
     def _session_timestamp(display: Any) -> str:
@@ -6610,8 +6782,7 @@ class OPLIDE(TkinterDnD.Tk):
                     self._output_session_ids[0] if self._output_session_ids else None
                 )
                 if session_id:
-                    self._current_output_session_id = self._current_output_session_id or session_id
-                    self._viewing_output_session_id = session_id
+                    self._session_state.select(session_id)
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
                     self.output_text.insert(tk.END, self._output_sessions.get(session_id, ""))
@@ -6689,7 +6860,7 @@ class OPLIDE(TkinterDnD.Tk):
             if index < 0 or index >= len(self._output_session_ids):
                 return
             sid = self._output_session_ids[index]
-            self._viewing_output_session_id = sid
+            self._session_state.select(sid)
             self._show_output_session(sid)
         except Exception:
             pass
@@ -7657,8 +7828,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Load settings from disk."""
         try:
             if hasattr(self, "_config_path") and self._config_path.exists():
-                with open(self._config_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                return _read_ide_settings(self._config_path)
         except Exception as e:
             print(f"Warning: failed to load settings: {e}")
         return {}
@@ -7683,8 +7853,7 @@ class OPLIDE(TkinterDnD.Tk):
                 ),
                 "genai-method": self.genai_method_var.get() if hasattr(self, "genai_method_var") else "pyopl_generative",
             }
-            with open(self._config_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=4)
+            _write_ide_settings(self._config_path, payload)
         except Exception as e:
             print(f"Warning: failed to save settings: {e}")
 

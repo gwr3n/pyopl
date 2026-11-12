@@ -1330,9 +1330,70 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._save_settings(dummy)
 
             payload = pyopl_ide_bootstrap.json.loads(config_path.read_text(encoding="utf-8"))
+            loaded = OPLIDE._load_settings(dummy)
 
         self.assertFalse(payload["display-solver-progress"])
         self.assertEqual(payload["solver"], "scipy")
+        self.assertEqual(loaded, payload)
+
+    def test_initialize_preferences_keeps_valid_values_with_invalid_font_size(self):
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        saved = {
+            "font-size": "not a number",
+            "theme": "darkly",
+            "solver": "scipy",
+            "verbose-llm-logs": True,
+            "display-solver-progress": False,
+            "genai-method": "pyopl_standard",
+            "genai-selection": {"provider": "elm", "model": "selected-model"},
+        }
+        dummy = SimpleNamespace(
+            _init_settings_storage=lambda: None,
+            _load_settings=lambda: saved,
+            current_font_size=12,
+            debug=False,
+            solver=DummyVar("gurobi"),
+            genai_selection_var=DummyVar(""),
+        )
+        dummy._restore_genai_selection = lambda value: OPLIDE._restore_genai_selection(dummy, value)
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "BooleanVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "IntVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+        ):
+            theme, loaded = OPLIDE._initialize_preferences(dummy)
+
+        self.assertIs(loaded, saved)
+        self.assertEqual(theme, "darkly")
+        self.assertEqual(dummy.current_font_size, 12)
+        self.assertEqual(dummy.solver.get(), "scipy")
+        self.assertFalse(dummy.display_solver_progress_var.get())
+        self.assertTrue(dummy.verbose_llm_var.get())
+        self.assertEqual(dummy.genai_method_var.get(), "pyopl_standard")
+        self.assertEqual(dummy.genai_selection_var.get(), "elm|selected-model")
+
+    def test_load_settings_rejects_non_object_json_with_warning(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "settings.json"
+            path.write_text("[]", encoding="utf-8")
+            dummy = SimpleNamespace(_config_path=path)
+            output = StringIO()
+
+            with redirect_stdout(output):
+                loaded = OPLIDE._load_settings(dummy)
+
+        self.assertEqual(loaded, {})
+        self.assertIn("settings must contain a JSON object", output.getvalue())
 
     def test_solver_selection_persists_and_refreshes_status(self):
         class DummyVar:
@@ -1588,40 +1649,147 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(OPLIDE._index_from_pos(None, s, len(s)), "2.5")
 
     def test_append_output_can_target_non_current_session(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.tk = SimpleNamespace()
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
+
+        first = OPLIDE._begin_new_output_session(ide, "First")
+        second = OPLIDE._begin_new_output_session(ide, "Second")
+
+        OPLIDE._append_output(ide, "\nfirst-session-update\n", first)
+
+        self.assertIn("first-session-update", ide._output_sessions[first])
+        self.assertNotIn("first-session-update", ide._output_sessions[second])
+
+    def test_real_ide_session_fields_share_one_state_through_create_append_remove(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.model_text = DummyText("model\n")
+        ide.data_text = DummyText("data\n")
+
+        session_id, _display = ide._session_state.begin("Solve:", datetime(2026, 1, 1))
+        OPLIDE._snapshot_output_session_artifacts(ide, session_id)
+        ide._session_state.select(session_id, make_current=True)
+        ide._session_state.append("finished")
+
+        self.assertIs(ide._output_sessions, ide._session_state.sessions)
+        self.assertEqual(ide._session_state.sessions[session_id], "Solve:\nfinished")
+        self.assertEqual(set(ide._session_state.model_snapshots.values()), {"model"})
+        self.assertEqual(set(ide._session_state.data_snapshots.values()), {"data"})
+
+        ide._session_state.remove(session_id, 0)
+
+        self.assertEqual(ide._session_state.ids, [])
+        self.assertEqual(ide._session_state.sessions, {})
+        self.assertEqual(ide._session_state.model_snapshots, {})
+        self.assertIsNone(ide._session_state.current_id)
+        self.assertIsNone(ide._session_state.viewing_id)
+
+        ide._fold_view_states = {"model.mod": {"folded_lines": [1], "edited_at": ""}}
+        OPLIDE._clear_output_session_state(ide)
+        self.assertEqual(ide._session_state.fold_view_states, {})
+
+    def test_save_session_preserves_payload_shape_from_grouped_state(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".pyopl_session"
+            ide = OPLIDE.__new__(OPLIDE)
+            ide._session_state = pyopl_ide_bootstrap._OutputSessionState(
+                sessions={"s1": "Solve:\nresult"},
+                ids=["s1"],
+                display={"s1": "2026-01-01 10:00:00 • Solve"},
+                labels={"s1": "Solve"},
+                timestamps={"s1": "2026-01-01 10:00:00"},
+                fold_view_states={"model.mod": {"folded_lines": [2], "edited_at": "now"}},
+                current_id="s1",
+                viewing_id="s1",
+            )
+            ide.model_file = "model.mod"
+            ide.data_file = None
+            ide.model_gutter = None
+            ide.data_gutter = None
+            ide._session_file_path = lambda: str(path)
+            OPLIDE._record_output_session_artifacts(ide, "s1", model_text="model", data_text="data")
+
+            OPLIDE._save_session(ide)
+
+            saved = pyopl_ide_bootstrap.json.loads(path.read_text(encoding="utf-8"))
+            restored = OPLIDE.__new__(OPLIDE)
+            restored._session_state = pyopl_ide_bootstrap._OutputSessionState()
+            restored.request_listbox = mock.Mock()
+            restored.output_text = mock.Mock()
+            restored.output_text.winfo_exists.return_value = False
+            OPLIDE._restore_session_history(restored, saved)
+            OPLIDE._restore_fold_view_states(restored, saved)
+
+        self.assertEqual(
+            set(saved),
+            {
+                "output_sessions",
+                "output_session_ids",
+                "output_session_display",
+                "output_session_label",
+                "output_session_timestamp",
+                "output_session_artifacts",
+                "model_snapshots",
+                "data_snapshots",
+                "current_output_session_id",
+                "viewing_output_session_id",
+                "model_file",
+                "data_file",
+                "fold_view_states",
+                "saved_at",
+            },
         )
+        self.assertEqual(saved["output_sessions"], {"s1": "Solve:\nresult"})
+        self.assertEqual(saved["model_file"], "model.mod")
+        self.assertIsNone(saved["data_file"])
+        self.assertEqual(saved["fold_view_states"]["model.mod"]["folded_lines"], [2])
+        self.assertEqual(set(saved["model_snapshots"].values()), {"model"})
+        self.assertEqual(set(saved["data_snapshots"].values()), {"data"})
+        self.assertEqual(restored._session_state.sessions, saved["output_sessions"])
+        self.assertEqual(restored._session_state.artifacts, saved["output_session_artifacts"])
+        self.assertEqual(restored._session_state.current_id, "s1")
+        self.assertEqual(restored._session_state.viewing_id, "s1")
+        self.assertEqual(restored._fold_view_states[OPLIDE._fold_state_key("model.mod")]["folded_lines"], [2])
 
-        first = OPLIDE._begin_new_output_session(dummy, "First")
-        second = OPLIDE._begin_new_output_session(dummy, "Second")
+    def test_selecting_another_session_does_not_replace_current_request(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState(current_id="s1", viewing_id="s1")
 
-        OPLIDE._append_output(dummy, "\nfirst-session-update\n", first)
+        ide._session_state.select("s2")
+        self.assertEqual(ide._session_state.current_id, "s1")
+        self.assertEqual(ide._session_state.viewing_id, "s2")
 
-        self.assertIn("first-session-update", dummy._output_sessions[first])
-        self.assertNotIn("first-session-update", dummy._output_sessions[second])
+        ide._session_state.select(None)
+        self.assertEqual(ide._session_state.current_id, "s1")
+        self.assertIsNone(ide._session_state.viewing_id)
 
-    def test_begin_new_output_session_initializes_missing_artifact_metadata(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
-        )
+        ide._session_state.select("s2", make_current=True)
+        self.assertEqual(ide._session_state.current_id, "s2")
 
-        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+    def test_begin_new_output_session_initializes_artifact_metadata(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.tk = SimpleNamespace()
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
 
-        self.assertIn(session_id, dummy._output_session_timestamp)
-        self.assertIn(session_id, dummy._output_session_artifacts)
-        self.assertEqual(dummy._output_session_artifacts[session_id], {})
+        session_id = OPLIDE._begin_new_output_session(ide, "Solve: Solving model...")
+
+        self.assertIn(session_id, ide._output_session_timestamp)
+        self.assertIn(session_id, ide._output_session_artifacts)
+        self.assertEqual(ide._output_session_artifacts[session_id], {})
 
     def test_begin_new_output_session_snapshots_current_editor_state(self):
         class DummyText:
@@ -1631,25 +1799,21 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def get(self, *_args):
                 return self.content
 
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
-            model_text=DummyText("dvar int x;\n"),
-            data_text=DummyText("x = 3;\n"),
-        )
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
+        ide.model_text = DummyText("dvar int x;\n")
+        ide.data_text = DummyText("x = 3;\n")
 
-        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
-        artifacts = dummy._output_session_artifacts[session_id]
+        session_id = OPLIDE._begin_new_output_session(ide, "Solve: Solving model...")
+        artifacts = ide._output_session_artifacts[session_id]
 
         self.assertEqual(artifacts["model_hash"], OPLIDE._session_snapshot_hash("dvar int x;"))
         self.assertEqual(artifacts["data_hash"], OPLIDE._session_snapshot_hash("x = 3;"))
-        self.assertEqual(dummy._model_snapshots, {artifacts["model_hash"]: "dvar int x;"})
-        self.assertEqual(dummy._data_snapshots, {artifacts["data_hash"]: "x = 3;"})
+        self.assertEqual(ide._model_snapshots, {artifacts["model_hash"]: "dvar int x;"})
+        self.assertEqual(ide._data_snapshots, {artifacts["data_hash"]: "x = 3;"})
 
     def test_output_session_snapshots_are_deduplicated(self):
         dummy = SimpleNamespace(_output_session_artifacts={}, _model_snapshots={}, _data_snapshots={})
@@ -1674,23 +1838,65 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(set(dummy._model_snapshots.values()), {"new model"})
         self.assertEqual(set(dummy._data_snapshots.values()), {"shared data"})
 
-    def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
+    def test_remove_output_session_prunes_only_unreferenced_snapshots(self):
+        state = pyopl_ide_bootstrap._OutputSessionState(
+            ids=["s1", "s2"],
+            sessions={"s1": "first", "s2": "second"},
+            display={"s1": "first", "s2": "second"},
+            labels={"s1": "Solve", "s2": "Solve"},
+            timestamps={"s1": "earlier", "s2": "later"},
+            current_id="s1",
+            viewing_id="s2",
+        )
+        state.record_artifacts(
+            state.artifacts, state.model_snapshots, state.data_snapshots, "s1", "first model", "shared data"
+        )
+        state.record_artifacts(
+            state.artifacts, state.model_snapshots, state.data_snapshots, "s2", "second model", "shared data"
         )
 
-        first = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
-        dummy._output_session_display["session-1"] = first
-        second = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
+        state.remove("s1", 0)
+
+        self.assertEqual(state.ids, ["s2"])
+        self.assertEqual(state.sessions, {"s2": "second"})
+        self.assertEqual(state.artifacts.keys(), {"s2"})
+        self.assertEqual(set(state.model_snapshots.values()), {"second model"})
+        self.assertEqual(set(state.data_snapshots.values()), {"shared data"})
+        self.assertIsNone(state.current_id)
+        self.assertEqual(state.viewing_id, "s2")
+
+    def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
+        state = pyopl_ide_bootstrap._OutputSessionState()
+
+        first = state.make_display("2026-05-03 12:00:00", "Ask")
+        state.display["session-1"] = first
+        second = state.make_display("2026-05-03 12:00:00", "Ask")
 
         self.assertEqual(first, "2026-05-03 12:00:00 • Ask")
         self.assertEqual(second, "2026-05-03 12:00:00 • Ask (2)")
+
+    def test_rename_session_updates_record_and_visible_label_without_collision(self):
+        timestamp = "2026-05-03 12:00:00"
+        listbox = mock.Mock()
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState(
+            ids=["s1", "s2"],
+            timestamps={"s1": timestamp, "s2": timestamp},
+            labels={"s1": "First", "s2": "Taken"},
+            display={"s1": f"{timestamp} • First", "s2": f"{timestamp} • Taken"},
+        )
+        ide._get_selected_request_session_id = lambda: "s1"
+        ide._ask_short_text = lambda **_kwargs: "Taken"
+        ide._save_session = mock.Mock()
+        ide.request_listbox = listbox
+
+        OPLIDE._rename_selected_request(ide)
+
+        self.assertEqual(ide._output_session_label, {"s1": "Taken", "s2": "Taken"})
+        self.assertEqual(ide._output_session_display["s1"], f"{timestamp} • Taken (2)")
+        self.assertEqual(ide._output_session_display["s2"], f"{timestamp} • Taken")
+        listbox.insert.assert_called_once_with(0, f"{timestamp} • Taken (2)")
+        ide._save_session.assert_called_once()
 
     def test_apply_pending_genai_revisions_persists_inline_session_snapshot(self):
         class DummyText:

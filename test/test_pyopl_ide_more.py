@@ -485,6 +485,21 @@ minimize x;
         self.assertNotIn(oldest_key, dummy._fold_view_states)
         self.assertEqual(dummy._fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
 
+    def test_fold_view_state_load_normalizes_lines_and_enforces_limit(self):
+        limit = pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES
+        paths = [f"file-{index}.mod" for index in range(limit + 1)]
+        payload = {
+            "fold_view_states": {
+                path: {"folded_lines": [2, 0, "3", 2], "edited_at": f"{index:04d}"} for index, path in enumerate(paths)
+            }
+        }
+
+        restored = pyopl_ide_bootstrap._OutputSessionState.normalize_fold_view_states(payload["fold_view_states"])
+
+        self.assertEqual(len(restored), limit)
+        self.assertNotIn(OPLIDE._fold_state_key(paths[0]), restored)
+        self.assertEqual(restored[OPLIDE._fold_state_key(paths[-1])]["folded_lines"], [2])
+
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
             def __init__(self):
@@ -870,28 +885,19 @@ minimize x;
             data_text = DummyText()
             listbox = Listbox()
             notebook = Notebook()
-            dummy = SimpleNamespace(
-                _session_file_path=lambda: str(session_path),
-                _output_sessions={},
-                _output_session_ids=[],
-                _output_session_display={},
-                _output_session_label={},
-                _output_session_timestamp={},
-                _output_session_artifacts={},
-                _model_snapshots={},
-                _data_snapshots={},
-                _current_output_session_id=None,
-                _viewing_output_session_id=None,
-                request_listbox=listbox,
-                output_text=output_text,
-                model_file=None,
-                data_file=None,
-                model_text=model_text,
-                data_text=data_text,
-                editor_notebook=notebook,
-                model_frame="model-frame",
-                data_frame="data-frame",
-            )
+            dummy = OPLIDE.__new__(OPLIDE)
+            dummy.tk = SimpleNamespace()
+            dummy._session_state = pyopl_ide_bootstrap._OutputSessionState()
+            dummy._session_file_path = lambda: str(session_path)
+            dummy.request_listbox = listbox
+            dummy.output_text = output_text
+            dummy.model_file = None
+            dummy.data_file = None
+            dummy.model_text = model_text
+            dummy.data_text = data_text
+            dummy.editor_notebook = notebook
+            dummy.model_frame = "model-frame"
+            dummy.data_frame = "data-frame"
 
             OPLIDE._load_session(dummy)
 
