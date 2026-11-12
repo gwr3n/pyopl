@@ -16,7 +16,7 @@ from typing import (
 )
 
 # === Local imports ===
-from ..pyopl_core import OPLCompiler, SemanticError
+from ..pyopl_core import OPLCompiler, SemanticError, linear_problem_from_opl
 from ._strategy_base import (
     GenAIStrategyBase,
     ImageInput,
@@ -681,6 +681,17 @@ def generative_observable_mapping(
 ) -> str:
     """Generate a validated JSON observable mapping for two model instances."""
     provider = _infer_provider(llm_provider, model_name)
+    grounded_columns = ""
+    if left_data and right_data:
+        left_columns = linear_problem_from_opl(left_model, left_data).var_names
+        right_columns = linear_problem_from_opl(right_model, right_data).var_names
+        grounded_columns = (
+            "Use only names from the supplied column lists as coefficient keys, "
+            "copying each name exactly (including brackets, parentheses and spaces). "
+            "Tuple-indexed columns may look like `flow[(0, 1)]`, not `flow_0_1`.\n"
+            f"<left_columns>\n{json.dumps(left_columns)}\n</left_columns>\n"
+            f"<right_columns>\n{json.dumps(right_columns)}\n</right_columns>"
+        )
     prompt = f"""
 You are constructing an observable mapping for two mathematical optimization models.
 The mapping will be consumed by a MILP projected-value equivalence checker.
@@ -704,6 +715,7 @@ The coefficient keys must be exact grounded ``LinearProblem.var_names`` after
 PyOPL compiles the supplied model and data. For example, use ``order_1`` and
 ``x_1_2``, never ``order[t]``, ``x[t][j]``, ``x[1][2]``, or a bare symbolic
 name containing an unbound ``i``, ``j``, or ``t``. Do not invent columns.
+{grounded_columns}
 
 Choose the smallest set of formulation-independent decisions whose feasible
 projected domain and conditional objective value are being compared. Do not

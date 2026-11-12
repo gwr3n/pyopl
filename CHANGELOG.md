@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Ground concrete observable-mapping prompts with compiled column names for
+  supplied model data, including tuple-indexed variables.
 - Report SciPy/HiGHS MIP dual bounds in the model's objective sense, including
   any constant objective offset.
 - Ignore invalid saved or runtime GenAI method keys (including Ask mode)

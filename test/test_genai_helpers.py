@@ -1920,13 +1920,44 @@ class TestRagHelper(unittest.TestCase):
 
 
 class TestStrategyModuleHelpers(unittest.TestCase):
+    def test_generate_observable_mapping_supplies_tuple_column_names(self) -> None:
+        model = """
+tuple Arc { int from; int to; }
+{Arc} Arcs = ...;
+dvar float+ flow[Arcs];
+maximize totalFlow: sum(a in Arcs) flow[a];
+subject to { forall(a in Arcs) flow[a] <= 10; }
+"""
+        data = "Arcs = { <0, 1>, <1, 2> };"
+        response = json.dumps(
+            {
+                "mapping": [
+                    {
+                        "name": "flow",
+                        "left": {"coefficients": {"flow[(0, 1)]": 1}},
+                        "right": {"coefficients": {"flow[(0, 1)]": 1}},
+                    }
+                ]
+            }
+        )
+        with patch.object(pyopl_generative, "_llm_generate_text", return_value=response) as llm:
+            pyopl_generative.generative_observable_mapping(model, model, data, data)
+
+        prompt = llm.call_args.args[2]
+        self.assertIn('"flow[(0, 1)]"', prompt)
+        self.assertIn('"flow[(1, 2)]"', prompt)
+        self.assertIn("Use only names from the supplied column lists", prompt)
+
     def test_generate_observable_mapping_parses_fenced_json_and_grounds_prompt(self) -> None:
         response = """Here is the mapping:
 ```json
 [{"name": "flow", "left": {"coefficients": {"x[1]": 1}},
   "right": {"coefficients": {"y[1]": 1}}}]
 ```"""
-        with patch.object(pyopl_generative, "_llm_generate_text", return_value=response) as llm:
+        with (
+            patch.object(pyopl_generative, "linear_problem_from_opl", return_value=SimpleNamespace(var_names=["x[1]"])),
+            patch.object(pyopl_generative, "_llm_generate_text", return_value=response) as llm,
+        ):
             mapping_text = pyopl_generative.generative_observable_mapping(
                 "left model text",
                 "right model text",
