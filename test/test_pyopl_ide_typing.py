@@ -405,23 +405,6 @@ class TestPyOPLIDETyping(unittest.TestCase):
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
 
-    def test_rank_exemplars_preserves_rag_order(self):
-        low = Path("/tmp/low.md")
-        high = Path("/tmp/high.md")
-        exemplars = [
-            {"name": "low", "description_path": low},
-            {"name": "high", "description_path": high},
-        ]
-        with mock.patch.object(
-            pyopl_ide_bootstrap,
-            "rank_problem_descriptions",
-            return_value=[{"path": str(high)}, {"path": str(low)}],
-        ) as rank:
-            ranked = OPLIDE._rank_exemplars("assignment", exemplars, [Path("/tmp/opl_models")])
-
-        self.assertEqual([entry["name"] for entry in ranked], ["high", "low"])
-        rank.assert_called_once_with(query="assignment", models_dir=[Path("/tmp/opl_models")], top_k=0)
-
     def test_classify_exemplar_search_result_handles_worker_messages(self):
         low = {"name": "low", "description_path": Path("/tmp/low.md")}
         high = {"name": "high", "description_path": Path("/tmp/high.md")}
@@ -446,9 +429,113 @@ class TestPyOPLIDETyping(unittest.TestCase):
         for message, current_generation, expected in cases:
             with self.subTest(message=message):
                 self.assertEqual(
-                    OPLIDE._classify_exemplar_search_result(message, current_generation, exemplars),
+                    pyopl_ide_bootstrap._ExemplarSearchState.classify_result(message, current_generation, exemplars),
                     expected,
                 )
+
+    def test_exemplar_search_owns_timers_generations_and_worker_shutdown(self):
+        exemplar = {"name": "fleet", "description_path": Path("/tmp/fleet.md")}
+        worker = mock.Mock()
+        worker.is_alive.return_value = True
+        search = pyopl_ide_bootstrap._ExemplarSearchState(worker, [exemplar])
+        dialog = mock.Mock()
+        dialog.after.side_effect = ["search-1", "search-2", "poll-1"]
+
+        search.schedule_search(dialog, mock.Mock())
+        search.schedule_search(dialog, mock.Mock())
+        self.assertFalse(search.start_search("  "))
+        self.assertTrue(search.start_search("fleet"))
+        worker.submit.assert_called_once_with(2, "fleet")
+        worker.get_nowait.side_effect = [
+            ("ready", None, None),
+            ("success", 1, [{"path": "/tmp/fleet.md"}]),
+            ("success", 2, [{"path": "/tmp/fleet.md"}]),
+            queue.Empty(),
+        ]
+        self.assertEqual(search.drain(), [("ready", None), ("success", [exemplar])])
+        self.assertTrue(search.worker_ready)
+        search.schedule_poll(dialog, mock.Mock())
+        search.close(dialog)
+        search.close(dialog)
+
+        self.assertEqual(dialog.after_cancel.call_args_list, [mock.call("search-1"), mock.call("poll-1")])
+        worker.close.assert_called_once_with(wait=False)
+        self.assertEqual(search.drain(), [])
+        search.schedule_search(dialog, mock.Mock())
+        self.assertEqual(dialog.after.call_count, 3)
+
+    def test_exemplar_search_reports_unavailable_worker(self):
+        worker = mock.Mock()
+        worker.is_alive.return_value = False
+        search = pyopl_ide_bootstrap._ExemplarSearchState(worker, [])
+
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            search.start_search("query")
+        worker.submit.assert_not_called()
+
+    def test_retrieve_copy_failure_keeps_dialog_and_editors_unchanged(self):
+        exemplar = {
+            "name": "fleet",
+            "description_path": Path("/tmp/fleet.md"),
+            "model_path": Path("/tmp/fleet.mod"),
+            "data_path": Path("/tmp/fleet.dat"),
+        }
+        previous_cleanup = mock.Mock()
+        host = SimpleNamespace(
+            _ensure_no_active_operation=lambda action: True,
+            _exemplar_search_cleanup=previous_cleanup,
+            _available_exemplars=lambda roots: [exemplar],
+            _copy_exemplar_to_tmp=mock.Mock(side_effect=OSError("copy failed")),
+            _open_model_path=mock.Mock(),
+            _open_data_path=mock.Mock(),
+            status_var=mock.Mock(),
+        )
+        dialog = mock.Mock()
+        dialog.after.return_value = "poll-id"
+        exemplar_list = mock.Mock()
+        exemplar_list.curselection.return_value = (0,)
+        worker = mock.Mock()
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.GenAIStrategyBase, "default_models_dirs", return_value=[]),
+            mock.patch.object(pyopl_ide_bootstrap, "ExemplarRankingWorker", return_value=worker),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Listbox", return_value=exemplar_list),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Text", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Scrollbar", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", return_value=mock.Mock()) as button,
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+        ):
+            OPLIDE.retrieve_exemplar(host)
+            button.call_args_list[0].kwargs["command"]()
+
+        previous_cleanup.assert_called_once_with(None)
+        self.assertIn("copy failed", showerror.call_args.args[1])
+        host._open_model_path.assert_not_called()
+        host._open_data_path.assert_not_called()
+        dialog.destroy.assert_not_called()
+        host._exemplar_search_cleanup(None)
+        worker.close.assert_called_once_with(wait=False)
+
+    def test_exemplar_catalog_only_lists_complete_triplets_once(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            complete = root / "complete"
+            complete.mkdir()
+            (complete / "complete.md").write_text("description", encoding="utf-8")
+            (complete / "complete.mod").write_text("model", encoding="utf-8")
+            (complete / "complete.dat").write_text("data", encoding="utf-8")
+            incomplete = root / "incomplete"
+            incomplete.mkdir()
+            (incomplete / "incomplete.md").write_text("description", encoding="utf-8")
+
+            entries = OPLIDE._available_exemplars([root, root])
+
+            self.assertEqual([entry["name"] for entry in entries], ["complete"])
+            self.assertEqual(entries[0]["model_path"], complete / "complete.mod")
 
     def test_file_menu_quit_entry_is_platform_appropriate(self):
         class FakeMenu:
@@ -679,6 +766,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                         "Reviewed fleet assignment problem.",
                     )
                 ),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -729,6 +817,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=OPLIDE._write_exemplar,
                 _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
                 _review_exemplar_draft=mock.Mock(side_effect=lambda draft, _root: draft),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -766,6 +855,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="cancelled"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -787,6 +877,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="fleet"),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _save_session=mock.Mock(),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider=None,
                 genai_model=None,
             )
@@ -813,6 +904,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="failed"),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -853,6 +945,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="race"),
                 _review_exemplar_draft=mock.Mock(side_effect=create_competing_destination),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -882,6 +975,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _ask_short_text=mock.Mock(return_value="async"),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
             )
@@ -897,8 +991,71 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
             worker.assert_called_once_with()
             distill.assert_not_called()
-            self.assertTrue(dummy._exemplar_save_pending)
+            self.assertTrue(dummy._exemplar_save_state.pending)
             self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
+    def test_save_exemplar_snapshots_inputs_and_blocks_duplicate_preparation(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("original session", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "original model"),
+                data_text=SimpleNamespace(get=lambda *_args: "original data"),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _ask_short_text=mock.Mock(return_value="fleet"),
+                _review_exemplar_draft=mock.Mock(return_value=None),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                genai_provider="openai",
+                genai_model="first-model",
+                after=lambda _delay, callback, *args: callback(*args),
+            )
+            thread = mock.Mock()
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showinfo") as showinfo,
+                mock.patch.object(pyopl_ide_bootstrap, "distill_exemplar_description", return_value="description") as distill,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE.save_exemplar(host)
+                OPLIDE.save_exemplar(host)
+                host.genai_provider, host.genai_model = "other-provider", "other-model"
+                host.model_text.get = lambda *_args: "changed model"
+                session_path.write_text("changed session", encoding="utf-8")
+                thread_cls.call_args.kwargs["target"]()
+
+            showinfo.assert_called_once()
+            host._ask_short_text.assert_called_once()
+            self.assertEqual(thread_cls.call_count, 1)
+            distill.assert_called_once_with(
+                model="original model",
+                data="original data",
+                source_session="original session",
+                provider="openai",
+                model_name="first-model",
+            )
+            self.assertFalse(host._exemplar_save_state.pending)
+            self.assertFalse((root / "opl_models").exists())
+
+    def test_exemplar_save_state_releases_pending_when_worker_cannot_start(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState()
+        with mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", side_effect=RuntimeError("cannot start")):
+            with self.assertRaisesRegex(RuntimeError, "cannot start"):
+                state.start(mock.Mock())
+        self.assertFalse(state.pending)
+
+    def test_exemplar_preparation_completion_after_shutdown_skips_review(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True, closed=True)
+        host = SimpleNamespace(_exemplar_save_state=state, _review_exemplar_draft=mock.Mock())
+        draft = pyopl_ide_bootstrap.ExemplarDraft("name", "model", "data", "description", "session")
+
+        OPLIDE._finish_exemplar_preparation(host, draft, Path("/tmp/opl_models"))
+
+        self.assertFalse(state.pending)
+        host._review_exemplar_draft.assert_not_called()
 
     def test_reviewed_exemplar_description_preserves_model_and_data(self):
         draft = pyopl_ide_bootstrap.ExemplarDraft(
@@ -922,7 +1079,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     OPLIDE._resolve_exemplar_destination(root, invalid_name)
 
-        dummy = SimpleNamespace(_save_session=mock.Mock(), _ask_short_text=mock.Mock(return_value=None))
+        dummy = SimpleNamespace(
+            _save_session=mock.Mock(),
+            _ask_short_text=mock.Mock(return_value=None),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+        )
         OPLIDE.save_exemplar(dummy)
         dummy._save_session.assert_not_called()
 

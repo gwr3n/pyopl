@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Separate IDE exemplar search timers, generations and worker cleanup from the Tk dialog, and snapshot Save preparation inputs behind an explicit pending lifecycle.
+- Make retrieved exemplar copies exclusive and clean up incomplete pairs without overwriting existing files; report search and copy failures in the dialog.
 - Keep IDE GenAI revisions in typed pending state until explicit Apply, preserving the preview and cleaning up partial revision files on write failure.
 - Share Generate and Ask request progress, provider/model snapshots, cancellation checks, and optional logger bridging while retaining their distinct results.
 - Align GraphChain type stubs with multimodal prompt support in the implementation.

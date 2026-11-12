@@ -1049,6 +1049,57 @@ minimize x;
             self.assertEqual(cloned_model.read_text(encoding="utf-8"), "original model")
             self.assertEqual(cloned_data.read_text(encoding="utf-8"), "original data")
 
+    def test_copy_exemplar_to_tmp_removes_only_its_partial_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_model = root / "source.mod"
+            source_data = root / "source.dat"
+            source_model.write_text("model", encoding="utf-8")
+            source_data.write_text("data", encoding="utf-8")
+            copy = pyopl_ide_bootstrap.shutil.copyfileobj
+
+            def fail_on_data(source, target):
+                copy(source, target)
+                if target.name.endswith(".dat"):
+                    raise OSError("copy failed")
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap.shutil, "copyfileobj", side_effect=fail_on_data),
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    OPLIDE._copy_exemplar_to_tmp(source_model, source_data, "fleet")
+
+            self.assertEqual(list((root / "tmp").iterdir()), [])
+            self.assertEqual(source_model.read_text(encoding="utf-8"), "model")
+            self.assertEqual(source_data.read_text(encoding="utf-8"), "data")
+
+    def test_copy_exemplar_to_tmp_does_not_overwrite_existing_destination(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_model = root / "source.mod"
+            source_data = root / "source.dat"
+            source_model.write_text("new model", encoding="utf-8")
+            source_data.write_text("new data", encoding="utf-8")
+            existing_model = root / "tmp" / "fleet.mod"
+            existing_model.parent.mkdir()
+            existing_model.write_text("existing model", encoding="utf-8")
+            target_data = root / "tmp" / "fleet.dat"
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(
+                    OPLIDE,
+                    "_unique_timestamped_model_data_paths",
+                    return_value=(existing_model, target_data),
+                ),
+            ):
+                with self.assertRaises(FileExistsError):
+                    OPLIDE._copy_exemplar_to_tmp(source_model, source_data, "fleet")
+
+            self.assertEqual(existing_model.read_text(encoding="utf-8"), "existing model")
+            self.assertFalse(target_data.exists())
+
     def test_poll_solver_empty_queue_handles_running_and_unexpected_exit(self):
         """Polling reschedules live solvers and reports dead solvers with no terminal message."""
 
@@ -1406,11 +1457,13 @@ minimize x;
             _save_settings=mock.Mock(),
             _save_session=mock.Mock(),
             _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
             destroy=mock.Mock(),
             quit=mock.Mock(),
         )
         OPLIDE._on_close(dummy)
         self.assertTrue(dummy._shutting_down)
+        self.assertTrue(dummy._exemplar_save_state.closed)
         self.assertEqual(dummy.after_cancel.call_count, 2)
         self.assertEqual(dummy._model_editor_state.highlight_after_ids, {})
         self.assertEqual(dummy._data_editor_state.highlight_after_ids, {})

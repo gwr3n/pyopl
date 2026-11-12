@@ -48,7 +48,6 @@ from .genai.pyopl_generative import (
     generative_indexed_observable_mapping,
     generative_observable_mapping,
 )
-from .genai.rag_helper import rank_problem_descriptions
 from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
@@ -1302,6 +1301,134 @@ class _GenAIRevisionState:
         return True
 
 
+@dataclass
+class _ExemplarSearchState:
+    worker: ExemplarRankingWorker
+    exemplars: list[dict[str, Any]]
+    entries: list[dict[str, Any]] = field(init=False)
+    generation: int = 0
+    search_after_id: Optional[str] = None
+    poll_after_id: Optional[str] = None
+    worker_ready: bool = False
+    closed: bool = False
+
+    def __post_init__(self) -> None:
+        self.entries = self.exemplars
+
+    @staticmethod
+    def classify_result(
+        message: tuple[str, Optional[int], Any], generation: int, exemplars: list[dict[str, Any]]
+    ) -> tuple[str, Any]:
+        kind, message_generation, payload = message
+        if kind == "ready":
+            return "ready", None
+        if kind == "startup_error":
+            return "startup_error", payload
+        if message_generation != generation:
+            return "ignore", None
+        if kind != "success" or not isinstance(payload, list):
+            return "error", payload
+
+        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
+        ranked = [
+            exemplar_by_description[Path(hit["path"]).resolve()]
+            for hit in payload
+            if isinstance(hit, dict) and "path" in hit and Path(hit["path"]).resolve() in exemplar_by_description
+        ]
+        return "success", ranked
+
+    def schedule_search(self, dialog: tk.Misc, callback: Callable[[], None]) -> None:
+        if self.closed:
+            return
+        if self.search_after_id is not None:
+            dialog.after_cancel(self.search_after_id)
+        self.search_after_id = dialog.after(250, callback)
+
+    def start_search(self, query: str) -> bool:
+        self.search_after_id = None
+        if self.closed:
+            return False
+        self.generation += 1
+        if not query.strip():
+            return False
+        if not self.worker.is_alive():
+            raise RuntimeError("Semantic search is unavailable.")
+        self.worker.submit(self.generation, query)
+        return True
+
+    def drain(self) -> list[tuple[str, Any]]:
+        self.poll_after_id = None
+        if self.closed:
+            return []
+        messages: list[tuple[str, Any]] = []
+        while True:
+            try:
+                message = self.worker.get_nowait()
+            except queue.Empty:
+                break
+            action, payload = self.classify_result(message, self.generation, self.exemplars)
+            if action == "ready":
+                self.worker_ready = True
+            if action != "ignore":
+                messages.append((action, payload))
+        return messages
+
+    def schedule_poll(self, dialog: tk.Misc, callback: Callable[[], None]) -> None:
+        if not self.closed:
+            self.poll_after_id = dialog.after(50, callback)
+
+    def close(self, dialog: tk.Misc) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for after_id in (self.search_after_id, self.poll_after_id):
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+        self.search_after_id = None
+        self.poll_after_id = None
+        self.worker.close(wait=False)
+
+
+@dataclass(frozen=True)
+class _ExemplarPreparation:
+    name: str
+    model: str
+    data: str
+    source_session: str
+    provider: str
+    model_name: str
+
+    def prepare(self) -> ExemplarDraft:
+        description = distill_exemplar_description(
+            model=self.model,
+            data=self.data,
+            source_session=self.source_session,
+            provider=self.provider,
+            model_name=self.model_name,
+        )
+        return ExemplarDraft(self.name, self.model, self.data, description, self.source_session)
+
+
+@dataclass
+class _ExemplarSaveState:
+    pending: bool = False
+    closed: bool = False
+
+    def start(self, prepare: Callable[[], None]) -> None:
+        self.pending = True
+        try:
+            threading.Thread(target=prepare, daemon=True).start()
+        except Exception:
+            self.pending = False
+            raise
+
+    def finish(self) -> None:
+        self.pending = False
+
+
 class _GenAIProgressLogHandler(logging.Handler):
     def __init__(self, progress: Callable[[str], None]) -> None:
         super().__init__()
@@ -1750,6 +1877,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_notebook: Optional[ttk.Notebook] = None
         self._genai_diff_preview_texts: dict[str, tk.Text] = {}
         self._exemplar_search_cleanup: Optional[Callable[[Any], None]] = None
+        self._exemplar_save_state = _ExemplarSaveState()
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
@@ -4151,47 +4279,12 @@ class OPLIDE(TkinterDnD.Tk):
                 )
         return sorted(exemplars.values(), key=lambda exemplar: str(exemplar["name"]).casefold())
 
-    @staticmethod
-    def _rank_exemplars(query: str, exemplars: list[dict[str, Any]], models_dirs: list[Path]) -> list[dict[str, Any]]:
-        """Sort complete exemplars with the same semantic ranking used by RAG."""
-        if not query.strip():
-            return exemplars
-        hits = rank_problem_descriptions(query=query, models_dir=models_dirs, top_k=0)
-        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
-        return [
-            exemplar_by_description[Path(hit["path"]).resolve()]
-            for hit in hits
-            if Path(hit["path"]).resolve() in exemplar_by_description
-        ]
-
-    @staticmethod
-    def _classify_exemplar_search_result(
-        message: tuple[str, Optional[int], Any],
-        current_generation: int,
-        exemplars: list[dict[str, Any]],
-    ) -> tuple[str, Any]:
-        kind, generation, payload = message
-        if kind == "ready":
-            return "ready", None
-        if kind == "startup_error":
-            return "startup_error", payload
-        if generation != current_generation:
-            return "ignore", None
-        if kind != "success" or not isinstance(payload, list):
-            return "error", payload
-
-        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
-        ranked = [
-            exemplar_by_description[Path(hit["path"]).resolve()]
-            for hit in payload
-            if isinstance(hit, dict) and "path" in hit and Path(hit["path"]).resolve() in exemplar_by_description
-        ]
-        return "success", ranked
-
     def retrieve_exemplar(self) -> None:
         """Show searchable packaged and local exemplars and load the selected pair."""
         if not self._ensure_no_active_operation("Retrieve Exemplar"):
             return
+        if self._exemplar_search_cleanup is not None:
+            self._exemplar_search_cleanup(None)
 
         models_dirs = GenAIStrategyBase.default_models_dirs()
         exemplars = self._available_exemplars(models_dirs)
@@ -4241,17 +4334,10 @@ class OPLIDE(TkinterDnD.Tk):
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
 
-        ranking_worker = ExemplarRankingWorker(models_dirs)
-        result: dict[str, Any] = {
-            "exemplars": exemplars,
-            "generation": 0,
-            "search_after_id": None,
-            "poll_after_id": None,
-            "worker_ready": False,
-        }
+        search = _ExemplarSearchState(ExemplarRankingWorker(models_dirs), exemplars)
 
         def show_entries(entries: list[dict[str, Any]]) -> None:
-            result["exemplars"] = entries
+            search.entries = entries
             exemplar_list.delete(0, tk.END)
             for exemplar in entries:
                 exemplar_list.insert(tk.END, str(exemplar["name"]))
@@ -4265,7 +4351,7 @@ class OPLIDE(TkinterDnD.Tk):
             selection = exemplar_list.curselection()
             description = ""
             if selection:
-                entries = result["exemplars"]
+                entries = search.entries
                 if selection[0] < len(entries):
                     description_path = Path(entries[selection[0]]["description_path"])
                     try:
@@ -4280,87 +4366,71 @@ class OPLIDE(TkinterDnD.Tk):
             description_text.insert("1.0", description)
             description_text.configure(state="disabled")
 
-        def cleanup_search() -> None:
-            poll_after_id = result["poll_after_id"]
-            if poll_after_id is not None:
-                try:
-                    dialog.after_cancel(poll_after_id)
-                except tk.TclError:
-                    pass
-                result["poll_after_id"] = None
-            ranking_worker.close(wait=False)
-
         def poll_search() -> None:
-            result["poll_after_id"] = None
-            if not dialog.winfo_exists():
+            if search.closed:
                 return
-            while True:
-                try:
-                    message = ranking_worker.get_nowait()
-                except queue.Empty:
-                    break
-                action, payload = self._classify_exemplar_search_result(
-                    message,
-                    result["generation"],
-                    exemplars,
-                )
-                if action == "ready":
-                    result["worker_ready"] = True
-                elif action == "startup_error":
+            if not dialog.winfo_exists():
+                search.close(dialog)
+                if self._exemplar_search_cleanup is close_dialog:
+                    self._exemplar_search_cleanup = None
+                return
+            for action, payload in search.drain():
+                if action == "startup_error":
                     empty_var.set("Semantic search is unavailable.")
                     logging.getLogger(__name__).debug("Exemplar search startup failed: %s", payload)
                 elif action == "success":
                     show_entries(payload)
                 elif action == "error":
-                    logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
+                    logging.getLogger(__name__).warning("Exemplar search failed: %s", payload)
                     show_entries([])
-            if ranking_worker.is_alive():
-                result["poll_after_id"] = dialog.after(50, poll_search)
-            elif not result["worker_ready"]:
+                    empty_var.set("Semantic search failed.")
+            if search.worker.is_alive():
+                search.schedule_poll(dialog, poll_search)
+            elif not search.worker_ready:
                 empty_var.set("Semantic search is unavailable.")
 
         def run_search() -> None:
-            result["search_after_id"] = None
-            result["generation"] += 1
-            generation = result["generation"]
+            if search.closed:
+                return
             query = search_var.get()
-            if not query.strip():
+            try:
+                searching = search.start_search(query)
+            except RuntimeError as exc:
+                empty_var.set(str(exc))
+                return
+            if not searching:
                 show_entries(exemplars)
                 return
             empty_var.set("Searching...")
-            ranking_worker.submit(generation, query)
 
         def schedule_search(_event: Any = None) -> None:
-            search_after_id = result["search_after_id"]
-            if search_after_id is not None:
-                dialog.after_cancel(search_after_id)
-            result["search_after_id"] = dialog.after(250, run_search)
+            search.schedule_search(dialog, run_search)
 
         def retrieve(_event: Any = None) -> None:
             selection = exemplar_list.curselection()
             if not selection:
                 return
-            exemplar = result["exemplars"][selection[0]]
-            model_path, data_path = self._copy_exemplar_to_tmp(
-                Path(exemplar["model_path"]),
-                Path(exemplar["data_path"]),
-                str(exemplar["name"]),
-            )
+            if search.closed or selection[0] >= len(search.entries):
+                return
+            exemplar = search.entries[selection[0]]
+            try:
+                model_path, data_path = self._copy_exemplar_to_tmp(
+                    Path(exemplar["model_path"]), Path(exemplar["data_path"]), str(exemplar["name"])
+                )
+            except (OSError, UnicodeError) as exc:
+                logging.getLogger(__name__).exception("Failed to retrieve exemplar")
+                messagebox.showerror("Retrieve Exemplar", f"Failed to copy exemplar:\n{exc}", parent=dialog)
+                return
             self._open_model_path(model_path)
             self._open_data_path(data_path)
             self.status_var.set(f"Retrieved exemplar: {exemplar['name']}")
             close_dialog()
 
         def close_dialog(_event: Any = None) -> None:
-            search_after_id = result["search_after_id"]
-            if search_after_id is not None:
-                try:
-                    dialog.after_cancel(search_after_id)
-                except tk.TclError:
-                    pass
-                result["search_after_id"] = None
-            cleanup_search()
-            if getattr(self, "_exemplar_search_cleanup", None) is close_dialog:
+            if search.closed:
+                return
+            search.close(dialog)
+            if self._exemplar_search_cleanup is close_dialog:
                 self._exemplar_search_cleanup = None
             dialog.destroy()
 
@@ -4377,8 +4447,14 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.bind("<Escape>", close_dialog)
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         show_entries(exemplars)
-        ranking_worker.start()
-        result["poll_after_id"] = dialog.after(50, poll_search)
+        try:
+            search.worker.start()
+        except Exception as exc:
+            close_dialog()
+            logging.getLogger(__name__).exception("Failed to start exemplar search")
+            messagebox.showerror("Retrieve Exemplar", f"Semantic search is unavailable:\n{exc}", parent=self)
+            return
+        search.schedule_poll(dialog, poll_search)
         search_entry.focus_set()
 
     @staticmethod
@@ -4401,8 +4477,19 @@ class OPLIDE(TkinterDnD.Tk):
         model_path, data_path = OPLIDE._unique_timestamped_model_data_paths(
             tmp_dir, exemplar_name or "exemplar", safe_timestamp
         )
-        shutil.copyfile(model_source, model_path)
-        shutil.copyfile(data_source, data_path)
+        created: list[Path] = []
+        try:
+            for source, target in ((model_source, model_path), (data_source, data_path)):
+                with source.open("rb") as source_file, target.open("xb") as target_file:
+                    created.append(target)
+                    shutil.copyfileobj(source_file, target_file)
+        except Exception:
+            for target in created:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    logging.getLogger(__name__).exception("Failed to clean up incomplete exemplar copy: %s", target)
+            raise
         return str(model_path), str(data_path)
 
     def open_file(self) -> None:
@@ -5979,7 +6066,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_exemplar(self) -> None:
         """Distill and review the current session before saving a local RAG exemplar."""
-        if getattr(self, "_exemplar_save_pending", False):
+        if self._exemplar_save_state.pending:
             messagebox.showinfo(
                 "Save Exemplar",
                 "An exemplar description is already being generated.",
@@ -6030,40 +6117,43 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
             return
 
-        self._exemplar_save_pending = True
+        request = _ExemplarPreparation(file_stem, model, data, source_session, provider, model_name)
 
         def prepare_draft() -> None:
-            try:
-                description = distill_exemplar_description(
-                    model=model,
-                    data=data,
-                    source_session=source_session,
-                    provider=provider,
-                    model_name=model_name,
-                )
-                draft = ExemplarDraft(
-                    name=file_stem,
-                    model=model,
-                    data=data,
-                    description=description,
-                    source_session=source_session,
-                )
-            except Exception as exc:
-                self.after(0, OPLIDE._finish_exemplar_preparation_error, self, exc)
+            if self._exemplar_save_state.closed:
+                self._exemplar_save_state.finish()
                 return
-            self.after(0, OPLIDE._finish_exemplar_preparation, self, draft, models_root)
+            try:
+                draft = request.prepare()
+            except Exception as exc:
+                if not self._exemplar_save_state.closed:
+                    self.after(0, OPLIDE._finish_exemplar_preparation_error, self, exc)
+                else:
+                    self._exemplar_save_state.finish()
+                return
+            if not self._exemplar_save_state.closed:
+                self.after(0, OPLIDE._finish_exemplar_preparation, self, draft, models_root)
+            else:
+                self._exemplar_save_state.finish()
 
-        threading.Thread(target=prepare_draft, daemon=True).start()
+        try:
+            self._exemplar_save_state.start(prepare_draft)
+        except Exception as exc:
+            OPLIDE._finish_exemplar_preparation_error(self, exc)
 
     def _finish_exemplar_preparation_error(self, exc: Exception) -> None:
-        self._exemplar_save_pending = False
+        self._exemplar_save_state.finish()
+        if self._exemplar_save_state.closed:
+            return
         detail = f"{type(exc).__name__}: {exc}"
         logging.getLogger(__name__).error("Failed to prepare exemplar: %s", detail)
         self.status_var.set(f"Failed to save exemplar: {detail}")
         messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{_concise_genai_error(exc)}", parent=self)
 
     def _finish_exemplar_preparation(self, draft: ExemplarDraft, models_root: Path) -> None:
-        self._exemplar_save_pending = False
+        if self._exemplar_save_state.closed:
+            self._exemplar_save_state.finish()
+            return
         try:
             reviewed = self._review_exemplar_draft(draft, models_root)
             if reviewed is None:
@@ -6083,6 +6173,8 @@ class OPLIDE(TkinterDnD.Tk):
             self.status_var.set(f"Failed to save exemplar: {detail}")
             messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
             return
+        finally:
+            self._exemplar_save_state.finish()
 
         self.status_var.set(f"Saved exemplar to {destination}")
 
@@ -7381,6 +7473,7 @@ class OPLIDE(TkinterDnD.Tk):
         if self._has_unsaved_editor_changes() and not self._confirm_quit_with_unsaved_changes():
             return
         setattr(self, "_shutting_down", True)
+        self._exemplar_save_state.closed = True
         OPLIDE._cancel_editor_highlights(self)
         exemplar_search_cleanup = getattr(self, "_exemplar_search_cleanup", None)
         if callable(exemplar_search_cleanup):
