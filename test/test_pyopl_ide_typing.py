@@ -962,9 +962,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         dummy = SimpleNamespace(
             _shutting_down=False,
-            _highlight_after_ids={},
-            _last_syntax_error_by_widget={},
-            _last_syntax_error="old error",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="old error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="data error"),
             status_syntax_var=DummyStatus(),
             after=lambda *args, **kwargs: "after-id",
             after_cancel=lambda _after_id: None,
@@ -978,14 +977,78 @@ class TestPyOPLIDETyping(unittest.TestCase):
             dummy, text_widget
         )
         text = DummyText()
+        dummy.model_text = text
 
         OPLIDE._schedule_highlight(dummy, text, is_data=False)
 
-        self.assertEqual(dummy._highlight_after_ids, {})
-        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
-        self.assertIsNone(dummy._last_syntax_error)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {})
+        self.assertIsNone(dummy._model_editor_state.syntax_error)
+        self.assertEqual(dummy._data_editor_state.syntax_error, "data error")
         self.assertEqual(dummy.status_syntax_var.value, "Syntax validation disabled for large text")
         self.assertTrue(any(tag == "ERROR" for tag, _start, _end in text.removed))
+
+    def test_model_and_data_highlight_callbacks_are_independent(self):
+        model_text = mock.Mock()
+        data_text = mock.Mock()
+        dummy = SimpleNamespace(
+            model_text=model_text,
+            data_text=data_text,
+            _shutting_down=False,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _highlight_debounce_ms=150,
+            _highlight_validate_idle_ms=800,
+            after=mock.Mock(side_effect=["model-first", "data-fast", "data-validate", "model-second"]),
+            after_cancel=mock.Mock(),
+            _run_scheduled_highlight=mock.Mock(),
+            _text_too_large_for_highlight=lambda _widget: False,
+            highlight=mock.Mock(),
+            editor_notebook=SimpleNamespace(select=lambda: "model", index=lambda _tab: 0),
+        )
+        dummy._cancel_scheduled_highlight = lambda widget, kind: OPLIDE._cancel_scheduled_highlight(dummy, widget, kind)
+
+        OPLIDE._schedule_highlight(dummy, model_text, is_data=False)
+        OPLIDE._schedule_highlight(dummy, data_text, is_data=True)
+        OPLIDE._schedule_highlight(dummy, model_text, is_data=False)
+
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {"validate": "model-second"})
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {"fast": "data-fast", "validate": "data-validate"})
+        dummy.after_cancel.assert_called_once_with("model-first")
+
+        old_version = dummy.after.call_args_list[0].args[-1]
+        OPLIDE._run_scheduled_highlight(dummy, model_text, is_data=False, validate=True, version=old_version)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {"validate": "model-second"})
+        dummy.highlight.assert_not_called()
+
+        OPLIDE._run_scheduled_highlight(dummy, data_text, is_data=True, validate=False)
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {"validate": "data-validate"})
+        dummy.highlight.assert_called_once_with(data_text, is_data=True, validate=False)
+
+    def test_editor_paths_and_saved_baselines_have_independent_state(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        ide._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        ide.model_text = DummyText("model")
+        ide.data_text = DummyText("data")
+        ide.model_file = "model.mod"
+        ide.data_file = "data.dat"
+        OPLIDE._mark_editor_baselines_saved(ide)
+
+        self.assertEqual(ide._model_editor_state.path, "model.mod")
+        self.assertEqual(ide._data_editor_state.path, "data.dat")
+        self.assertFalse(OPLIDE._has_unsaved_editor_changes(ide))
+
+        ide.data_text.value = "changed data"
+        self.assertTrue(OPLIDE._has_unsaved_editor_changes(ide))
+        self.assertEqual(ide._model_editor_state.saved_text, "model")
+        self.assertEqual(ide._data_editor_state.saved_text, "data")
 
     def test_update_caret_preserves_large_text_status(self):
         class DummyText:
@@ -1050,6 +1113,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 self.value = value
 
         text = DummyText()
+        error_message = "Parser Error on line 13: Semantic Error (Line 13): Syntax error in .dat file at end of file (EOF)."
         dummy = SimpleNamespace(
             status_caret_var=DummyVar(),
             status_syntax_var=DummyVar(),
@@ -1060,10 +1124,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
             genai_model=None,
             genai_method_var=SimpleNamespace(get=lambda: "pyopl_generative"),
             _genai_methods=[("SyntAGM", "pyopl_generative")],
-            _last_syntax_error_by_widget={
-                id(text): "Parser Error on line 13: Semantic Error (Line 13): Syntax error in .dat file at end of file (EOF)."
-            },
-            _last_syntax_error=None,
+            model_text=text,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error=error_message),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
         )
         dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
         dummy._refresh_status_context = lambda: OPLIDE._refresh_status_context(dummy)
@@ -1772,8 +1835,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         text = DummyText("dvar float+ x;\nminimize x;\nsubject to {\n")
         dummy = SimpleNamespace(
-            _last_syntax_error_by_widget={},
-            _last_syntax_error="old error",
+            model_text=text,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="old error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
         )
         dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
         dummy._disable_highlight_for_large_text = lambda text_widget: OPLIDE._disable_highlight_for_large_text(
@@ -1785,8 +1849,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         OPLIDE.highlight(dummy, text, is_data=False, validate=True)
 
         self.assertFalse(any(tag == "ERROR" for tag, _start, _end in text.tags))
-        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
-        self.assertIsNone(dummy._last_syntax_error)
+        self.assertIsNone(dummy._model_editor_state.syntax_error)
 
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
@@ -1982,6 +2045,110 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(OPLIDE._index_from_pos(None, s, 6), "2.0")
         # end of string len=11 => line 2, col len('world')=5
         self.assertEqual(OPLIDE._index_from_pos(None, s, len(s)), "2.5")
+
+    def test_highlight_ranges_map_model_tokens_and_data_keywords_to_lines(self):
+        code = "param limit = 12;\nset S = {true, 3.5};"
+        index = pyopl_ide_bootstrap._make_text_indexer(code)
+        self.assertEqual(index(-1), "1.0")
+        self.assertEqual(index(len(code) + 5), index(len(code)))
+
+        tokens = [
+            SimpleNamespace(type="PARAM", index=0, value="param"),
+            SimpleNamespace(type="NAME", index=6, value="limit"),
+            SimpleNamespace(type="UNKNOWN", index=12, value="="),
+        ]
+        self.assertEqual(
+            pyopl_ide_bootstrap._token_highlight_ranges(tokens, index),
+            {"PARAM": ["1.0", "1.5"], "NAME": ["1.6", "1.11"]},
+        )
+        ranges = pyopl_ide_bootstrap._data_highlight_ranges(code, index)
+        self.assertEqual(ranges["PARAM"], ["1.0", "1.5"])
+        self.assertEqual(ranges["SET"], ["2.0", "2.3"])
+        self.assertEqual(ranges["BOOLEAN"], ["2.9", "2.13"])
+        self.assertEqual(ranges["NUMBER"], ["1.14", "1.16", "2.15", "2.18"])
+
+    def test_find_previous_match_wraps_and_handles_case_and_regex(self):
+        find = pyopl_ide_bootstrap._find_previous_match
+        self.assertEqual(find("Alpha beta alpha", "alpha", 7, False, False), (0, 5))
+        self.assertEqual(find("Alpha beta alpha", "alpha", 0, False, False), (11, 16))
+        self.assertEqual(find("Alpha beta alpha", "alpha", 7, False, True), (11, 16))
+        self.assertEqual(find("abc 123 abc", r"\d+", 8, True, True), (4, 7))
+
+    def test_find_replace_dialog_owns_shortcuts_and_replace_all_without_tk(self):
+        class DummyVar:
+            instances = []
+
+            def __init__(self, value=""):
+                self.value = value
+                self.instances.append(self)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        buttons = {}
+        entries = []
+
+        def make_button(*_args, **kwargs):
+            button = mock.Mock()
+            button.command = kwargs["command"]
+            buttons[kwargs["text"]] = button
+            return button
+
+        def make_entry(*_args, **kwargs):
+            entry = mock.Mock()
+            entry.get.side_effect = kwargs["textvariable"].get
+            entries.append(entry)
+            return entry
+
+        dialog = mock.Mock()
+        dialog.winfo_exists.return_value = True
+        model_text, data_text = mock.Mock(), mock.Mock()
+        model_text.get.return_value = "alpha beta Alpha"
+        host = SimpleNamespace(
+            data_text=data_text,
+            _ensure_no_active_operation=mock.Mock(return_value=True),
+            _undo=mock.Mock(),
+            _redo=mock.Mock(),
+            _get_active_editor=mock.Mock(return_value=model_text),
+            _on_text_change=mock.Mock(),
+        )
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "BooleanVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Checkbutton", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=make_entry),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
+        ):
+            OPLIDE._open_find_replace_dialog(host, replace=True)
+            DummyVar.instances[0].set("alpha")
+            DummyVar.instances[1].set("omega")
+            model_text.tag_ranges.return_value = ()
+            model_text.search.return_value = "1.0"
+            buttons["Next"].command()
+            buttons["Replace All"].command()
+            data_text.get.return_value = "alpha"
+            host._get_active_editor.return_value = data_text
+            buttons["Replace All"].command()
+            undo = next(call.args[1] for call in dialog.bind.call_args_list if call.args[0] == "<Control-z>")
+            undo(None)
+            buttons["Close"].command()
+
+        model_text.replace.assert_called_once_with("1.0", "end-1c", "omega beta omega")
+        model_text.tag_add.assert_any_call("find_match", "1.0", "1.0+5c")
+        data_text.replace.assert_called_once_with("1.0", "end-1c", "omega")
+        self.assertEqual(
+            host._on_text_change.call_args_list,
+            [mock.call(model_text, is_data=False), mock.call(data_text, is_data=True)],
+        )
+        host._undo.assert_called_once_with()
+        entries[0].focus_set.assert_called_once_with()
+        dialog.destroy.assert_called_once_with()
 
     def test_append_output_can_target_non_current_session(self):
         ide = OPLIDE.__new__(OPLIDE)

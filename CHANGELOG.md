@@ -43,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Separate solver input preparation, queue-event routing, and Tk progress/log presentation.
 - Separate comparison request validation and result formatting from IDE dialog widgets.
 - Move model-comparison dialog state, process/queue cleanup, and cancellation into an in-file dialog owner.
+- Group model/data editor paths, saved baselines, syntax errors, and highlight timers into independent in-file state records.
+- Separate editor highlight ranges from Tk rendering and give find/replace its own in-file dialog owner.
+- Route IDE bridge reads and writes through editor operations while validating both fields before mutation.
 
 ### Removed
 

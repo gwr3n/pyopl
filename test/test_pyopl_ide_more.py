@@ -618,6 +618,8 @@ minimize x;
 
         with self.assertRaisesRegex(ValueError, "data_text must be a string"):
             OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"data_text": None})
+        with self.assertRaisesRegex(ValueError, "data_text must be a string"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "new model", "data_text": None})
         self.assertEqual(model.value, "old model")
         self.assertEqual(data.value, "new data")
 
@@ -888,6 +890,8 @@ minimize x;
             dummy = OPLIDE.__new__(OPLIDE)
             dummy.tk = SimpleNamespace()
             dummy._session_state = pyopl_ide_bootstrap._OutputSessionState()
+            dummy._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            dummy._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
             dummy._session_file_path = lambda: str(session_path)
             dummy.request_listbox = listbox
             dummy.output_text = output_text
@@ -1386,6 +1390,9 @@ minimize x;
         dummy = SimpleNamespace(
             _has_unsaved_editor_changes=mock.Mock(return_value=False),
             _confirm_quit_with_unsaved_changes=mock.Mock(return_value=False),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(highlight_after_ids={"validate": "model-id"}),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(highlight_after_ids={"fast": "data-id"}),
+            after_cancel=mock.Mock(),
             stop_model=mock.Mock(),
             _save_settings=mock.Mock(),
             _save_session=mock.Mock(),
@@ -1395,6 +1402,9 @@ minimize x;
         )
         OPLIDE._on_close(dummy)
         self.assertTrue(dummy._shutting_down)
+        self.assertEqual(dummy.after_cancel.call_count, 2)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {})
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {})
         dummy.stop_model.assert_called_once()
         dummy.destroy.assert_called_once()
         dummy.quit.assert_called_once()
