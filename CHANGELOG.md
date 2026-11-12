@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Centralize IDE solver process and result-queue lifecycle in an in-file owner, including failed-start cleanup and stale-poll isolation.
 - Validate solver worker message envelopes and success payloads before routing them to the IDE.
 - Separate solver input preparation, queue-event routing, and Tk progress/log presentation.
+- Separate comparison request validation and result formatting from IDE dialog widgets.
+- Move model-comparison dialog state, process/queue cleanup, and cancellation into an in-file dialog owner.
 
 ### Removed
 

@@ -776,6 +776,114 @@ def _data_paths_are_paired(left_data: str, right_data: str) -> bool:
     return bool(left_data) == bool(right_data)
 
 
+class _ComparisonInputError(ValueError):
+    def __init__(self, message: str, *, warning: bool) -> None:
+        super().__init__(message)
+        self.warning = warning
+
+
+@dataclass(frozen=True)
+class _ComparisonRequest:
+    left_model: str
+    left_data: str
+    right_model: str
+    right_data: str
+    strategy: str
+    observable_mapping_file: str = ""
+
+    def validate_paths(self, *, include_mapping: bool = False) -> None:
+        if not self.left_model or not self.right_model:
+            raise _ComparisonInputError("Choose both a left model and a right model.", warning=True)
+        if not _data_paths_are_paired(self.left_data, self.right_data):
+            raise _ComparisonInputError("Choose both data files or leave both data fields empty.", warning=True)
+        paths = [
+            ("Left model", self.left_model),
+            ("Right model", self.right_model),
+            ("Left data", self.left_data),
+            ("Right data", self.right_data),
+        ]
+        if include_mapping:
+            paths.append(("Observable mapping", self.observable_mapping_file))
+        for label, path in paths:
+            if path and not os.path.exists(path):
+                raise _ComparisonInputError(f"{label} file does not exist:\n{path}", warning=False)
+
+
+@dataclass
+class _ComparisonProcessState:
+    process: Optional[multiprocessing.Process] = None
+    result_queue: Optional[multiprocessing.Queue] = None
+
+    def start(self, request: _ComparisonRequest) -> None:
+        if self.process is not None or self.result_queue is not None:
+            raise RuntimeError("Comparison process resources are already in use")
+        self.result_queue = multiprocessing.Queue()
+        try:
+            self.process = multiprocessing.Process(
+                target=_compare_models_wrapper,
+                args=(
+                    request.left_model,
+                    request.left_data,
+                    request.right_model,
+                    request.right_data,
+                    request.strategy,
+                    self.result_queue,
+                    request.observable_mapping_file,
+                ),
+            )
+            self.process.start()
+        except Exception:
+            self.cleanup(cancel_queue_thread=True)
+            raise
+
+    def read_nowait(self) -> tuple[str, Any]:
+        if self.result_queue is None:
+            raise RuntimeError("Comparison result queue is not available")
+        message = self.result_queue.get_nowait()
+        if not isinstance(message, tuple) or len(message) != 2 or message[0] not in ("success", "validation_error", "error"):
+            raise ValueError("Invalid comparison worker message")
+        return message
+
+    def interrupt(self) -> None:
+        process = self.process
+        if process is not None and process.is_alive():
+            try:
+                process.terminate()
+                process.join(timeout=1.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=1.0)
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to interrupt comparison process")
+        self.cleanup(cancel_queue_thread=True)
+
+    def finish(self) -> None:
+        if self.process is not None:
+            try:
+                self.process.join(timeout=0.1)
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to join comparison process")
+        self.cleanup(cancel_queue_thread=False)
+
+    def cleanup(self, *, cancel_queue_thread: bool) -> None:
+        result_queue = self.result_queue
+        self.process = None
+        self.result_queue = None
+        if result_queue is None:
+            return
+        try:
+            result_queue.close()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to close comparison result queue")
+        try:
+            if cancel_queue_thread:
+                result_queue.cancel_join_thread()
+            else:
+                result_queue.join_thread()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to finish comparison result queue thread")
+
+
 def _read_mapping_generation_inputs(
     left_model: str,
     right_model: str,
@@ -877,6 +985,43 @@ def _format_comparison_validation_error(detail: str) -> str:
                 "Check the index expression and its iterator filter. For example, an access using j + 1 over 1..N requires a guard such as j < N.",
             ]
         )
+    return "\n".join(lines) + "\n"
+
+
+def _format_equivalence_result(
+    result: ModelComparisonResult,
+    left_model: str,
+    right_model: str,
+    left_data: str = "",
+    right_data: str = "",
+    strategy: str = "abstract",
+) -> str:
+    """Format a comparison result without depending on the dialog widgets."""
+    equivalence_label = {
+        "equivalent": "Yes",
+        "different": "No",
+        "unknown": "Undetermined",
+    }[result.status]
+    lines = [
+        "Compare models",
+        "",
+        f"Strategy: {strategy}",
+        f"Status: {result.status}",
+        f"Equivalent: {equivalence_label}",
+        f"Level: {result.level}",
+        f"Reason: {result.reason}",
+        "",
+        "Inputs:",
+        f"  Left model: {left_model}",
+        f"  Left data: {left_data or '(none)'}",
+        f"  Right model: {right_model}",
+        f"  Right data: {right_data or '(none)'}",
+    ]
+    if result.proof_steps:
+        lines.extend(["", "Proof steps:"])
+        lines.extend(f"  {index}. {step}" for index, step in enumerate(result.proof_steps, start=1))
+    if result.counterexample:
+        lines.extend(["", "Counterexample:", f"  {result.counterexample}"])
     return "\n".join(lines) + "\n"
 
 
@@ -4524,508 +4669,7 @@ class OPLIDE(TkinterDnD.Tk):
         if not self._ensure_no_active_operation("Compare models"):
             return
 
-        dialog = tk.Toplevel(self)
-        dialog.title("Compare models")
-        dialog.transient(self)
-        dialog.geometry("760x600")
-        dialog.minsize(680, 500)
-
-        root = ttk.Frame(dialog, padding=12)
-        root.pack(fill=tk.BOTH, expand=True)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
-
-        strategy_frame = ttk.Frame(root)
-        strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
-        strategy_frame.columnconfigure(1, uniform="comparison-strategy")
-        strategy_frame.columnconfigure(2, minsize=4)
-        strategy_frame.columnconfigure(3, uniform="comparison-strategy")
-        strategy_var = tk.StringVar(value="abstract")
-
-        def set_strategy(strategy: str) -> None:
-            strategy_var.set(strategy)
-            abstract_button.configure(style=("GenaiModeActive.TButton" if strategy == "abstract" else "GenaiMode.TButton"))
-            concrete_button.configure(style=("GenaiModeActive.TButton" if strategy == "concrete" else "GenaiMode.TButton"))
-
-        strategy_button_width = max(len("Abstract"), len("Concrete"))
-        abstract_button = ttk.Button(
-            strategy_frame,
-            text="Abstract",
-            style="GenaiModeActive.TButton",
-            width=strategy_button_width,
-            command=lambda: set_strategy("abstract"),
-        )
-        abstract_button.grid(row=0, column=1, sticky="ew")
-        concrete_button = ttk.Button(
-            strategy_frame,
-            text="Concrete",
-            style="GenaiMode.TButton",
-            width=strategy_button_width,
-            command=lambda: set_strategy("concrete"),
-        )
-        concrete_button.grid(row=0, column=3, sticky="ew")
-
-        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
-        path_frame.grid(row=1, column=0, sticky="ew")
-        path_frame.columnconfigure(1, weight=1)
-        path_frame.columnconfigure(3, minsize=90)
-
-        left_model_var = tk.StringVar(value=self.model_file or "")
-        left_data_var = tk.StringVar(value=self.data_file or "")
-        right_model_var = tk.StringVar()
-        right_data_var = tk.StringVar()
-        observable_mapping_var = tk.StringVar()
-
-        def browse_model(target: tk.StringVar) -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select model file",
-                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
-            )
-            if fname:
-                target.set(fname)
-
-        def browse_data(target: tk.StringVar) -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select data file",
-                filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
-            )
-            if fname:
-                target.set(fname)
-
-        def browse_observable_mapping() -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select observable mapping JSON",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            )
-            if fname:
-                observable_mapping_var.set(fname)
-
-        browse_buttons: list[ttk.Button] = []
-        compare_process: Optional[multiprocessing.Process] = None
-        compare_queue: Optional[multiprocessing.Queue] = None
-
-        def add_path_row(
-            row: int,
-            label: str,
-            var: tk.StringVar,
-            browse_command: Callable[[], None],
-        ) -> None:
-            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-            entry = ttk.Entry(path_frame, textvariable=var)
-            entry.grid(row=row, column=1, sticky="ew", pady=4)
-            browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
-            browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
-            browse_buttons.append(browse_button)
-
-        add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
-        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
-        add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
-        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
-        add_path_row(4, "Observable mapping", observable_mapping_var, browse_observable_mapping)
-        mapping_generate_button = ttk.Button(path_frame, text="Generate")
-        mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
-
-        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
-        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
-        result_frame.rowconfigure(0, weight=1)
-        result_frame.columnconfigure(0, weight=1)
-
-        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
-        result_text.grid(row=0, column=0, sticky="nsew")
-        result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
-        result_text.config(state="disabled")
-
-        button_frame = ttk.Frame(root)
-        button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        button_frame.columnconfigure(0, weight=1)
-        compare_button = ttk.Button(button_frame, text="Compare")
-        compare_button.grid(row=0, column=1, padx=(0, 8))
-        close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy)
-        close_button.grid(row=0, column=2)
-
-        def set_compare_running(running: bool) -> None:
-            state = "disabled" if running else "normal"
-            for control in browse_buttons:
-                control.config(state=state)
-            mapping_generate_button.config(state=state)
-            abstract_button.config(state=state)
-            concrete_button.config(state=state)
-            close_button.config(state=state)
-            compare_button.config(
-                text=("Interrupt" if running else "Compare"),
-                command=(interrupt_compare if running else do_compare),
-                state="normal",
-            )
-
-        def set_mapping_running(running: bool) -> None:
-            state = "disabled" if running else "normal"
-            for control in browse_buttons:
-                control.config(state=state)
-            abstract_button.config(state=state)
-            concrete_button.config(state=state)
-            compare_button.config(state=state)
-            close_button.config(state=state)
-            mapping_generate_button.config(
-                text=("Interrupt" if running else "Generate"),
-                command=(interrupt_mapping if running else generate_observable_mapping),
-                state="normal",
-            )
-
-        def set_result(text: str) -> None:
-            result_text.config(state="normal")
-            result_text.delete("1.0", tk.END)
-            result_text.insert(tk.END, text)
-            result_text.config(state="disabled")
-
-        def cleanup_compare_process(*, cancel_queue_thread: bool) -> None:
-            nonlocal compare_process, compare_queue
-            q = compare_queue
-            compare_process = None
-            compare_queue = None
-            if q is None:
-                return
-            try:
-                q.close()
-            except Exception:
-                pass
-            try:
-                if cancel_queue_thread:
-                    q.cancel_join_thread()
-                else:
-                    q.join_thread()
-            except Exception:
-                pass
-
-        def interrupt_mapping() -> None:
-            active = getattr(self, "_active_operation", None)
-            if active is None or active.kind != "genai-observable-mapping":
-                return
-            self.interrupt_active_operation()
-            set_mapping_running(False)
-            set_result("Observable mapping generation interrupted.\n")
-
-        def generate_observable_mapping() -> None:
-            left_model = left_model_var.get().strip()
-            right_model = right_model_var.get().strip()
-            left_data = left_data_var.get().strip()
-            right_data = right_data_var.get().strip()
-
-            if not left_model or not right_model:
-                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
-                return
-            if not _data_paths_are_paired(left_data, right_data):
-                messagebox.showwarning(
-                    "Compare models",
-                    "Choose both data files or leave both data fields empty.",
-                    parent=dialog,
-                )
-                return
-            for label, path in (
-                ("Left model", left_model),
-                ("Right model", right_model),
-                ("Left data", left_data),
-                ("Right data", right_data),
-            ):
-                if path and not os.path.exists(path):
-                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
-                    return
-            selected_genai_model = self.genai_model
-            if not self.genai_provider or not selected_genai_model:
-                messagebox.showwarning(
-                    "Compare models", "Select a GenAI provider and model before generating a mapping.", parent=dialog
-                )
-                return
-
-            operation = self._start_foreground_operation(
-                kind="genai-observable-mapping",
-                label="Generate Observable Mapping",
-                header="GenAI: Generating observable mapping...",
-                status=f"GenAI: generating observable mapping with {self.genai_provider} - {self.genai_model} ...",
-                model_file=left_model,
-                data_file=left_data,
-            )
-            if operation is None:
-                return
-            set_mapping_running(True)
-            self._append_output(
-                f"Generating an observable mapping for:\n{left_model}\n{right_model}\n",
-                operation.session_id,
-            )
-
-            def progress(message: str) -> None:
-                if not operation.cancel_requested:
-                    self.after(
-                        0,
-                        self._append_output,
-                        (message if message.endswith("\n") else message + "\n"),
-                        operation.session_id,
-                    )
-
-            def finish_cancelled() -> None:
-                set_mapping_running(False)
-                self._finish_foreground_operation(operation)
-
-            def run() -> None:
-                try:
-                    mapping_text = _generate_dialog_mapping_text(
-                        left_model,
-                        right_model,
-                        left_data,
-                        right_data,
-                        strategy_var.get(),
-                        selected_genai_model,
-                        self.genai_provider,
-                        progress,
-                    )
-                    if operation.cancel_requested:
-                        self.after(0, finish_cancelled)
-                        return
-
-                    tmp_dir = Path.cwd() / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    descriptor, mapping_path = tempfile.mkstemp(
-                        prefix="observable_mapping_",
-                        suffix=".json",
-                        dir=str(tmp_dir),
-                        text=True,
-                    )
-                    with os.fdopen(descriptor, "w", encoding="utf-8") as file_obj:
-                        file_obj.write(mapping_text)
-
-                    def apply_mapping() -> None:
-                        if operation.cancel_requested:
-                            try:
-                                os.unlink(mapping_path)
-                            except OSError:
-                                pass
-                            finish_cancelled()
-                            return
-                        observable_mapping_var.set(mapping_path)
-                        set_mapping_running(False)
-                        self._finish_foreground_operation(operation)
-                        set_result(f"Generated observable mapping:\n{mapping_path}\n\n{mapping_text}")
-                        self.status_var.set("GenAI: observable mapping generated")
-
-                    self.after(0, apply_mapping)
-                except Exception as exc:
-
-                    def on_error(error: Exception) -> None:
-                        set_mapping_running(False)
-                        self._finish_foreground_operation(operation)
-                        if operation.cancel_requested:
-                            return
-                        detail = _concise_genai_error(error)
-                        set_result(f"Observable mapping generation failed.\n\n{detail}\n")
-                        messagebox.showerror("GenAI Error", detail, parent=dialog)
-                        self.status_var.set("GenAI: observable mapping error")
-
-                    self.after(0, on_error, exc)
-
-            threading.Thread(target=run, daemon=True).start()
-
-        def interrupt_compare() -> None:
-            p = compare_process
-            if p is not None and p.is_alive():
-                try:
-                    p.terminate()
-                    p.join(timeout=1.0)
-                    if p.is_alive() and hasattr(p, "kill"):
-                        p.kill()
-                        p.join(timeout=1.0)
-                except Exception:
-                    pass
-            cleanup_compare_process(cancel_queue_thread=True)
-            set_compare_running(False)
-            set_result("Comparison interrupted by user.\n")
-            self.status_var.set("Compare models interrupted.")
-
-        def poll_compare(left_model: str, right_model: str, left_data: str, right_data: str) -> None:
-            p = compare_process
-            q = compare_queue
-            if p is None or q is None:
-                return
-
-            try:
-                kind, payload = q.get_nowait()
-            except queue.Empty:
-                if p.is_alive():
-                    dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
-                    return
-                cleanup_compare_process(cancel_queue_thread=True)
-                set_compare_running(False)
-                set_result("Comparison failed.\n\nComparison process terminated unexpectedly.\n")
-                self.status_var.set("Compare models failed: process terminated unexpectedly.")
-                messagebox.showerror(
-                    "Compare models",
-                    "Comparison process terminated unexpectedly.",
-                    parent=dialog,
-                )
-                return
-
-            try:
-                p.join(timeout=0.1)
-            except Exception:
-                pass
-            cleanup_compare_process(cancel_queue_thread=False)
-            set_compare_running(False)
-
-            if kind == "success" and hasattr(payload, "status") and hasattr(payload, "proof_steps"):
-                set_result(
-                    self._format_equivalence_result(
-                        payload,
-                        left_model,
-                        right_model,
-                        left_data,
-                        right_data,
-                        strategy_var.get(),
-                    )
-                )
-                self.status_var.set(f"Compare models: {payload.status}")
-                return
-
-            if kind == "validation_error":
-                detail = str(payload)
-                set_result(_format_comparison_validation_error(detail))
-                self.status_var.set("Compare models: model validation issue")
-                return
-
-            detail = str(payload)
-            logging.getLogger(__name__).error("Compare models failed: %s", detail)
-            set_result(f"Comparison failed.\n\n{detail}\n")
-            messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
-
-        def do_compare() -> None:
-            nonlocal compare_process, compare_queue
-            left_model = left_model_var.get().strip()
-            right_model = right_model_var.get().strip()
-            left_data = left_data_var.get().strip()
-            right_data = right_data_var.get().strip()
-            observable_mapping_file = observable_mapping_var.get().strip()
-            strategy = strategy_var.get()
-
-            if not left_model or not right_model:
-                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
-                return
-            if not _data_paths_are_paired(left_data, right_data):
-                messagebox.showwarning(
-                    "Compare models",
-                    "Choose both data files or leave both data fields empty.",
-                    parent=dialog,
-                )
-                return
-            paths = [
-                ("Left model", left_model),
-                ("Right model", right_model),
-                ("Left data", left_data),
-                ("Right data", right_data),
-                ("Observable mapping", observable_mapping_file),
-            ]
-            for label, path in paths:
-                if path and not os.path.exists(path):
-                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
-                    return
-
-            try:
-                compare_queue = multiprocessing.Queue()
-                compare_process = multiprocessing.Process(
-                    target=_compare_models_wrapper,
-                    args=(
-                        left_model,
-                        left_data,
-                        right_model,
-                        right_data,
-                        strategy,
-                        compare_queue,
-                        observable_mapping_file,
-                    ),
-                )
-                compare_process.start()
-                set_compare_running(True)
-                set_result(f"Comparing models with the {strategy} strategy...\n")
-                self.status_var.set("Compare models running...")
-                dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
-            except Exception as exc:
-                logging.getLogger(__name__).exception("Compare models failed")
-                cleanup_compare_process(cancel_queue_thread=True)
-                set_compare_running(False)
-                detail = f"{type(exc).__name__}: {exc}"
-                set_result(f"Comparison failed.\n\n{detail}\n")
-                messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
-
-        compare_button.config(command=do_compare)
-        mapping_generate_button.config(command=generate_observable_mapping)
-
-        def mapping_is_running() -> bool:
-            active = getattr(self, "_active_operation", None)
-            return active is not None and active.kind == "genai-observable-mapping"
-
-        dialog.bind(
-            "<Return>",
-            lambda _event: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else do_compare()
-            ),
-        )
-        dialog.bind(
-            "<Escape>",
-            lambda _event: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
-            ),
-        )
-        dialog.protocol(
-            "WM_DELETE_WINDOW",
-            lambda: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
-            ),
-        )
-        dialog.grab_set()
-        dialog.focus_set()
-
-    @staticmethod
-    def _format_equivalence_result(
-        result: ModelComparisonResult,
-        left_model: str,
-        right_model: str,
-        left_data: str = "",
-        right_data: str = "",
-        strategy: str = "abstract",
-    ) -> str:
-        """Format an EquivalenceResult for the compare-models dialog."""
-        equivalence_label = {
-            "equivalent": "Yes",
-            "different": "No",
-            "unknown": "Undetermined",
-        }[result.status]
-        lines = [
-            "Compare models",
-            "",
-            f"Strategy: {strategy}",
-            f"Status: {result.status}",
-            f"Equivalent: {equivalence_label}",
-            f"Level: {result.level}",
-            f"Reason: {result.reason}",
-            "",
-            "Inputs:",
-            f"  Left model: {left_model}",
-            f"  Left data: {left_data or '(none)'}",
-            f"  Right model: {right_model}",
-            f"  Right data: {right_data or '(none)'}",
-        ]
-        if result.proof_steps:
-            lines.extend(["", "Proof steps:"])
-            lines.extend(f"  {index}. {step}" for index, step in enumerate(result.proof_steps, start=1))
-        if result.counterexample:
-            lines.extend(["", "Counterexample:", f"  {result.counterexample}"])
-        return "\n".join(lines) + "\n"
+        _ComparisonDialog(self).open()
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
@@ -8404,6 +8048,450 @@ class OPLIDE(TkinterDnD.Tk):
             pass
         self._refresh_genai_panel_state()
         self._save_settings()
+
+
+class _ComparisonDialog:
+    def __init__(self, host: OPLIDE) -> None:
+        self.parent = host
+        self.model_file = host.model_file
+        self.data_file = host.data_file
+        self._selected_genai_model = lambda: (host.genai_provider, host.genai_model)
+        self._active_operation = lambda: host._active_operation
+        self._start_operation = host._start_foreground_operation
+        self._finish_operation = host._finish_foreground_operation
+        self._interrupt_operation = host.interrupt_active_operation
+        self._append_output = host._append_output
+        self._set_status = host.status_var.set
+        self._after = host.after
+        self.process_state = _ComparisonProcessState()
+        self.dialog: Optional[tk.Toplevel] = None
+        self._poll_after_id: Optional[str] = None
+        self._active_request: Optional[_ComparisonRequest] = None
+
+    def _cancel_poll(self) -> None:
+        after_id = self._poll_after_id
+        self._poll_after_id = None
+        if after_id is not None and self.dialog is not None:
+            try:
+                self.dialog.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def close(self) -> None:
+        self._cancel_poll()
+        self.process_state.interrupt()
+        self._active_request = None
+        active = self._active_operation()
+        if active is not None and active.kind == "genai-observable-mapping":
+            self._interrupt_operation()
+        if self.dialog is not None and self.dialog.winfo_exists():
+            self.dialog.destroy()
+
+    def open(self) -> None:
+        dialog = tk.Toplevel(self.parent)
+        self.dialog = dialog
+        dialog.title("Compare models")
+        dialog.transient(self.parent)
+        dialog.geometry("760x600")
+        dialog.minsize(680, 500)
+
+        root = ttk.Frame(dialog, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(2, weight=1)
+
+        strategy_frame = ttk.Frame(root)
+        strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
+        strategy_frame.columnconfigure(1, uniform="comparison-strategy")
+        strategy_frame.columnconfigure(2, minsize=4)
+        strategy_frame.columnconfigure(3, uniform="comparison-strategy")
+        strategy_var = tk.StringVar(value="abstract")
+
+        def set_strategy(strategy: str) -> None:
+            strategy_var.set(strategy)
+            abstract_button.configure(style=("GenaiModeActive.TButton" if strategy == "abstract" else "GenaiMode.TButton"))
+            concrete_button.configure(style=("GenaiModeActive.TButton" if strategy == "concrete" else "GenaiMode.TButton"))
+
+        strategy_button_width = max(len("Abstract"), len("Concrete"))
+        abstract_button = ttk.Button(
+            strategy_frame,
+            text="Abstract",
+            style="GenaiModeActive.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("abstract"),
+        )
+        abstract_button.grid(row=0, column=1, sticky="ew")
+        concrete_button = ttk.Button(
+            strategy_frame,
+            text="Concrete",
+            style="GenaiMode.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("concrete"),
+        )
+        concrete_button.grid(row=0, column=3, sticky="ew")
+
+        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
+        path_frame.grid(row=1, column=0, sticky="ew")
+        path_frame.columnconfigure(1, weight=1)
+        path_frame.columnconfigure(3, minsize=90)
+
+        left_model_var = tk.StringVar(value=self.model_file or "")
+        left_data_var = tk.StringVar(value=self.data_file or "")
+        right_model_var = tk.StringVar()
+        right_data_var = tk.StringVar()
+        observable_mapping_var = tk.StringVar()
+
+        def comparison_request() -> _ComparisonRequest:
+            return _ComparisonRequest(
+                left_model_var.get().strip(),
+                left_data_var.get().strip(),
+                right_model_var.get().strip(),
+                right_data_var.get().strip(),
+                strategy_var.get(),
+                observable_mapping_var.get().strip(),
+            )
+
+        def validate_request(request: _ComparisonRequest, *, include_mapping: bool = False) -> bool:
+            try:
+                request.validate_paths(include_mapping=include_mapping)
+            except _ComparisonInputError as exc:
+                show_error = messagebox.showwarning if exc.warning else messagebox.showerror
+                show_error("Compare models", str(exc), parent=dialog)
+                return False
+            return True
+
+        def browse_model(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select model file",
+                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def browse_data(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select data file",
+                filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def browse_observable_mapping() -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select observable mapping JSON",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            if fname:
+                observable_mapping_var.set(fname)
+
+        browse_buttons: list[ttk.Button] = []
+
+        def add_path_row(
+            row: int,
+            label: str,
+            var: tk.StringVar,
+            browse_command: Callable[[], None],
+        ) -> None:
+            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            entry = ttk.Entry(path_frame, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
+            browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+            browse_buttons.append(browse_button)
+
+        add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
+        add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
+        add_path_row(4, "Observable mapping", observable_mapping_var, browse_observable_mapping)
+        mapping_generate_button = ttk.Button(path_frame, text="Generate")
+        mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
+
+        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
+        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+
+        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
+        result_text.grid(row=0, column=0, sticky="nsew")
+        result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
+        result_text.config(state="disabled")
+
+        button_frame = ttk.Frame(root)
+        button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        button_frame.columnconfigure(0, weight=1)
+        compare_button = ttk.Button(button_frame, text="Compare")
+        compare_button.grid(row=0, column=1, padx=(0, 8))
+        close_button = ttk.Button(button_frame, text="Close", command=self.close)
+        close_button.grid(row=0, column=2)
+
+        def set_compare_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            mapping_generate_button.config(state=state)
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
+            close_button.config(state=state)
+            compare_button.config(
+                text=("Interrupt" if running else "Compare"),
+                command=(interrupt_compare if running else do_compare),
+                state="normal",
+            )
+
+        def set_mapping_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
+            compare_button.config(state=state)
+            close_button.config(state=state)
+            mapping_generate_button.config(
+                text=("Interrupt" if running else "Generate"),
+                command=(interrupt_mapping if running else generate_observable_mapping),
+                state="normal",
+            )
+
+        def set_result(text: str) -> None:
+            result_text.config(state="normal")
+            result_text.delete("1.0", tk.END)
+            result_text.insert(tk.END, text)
+            result_text.config(state="disabled")
+
+        def interrupt_mapping() -> None:
+            active = self._active_operation()
+            if active is None or active.kind != "genai-observable-mapping":
+                return
+            self._interrupt_operation()
+            set_mapping_running(False)
+            set_result("Observable mapping generation interrupted.\n")
+
+        def generate_observable_mapping() -> None:
+            request = comparison_request()
+            if not validate_request(request):
+                return
+            left_model, right_model = request.left_model, request.right_model
+            left_data, right_data = request.left_data, request.right_data
+            selected_genai_provider, selected_genai_model = self._selected_genai_model()
+            if not selected_genai_provider or not selected_genai_model:
+                messagebox.showwarning(
+                    "Compare models", "Select a GenAI provider and model before generating a mapping.", parent=dialog
+                )
+                return
+
+            operation = self._start_operation(
+                kind="genai-observable-mapping",
+                label="Generate Observable Mapping",
+                header="GenAI: Generating observable mapping...",
+                status=f"GenAI: generating observable mapping with {selected_genai_provider} - {selected_genai_model} ...",
+                model_file=left_model,
+                data_file=left_data,
+            )
+            if operation is None:
+                return
+            set_mapping_running(True)
+            self._append_output(
+                f"Generating an observable mapping for:\n{left_model}\n{right_model}\n",
+                operation.session_id,
+            )
+
+            def progress(message: str) -> None:
+                if not operation.cancel_requested:
+                    self._after(
+                        0,
+                        self._append_output,
+                        (message if message.endswith("\n") else message + "\n"),
+                        operation.session_id,
+                    )
+
+            def finish_cancelled() -> None:
+                if dialog.winfo_exists():
+                    set_mapping_running(False)
+                self._finish_operation(operation)
+
+            def run() -> None:
+                try:
+                    mapping_text = _generate_dialog_mapping_text(
+                        left_model,
+                        right_model,
+                        left_data,
+                        right_data,
+                        request.strategy,
+                        selected_genai_model,
+                        selected_genai_provider,
+                        progress,
+                    )
+                    if operation.cancel_requested:
+                        self._after(0, finish_cancelled)
+                        return
+
+                    tmp_dir = Path.cwd() / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    descriptor, mapping_path = tempfile.mkstemp(
+                        prefix="observable_mapping_",
+                        suffix=".json",
+                        dir=str(tmp_dir),
+                        text=True,
+                    )
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as file_obj:
+                        file_obj.write(mapping_text)
+
+                    def apply_mapping() -> None:
+                        if operation.cancel_requested or not dialog.winfo_exists():
+                            try:
+                                os.unlink(mapping_path)
+                            except OSError:
+                                pass
+                            finish_cancelled()
+                            return
+                        observable_mapping_var.set(mapping_path)
+                        set_mapping_running(False)
+                        self._finish_operation(operation)
+                        set_result(f"Generated observable mapping:\n{mapping_path}\n\n{mapping_text}")
+                        self._set_status("GenAI: observable mapping generated")
+
+                    self._after(0, apply_mapping)
+                except Exception as exc:
+
+                    def on_error(error: Exception) -> None:
+                        self._finish_operation(operation)
+                        if operation.cancel_requested or not dialog.winfo_exists():
+                            return
+                        set_mapping_running(False)
+                        detail = _concise_genai_error(error)
+                        set_result(f"Observable mapping generation failed.\n\n{detail}\n")
+                        messagebox.showerror("GenAI Error", detail, parent=dialog)
+                        self._set_status("GenAI: observable mapping error")
+
+                    self._after(0, on_error, exc)
+
+            threading.Thread(target=run, daemon=True).start()
+
+        def interrupt_compare() -> None:
+            self._cancel_poll()
+            self.process_state.interrupt()
+            self._active_request = None
+            set_compare_running(False)
+            set_result("Comparison interrupted by user.\n")
+            self._set_status("Compare models interrupted.")
+
+        def poll_compare(request: _ComparisonRequest) -> None:
+            if request is not self._active_request:
+                return
+            self._poll_after_id = None
+            p = self.process_state.process
+            if p is None or self.process_state.result_queue is None:
+                return
+
+            try:
+                kind, payload = self.process_state.read_nowait()
+            except queue.Empty:
+                if p.is_alive():
+                    self._poll_after_id = dialog.after(100, poll_compare, request)
+                    return
+                self.process_state.cleanup(cancel_queue_thread=True)
+                self._active_request = None
+                set_compare_running(False)
+                set_result("Comparison failed.\n\nComparison process terminated unexpectedly.\n")
+                self._set_status("Compare models failed: process terminated unexpectedly.")
+                messagebox.showerror(
+                    "Compare models",
+                    "Comparison process terminated unexpectedly.",
+                    parent=dialog,
+                )
+                return
+            except ValueError as exc:
+                kind, payload = "error", str(exc)
+
+            self.process_state.finish()
+            self._active_request = None
+            set_compare_running(False)
+
+            if kind == "success" and hasattr(payload, "status") and hasattr(payload, "proof_steps"):
+                set_result(
+                    _format_equivalence_result(
+                        payload,
+                        request.left_model,
+                        request.right_model,
+                        request.left_data,
+                        request.right_data,
+                        request.strategy,
+                    )
+                )
+                self._set_status(f"Compare models: {payload.status}")
+                return
+
+            if kind == "validation_error":
+                detail = str(payload)
+                set_result(_format_comparison_validation_error(detail))
+                self._set_status("Compare models: model validation issue")
+                return
+
+            detail = str(payload)
+            logging.getLogger(__name__).error("Compare models failed: %s", detail)
+            set_result(f"Comparison failed.\n\n{detail}\n")
+            messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
+
+        def do_compare() -> None:
+            request = comparison_request()
+            if not validate_request(request, include_mapping=True):
+                return
+
+            try:
+                self.process_state.start(request)
+                self._active_request = request
+                set_compare_running(True)
+                set_result(f"Comparing models with the {request.strategy} strategy...\n")
+                self._set_status("Compare models running...")
+                self._poll_after_id = dialog.after(100, poll_compare, request)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Compare models failed")
+                self._cancel_poll()
+                self.process_state.interrupt()
+                self._active_request = None
+                set_compare_running(False)
+                detail = f"{type(exc).__name__}: {exc}"
+                set_result(f"Comparison failed.\n\n{detail}\n")
+                messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
+
+        compare_button.config(command=do_compare)
+        mapping_generate_button.config(command=generate_observable_mapping)
+
+        def mapping_is_running() -> bool:
+            active = self._active_operation()
+            return active is not None and active.kind == "genai-observable-mapping"
+
+        dialog.bind(
+            "<Return>",
+            lambda _event: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else do_compare()
+            ),
+        )
+        dialog.bind(
+            "<Escape>",
+            lambda _event: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else self.close()
+            ),
+        )
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else self.close()
+            ),
+        )
+        dialog.grab_set()
+        dialog.focus_set()
 
 
 if __name__ == "__main__":

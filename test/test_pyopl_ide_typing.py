@@ -31,6 +31,223 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", ""))
         self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("", "right.dat"))
 
+    def test_comparison_request_validates_paths_for_compare_and_mapping_generation(self):
+        with TemporaryDirectory() as tmpdir:
+            left = Path(tmpdir) / "left.mod"
+            right = Path(tmpdir) / "right.mod"
+            left_data = Path(tmpdir) / "left.dat"
+            right_data = Path(tmpdir) / "right.dat"
+            for path in (left, right, left_data, right_data):
+                path.write_text("", encoding="utf-8")
+            missing_mapping = str(Path(tmpdir) / "missing.json")
+            request = pyopl_ide_bootstrap._ComparisonRequest(
+                str(left), str(left_data), str(right), str(right_data), "abstract", missing_mapping
+            )
+
+            request.validate_paths()
+            with self.assertRaises(pyopl_ide_bootstrap._ComparisonInputError) as missing:
+                request.validate_paths(include_mapping=True)
+            self.assertFalse(missing.exception.warning)
+            self.assertEqual(str(missing.exception), f"Observable mapping file does not exist:\n{missing_mapping}")
+
+            invalid = (
+                ("", "", str(right), "", "Choose both a left model and a right model.", True),
+                (str(left), str(left_data), str(right), "", "Choose both data files or leave both data fields empty.", True),
+                (str(left), "", str(Path(tmpdir) / "missing.mod"), "", "Right model file does not exist:", False),
+            )
+            for left_model, left_dat, right_model, right_dat, expected, warning in invalid:
+                with self.subTest(expected=expected):
+                    candidate = pyopl_ide_bootstrap._ComparisonRequest(
+                        left_model, left_dat, right_model, right_dat, "abstract"
+                    )
+                    with self.assertRaises(pyopl_ide_bootstrap._ComparisonInputError) as error:
+                        candidate.validate_paths(include_mapping=True)
+                    self.assertEqual(error.exception.warning, warning)
+                    self.assertIn(expected, str(error.exception))
+
+    def test_comparison_process_owner_starts_and_releases_worker(self):
+        request = pyopl_ide_bootstrap._ComparisonRequest("left.mod", "", "right.mod", "", "abstract")
+        result_queue = mock.Mock()
+        process = mock.Mock()
+        owner = pyopl_ide_bootstrap._ComparisonProcessState()
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process) as process_cls,
+        ):
+            owner.start(request)
+
+        process_cls.assert_called_once_with(
+            target=pyopl_ide_bootstrap._compare_models_wrapper,
+            args=("left.mod", "", "right.mod", "", "abstract", result_queue, ""),
+        )
+        process.start.assert_called_once_with()
+        result_queue.get_nowait.return_value = ("success", "result")
+        self.assertEqual(owner.read_nowait(), ("success", "result"))
+
+        owner.finish()
+
+        process.join.assert_called_once_with(timeout=0.1)
+        result_queue.close.assert_called_once_with()
+        result_queue.join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+        self.assertIsNone(owner.result_queue)
+
+    def test_comparison_process_owner_cleans_up_failed_start_and_interrupt(self):
+        request = pyopl_ide_bootstrap._ComparisonRequest("left.mod", "", "right.mod", "", "abstract")
+        result_queue = mock.Mock()
+        process = mock.Mock()
+        process.start.side_effect = OSError("cannot spawn")
+        owner = pyopl_ide_bootstrap._ComparisonProcessState()
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process),
+        ):
+            with self.assertRaises(OSError):
+                owner.start(request)
+
+        result_queue.cancel_join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+
+        process.start.side_effect = None
+        process.is_alive.side_effect = [True, True]
+        owner.process = process
+        interrupt_queue = mock.Mock()
+        owner.result_queue = interrupt_queue
+        owner.interrupt()
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        interrupt_queue.cancel_join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+        self.assertIsNone(owner.result_queue)
+
+    def test_comparison_process_owner_rejects_invalid_messages(self):
+        owner = pyopl_ide_bootstrap._ComparisonProcessState(result_queue=mock.Mock())
+        owner.result_queue.get_nowait.return_value = ("unexpected", "payload")
+
+        with self.assertRaisesRegex(ValueError, "Invalid comparison worker message"):
+            owner.read_nowait()
+
+    def test_comparison_dialog_validates_completes_and_cancels_without_tk(self):
+        class DummyVar:
+            instances = []
+
+            def __init__(self, value=""):
+                self.value = value
+                self.instances.append(self)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        buttons = {}
+
+        def make_button(*_args, **kwargs):
+            button = mock.Mock()
+            button.command = kwargs.get("command")
+
+            def config(**updates):
+                if "command" in updates:
+                    button.command = updates["command"]
+
+            button.config.side_effect = config
+            buttons[kwargs.get("text")] = button
+            return button
+
+        dialog = mock.Mock()
+        dialog.after.return_value = "poll-id"
+        dialog.winfo_exists.return_value = True
+        result_text = mock.Mock()
+        host = SimpleNamespace(
+            model_file=None,
+            data_file=None,
+            genai_provider=None,
+            genai_model=None,
+            _active_operation=None,
+            _ensure_no_active_operation=mock.Mock(return_value=True),
+            _start_foreground_operation=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            interrupt_active_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=mock.Mock(),
+            after=mock.Mock(),
+        )
+        result = SimpleNamespace(
+            status="unknown", level="inconclusive", reason="no proof", proof_steps=(), counterexample=None
+        )
+        first_queue, second_queue, third_queue = mock.Mock(), mock.Mock(), mock.Mock()
+        first_queue.get_nowait.return_value = ("success", result)
+        third_queue.get_nowait.side_effect = pyopl_ide_bootstrap.queue.Empty
+        first_process, second_process, third_process = mock.Mock(), mock.Mock(), mock.Mock()
+        third_process.is_alive.return_value = False
+
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "LabelFrame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
+            mock.patch.object(pyopl_ide_bootstrap.scrolledtext, "ScrolledText", return_value=result_text),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            mock.patch.object(
+                pyopl_ide_bootstrap.multiprocessing, "Queue", side_effect=[first_queue, second_queue, third_queue]
+            ),
+            mock.patch.object(
+                pyopl_ide_bootstrap.multiprocessing, "Process", side_effect=[first_process, second_process, third_process]
+            ),
+            mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=mock.Mock()) as thread_cls,
+        ):
+            OPLIDE.compare_models(host)
+            compare_button = buttons["Compare"]
+            compare_button.command()
+            showwarning.assert_called_once()
+
+            left_path = Path(tmpdir) / "left.mod"
+            right_path = Path(tmpdir) / "right.mod"
+            left_path.write_text("minimize 0;", encoding="utf-8")
+            right_path.write_text("minimize 0;", encoding="utf-8")
+            DummyVar.instances[1].set(str(left_path))
+            DummyVar.instances[3].set(str(right_path))
+            compare_button.command()
+            poll = dialog.after.call_args.args[1:]
+            poll[0](*poll[1:])
+            self.assertIn("Status: unknown", result_text.insert.call_args.args[1])
+            first_queue.join_thread.assert_called_once()
+
+            escape = next(call.args[1] for call in dialog.bind.call_args_list if call.args[0] == "<Escape>")
+            mapping_operation = pyopl_ide_bootstrap._ForegroundOperation("genai-observable-mapping", "Mapping", "s1")
+            host.genai_provider = "openai"
+            host.genai_model = "selected-model"
+            host._start_foreground_operation.return_value = mapping_operation
+            host._active_operation = mapping_operation
+            host.interrupt_active_operation.side_effect = lambda: setattr(host, "_active_operation", None)
+            buttons["Generate"].command()
+            thread_cls.return_value.start.assert_called_once_with()
+            escape(None)
+            host.interrupt_active_operation.assert_called_once_with()
+
+            compare_button.command()
+            escape(None)
+            second_queue.cancel_join_thread.assert_called_once()
+            dialog.after_cancel.assert_called_once_with("poll-id")
+            self.assertFalse(dialog.destroy.called)
+
+            compare_button.command()
+            poll = dialog.after.call_args.args[1:]
+            poll[0](*poll[1:])
+            third_queue.cancel_join_thread.assert_called_once()
+            showerror.assert_called_once_with("Compare models", "Comparison process terminated unexpectedly.", parent=dialog)
+            escape(None)
+            dialog.destroy.assert_called_once()
+
     def test_compare_wrapper_reports_semantic_error_without_traceback(self):
         result_queue = mock.Mock()
         error = SemanticError("index 2 of 'shipment' can exceed its declared range")
