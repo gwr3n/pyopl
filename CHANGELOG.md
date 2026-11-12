@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Keep IDE GenAI revisions in typed pending state until explicit Apply, preserving the preview and cleaning up partial revision files on write failure.
+- Share Generate and Ask request progress, provider/model snapshots, cancellation checks, and optional logger bridging while retaining their distinct results.
 - Align GraphChain type stubs with multimodal prompt support in the implementation.
 - Separate IDE settings parsing and persistence from Tk preference application while preserving the settings format.
 - Centralize output-session creation and append mutations without changing session storage or UI behavior.
@@ -46,6 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Group model/data editor paths, saved baselines, syntax errors, and highlight timers into independent in-file state records.
 - Separate editor highlight ranges from Tk rendering and give find/replace its own in-file dialog owner.
 - Route IDE bridge reads and writes through editor operations while validating both fields before mutation.
+- Centralize GenAI visual attachments and rendered PDF cleanup in an in-file owner, preserving prompt snapshots.
 
 ### Removed
 

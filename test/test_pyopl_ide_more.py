@@ -522,7 +522,7 @@ minimize x;
         widgets = [Widget() for _ in range(6)]
         dummy = SimpleNamespace(
             _active_operation=SimpleNamespace(kind="genai-generate"),
-            _genai_attachment_paths=[],
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
             genai_panel_mode_var=DummyVar("generate"),
             genai_prompt_title_var=DummyVar(),
             genai_submit_label_var=DummyVar(),
@@ -582,16 +582,17 @@ minimize x;
         dummy.open_data.assert_called_once_with()
 
     def test_attachment_drop_filters_files_and_renders_pdf(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
+        attachments.render_pdf = mock.Mock(return_value=["/tmp/rendered/page_1.png"])
         dummy = SimpleNamespace(
-            _genai_attachment_paths=[],
-            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png"]),
+            _genai_attachments=attachments,
             _refresh_genai_attachment_list=mock.Mock(),
         )
 
         OPLIDE._add_genai_attachment_paths(dummy, ["/tmp/sketch.png", "/tmp/notes.txt", "/tmp/formulation.pdf"])
 
-        self.assertEqual(dummy._genai_attachment_paths, ["/tmp/sketch.png", "/tmp/rendered/page_1.png"])
-        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/formulation.pdf")
+        self.assertEqual(attachments.paths, ["/tmp/sketch.png", "/tmp/rendered/page_1.png"])
+        self.assertEqual(attachments.render_pdf.call_args.args[0], "/tmp/formulation.pdf")
         dummy._refresh_genai_attachment_list.assert_called_once_with()
 
     def test_mcp_bridge_handler_reads_and_partially_updates_editors(self):
@@ -1404,7 +1405,7 @@ minimize x;
             stop_model=mock.Mock(),
             _save_settings=mock.Mock(),
             _save_session=mock.Mock(),
-            _cleanup_genai_pdf_temp_dir=mock.Mock(),
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
             destroy=mock.Mock(),
             quit=mock.Mock(),
         )

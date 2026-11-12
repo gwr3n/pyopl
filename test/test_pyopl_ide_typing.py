@@ -1,6 +1,7 @@
 import os
 import queue
 import unittest
+from builtins import open as builtin_open
 from contextlib import redirect_stdout
 from datetime import datetime
 from io import StringIO
@@ -2429,15 +2430,19 @@ class TestPyOPLIDETyping(unittest.TestCase):
             log = []
             artifact_calls = []
             dummy = SimpleNamespace(
-                _genai_pending_revisions={
-                    "revised_model": "dvar int y;\n",
-                    "revised_data": "y = 2;\n",
-                    "model_path": str(original_model),
-                    "data_path": str(original_data),
-                    "safe_ts": "2026-05-03_01-20-41",
-                    "had_data_file": True,
-                    "session_id": "session-1",
-                },
+                _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(
+                    pyopl_ide_bootstrap._PendingGenAIRevision(
+                        revised_model="dvar int y;\n",
+                        revised_data="y = 2;\n",
+                        current_model="dvar int x;\n",
+                        current_data="old = 1;\n",
+                        model_path=str(original_model),
+                        data_path=str(original_data),
+                        safe_ts="2026-05-03_01-20-41",
+                        had_data_file=True,
+                        session_id="session-1",
+                    )
+                ),
                 _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(original_model)),
                 _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(original_data)),
                 model_text=DummyText("dvar int x;\n"),
@@ -2458,6 +2463,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
             self.assertEqual(Path(dummy._model_editor_state.path).name, "model_2026-05-03_01-20-41.mod")
             self.assertEqual(Path(dummy._data_editor_state.path).name, "data_2026-05-03_01-20-41.dat")
+            self.assertIsNone(dummy._genai_revisions.pending)
             self.assertEqual(
                 artifact_calls,
                 [
@@ -2469,22 +2475,96 @@ class TestPyOPLIDETyping(unittest.TestCase):
             )
 
     def test_pending_unsaved_genai_revisions_use_tmp_timestamp_basename(self):
-        dummy = SimpleNamespace(model_text=SimpleNamespace(get=lambda *_args: "model"))
-
         with TemporaryDirectory() as tmpdir:
-            model_target, data_target = OPLIDE._write_pending_revision_files(
-                dummy,
+            pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+                revised_model="revised model",
+                revised_data="revised data",
+                current_model="model",
+                current_data="",
+                model_path=str(Path(tmpdir) / "temp_model.mod"),
+                data_path=str(Path(tmpdir) / "temp_data.dat"),
+                safe_ts="2026-08-24_00-47-51",
+                had_data_file=False,
+                session_id=None,
+            )
+            model_target, data_target = pyopl_ide_bootstrap._write_genai_revision_files(
+                pending,
                 tmpdir,
-                "revised model",
-                "revised data",
-                str(Path(tmpdir) / "temp_model.mod"),
-                str(Path(tmpdir) / "temp_data.dat"),
-                "2026-08-24_00-47-51",
-                False,
+                pending.model_path,
+                pending.data_path,
+                pending.safe_ts,
+                pending.current_model,
             )
 
             self.assertEqual(Path(model_target).name, "tmp_2026-08-24_00-47-51.mod")
             self.assertEqual(Path(data_target).name, "tmp_2026-08-24_00-47-51.dat")
+            second_model, second_data = pyopl_ide_bootstrap._write_genai_revision_files(
+                pending, tmpdir, pending.model_path, pending.data_path, pending.safe_ts, pending.current_model
+            )
+            self.assertEqual(Path(second_model).name, "tmp_2026-08-24_00-47-51_1.mod")
+            self.assertEqual(Path(second_data).name, "tmp_2026-08-24_00-47-51_1.dat")
+
+    def test_pending_genai_revisions_preview_before_apply_and_survive_failure(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            revised_model="new model",
+            revised_data="",
+            current_model="old model",
+            current_data="",
+            model_path="original.mod",
+            data_path="",
+            safe_ts="2026-11-12_16-00-00",
+            had_data_file=False,
+            session_id="session-1",
+        )
+        dummy = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(),
+            genai_pending_var=mock.Mock(),
+            genai_pending_frame=mock.Mock(),
+            _show_pending_genai_diff_preview=mock.Mock(),
+            _close_pending_genai_diff_preview=mock.Mock(),
+        )
+
+        OPLIDE._set_pending_genai_revisions(dummy, pending)
+
+        self.assertIs(dummy._genai_revisions.pending, pending)
+        dummy._show_pending_genai_diff_preview.assert_called_once_with()
+
+        def fail_apply(_pending):
+            raise OSError("disk failure")
+
+        with self.assertRaisesRegex(OSError, "disk failure"):
+            dummy._genai_revisions.apply(fail_apply)
+        self.assertIs(dummy._genai_revisions.pending, pending)
+        self.assertTrue(dummy._genai_revisions.apply(lambda _pending: None))
+        OPLIDE._clear_pending_genai_revisions(dummy)
+        self.assertIsNone(dummy._genai_revisions.pending)
+        dummy._close_pending_genai_diff_preview.assert_called_once_with()
+
+    def test_revision_file_failure_removes_partial_model_file(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            revised_model="new model",
+            revised_data="new data",
+            current_model="old model",
+            current_data="old data",
+            model_path="source.mod",
+            data_path="source.dat",
+            safe_ts="2026-11-12_16-00-00",
+            had_data_file=True,
+            session_id="session-1",
+        )
+
+        def failing_open(path, *args, **kwargs):
+            if str(path).endswith(".dat"):
+                raise OSError("cannot write data")
+            return builtin_open(path, *args, **kwargs)
+
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.object(pyopl_ide_bootstrap, "open", failing_open, create=True):
+                with self.assertRaisesRegex(OSError, "cannot write data"):
+                    pyopl_ide_bootstrap._write_genai_revision_files(
+                        pending, tmpdir, pending.model_path, pending.data_path, pending.safe_ts, pending.current_model
+                    )
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
@@ -2658,8 +2738,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(formatted, "\nPrompt:\nMaximize profit subject to capacity.\n\n")
 
     def test_format_prompt_for_output_with_attachments(self):
+        dummy = SimpleNamespace(_genai_attachments=pyopl_ide_bootstrap._GenAIAttachments())
         formatted = OPLIDE._format_prompt_for_output(
-            None,
+            dummy,
             "Question",
             {
                 "text": "Please explain the bottleneck.",
@@ -2675,7 +2756,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
     def test_format_prompt_for_output_uses_friendly_attachment_labels(self):
         dummy = SimpleNamespace(
-            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(
+                labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+            )
         )
 
         formatted = OPLIDE._format_prompt_for_output(
@@ -2688,30 +2771,28 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertNotIn("/tmp/rendered/page_1.png", formatted)
 
     def test_attachment_list_label_compacts_rendered_pdf_page(self):
-        dummy = SimpleNamespace(
-            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(
+            labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
         )
 
         self.assertEqual(
-            OPLIDE._list_label_for_genai_attachment_path(dummy, "/tmp/rendered/page_1.png"),
+            attachments.list_label("/tmp/rendered/page_1.png"),
             "diet-problem.pdf page 1",
         )
 
     def test_attachment_list_label_keeps_image_basename(self):
-        dummy = SimpleNamespace(_genai_attachment_display_labels={})
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
 
         self.assertEqual(
-            OPLIDE._list_label_for_genai_attachment_path(
-                dummy, "/Users/gwren/Downloads/Screenshot 2026-06-30 at 21.37.52.png"
-            ),
+            attachments.list_label("/Users/gwren/Downloads/Screenshot 2026-06-30 at 21.37.52.png"),
             "Screenshot 2026-06-30 at 21.37.52.png",
         )
 
     def test_genai_add_images_converts_pdf_to_rendered_paths(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(paths=["/tmp/existing.png"])
+        attachments.render_pdf = mock.Mock(return_value=["/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png"])
         dummy = SimpleNamespace(
-            _genai_attachment_paths=["/tmp/existing.png"],
-            _genai_attachment_display_labels={},
-            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png"]),
+            _genai_attachments=attachments,
             _refresh_genai_attachment_list=mock.Mock(),
         )
 
@@ -2723,11 +2804,42 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._genai_add_images(dummy)
 
         self.assertEqual(
-            dummy._genai_attachment_paths,
+            attachments.paths,
             ["/tmp/existing.png", "/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png", "/tmp/photo.png"],
         )
-        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/sketch.pdf")
+        self.assertEqual(attachments.render_pdf.call_args.args[0], "/tmp/sketch.pdf")
         dummy._refresh_genai_attachment_list.assert_called_once()
+
+    def test_genai_prompt_uses_attachment_snapshot_after_list_clears(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(paths=["/tmp/sketch.png"])
+        dummy = SimpleNamespace(
+            genai_prompt_text=SimpleNamespace(get=lambda *_args: ""),
+            genai_panel_mode_var=SimpleNamespace(get=lambda: "generate"),
+            _genai_attachments=attachments,
+        )
+
+        prompt_input = OPLIDE._collect_genai_prompt_input(dummy)
+        attachments.clear()
+
+        self.assertEqual(prompt_input, {"text": "", "images": [{"path": "/tmp/sketch.png"}]})
+        self.assertIsNone(OPLIDE._collect_genai_prompt_input(dummy))
+
+    def test_clearing_attachments_removes_rendered_pdf_temp_dir(self):
+        with TemporaryDirectory() as tmpdir:
+            render_dir = Path(tmpdir) / "rendered"
+            render_dir.mkdir()
+            page = render_dir / "page_1.png"
+            page.write_text("png", encoding="utf-8")
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(
+                paths=[str(page)], labels={str(page): "paper.pdf page 1"}, pdf_temp_dir=str(render_dir)
+            )
+
+            attachments.clear()
+
+            self.assertFalse(render_dir.exists())
+            self.assertEqual(attachments.snapshot(), ())
+            self.assertEqual(attachments.labels, {})
+            self.assertIsNone(attachments.pdf_temp_dir)
 
     def test_render_genai_pdf_attachment_rejects_large_pdf(self):
         class FakeDocument:
@@ -2741,13 +2853,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         fake_document = FakeDocument()
         fake_fitz = SimpleNamespace(open=mock.Mock(return_value=fake_document))
-        dummy = SimpleNamespace()
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
 
-        with (
-            mock.patch.dict("sys.modules", {"fitz": fake_fitz}),
-            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
-        ):
-            rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/too-large.pdf")
+        with (mock.patch.dict("sys.modules", {"fitz": fake_fitz}),):
+            showwarning = mock.Mock()
+            rendered = attachments.render_pdf("/tmp/too-large.pdf", mock.Mock(), showwarning)
 
         self.assertEqual(rendered, [])
         showwarning.assert_called_once()
@@ -2777,20 +2887,54 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 self.y_scale = y_scale
 
         with TemporaryDirectory() as tmpdir:
-            dummy = SimpleNamespace(_genai_pdf_temp_dir=tmpdir, _genai_attachment_display_labels={})
-            dummy._ensure_genai_pdf_temp_dir = lambda: OPLIDE._ensure_genai_pdf_temp_dir(dummy)
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(pdf_temp_dir=tmpdir)
             fake_fitz = SimpleNamespace(open=mock.Mock(return_value=FakeDocument()), Matrix=FakeMatrix)
 
             with mock.patch.dict("sys.modules", {"fitz": fake_fitz}):
-                rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/sketch.pdf")
+                rendered = attachments.render_pdf("/tmp/sketch.pdf", mock.Mock(), mock.Mock())
 
             self.assertEqual(len(rendered), 2)
             self.assertTrue(rendered[0].endswith("page_1.png"))
             self.assertTrue(rendered[1].endswith("page_2.png"))
             self.assertTrue(Path(rendered[0]).exists())
             self.assertTrue(Path(rendered[1]).exists())
-            self.assertEqual(dummy._genai_attachment_display_labels[rendered[0]], "/tmp/sketch.pdf page 1")
-            self.assertEqual(dummy._genai_attachment_display_labels[rendered[1]], "/tmp/sketch.pdf page 2")
+            self.assertEqual(attachments.labels[rendered[0]], "/tmp/sketch.pdf page 1")
+            self.assertEqual(attachments.labels[rendered[1]], "/tmp/sketch.pdf page 2")
+
+    def test_failed_pdf_render_removes_partial_pages_and_labels(self):
+        class FakePage:
+            def __init__(self, index):
+                self.index = index
+
+            def get_pixmap(self, **_kwargs):
+                return self
+
+            def save(self, path):
+                if self.index:
+                    raise OSError("render failed")
+                Path(path).write_text("page one", encoding="utf-8")
+
+        class FakeDocument:
+            page_count = 2
+
+            def load_page(self, index):
+                return FakePage(index)
+
+            def close(self):
+                pass
+
+        with TemporaryDirectory() as tmpdir:
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(pdf_temp_dir=tmpdir)
+            fake_fitz = SimpleNamespace(open=lambda _path: FakeDocument(), Matrix=lambda *_args: object())
+            on_error = mock.Mock()
+
+            with mock.patch.dict("sys.modules", {"fitz": fake_fitz}):
+                rendered = attachments.render_pdf("/tmp/sketch.pdf", on_error, mock.Mock())
+
+            self.assertEqual(rendered, [])
+            self.assertEqual(attachments.labels, {})
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
+            self.assertIn("render failed", on_error.call_args.args[0])
 
     def test_append_output_to_prompt_input_text_only(self):
         merged = OPLIDE._append_output_to_prompt_input(
@@ -2836,6 +2980,183 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 "images": [{"path": "/tmp/chart.png"}],
             },
         )
+
+
+class TestGenAIRequestRunner(unittest.TestCase):
+    def _request_host(self, generator, operation, scheduled):
+        return SimpleNamespace(
+            genai_provider="selected-provider",
+            genai_model="selected-model",
+            verbose_llm_var=SimpleNamespace(get=lambda: False),
+            genai_method_var=SimpleNamespace(get=lambda: "default"),
+            _label_for_method=lambda value: value,
+            _import_selected_genai_module=lambda: generator,
+            _start_foreground_operation=lambda **kwargs: operation,
+            _finish_foreground_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+            _format_prompt_for_output=lambda label, prompt: label,
+            _clear_pending_genai_revisions=mock.Mock(),
+            _session_state=SimpleNamespace(timestamps={operation.session_id: "2026-01-01 12:00:00"}),
+            after=lambda delay, callback, *args: scheduled.append((callback, args)),
+            _clear_genai_composer=mock.Mock(),
+            _save_session=mock.Mock(),
+            status_var=mock.Mock(),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+        )
+
+    def test_generate_snapshots_selection_and_discards_cancelled_completion(self):
+        with TemporaryDirectory() as tmpdir:
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-generate", "Generate", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_generate"
+
+            def generate(prompt, model_path, data_path, **kwargs):
+                Path(model_path).write_text("generated model")
+                Path(data_path).write_text("generated data")
+                kwargs["progress"]("working")
+                return "assessment"
+
+            generator.generative_solve.side_effect = generate
+            host = self._request_host(generator, operation, scheduled)
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE._run_genai_generate(host, "prompt")
+                host.genai_provider, host.genai_model = "changed-provider", "changed-model"
+                thread_cls.call_args.kwargs["target"]()
+
+            self.assertEqual(generator.generative_solve.call_args.kwargs["llm_provider"], "selected-provider")
+            self.assertEqual(generator.generative_solve.call_args.kwargs["model_name"], "selected-model")
+            operation.cancel_requested = True
+            for callback, args in scheduled:
+                callback(*args)
+            host._append_output.assert_called_once_with("Prompt", "session-1")
+            host._finish_foreground_operation.assert_not_called()
+            host.model_text.delete.assert_not_called()
+
+    def test_feedback_snapshots_selection_and_previews_revision(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "original.mod"
+            model_path.write_text("original model")
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_feedback"
+            generator.generative_feedback.return_value = {"feedback": "suggestion", "revised_model": "new model"}
+            host = self._request_host(generator, operation, scheduled)
+            host._data_editor_state = SimpleNamespace(path=None)
+            host._ensure_model_data_saved = lambda: (str(model_path), None)
+            host._set_pending_genai_revisions = mock.Mock()
+            host.model_text.get.return_value = "original model"
+            host.data_text.get.return_value = "original data"
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE._run_genai_feedback(host, "question")
+                host.genai_provider, host.genai_model = "changed-provider", "changed-model"
+                thread_cls.call_args.kwargs["target"]()
+
+            self.assertEqual(generator.generative_feedback.call_args.kwargs["llm_provider"], "selected-provider")
+            self.assertEqual(generator.generative_feedback.call_args.kwargs["model_name"], "selected-model")
+            for callback, args in scheduled:
+                callback(*args)
+            pending = host._set_pending_genai_revisions.call_args.args[0]
+            self.assertEqual(pending.revised_model, "new model")
+            self.assertEqual(pending.current_model, "original model")
+            self.assertEqual(pending.session_id, "session-1")
+            host._append_output.assert_any_call("\nFeedback:\nsuggestion\n", "session-1")
+            host.model_text.delete.assert_not_called()
+
+    def test_feedback_provider_failure_is_reported_in_request_session(self):
+        with TemporaryDirectory() as tmpdir:
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_feedback_error"
+            generator.generative_feedback.side_effect = ValueError("provider failed")
+            host = self._request_host(generator, operation, scheduled)
+            host._data_editor_state = SimpleNamespace(path=None)
+            host._ensure_model_data_saved = lambda: (str(Path(tmpdir) / "model.mod"), None)
+            host._set_pending_genai_revisions = mock.Mock()
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                OPLIDE._run_genai_feedback(host, "question")
+                thread_cls.call_args.kwargs["target"]()
+                for callback, args in scheduled:
+                    callback(*args)
+
+            showerror.assert_called_once()
+            host._append_output.assert_any_call("\nGenAI Error: provider failed\n", "session-1")
+            host.status_var.set.assert_called_with("GenAI: error")
+            host._set_pending_genai_revisions.assert_not_called()
+
+    def test_generate_and_feedback_use_selected_provider_and_session_progress(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1")
+        scheduled = []
+        append_output = mock.Mock()
+        gen_module = mock.Mock()
+        gen_module.__name__ = "pyopl.test_genai_runner"
+        gen_module.generative_solve.side_effect = lambda *args, **kwargs: kwargs["progress"]("generating")
+        gen_module.generative_feedback.side_effect = lambda *args, **kwargs: kwargs["progress"]("asking")
+        runner = pyopl_ide_bootstrap._GenAIRequestRunner(
+            operation,
+            "selected-provider",
+            "selected-model",
+            gen_module,
+            False,
+            lambda delay, callback, *args: scheduled.append((callback, args)),
+            append_output,
+        )
+
+        runner.generate("prompt", "model.mod", "data.dat")
+        runner.feedback("prompt", "model.mod", "data.dat")
+        self.assertEqual(gen_module.generative_solve.call_args.kwargs["llm_provider"], "selected-provider")
+        self.assertEqual(gen_module.generative_solve.call_args.kwargs["model_name"], "selected-model")
+        self.assertEqual(gen_module.generative_feedback.call_args.kwargs["llm_provider"], "selected-provider")
+        self.assertEqual(gen_module.generative_feedback.call_args.kwargs["model_name"], "selected-model")
+
+        for callback, args in scheduled:
+            callback(*args)
+        append_output.assert_has_calls([mock.call("generating\n", "session-1"), mock.call("asking\n", "session-1")])
+
+        operation.cancel_requested = True
+        gen_module.generative_feedback.call_args.kwargs["progress"]("late")
+        for callback, args in scheduled:
+            callback(*args)
+        self.assertEqual(append_output.call_count, 2)
+
+    def test_verbose_logger_restored_after_provider_failure(self):
+        import logging
+
+        logger = logging.getLogger("pyopl.test_genai_runner_failure")
+        previous_level, previous_handlers = logger.level, list(logger.handlers)
+        gen_module = mock.Mock()
+        gen_module.__name__ = logger.name
+        gen_module.generative_feedback.side_effect = ValueError("provider failed")
+        runner = pyopl_ide_bootstrap._GenAIRequestRunner(
+            pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1"),
+            "provider",
+            "model",
+            gen_module,
+            True,
+            mock.Mock(),
+            mock.Mock(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "provider failed"):
+            runner.feedback("prompt", "model.mod", "data.dat")
+        self.assertEqual(logger.level, previous_level)
+        self.assertEqual(logger.handlers, previous_handlers)
 
 
 if __name__ == "__main__":

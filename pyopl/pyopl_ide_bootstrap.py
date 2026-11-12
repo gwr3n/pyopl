@@ -1151,6 +1151,298 @@ class _EditorBufferState:
         return True
 
 
+@dataclass
+class _GenAIAttachments:
+    paths: list[str] = field(default_factory=list)
+    labels: dict[str, str] = field(default_factory=dict)
+    pdf_temp_dir: Optional[str] = None
+
+    def snapshot(self) -> tuple[str, ...]:
+        return tuple(self.paths)
+
+    def label(self, path: str) -> str:
+        return self.labels.get(path) or path
+
+    def list_label(self, path: str) -> str:
+        label = self.label(path)
+        if label == path:
+            return os.path.basename(path)
+        match = re.match(r"^(.*\.pdf)( page \d+)$", label, re.IGNORECASE)
+        if match:
+            return f"{os.path.basename(match.group(1))}{match.group(2)}"
+        return label
+
+    def add_paths(self, paths: list[str], on_error: Callable[[str], object], on_warning: Callable[[str], object]) -> None:
+        supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".pdf"}
+        for path in paths:
+            path_str = str(path)
+            if not path_str or Path(path_str).suffix.lower() not in supported_suffixes:
+                continue
+            images = self.render_pdf(path_str, on_error, on_warning) if path_str.lower().endswith(".pdf") else (path_str,)
+            for image in images:
+                if image not in self.paths:
+                    self.paths.append(image)
+
+    def remove_at(self, index: int) -> None:
+        if 0 <= index < len(self.paths):
+            self.labels.pop(self.paths.pop(index), None)
+
+    def clear(self) -> None:
+        self.paths.clear()
+        self.labels.clear()
+        self.cleanup()
+
+    def ensure_temp_dir(self) -> str:
+        if self.pdf_temp_dir and os.path.isdir(self.pdf_temp_dir):
+            return self.pdf_temp_dir
+        self.pdf_temp_dir = tempfile.mkdtemp(prefix="rhetor_syntagm_pdf_")
+        return self.pdf_temp_dir
+
+    def cleanup(self) -> None:
+        if self.pdf_temp_dir is None:
+            return
+        try:
+            shutil.rmtree(self.pdf_temp_dir)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logging.getLogger(__name__).exception("Failed to clean up rendered GenAI PDF attachments")
+            return
+        self.pdf_temp_dir = None
+
+    def render_pdf(self, pdf_path: str, on_error: Callable[[str], object], on_warning: Callable[[str], object]) -> list[str]:
+        try:
+            import fitz  # type: ignore[import-not-found]
+        except ImportError:
+            on_error("PDF attachments require PyMuPDF. Install it with: pip install PyMuPDF")
+            return []
+
+        try:
+            document = fitz.open(pdf_path)
+        except Exception as exc:
+            on_error(f"Could not open PDF attachment:\n{exc}")
+            return []
+
+        try:
+            return self._render_pdf_pages(document, pdf_path, lambda x, y: fitz.Matrix(x, y), on_warning)
+        except Exception as exc:
+            on_error(f"Could not render PDF attachment:\n{exc}")
+            return []
+        finally:
+            document.close()
+
+    def _render_pdf_pages(
+        self,
+        document: Any,
+        pdf_path: str,
+        matrix_factory: Callable[[float, float], Any],
+        on_warning: Callable[[str], object],
+    ) -> list[str]:
+        raw_page_count = getattr(document, "page_count", None)
+        page_count = int(raw_page_count if raw_page_count is not None else len(document))
+        if page_count > GENAI_MAX_PDF_PAGES:
+            on_warning(
+                f"SyntAGM accepts PDFs up to {GENAI_MAX_PDF_PAGES} pages. "
+                "For longer documents, attach screenshots of the relevant formulation."
+            )
+            return []
+
+        stem = Path(pdf_path).stem or "attachment"
+        temp_dir = tempfile.mkdtemp(prefix=f"{stem}_", dir=self.ensure_temp_dir())
+        rendered_paths: list[str] = []
+        try:
+            matrix = matrix_factory(GENAI_PDF_RENDER_DPI / 72.0, GENAI_PDF_RENDER_DPI / 72.0)
+            for page_index in range(page_count):
+                page = document.load_page(page_index)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                image_path = os.path.join(temp_dir, f"page_{page_index + 1}.png")
+                pixmap.save(image_path)
+                self.labels[image_path] = f"{pdf_path} page {page_index + 1}"
+                rendered_paths.append(image_path)
+        except Exception:
+            for path in rendered_paths:
+                self.labels.pop(path, None)
+            try:
+                shutil.rmtree(temp_dir)
+            except OSError:
+                logging.getLogger(__name__).exception("Failed to clean up incomplete PDF rendering")
+            raise
+        return rendered_paths
+
+
+@dataclass(frozen=True)
+class _PendingGenAIRevision:
+    revised_model: str
+    revised_data: str
+    current_model: str
+    current_data: str
+    model_path: str
+    data_path: str
+    safe_ts: str
+    had_data_file: bool
+    session_id: Optional[str]
+
+
+@dataclass
+class _GenAIRevisionState:
+    pending: Optional[_PendingGenAIRevision] = None
+
+    def set(self, pending: _PendingGenAIRevision) -> None:
+        self.pending = pending
+
+    def clear(self) -> None:
+        self.pending = None
+
+    def apply(self, apply_revision: Callable[[_PendingGenAIRevision], None]) -> bool:
+        pending = self.pending
+        if pending is None:
+            return False
+        apply_revision(pending)
+        self.pending = None
+        return True
+
+
+class _GenAIProgressLogHandler(logging.Handler):
+    def __init__(self, progress: Callable[[str], None]) -> None:
+        super().__init__()
+        self._progress = progress
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            message = record.getMessage()
+        self._progress(message)
+
+
+class _GenAIRequestRunner:
+    def __init__(
+        self,
+        operation: _ForegroundOperation,
+        provider: str,
+        model_name: str,
+        generator: Any,
+        verbose: bool,
+        schedule: Callable[..., Any],
+        append_output: Callable[[str, Optional[str]], None],
+    ) -> None:
+        self.operation = operation
+        self.provider = provider
+        self.model_name = model_name
+        self.generator = generator
+        self.verbose = verbose
+        self.schedule = schedule
+        self.append_output = append_output
+        self.logger = logging.getLogger(getattr(generator, "__name__", "pyopl.genai.pyopl_generative"))
+
+    def progress(self, message: str) -> None:
+        if not self.operation.cancel_requested:
+            self.schedule(0, self._append_progress, message if message.endswith("\n") else message + "\n")
+
+    def _append_progress(self, message: str) -> None:
+        if not self.operation.cancel_requested:
+            self.append_output(message, self.operation.session_id)
+
+    def _invoke(self, call: Callable[[Callable[[str], None]], Any]) -> Any:
+        handler: Optional[_GenAIProgressLogHandler] = None
+        old_level = self.logger.level
+        if self.verbose:
+            handler = _GenAIProgressLogHandler(self.progress)
+            handler.setLevel(logging.DEBUG)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.DEBUG)
+        try:
+            return call(self.progress)
+        finally:
+            if handler is not None:
+                self.logger.removeHandler(handler)
+                self.logger.setLevel(old_level)
+
+    def generate(self, prompt_input: _PromptInput, model_path: str, data_path: str) -> Any:
+        return self._invoke(
+            lambda progress: self.generator.generative_solve(
+                prompt_input,
+                model_path,
+                data_path,
+                model_name=self.model_name,
+                llm_provider=self.provider,
+                progress=progress,
+            )
+        )
+
+    def feedback(self, prompt_input: _PromptInput, model_path: str, data_path: Optional[str]) -> Any:
+        return self._invoke(
+            lambda progress: self.generator.generative_feedback(
+                prompt_input,
+                model_path,
+                data_path,
+                model_name=self.model_name,
+                llm_provider=self.provider,
+                progress=progress,
+            )
+        )
+
+    def start(self, worker: Callable[[], None]) -> None:
+        threading.Thread(target=worker, daemon=True).start()
+
+
+def _unique_revision_path(base_path: str, extension: str) -> str:
+    target = base_path + extension
+    suffix = 1
+    while os.path.exists(target):
+        target = f"{base_path}_{suffix}{extension}"
+        suffix += 1
+    return target
+
+
+def _write_genai_revision_files(
+    pending: _PendingGenAIRevision,
+    tmp_dir: str,
+    model_path: str,
+    data_path: str,
+    safe_ts: str,
+    current_model_text: str,
+) -> tuple[str, Optional[str]]:
+    def strip_ts_suffix(name: str) -> str:
+        match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
+        return match.group(1) if match and match.group(1) else name
+
+    model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
+    model_ext = model_ext or ".mod"
+    model_base_name = strip_ts_suffix(model_base_name)
+    if model_base_name == "temp_model":
+        model_base_name = "tmp"
+    model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
+    model_tgt = _unique_revision_path(model_base, model_ext)
+    data_tgt = None
+    try:
+        with open(model_tgt, "w", encoding="utf-8") as file_obj:
+            file_obj.write(pending.revised_model if pending.revised_model else current_model_text)
+
+        if pending.revised_data:
+            if pending.had_data_file:
+                data_base_name, data_ext = os.path.splitext(os.path.basename(data_path))
+                data_ext = data_ext or ".dat"
+            else:
+                data_base_name, data_ext = model_base_name, ".dat"
+            data_base_name = strip_ts_suffix(data_base_name)
+            data_base = os.path.join(tmp_dir, f"{data_base_name}_{safe_ts}")
+            data_tgt = _unique_revision_path(data_base, data_ext)
+            with open(data_tgt, "w", encoding="utf-8") as file_obj:
+                file_obj.write(pending.revised_data)
+    except OSError:
+        for target in (model_tgt, data_tgt):
+            if target is not None:
+                try:
+                    os.remove(target)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logging.getLogger(__name__).exception("Failed to clean up incomplete GenAI revision file: %s", target)
+        raise
+    return model_tgt, data_tgt
+
+
 def _make_text_indexer(code: str) -> Callable[[int], str]:
     line_starts = [0] + [index + 1 for index, char in enumerate(code) if char == "\n"]
 
@@ -1476,10 +1768,8 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_context_var = tk.StringVar(value="No GenAI model selected")
         self.genai_attachment_summary_var = tk.StringVar(value="No visual attachments")
         self.genai_pending_var = tk.StringVar(value="")
-        self._genai_attachment_paths: list[str] = []
-        self._genai_attachment_display_labels: dict[str, str] = {}
-        self._genai_pdf_temp_dir: Optional[str] = None
-        self._genai_pending_revisions: Optional[dict[str, Any]] = None
+        self._genai_attachments = _GenAIAttachments()
+        self._genai_revisions = _GenAIRevisionState()
 
         self._session_state = _OutputSessionState()
         self._active_operation: Optional[_ForegroundOperation] = None
@@ -3028,7 +3318,7 @@ class OPLIDE(TkinterDnD.Tk):
             else:
                 self.genai_attach_output_check.grid_remove()
 
-        attachment_count = len(getattr(self, "_genai_attachment_paths", []))
+        attachment_count = len(self._genai_attachments.paths)
         if attachment_count == 0:
             self.genai_attachment_summary_var.set("No visual attachments")
         elif attachment_count == 1:
@@ -3076,33 +3366,15 @@ class OPLIDE(TkinterDnD.Tk):
         """Clear the docked GenAI composer state."""
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.delete("1.0", tk.END)
-        self._genai_attachment_paths.clear()
-        self._genai_attachment_display_labels.clear()
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.clear()
         self._refresh_genai_attachment_list()
-
-    def _label_for_genai_attachment_path(self, path: str) -> str:
-        """Return a user-facing label for an attachment path."""
-        labels = getattr(self, "_genai_attachment_display_labels", {})
-        label = labels.get(path) if isinstance(labels, dict) else None
-        return label or path
-
-    def _list_label_for_genai_attachment_path(self, path: str) -> str:
-        """Return the compact label shown in the composer attachment list."""
-        label = OPLIDE._label_for_genai_attachment_path(self, path)
-        if label == path:
-            return os.path.basename(path)
-        match = re.match(r"^(.*\.pdf)( page \d+)$", label, re.IGNORECASE)
-        if match:
-            return f"{os.path.basename(match.group(1))}{match.group(2)}"
-        return label
 
     def _refresh_genai_attachment_list(self) -> None:
         """Refresh the composer attachment list."""
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.delete(0, tk.END)
-            for path in self._genai_attachment_paths:
-                self.genai_attachment_listbox.insert(tk.END, self._list_label_for_genai_attachment_path(path))
+            for path in self._genai_attachments.paths:
+                self.genai_attachment_listbox.insert(tk.END, self._genai_attachments.list_label(path))
         self._refresh_genai_panel_state()
 
     def _genai_add_images(self) -> None:
@@ -3125,87 +3397,12 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _add_genai_attachment_paths(self, paths: list[str]) -> None:
         """Add supported visual paths to the docked GenAI composer."""
-        supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".pdf"}
-        for path in paths:
-            path_str = str(path)
-            if not path_str or Path(path_str).suffix.lower() not in supported_suffixes:
-                continue
-            if path_str.lower().endswith(".pdf"):
-                for rendered_path in self._render_genai_pdf_attachment(path_str):
-                    if rendered_path not in self._genai_attachment_paths:
-                        self._genai_attachment_paths.append(rendered_path)
-            elif path_str not in self._genai_attachment_paths:
-                self._genai_attachment_paths.append(path_str)
+        self._genai_attachments.add_paths(
+            paths,
+            lambda message: messagebox.showerror("GenAI", message, parent=self),
+            lambda message: messagebox.showwarning("GenAI", message, parent=self),
+        )
         self._refresh_genai_attachment_list()
-
-    def _ensure_genai_pdf_temp_dir(self) -> str:
-        """Return the temporary directory used for rendered PDF attachment pages."""
-        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
-        if temp_dir and os.path.isdir(temp_dir):
-            return temp_dir
-        temp_dir = tempfile.mkdtemp(prefix="rhetor_syntagm_pdf_")
-        self._genai_pdf_temp_dir = temp_dir
-        return temp_dir
-
-    def _cleanup_genai_pdf_temp_dir(self) -> None:
-        """Remove temporary rendered PDF attachment pages."""
-        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
-        if temp_dir:
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            self._genai_pdf_temp_dir = None
-
-    def _render_genai_pdf_attachment(self, pdf_path: str) -> list[str]:
-        """Render a short PDF attachment to image paths accepted by SyntAGM."""
-        try:
-            import fitz  # type: ignore[import-not-found]
-        except Exception:
-            messagebox.showerror(
-                "GenAI",
-                "PDF attachments require PyMuPDF. Install it with: pip install PyMuPDF",
-                parent=self,
-            )
-            return []
-
-        try:
-            document = fitz.open(pdf_path)
-        except Exception as exc:
-            messagebox.showerror("GenAI", f"Could not open PDF attachment:\n{exc}", parent=self)
-            return []
-
-        rendered_paths: list[str] = []
-        try:
-            raw_page_count = getattr(document, "page_count", None)
-            page_count = int(raw_page_count if raw_page_count is not None else len(document))
-            if page_count > GENAI_MAX_PDF_PAGES:
-                messagebox.showwarning(
-                    "GenAI",
-                    f"SyntAGM accepts PDFs up to {GENAI_MAX_PDF_PAGES} pages. "
-                    "For longer documents, attach screenshots of the relevant formulation.",
-                    parent=self,
-                )
-                return []
-
-            stem = Path(pdf_path).stem or "attachment"
-            temp_dir = tempfile.mkdtemp(prefix=f"{stem}_", dir=self._ensure_genai_pdf_temp_dir())
-            scale = GENAI_PDF_RENDER_DPI / 72.0
-            matrix = fitz.Matrix(scale, scale)
-            for page_index in range(page_count):
-                page = document.load_page(page_index)
-                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                image_path = os.path.join(temp_dir, f"page_{page_index + 1}.png")
-                pixmap.save(image_path)
-                self._genai_attachment_display_labels[image_path] = f"{pdf_path} page {page_index + 1}"
-                rendered_paths.append(image_path)
-        except Exception as exc:
-            messagebox.showerror("GenAI", f"Could not render PDF attachment:\n{exc}", parent=self)
-            return []
-        finally:
-            document.close()
-
-        return rendered_paths
 
     def _genai_remove_selected_image(self) -> None:
         """Remove the selected attachment from the composer."""
@@ -3215,16 +3412,12 @@ class OPLIDE(TkinterDnD.Tk):
         if not sel:
             return
         idx = int(sel[0])
-        if 0 <= idx < len(self._genai_attachment_paths):
-            removed_path = self._genai_attachment_paths.pop(idx)
-            self._genai_attachment_display_labels.pop(removed_path, None)
+        self._genai_attachments.remove_at(idx)
         self._refresh_genai_attachment_list()
 
     def _genai_clear_images(self) -> None:
         """Clear all attached images from the composer."""
-        self._genai_attachment_paths.clear()
-        self._genai_attachment_display_labels.clear()
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.clear()
         self._refresh_genai_attachment_list()
 
     def _on_genai_attachment_right_click(self, event: Optional[tk.Event]) -> None:
@@ -3245,7 +3438,7 @@ class OPLIDE(TkinterDnD.Tk):
                         self.genai_attachment_listbox.activate(idx)
                         selected_index = idx
 
-            has_any = bool(self._genai_attachment_paths)
+            has_any = bool(self._genai_attachments.paths)
             self.genai_attachment_menu.entryconfigure(
                 "Remove selected", state=("normal" if selected_index is not None else "disabled")
             )
@@ -3263,10 +3456,9 @@ class OPLIDE(TkinterDnD.Tk):
             return None
         text_val = self.genai_prompt_text.get("1.0", tk.END).rstrip()
         prompt_input: Optional[_PromptInput]
-        if self._genai_attachment_paths:
-            if not text_val.strip() and not self._genai_attachment_paths:
-                return None
-            prompt_input = {"text": text_val, "images": [{"path": p} for p in self._genai_attachment_paths]}
+        attachment_paths = self._genai_attachments.snapshot()
+        if attachment_paths:
+            prompt_input = {"text": text_val, "images": [{"path": path} for path in attachment_paths]}
         else:
             if not text_val.strip():
                 return None
@@ -3332,7 +3524,7 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        if self._genai_attachment_paths and not self._selected_genai_method_supports_images():
+        if self._genai_attachments.paths and not self._selected_genai_method_supports_images():
             method_label = self._label_for_method(self.genai_method_var.get())
             messagebox.showwarning(
                 "GenAI",
@@ -3350,11 +3542,11 @@ class OPLIDE(TkinterDnD.Tk):
         else:
             self._run_genai_generate(prompt_input)
 
-    def _set_pending_genai_revisions(self, pending: dict[str, Any]) -> None:
+    def _set_pending_genai_revisions(self, pending: _PendingGenAIRevision) -> None:
         """Expose pending revised model/data through inline panel actions."""
-        self._genai_pending_revisions = pending
-        revised_model = bool(pending.get("revised_model"))
-        revised_data = bool(pending.get("revised_data"))
+        self._genai_revisions.set(pending)
+        revised_model = bool(pending.revised_model)
+        revised_data = bool(pending.revised_data)
         labels = []
         if revised_model:
             labels.append("model")
@@ -3367,7 +3559,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _clear_pending_genai_revisions(self) -> None:
         """Hide inline revision actions when no revisions are pending."""
-        self._genai_pending_revisions = None
+        self._genai_revisions.clear()
         self.genai_pending_var.set("")
         if hasattr(self, "genai_pending_frame"):
             self.genai_pending_frame.grid_remove()
@@ -3467,8 +3659,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _show_pending_genai_diff_preview(self) -> None:
         """Show a VS Code-like diff preview for pending Ask revisions."""
-        pending = self._genai_pending_revisions
-        if not pending:
+        pending = self._genai_revisions.pending
+        if pending is None:
             return
         try:
             self._ensure_pending_genai_diff_preview_window()
@@ -3519,16 +3711,12 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_notebook = notebook
         self._genai_diff_preview_texts = {}
 
-    def _populate_pending_genai_diff_tabs(self, notebook: ttk.Notebook, pending: dict[str, Any]) -> None:
+    def _populate_pending_genai_diff_tabs(self, notebook: ttk.Notebook, pending: _PendingGenAIRevision) -> None:
         tabs: list[tuple[str, str, str]] = []
-        revised_model = str(pending.get("revised_model") or "")
-        revised_data = str(pending.get("revised_data") or "")
-        current_model = str(pending.get("current_model") or "")
-        current_data = str(pending.get("current_data") or "")
-        if revised_model:
-            tabs.append(("Model", current_model, revised_model))
-        if revised_data:
-            tabs.append(("Data", current_data, revised_data))
+        if pending.revised_model:
+            tabs.append(("Model", pending.current_model, pending.revised_model))
+        if pending.revised_data:
+            tabs.append(("Data", pending.current_data, pending.revised_data))
         self._genai_diff_preview_texts = {}
         for label, original, revised in tabs:
             frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
@@ -3539,32 +3727,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
-        pending = self._genai_pending_revisions
-        if not pending:
+        if not self._genai_revisions.apply(lambda pending: OPLIDE._apply_pending_revision(self, pending)):
             return
 
-        revised_model = str(pending.get("revised_model") or "")
-        revised_data = str(pending.get("revised_data") or "")
-        model_path = str(pending.get("model_path") or self._model_editor_state.path or "")
-        data_path = str(pending.get("data_path") or self._data_editor_state.path or "")
-        safe_ts = str(pending.get("safe_ts") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-        had_data_file = bool(pending.get("had_data_file"))
-        session_id = pending.get("session_id")
-
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        model_tgt, data_tgt = OPLIDE._write_pending_revision_files(
-            self,
-            tmp_dir,
-            revised_model,
-            revised_data,
-            model_path,
-            data_path,
-            safe_ts,
-            had_data_file,
-        )
-        OPLIDE._apply_pending_revision_editors(self, revised_model, revised_data, model_tgt, data_tgt, session_id)
         self.status_var.set("GenAI: revisions applied")
         self._clear_pending_genai_revisions()
         try:
@@ -3572,54 +3737,18 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
 
-    @staticmethod
-    def _write_pending_revision_files(
-        self: Any,
-        tmp_dir: str,
-        revised_model: str,
-        revised_data: str,
-        model_path: str,
-        data_path: str,
-        safe_ts: str,
-        had_data_file: bool,
-    ) -> tuple[str, Optional[str]]:
-        def strip_ts_suffix(name: str) -> str:
-            match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
-            return match.group(1) if match and match.group(1) else name
-
-        model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
-        model_ext = model_ext or ".mod"
-        model_base_name = strip_ts_suffix(model_base_name)
-        if model_base_name == "temp_model":
-            model_base_name = "tmp"
-        model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
-        model_tgt = OPLIDE._unique_revision_path(model_base, model_ext)
-        model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
-        with open(model_tgt, "w", encoding="utf-8") as file_obj:
-            file_obj.write(model_content)
-
-        data_tgt = None
-        if revised_data:
-            if had_data_file:
-                data_base_name, data_ext = os.path.splitext(os.path.basename(data_path))
-                data_ext = data_ext or ".dat"
-            else:
-                data_base_name, data_ext = model_base_name, ".dat"
-            data_base_name = strip_ts_suffix(data_base_name)
-            data_base = os.path.join(tmp_dir, f"{data_base_name}_{safe_ts}")
-            data_tgt = OPLIDE._unique_revision_path(data_base, data_ext)
-            with open(data_tgt, "w", encoding="utf-8") as file_obj:
-                file_obj.write(revised_data)
-        return model_tgt, data_tgt
-
-    @staticmethod
-    def _unique_revision_path(base_path: str, extension: str) -> str:
-        target = base_path + extension
-        suffix = 1
-        while os.path.exists(target):
-            target = f"{base_path}_{suffix}{extension}"
-            suffix += 1
-        return target
+    def _apply_pending_revision(self, pending: _PendingGenAIRevision) -> None:
+        model_path = pending.model_path or self._model_editor_state.path or ""
+        data_path = pending.data_path or self._data_editor_state.path or ""
+        safe_ts = pending.safe_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        model_tgt, data_tgt = _write_genai_revision_files(
+            pending, tmp_dir, model_path, data_path, safe_ts, self.model_text.get("1.0", tk.END)
+        )
+        OPLIDE._apply_pending_revision_editors(
+            self, pending.revised_model, pending.revised_data, model_tgt, data_tgt, pending.session_id
+        )
 
     def _apply_pending_revision_editors(
         self,
@@ -5994,7 +6123,7 @@ class OPLIDE(TkinterDnD.Tk):
                 for image in images:
                     path = str(image.get("path", "")).strip() if isinstance(image, dict) else str(image).strip()
                     if path:
-                        lines.append(f"- {OPLIDE._label_for_genai_attachment_path(self, path)}\n")
+                        lines.append(f"- {self._genai_attachments.label(path)}\n")
             lines.append("\n")
             return "".join(lines)
 
@@ -6541,25 +6670,28 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _run_genai_generate(self, prompt_input: _PromptInput) -> None:
         """Generate model and data from the docked GenAI composer input."""
-        if not self.genai_provider or not self.genai_model:
+        provider, model_name = self.genai_provider, self.genai_model
+        if not provider or not model_name:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
         operation = self._start_foreground_operation(
             kind="genai-generate",
             label="Generate Model & Data",
             header="GenAI: Generating model and data...",
             status=(
-                f"GenAI: generating with {self.genai_provider} • {self.genai_model} • "
+                f"GenAI: generating with {provider} • {model_name} • "
                 f"method={self._label_for_method(self.genai_method_var.get())} ..."
             ),
         )
         if operation is None:
             return
+        runner = _GenAIRequestRunner(
+            operation, provider, model_name, gen_module, bool(self.verbose_llm_var.get()), self.after, self._append_output
+        )
         self._append_output(
             self._format_prompt_for_output("Prompt", prompt_input),
             operation.session_id,
@@ -6572,30 +6704,6 @@ class OPLIDE(TkinterDnD.Tk):
 
         def run():
             try:
-                # Progress hook -> Output panel
-                def progress(msg: str) -> None:
-                    if operation.cancel_requested:
-                        return
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
-
-                # Bridge module logger to progress (optional)
-                class _ProgressLogHandler(logging.Handler):
-                    def emit(self, record: logging.LogRecord) -> None:
-                        try:
-                            text = self.format(record)
-                        except Exception:
-                            text = record.getMessage()
-                        progress(text)
-
-                log = logging.getLogger(module_logger_name)
-                handler = None
-                old_level = log.level
-                if self.verbose_llm_var.get():
-                    handler = _ProgressLogHandler()
-                    handler.setLevel(logging.DEBUG)
-                    log.addHandler(handler)
-                    log.setLevel(logging.DEBUG)
-
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 # Unique filenames per request
@@ -6603,23 +6711,7 @@ class OPLIDE(TkinterDnD.Tk):
                 model_path = str(model_target)
                 data_path = str(data_target)
 
-                try:
-                    # Dispatch to selected generation method (PromptInput supports images)
-                    assessment = gen_module.generative_solve(
-                        prompt_input,
-                        model_path,
-                        data_path,
-                        model_name=self.genai_model,
-                        llm_provider=self.genai_provider,
-                        progress=progress,
-                    )
-                finally:
-                    if handler is not None:
-                        try:
-                            log.removeHandler(handler)
-                            log.setLevel(old_level)
-                        except Exception:
-                            pass
+                assessment = runner.generate(prompt_input, model_path, data_path)
 
                 with open(model_path, "r", encoding="utf-8") as f:
                     model_code = f.read()
@@ -6673,7 +6765,7 @@ class OPLIDE(TkinterDnD.Tk):
 
                 self.after(0, on_error, e)
 
-        threading.Thread(target=run, daemon=True).start()
+        runner.start(run)
 
     def genai_feedback(self) -> None:
         """Open the docked GenAI composer in Ask mode."""
@@ -6681,7 +6773,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _run_genai_feedback(self, prompt_input: _PromptInput) -> None:
         """Request GenAI feedback from the docked composer input."""
-        if not self.genai_provider or not self.genai_model:
+        provider, model_name = self.genai_provider, self.genai_model
+        if not provider or not model_name:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
@@ -6695,7 +6788,6 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Resolve selected generator module
         gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
 
         operation = self._start_foreground_operation(
             kind="genai-feedback",
@@ -6707,6 +6799,9 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if operation is None:
             return
+        runner = _GenAIRequestRunner(
+            operation, provider, model_name, gen_module, bool(self.verbose_llm_var.get()), self.after, self._append_output
+        )
         self._append_output(
             self._format_prompt_for_output("Question", prompt_input),
             operation.session_id,
@@ -6723,51 +6818,11 @@ class OPLIDE(TkinterDnD.Tk):
 
         def run():
             try:
-                # Progress hook -> Output panel
-                def progress(msg: str) -> None:
-                    if operation.cancel_requested:
-                        return
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
-
-                # Bridge module logger to progress (optional)
-                class _ProgressLogHandler(logging.Handler):
-                    def emit(self, record: logging.LogRecord) -> None:
-                        try:
-                            text = self.format(record)
-                        except Exception:
-                            text = record.getMessage()
-                        progress(text)
-
-                log = logging.getLogger(module_logger_name)
-                handler = None
-                old_level = log.level
-                if self.verbose_llm_var.get():
-                    handler = _ProgressLogHandler()
-                    handler.setLevel(logging.DEBUG)
-                    log.addHandler(handler)
-                    log.setLevel(logging.DEBUG)
-
-                try:
-                    # PromptInput supports images (same shape as Generate)
-                    result = gen_module.generative_feedback(
-                        prompt_input,
-                        model_path,
-                        data_path,
-                        model_name=self.genai_model,
-                        llm_provider=self.genai_provider,
-                        progress=progress,
-                    )
-                finally:
-                    if handler is not None:
-                        try:
-                            log.removeHandler(handler)
-                            log.setLevel(old_level)
-                        except Exception:
-                            pass
+                result = runner.feedback(prompt_input, model_path, data_path)
 
                 feedback = result.get("feedback", "No feedback returned.")
-                revised_model = result.get("revised_model", "")
-                revised_data = result.get("revised_data", "")
+                revised_model = str(result.get("revised_model") or "")
+                revised_data = str(result.get("revised_data") or "")
 
                 if operation.cancel_requested:
                     return
@@ -6779,17 +6834,17 @@ class OPLIDE(TkinterDnD.Tk):
                     self._append_output(f"\nFeedback:\n{feedback}\n", operation.session_id)
                     if revised_model or revised_data:
                         self._set_pending_genai_revisions(
-                            {
-                                "revised_model": revised_model,
-                                "revised_data": revised_data,
-                                "current_model": self.model_text.get("1.0", tk.END),
-                                "current_data": self.data_text.get("1.0", tk.END),
-                                "model_path": model_path,
-                                "data_path": data_path,
-                                "safe_ts": safe_ts,
-                                "had_data_file": had_data_file,
-                                "session_id": operation.session_id,
-                            }
+                            _PendingGenAIRevision(
+                                revised_model=revised_model,
+                                revised_data=revised_data,
+                                current_model=self.model_text.get("1.0", tk.END),
+                                current_data=self.data_text.get("1.0", tk.END),
+                                model_path=model_path,
+                                data_path=data_path or "",
+                                safe_ts=safe_ts,
+                                had_data_file=had_data_file,
+                                session_id=operation.session_id,
+                            )
                         )
                     self._clear_genai_composer()
 
@@ -6812,7 +6867,7 @@ class OPLIDE(TkinterDnD.Tk):
 
                 self.after(0, on_error, e)
 
-        threading.Thread(target=run, daemon=True).start()
+        runner.start(run)
 
     def _genai_solve_and_explain(self) -> None:
         """Solve the current model/data and ask GenAI to explain the solution in lay terms."""
@@ -7343,7 +7398,7 @@ class OPLIDE(TkinterDnD.Tk):
             self._save_session()
         except Exception:
             pass
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.cleanup()
         try:
             self.destroy()
         finally:
