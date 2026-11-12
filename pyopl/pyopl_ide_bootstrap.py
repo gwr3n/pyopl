@@ -116,6 +116,15 @@ MAX_HIGHLIGHT_CHARS = 10_000
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
+GENAI_METHODS = (
+    ("SyntAGM", "pyopl_generative"),
+    ("Standard", "pyopl_standard"),
+    ("Chain of Thought", "pyopl_chain_of_thought"),
+    ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+    ("CAFA", "pyopl_cafa"),
+    ("Chain of Experts", "pyopl_chain_of_experts"),
+    ("Reflexion", "pyopl_reflexion"),
+)
 
 
 @dataclass(frozen=True)
@@ -143,7 +152,11 @@ def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool
         solver=solver if solver in ("gurobi", "scipy") else None,
         verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
         display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
-        genai_method=genai_method if isinstance(genai_method, str) and genai_method else "pyopl_generative",
+        genai_method=(
+            genai_method
+            if isinstance(genai_method, str) and any(genai_method == key for _, key in GENAI_METHODS)
+            else "pyopl_generative"
+        ),
     )
 
 
@@ -2018,15 +2031,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.display_solver_progress_var = tk.BooleanVar(value=preferences.display_solver_progress)
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
-        self._genai_methods = [
-            ("SyntAGM", "pyopl_generative"),
-            ("Standard", "pyopl_standard"),
-            ("Chain of Thought", "pyopl_chain_of_thought"),
-            ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
-            ("CAFA", "pyopl_cafa"),
-            ("Chain of Experts", "pyopl_chain_of_experts"),
-            ("Reflexion", "pyopl_reflexion"),
-        ]
+        self._genai_methods = list(GENAI_METHODS)
         self.genai_method_var = tk.StringVar(value=preferences.genai_method)
         self._desired_genai_provider: Optional[str] = None
         self._desired_genai_model: Optional[str] = None
@@ -7819,14 +7824,17 @@ class OPLIDE(TkinterDnD.Tk):
         import importlib
 
         key = self.genai_method_var.get() or "pyopl_generative"
+        if key not in (method_key for _, method_key in GENAI_METHODS):
+            key = "pyopl_generative"
+            self.genai_method_var.set(key)
+        module_name = f"pyopl.genai.{key}"
         try:
-            return importlib.import_module(f"pyopl.genai.{key}")
-        except Exception as e:
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError as e:
+            if e.name != module_name or key == "pyopl_generative":
+                raise
             logging.getLogger(__name__).warning(f"Falling back to pyopl_generative due to import error: {e}")
-            try:
-                self.genai_method_var.set("pyopl_generative")
-            except Exception:
-                pass
+            self.genai_method_var.set("pyopl_generative")
             return importlib.import_module("pyopl.genai.pyopl_generative")
 
     def _label_for_method(self, key: str) -> str:

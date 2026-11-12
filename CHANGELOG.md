@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report SciPy/HiGHS MIP dual bounds in the model's objective sense, including
+  any constant objective offset.
+- Ignore invalid saved or runtime GenAI method keys (including Ask mode)
+  rather than importing them as generator modules, and surface missing dependencies.
 - Pass the OpenAI input content using the shared strategy helper's current
   parameter name.
 - Remove temporary output files even when an atomic rename fails.

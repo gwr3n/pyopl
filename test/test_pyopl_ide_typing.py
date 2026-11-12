@@ -1943,6 +1943,53 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy.genai_method_var.get(), "pyopl_standard")
         self.assertEqual(dummy.genai_selection_var.get(), "elm|selected-model")
 
+    def test_invalid_saved_genai_method_does_not_import_composer_mode(self):
+        for saved_method in ("ask", "generate", "pyopl.genai.ask", "", None, []):
+            with self.subTest(saved_method=saved_method):
+                preferences = pyopl_ide_bootstrap._parse_ide_preferences({"genai-method": saved_method}, 12, False)
+                self.assertEqual(preferences.genai_method, "pyopl_generative")
+
+                selection = mock.Mock()
+                selection.get.return_value = preferences.genai_method
+                generator = OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+                self.assertEqual(generator.__name__, "pyopl.genai.pyopl_generative")
+                selection.set.assert_not_called()
+
+    def test_invalid_runtime_genai_method_uses_default_without_import_warning(self):
+        selection = mock.Mock()
+        selection.get.return_value = "ask"
+        with mock.patch.object(pyopl_ide_bootstrap.logging.getLogger(pyopl_ide_bootstrap.__name__), "warning") as warning:
+            generator = OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+        warning.assert_not_called()
+        self.assertEqual(generator.__name__, "pyopl.genai.pyopl_generative")
+        selection.set.assert_called_once_with("pyopl_generative")
+
+    def test_selected_genai_import_propagates_missing_dependency(self):
+        selection = mock.Mock()
+        selection.get.return_value = "pyopl_standard"
+        with mock.patch(
+            "importlib.import_module", side_effect=ModuleNotFoundError("missing dependency", name="optional_dependency")
+        ):
+            with self.assertRaisesRegex(ModuleNotFoundError, "missing dependency"):
+                OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+        selection.set.assert_not_called()
+
+    def test_missing_selected_genai_module_falls_back(self):
+        selection = mock.Mock()
+        selection.get.return_value = "pyopl_standard"
+        generator = mock.sentinel.generator
+        with (
+            mock.patch(
+                "importlib.import_module",
+                side_effect=[ModuleNotFoundError("missing method", name="pyopl.genai.pyopl_standard"), generator],
+            ) as import_module,
+            mock.patch.object(pyopl_ide_bootstrap.logging.getLogger(pyopl_ide_bootstrap.__name__), "warning"),
+        ):
+            self.assertIs(OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection)), generator)
+        import_module.assert_any_call("pyopl.genai.pyopl_standard")
+        import_module.assert_any_call("pyopl.genai.pyopl_generative")
+        selection.set.assert_called_once_with("pyopl_generative")
+
     def test_load_settings_rejects_non_object_json_with_warning(self):
         with TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "settings.json"
