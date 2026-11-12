@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- Remove forwarding `OPLIDE` properties for editor, session, and solver state; callers now use the owning state objects.
+
 ## [v2.6.3] - 2026-11-08
 
 ### Added

@@ -458,7 +458,11 @@ minimize x;
         )
         path = "./models/example.mod"
         key = OPLIDE._fold_state_key(path)
-        dummy = SimpleNamespace(_fold_view_states={key: {"folded_lines": [2, 99], "edited_at": "2026-08-21T12:00:00+00:00"}})
+        dummy = SimpleNamespace(
+            _session_state=pyopl_ide_bootstrap._OutputSessionState(
+                fold_view_states={key: {"folded_lines": [2, 99], "edited_at": "2026-08-21T12:00:00+00:00"}}
+            )
+        )
 
         OPLIDE._restore_fold_state(dummy, path, gutter)
 
@@ -476,14 +480,14 @@ minimize x;
         }
         oldest_key = OPLIDE._fold_state_key("file-0.mod")
         newest_path = "newest.mod"
-        dummy = SimpleNamespace(_fold_view_states=states)
+        dummy = SimpleNamespace(_session_state=pyopl_ide_bootstrap._OutputSessionState(fold_view_states=states))
         gutter = SimpleNamespace(folded_lines={3})
 
         OPLIDE._store_fold_state(dummy, newest_path, gutter, touch=True)
 
-        self.assertEqual(len(dummy._fold_view_states), pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
-        self.assertNotIn(oldest_key, dummy._fold_view_states)
-        self.assertEqual(dummy._fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
+        self.assertEqual(len(dummy._session_state.fold_view_states), pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
+        self.assertNotIn(oldest_key, dummy._session_state.fold_view_states)
+        self.assertEqual(dummy._session_state.fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
 
     def test_fold_view_state_load_normalizes_lines_and_enforces_limit(self):
         limit = pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES
@@ -769,15 +773,14 @@ minimize x;
 
         dummy = SimpleNamespace(
             request_listbox=Listbox((1,)),
-            _output_session_ids=["s1", "s2"],
-            _output_sessions={"s1": "first\n", "s2": "second\n"},
-            _viewing_output_session_id=None,
-            _current_output_session_id="s1",
+            _session_state=pyopl_ide_bootstrap._OutputSessionState(
+                ids=["s1", "s2"], sessions={"s1": "first\n", "s2": "second\n"}, current_id="s1"
+            ),
         )
 
         self.assertEqual(OPLIDE._get_selected_output_session_text(dummy), "second")
         dummy.request_listbox = Listbox(())
-        dummy._viewing_output_session_id = "s1"
+        dummy._session_state.viewing_id = "s1"
         self.assertEqual(OPLIDE._get_selected_output_session_text(dummy), "first")
 
         self.assertEqual(
@@ -807,8 +810,8 @@ minimize x;
             _get_output_session_artifacts=mock.Mock(return_value={"model_text": "m", "data_text": "d"}),
             model_text=model,
             data_text=data,
-            model_file="old.mod",
-            data_file="old.dat",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="old.mod"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="old.dat"),
             editor_notebook=SimpleNamespace(tab=mock.Mock()),
             model_frame=object(),
             data_frame=object(),
@@ -820,8 +823,8 @@ minimize x;
 
         self.assertEqual(model.value, "m")
         self.assertEqual(data.value, "d")
-        self.assertIsNone(dummy.model_file)
-        self.assertIsNone(dummy.data_file)
+        self.assertIsNone(dummy._model_editor_state.path)
+        self.assertIsNone(dummy._data_editor_state.path)
         self.assertEqual(dummy.status_var.value, "Model restored from session")
         self.assertEqual(dummy.highlight.call_count, 2)
 
@@ -895,8 +898,8 @@ minimize x;
             dummy._session_file_path = lambda: str(session_path)
             dummy.request_listbox = listbox
             dummy.output_text = output_text
-            dummy.model_file = None
-            dummy.data_file = None
+            dummy._model_editor_state.path = None
+            dummy._data_editor_state.path = None
             dummy.model_text = model_text
             dummy.data_text = data_text
             dummy.editor_notebook = notebook
@@ -905,11 +908,11 @@ minimize x;
 
             OPLIDE._load_session(dummy)
 
-        self.assertEqual(dummy._output_sessions, {"s1": "output"})
-        self.assertEqual(dummy._output_session_timestamp["s1"], "2026-01-01 10:00:00")
-        self.assertEqual(dummy._output_session_label["s1"], "Solve")
+        self.assertEqual(dummy._session_state.sessions, {"s1": "output"})
+        self.assertEqual(dummy._session_state.timestamps["s1"], "2026-01-01 10:00:00")
+        self.assertEqual(dummy._session_state.labels["s1"], "Solve")
         self.assertEqual(
-            dummy._output_session_artifacts,
+            dummy._session_state.artifacts,
             {"s1": {"model_hash": "sha256:model", "data_hash": "sha256:data"}},
         )
         self.assertEqual(
@@ -990,8 +993,8 @@ minimize x;
 
             notebook = Notebook()
             dummy = SimpleNamespace(
-                model_file=None,
-                data_file=None,
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 model_text=DummyText("model body\n"),
                 data_text=DummyText("data body\n"),
                 editor_notebook=notebook,
@@ -1008,8 +1011,8 @@ minimize x;
 
             self.assertEqual(model_path.read_text(encoding="utf-8"), "model body")
             self.assertEqual(data_path.read_text(encoding="utf-8"), "data body")
-            self.assertEqual(dummy._model_saved_text, "model body\n")
-            self.assertEqual(dummy._data_saved_text, "data body\n")
+            self.assertEqual(dummy._model_editor_state.saved_text, "model body\n")
+            self.assertEqual(dummy._data_editor_state.saved_text, "data body\n")
             self.assertEqual(
                 notebook.calls[-2:],
                 [("model-frame", {"text": "Model: saved.mod"}), ("data-frame", {"text": "Data: saved.dat"})],
@@ -1365,8 +1368,8 @@ minimize x;
             dummy = SimpleNamespace(
                 model_text=DummyText("model\n"),
                 data_text=DummyText("data\n"),
-                model_file=None,
-                data_file=None,
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             )
             with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
                 result = OPLIDE._ensure_model_data_saved(dummy)
@@ -1374,15 +1377,20 @@ minimize x;
             self.assertTrue(Path(result[0]).read_text(encoding="utf-8"), "model")
             self.assertTrue(Path(result[1]).read_text(encoding="utf-8"), "data")
 
-            dummy = SimpleNamespace(model_text=DummyText("model"), data_text=DummyText("data"))
+            dummy = SimpleNamespace(
+                model_text=DummyText("model"),
+                data_text=DummyText("data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            )
             result = OPLIDE._ensure_model_data_saved(dummy, str(model_path), str(data_path))
             self.assertEqual(result, (str(model_path), str(data_path)))
 
         dummy = SimpleNamespace(
             model_text=DummyText("new"),
             data_text=DummyText("same"),
-            _model_saved_text="old",
-            _data_saved_text="same",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(saved_text="old"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(saved_text="same"),
         )
         dummy._get_editor_text = lambda widget: widget.get()
         self.assertTrue(OPLIDE._has_unsaved_editor_changes(dummy))

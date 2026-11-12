@@ -1529,148 +1529,12 @@ class OPLIDE(TkinterDnD.Tk):
         except OSError as exc:
             logging.getLogger(__name__).warning("Could not start Rhetor IDE MCP bridge: %s", exc)
 
-    @property
-    def _output_sessions(self) -> dict[str, str]:
-        return self._session_state.sessions
-
-    @_output_sessions.setter
-    def _output_sessions(self, value: dict[str, str]) -> None:
-        self._session_state.sessions = value
-
-    @property
-    def model_file(self) -> Optional[str]:
-        return self._model_editor_state.path
-
-    @model_file.setter
-    def model_file(self, value: Optional[str]) -> None:
-        self._model_editor_state.path = value
-
-    @property
-    def data_file(self) -> Optional[str]:
-        return self._data_editor_state.path
-
-    @data_file.setter
-    def data_file(self, value: Optional[str]) -> None:
-        self._data_editor_state.path = value
-
-    @property
-    def _model_saved_text(self) -> str:
-        return self._model_editor_state.saved_text
-
-    @_model_saved_text.setter
-    def _model_saved_text(self, value: str) -> None:
-        self._model_editor_state.saved_text = value
-
-    @property
-    def _data_saved_text(self) -> str:
-        return self._data_editor_state.saved_text
-
-    @_data_saved_text.setter
-    def _data_saved_text(self, value: str) -> None:
-        self._data_editor_state.saved_text = value
-
     def _editor_state_for_widget(self, text_widget: tk.Text) -> _EditorBufferState:
         if text_widget is self.model_text:
             return self._model_editor_state
         if text_widget is self.data_text:
             return self._data_editor_state
         raise ValueError("Unknown editor widget")
-
-    @property
-    def _solver_process(self) -> Optional[multiprocessing.Process]:
-        return self._solver_ipc.process
-
-    @_solver_process.setter
-    def _solver_process(self, value: Optional[multiprocessing.Process]) -> None:
-        self._solver_ipc.process = value
-
-    @property
-    def _solver_queue(self) -> Optional[multiprocessing.Queue]:
-        return self._solver_ipc.result_queue
-
-    @_solver_queue.setter
-    def _solver_queue(self, value: Optional[multiprocessing.Queue]) -> None:
-        self._solver_ipc.result_queue = value
-
-    @property
-    def _output_session_ids(self) -> list[str]:
-        return self._session_state.ids
-
-    @_output_session_ids.setter
-    def _output_session_ids(self, value: list[str]) -> None:
-        self._session_state.ids = value
-
-    @property
-    def _output_session_display(self) -> dict[str, str]:
-        return self._session_state.display
-
-    @_output_session_display.setter
-    def _output_session_display(self, value: dict[str, str]) -> None:
-        self._session_state.display = value
-
-    @property
-    def _output_session_label(self) -> dict[str, str]:
-        return self._session_state.labels
-
-    @_output_session_label.setter
-    def _output_session_label(self, value: dict[str, str]) -> None:
-        self._session_state.labels = value
-
-    @property
-    def _output_session_timestamp(self) -> dict[str, str]:
-        return self._session_state.timestamps
-
-    @_output_session_timestamp.setter
-    def _output_session_timestamp(self, value: dict[str, str]) -> None:
-        self._session_state.timestamps = value
-
-    @property
-    def _output_session_artifacts(self) -> dict[str, dict[str, str]]:
-        return self._session_state.artifacts
-
-    @_output_session_artifacts.setter
-    def _output_session_artifacts(self, value: dict[str, dict[str, str]]) -> None:
-        self._session_state.artifacts = value
-
-    @property
-    def _model_snapshots(self) -> dict[str, str]:
-        return self._session_state.model_snapshots
-
-    @_model_snapshots.setter
-    def _model_snapshots(self, value: dict[str, str]) -> None:
-        self._session_state.model_snapshots = value
-
-    @property
-    def _data_snapshots(self) -> dict[str, str]:
-        return self._session_state.data_snapshots
-
-    @_data_snapshots.setter
-    def _data_snapshots(self, value: dict[str, str]) -> None:
-        self._session_state.data_snapshots = value
-
-    @property
-    def _fold_view_states(self) -> dict[str, dict[str, Any]]:
-        return self._session_state.fold_view_states
-
-    @_fold_view_states.setter
-    def _fold_view_states(self, value: dict[str, dict[str, Any]]) -> None:
-        self._session_state.fold_view_states = value
-
-    @property
-    def _current_output_session_id(self) -> Optional[str]:
-        return self._session_state.current_id
-
-    @_current_output_session_id.setter
-    def _current_output_session_id(self, value: Optional[str]) -> None:
-        self._session_state.current_id = value
-
-    @property
-    def _viewing_output_session_id(self) -> Optional[str]:
-        return self._session_state.viewing_id
-
-    @_viewing_output_session_id.setter
-    def _viewing_output_session_id(self, value: Optional[str]) -> None:
-        self._session_state.viewing_id = value
 
     def _poll_ide_bridge(self) -> None:
         """Dispatch pending MCP bridge requests on Tk's event thread."""
@@ -2157,7 +2021,7 @@ class OPLIDE(TkinterDnD.Tk):
         active = getattr(self, "_active_operation", None)
         if active is None:
             return
-        if active.kind == "solve" and self._solver_process and self._solver_process.is_alive():
+        if active.kind == "solve" and self._solver_ipc.process and self._solver_ipc.process.is_alive():
             self.stop_model()
             return
 
@@ -2176,8 +2040,8 @@ class OPLIDE(TkinterDnD.Tk):
             return
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
-        self.model_file = None
-        self.data_file = None
+        self._model_editor_state.path = None
+        self._data_editor_state.path = None
 
         # Reset tab labels
         self.editor_notebook.tab(self.model_frame, text="Model")
@@ -2223,8 +2087,8 @@ class OPLIDE(TkinterDnD.Tk):
                 text_widget.delete(1.0, tk.END)
             except Exception:
                 pass
-        self.model_file = None
-        self.data_file = None
+        self._model_editor_state.path = None
+        self._data_editor_state.path = None
         self._mark_editor_baselines_saved()
         try:
             self.editor_notebook.tab(self.model_frame, text="Model")
@@ -2459,9 +2323,9 @@ class OPLIDE(TkinterDnD.Tk):
             index = int(sel[0]) if sel else getattr(self, "_last_request_popup_index", None)
         except Exception:
             index = getattr(self, "_last_request_popup_index", None)
-        if index is None or index < 0 or index >= len(self._output_session_ids):
+        if index is None or index < 0 or index >= len(self._session_state.ids):
             return None
-        return self._output_session_ids[index]
+        return self._session_state.ids[index]
 
     def _record_output_session_artifacts(
         self,
@@ -2472,14 +2336,13 @@ class OPLIDE(TkinterDnD.Tk):
         """Associate a session with content-addressed model/data snapshots."""
         if not session_id:
             return
-        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
-            self._output_session_artifacts = {}
-        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
-            self._model_snapshots = {}
-        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
-            self._data_snapshots = {}
         _OutputSessionState.record_artifacts(
-            self._output_session_artifacts, self._model_snapshots, self._data_snapshots, session_id, model_text, data_text
+            self._session_state.artifacts,
+            self._session_state.model_snapshots,
+            self._session_state.data_snapshots,
+            session_id,
+            model_text,
+            data_text,
         )
 
     @staticmethod
@@ -2487,8 +2350,8 @@ class OPLIDE(TkinterDnD.Tk):
         return _OutputSessionState.snapshot_hash(content)
 
     def _prune_session_snapshots(self) -> None:
-        self._model_snapshots, self._data_snapshots = _OutputSessionState.prune_snapshots(
-            self._output_session_artifacts, self._model_snapshots, self._data_snapshots
+        self._session_state.model_snapshots, self._session_state.data_snapshots = _OutputSessionState.prune_snapshots(
+            self._session_state.artifacts, self._session_state.model_snapshots, self._session_state.data_snapshots
         )
 
     def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
@@ -2505,14 +2368,14 @@ class OPLIDE(TkinterDnD.Tk):
         """Return the stored model/data snapshot content for a session."""
         if not session_id:
             return {}
-        artifact = self._output_session_artifacts.get(session_id, {})
+        artifact = self._session_state.artifacts.get(session_id, {})
         resolved: dict[str, str] = {}
         model_hash = artifact.get("model_hash")
         data_hash = artifact.get("data_hash")
-        if isinstance(model_hash, str) and model_hash in getattr(self, "_model_snapshots", {}):
-            resolved["model_text"] = self._model_snapshots[model_hash]
-        if isinstance(data_hash, str) and data_hash in getattr(self, "_data_snapshots", {}):
-            resolved["data_text"] = self._data_snapshots[data_hash]
+        if isinstance(model_hash, str) and model_hash in self._session_state.model_snapshots:
+            resolved["model_text"] = self._session_state.model_snapshots[model_hash]
+        if isinstance(data_hash, str) and data_hash in self._session_state.data_snapshots:
+            resolved["data_text"] = self._session_state.data_snapshots[data_hash]
         return resolved
 
     def _show_session_model_preview(self) -> None:
@@ -2615,11 +2478,11 @@ class OPLIDE(TkinterDnD.Tk):
         if has_model:
             self.model_text.delete("1.0", tk.END)
             self.model_text.insert(tk.END, model_text)
-            self.model_file = None
+            self._model_editor_state.path = None
         if has_data:
             self.data_text.delete("1.0", tk.END)
             self.data_text.insert(tk.END, data_text)
-            self.data_file = None
+            self._data_editor_state.path = None
         if has_model:
             self.editor_notebook.tab(self.model_frame, text="Model: session snapshot")
         if has_data:
@@ -2875,11 +2738,9 @@ class OPLIDE(TkinterDnD.Tk):
             if hasattr(self, "output_text") and self.output_text.winfo_exists():
                 self.output_text.pack(fill=tk.BOTH, expand=1)
             if hasattr(self, "output_text") and self.output_text.winfo_exists():
-                session_id = getattr(self, "_viewing_output_session_id", None) or getattr(
-                    self, "_current_output_session_id", None
-                )
+                session_id = self._session_state.viewing_id or self._session_state.current_id
                 if session_id:
-                    content = self._output_sessions.get(session_id, "")
+                    content = self._session_state.sessions.get(session_id, "")
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
                     self.output_text.insert(tk.END, content)
@@ -3427,17 +3288,17 @@ class OPLIDE(TkinterDnD.Tk):
                 sel = self.request_listbox.curselection()
                 if sel:
                     index = int(sel[0])
-                    if 0 <= index < len(self._output_session_ids):
-                        session_id = self._output_session_ids[index]
+                    if 0 <= index < len(self._session_state.ids):
+                        session_id = self._session_state.ids[index]
             except Exception:
                 session_id = None
         if not session_id:
-            session_id = getattr(self, "_viewing_output_session_id", None)
+            session_id = self._session_state.viewing_id
         if not session_id:
-            session_id = getattr(self, "_current_output_session_id", None)
+            session_id = self._session_state.current_id
         if not session_id:
             return ""
-        return str(self._output_sessions.get(session_id, "")).rstrip()
+        return str(self._session_state.sessions.get(session_id, "")).rstrip()
 
     def _append_output_to_prompt_input(self, prompt_input: _PromptInput, session_output: str) -> _PromptInput:
         """Append selected output history to the prompt text while preserving attachments."""
@@ -3684,8 +3545,8 @@ class OPLIDE(TkinterDnD.Tk):
 
         revised_model = str(pending.get("revised_model") or "")
         revised_data = str(pending.get("revised_data") or "")
-        model_path = str(pending.get("model_path") or self.model_file or "")
-        data_path = str(pending.get("data_path") or self.data_file or "")
+        model_path = str(pending.get("model_path") or self._model_editor_state.path or "")
+        data_path = str(pending.get("data_path") or self._data_editor_state.path or "")
         safe_ts = str(pending.get("safe_ts") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
         had_data_file = bool(pending.get("had_data_file"))
         session_id = pending.get("session_id")
@@ -3775,18 +3636,18 @@ class OPLIDE(TkinterDnD.Tk):
             self.data_text.delete("1.0", tk.END)
             self.data_text.insert(tk.END, revised_data)
 
-        self.model_file = model_tgt
+        self._model_editor_state.path = model_tgt
         if data_tgt:
-            self.data_file = data_tgt
+            self._data_editor_state.path = data_tgt
         self._record_output_session_artifacts(
             session_id,
             model_text=self.model_text.get("1.0", tk.END).rstrip("\n"),
             data_text=self.data_text.get("1.0", tk.END).rstrip("\n"),
         )
 
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
         if data_tgt:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
         mark_baselines_saved = getattr(self, "_mark_editor_baselines_saved", None)
@@ -3834,10 +3695,10 @@ class OPLIDE(TkinterDnD.Tk):
         """Delete the currently selected output session."""
         try:
             index = self._selected_request_index()
-            if index is None or index < 0 or index >= len(self._output_session_ids):
+            if index is None or index < 0 or index >= len(self._session_state.ids):
                 return
 
-            sid = self._output_session_ids[index]
+            sid = self._session_state.ids[index]
             active = getattr(self, "_active_operation", None)
             if active is not None and active.session_id == sid:
                 self._show_active_session_delete_warning()
@@ -3881,7 +3742,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.request_listbox.selection_clear(0, tk.END)
         self.request_listbox.selection_set(new_index)
         self.request_listbox.activate(new_index)
-        new_sid = self._output_session_ids[new_index]
+        new_sid = self._session_state.ids[new_index]
         self._session_state.select(new_sid)
         self._show_output_session(new_sid)
 
@@ -3897,10 +3758,10 @@ class OPLIDE(TkinterDnD.Tk):
         if not session_id:
             return
 
-        timestamp = self._output_session_timestamp.get(session_id, session_id)
-        current_label = self._output_session_label.get(session_id, "")
+        timestamp = self._session_state.timestamps.get(session_id, session_id)
+        current_label = self._session_state.labels.get(session_id, "")
         if not current_label:
-            display = self._output_session_display.get(session_id, "")
+            display = self._session_state.display.get(session_id, "")
             prefix = f"{timestamp} • "
             current_label = display[len(prefix) :] if display.startswith(prefix) else (display or "Session")
 
@@ -3923,7 +3784,7 @@ class OPLIDE(TkinterDnD.Tk):
         display = self._session_state.rename(session_id, new_label)
 
         try:
-            index = self._output_session_ids.index(session_id)
+            index = self._session_state.ids.index(session_id)
         except ValueError:
             return
 
@@ -4446,12 +4307,12 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _open_model_path(self, path: str) -> None:
         """Open a model path into the model editor."""
-        self._store_fold_state(self.model_file, self.model_gutter, touch=False)
+        self._store_fold_state(self._model_editor_state.path, self.model_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as model_handle:
             self.model_text.delete(1.0, tk.END)
             self.model_text.insert(tk.END, model_handle.read())
-        self.model_file = path
-        self._model_saved_text = self._get_editor_text(self.model_text)
+        self._model_editor_state.path = path
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
         self.highlight(self.model_text)
         self._restore_fold_state(path, self.model_gutter)
         self._update_caret_position(self.model_text)
@@ -4470,12 +4331,12 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _open_data_path(self, path: str) -> None:
         """Open a data path into the data editor."""
-        self._store_fold_state(self.data_file, self.data_gutter, touch=False)
+        self._store_fold_state(self._data_editor_state.path, self.data_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
             self.data_text.insert(tk.END, data_handle.read())
-        self.data_file = path
-        self._data_saved_text = self._get_editor_text(self.data_text)
+        self._data_editor_state.path = path
+        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         self.highlight(self.data_text, is_data=True)
         self._restore_fold_state(path, self.data_gutter)
         self._update_caret_position(self.data_text)
@@ -4530,22 +4391,22 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
-        if not self.model_file:
+        if not self._model_editor_state.path:
             fname = filedialog.asksaveasfilename(
                 defaultextension=".mod",
                 filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
             )
             if not fname:
                 return
-            self.model_file = fname
+            self._model_editor_state.path = fname
         # "end-1c" means "end minus 1 character" (the implicit newline)
         content = self.model_text.get("1.0", "end-1c")
-        with open(self.model_file, "w", encoding="utf-8") as f:
+        with open(self._model_editor_state.path, "w", encoding="utf-8") as f:
             f.write(content)
-        self._model_saved_text = self._get_editor_text(self.model_text)
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
         # Update tab title
         try:
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
         except Exception:
             pass
         try:
@@ -4555,21 +4416,21 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
-        if not self.data_file:
+        if not self._data_editor_state.path:
             fname = filedialog.asksaveasfilename(
                 defaultextension=".dat",
                 filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
             )
             if not fname:
                 return
-            self.data_file = fname
+            self._data_editor_state.path = fname
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w", encoding="utf-8") as f:
+        with open(self._data_editor_state.path, "w", encoding="utf-8") as f:
             f.write(content)
-        self._data_saved_text = self._get_editor_text(self.data_text)
+        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         # Update tab title
         try:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path)}")
         except Exception:
             pass
         try:
@@ -4585,12 +4446,12 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self.model_file = fname
+        self._model_editor_state.path = fname
         content = self.model_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.model_file, "w", encoding="utf-8") as f:
+        with open(self._model_editor_state.path, "w", encoding="utf-8") as f:
             f.write(content)
-        self._model_saved_text = self._get_editor_text(self.model_text)
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
         try:
             self._save_session()
         except Exception:
@@ -4604,12 +4465,12 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self.data_file = fname
+        self._data_editor_state.path = fname
         content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w", encoding="utf-8") as f:
+        with open(self._data_editor_state.path, "w", encoding="utf-8") as f:
             f.write(content)
-        self._data_saved_text = self._get_editor_text(self.data_text)
-        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
+        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path)}")
         try:
             self._save_session()
         except Exception:
@@ -4995,7 +4856,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _tick_run_timer(self) -> None:
         """Update status bar with elapsed time so far; reschedule if still running."""
-        p = self._solver_process
+        p = self._solver_ipc.process
         if not (p and p.is_alive()):
             self._stop_run_timer()
             return
@@ -5407,7 +5268,7 @@ class OPLIDE(TkinterDnD.Tk):
         data_file_override: Optional[str] = None,
     ) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
-        if self._solver_process and self._solver_process.is_alive():
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
             messagebox.showinfo("Solve Model", "Model is already running.")
             return
 
@@ -5485,7 +5346,7 @@ class OPLIDE(TkinterDnD.Tk):
             )
             for match in re.finditer(pattern, model_code)
         }
-        if self.data_file and os.path.exists(self.data_file):
+        if self._data_editor_state.path and os.path.exists(self._data_editor_state.path):
             try:
                 from .pyopl_core import OPLDataLexer, OPLDataParser
 
@@ -5520,8 +5381,8 @@ class OPLIDE(TkinterDnD.Tk):
         operation: _ForegroundOperation,
     ) -> Optional[tuple[str, str]]:
         temp_model_file, temp_data_file = OPLIDE._temporary_model_data_paths(tmp_dir)
-        model_file = model_file_override or self.model_file or temp_model_file
-        data_file = data_file_override or self.data_file or temp_data_file
+        model_file = model_file_override or self._model_editor_state.path or temp_model_file
+        data_file = data_file_override or self._data_editor_state.path or temp_data_file
         try:
             with open(model_file, "w", encoding="utf-8") as file_obj:
                 file_obj.write(model_code)
@@ -5802,8 +5663,8 @@ class OPLIDE(TkinterDnD.Tk):
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
-            if self.model_file:
-                base = os.path.splitext(os.path.basename(self.model_file or ""))[0]
+            if self._model_editor_state.path:
+                base = os.path.splitext(os.path.basename(self._model_editor_state.path or ""))[0]
                 default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
 
             dest_path = filedialog.asksaveasfilename(
@@ -6106,7 +5967,7 @@ class OPLIDE(TkinterDnD.Tk):
         sid = self._session_state.append(text, session_id)
         if (
             sid
-            and getattr(self, "_viewing_output_session_id", None) == sid
+            and self._session_state.viewing_id == sid
             and self.output_text.winfo_exists()
             and not getattr(self, "_solver_log_text", None)
         ):
@@ -6166,7 +6027,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _show_output_session(self, session_id: str) -> None:
         """Display a session's content in the Output panel."""
-        content = self._output_sessions.get(session_id, "")
+        content = self._session_state.sessions.get(session_id, "")
         if hasattr(self, "output_text") and self.output_text.winfo_exists():
             self.output_text.config(state="normal")
             self.output_text.delete("1.0", tk.END)
@@ -6195,12 +6056,12 @@ class OPLIDE(TkinterDnD.Tk):
     def _store_fold_state(self, path: Optional[str], gutter: Any, *, touch: bool) -> None:
         if not path or gutter is None:
             return
-        _OutputSessionState.store_fold_state(self._fold_view_states, path, gutter.folded_lines, touch=touch)
+        _OutputSessionState.store_fold_state(self._session_state.fold_view_states, path, gutter.folded_lines, touch=touch)
 
     def _restore_fold_state(self, path: Optional[str], gutter: Any) -> None:
         if not path or gutter is None:
             return
-        state = self._fold_view_states.get(OPLIDE._fold_state_key(path), {})
+        state = self._session_state.fold_view_states.get(OPLIDE._fold_state_key(path), {})
         folded_lines = state.get("folded_lines", [])
         gutter.folded_lines = {int(line) for line in folded_lines if int(line) in gutter.fold_regions}
         gutter._apply_folds()
@@ -6208,9 +6069,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _on_fold_state_changed(self, gutter: Any) -> None:
         if gutter is getattr(self, "model_gutter", None):
-            path = self.model_file
+            path = self._model_editor_state.path
         elif gutter is getattr(self, "data_gutter", None):
-            path = self.data_file
+            path = self._data_editor_state.path
         else:
             return
         self._store_fold_state(path, gutter, touch=True)
@@ -6222,12 +6083,14 @@ class OPLIDE(TkinterDnD.Tk):
         This is intentionally tolerant: best-effort persistence without blocking UI.
         """
         try:
-            self._store_fold_state(self.model_file, getattr(self, "model_gutter", None), touch=False)
-            self._store_fold_state(self.data_file, getattr(self, "data_gutter", None), touch=False)
+            self._store_fold_state(self._model_editor_state.path, getattr(self, "model_gutter", None), touch=False)
+            self._store_fold_state(self._data_editor_state.path, getattr(self, "data_gutter", None), touch=False)
             OPLIDE._prune_session_snapshots(self)
             path = self._session_file_path()
             tmp_path = path + ".tmp"
-            payload = self._session_state.to_payload(self.model_file, self.data_file, datetime.now(timezone.utc).isoformat())
+            payload = self._session_state.to_payload(
+                self._model_editor_state.path, self._data_editor_state.path, datetime.now(timezone.utc).isoformat()
+            )
             # Write atomically
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -6272,28 +6135,28 @@ class OPLIDE(TkinterDnD.Tk):
         return _normalize_session_artifacts(raw_artifacts)
 
     def _restore_session_history(self, session: dict[str, Any]) -> None:
-        history = _OutputSessionState.from_payload(session, self._current_output_session_id, self._viewing_output_session_id)
-        self._output_sessions = history.sessions
-        self._output_session_ids = history.ids
-        self._output_session_display = history.display
-        self._output_session_label = history.labels
-        self._output_session_timestamp = history.timestamps
-        self._model_snapshots = history.model_snapshots
-        self._data_snapshots = history.data_snapshots
-        self._output_session_artifacts = history.artifacts
+        history = _OutputSessionState.from_payload(session, self._session_state.current_id, self._session_state.viewing_id)
+        self._session_state.sessions = history.sessions
+        self._session_state.ids = history.ids
+        self._session_state.display = history.display
+        self._session_state.labels = history.labels
+        self._session_state.timestamps = history.timestamps
+        self._session_state.model_snapshots = history.model_snapshots
+        self._session_state.data_snapshots = history.data_snapshots
+        self._session_state.artifacts = history.artifacts
         OPLIDE._prune_session_snapshots(self)
-        self._current_output_session_id = history.current_id
-        self._viewing_output_session_id = history.viewing_id
+        self._session_state.current_id = history.current_id
+        self._session_state.viewing_id = history.viewing_id
 
-        for sid in self._output_session_ids:
-            display = self._output_session_display.get(sid, sid)
-            timestamp = self._output_session_timestamp.setdefault(sid, OPLIDE._session_timestamp(display))
-            self._output_session_label.setdefault(sid, OPLIDE._session_label(display, timestamp))
+        for sid in self._session_state.ids:
+            display = self._session_state.display.get(sid, sid)
+            timestamp = self._session_state.timestamps.setdefault(sid, OPLIDE._session_timestamp(display))
+            self._session_state.labels.setdefault(sid, OPLIDE._session_label(display, timestamp))
 
         OPLIDE._restore_session_history_widgets(self)
 
     def _restore_fold_view_states(self, session: dict[str, Any]) -> None:
-        self._fold_view_states = _OutputSessionState.normalize_fold_view_states(session.get("fold_view_states"))
+        self._session_state.fold_view_states = _OutputSessionState.normalize_fold_view_states(session.get("fold_view_states"))
 
     @staticmethod
     def _session_timestamp(display: Any) -> str:
@@ -6314,12 +6177,12 @@ class OPLIDE(TkinterDnD.Tk):
         if hasattr(self, "request_listbox"):
             try:
                 self.request_listbox.delete(0, tk.END)
-                for sid in self._output_session_ids:
-                    self.request_listbox.insert(tk.END, self._output_session_display.get(sid, sid))
-                selected_id = self._viewing_output_session_id
-                if selected_id and selected_id in self._output_session_ids:
-                    index = self._output_session_ids.index(selected_id)
-                elif self._output_session_ids:
+                for sid in self._session_state.ids:
+                    self.request_listbox.insert(tk.END, self._session_state.display.get(sid, sid))
+                selected_id = self._session_state.viewing_id
+                if selected_id and selected_id in self._session_state.ids:
+                    index = self._session_state.ids.index(selected_id)
+                elif self._session_state.ids:
                     index = 0
                 else:
                     index = None
@@ -6332,14 +6195,14 @@ class OPLIDE(TkinterDnD.Tk):
 
         if hasattr(self, "output_text") and self.output_text.winfo_exists():
             try:
-                session_id: Optional[str] = self._viewing_output_session_id or (
-                    self._output_session_ids[0] if self._output_session_ids else None
+                session_id: Optional[str] = self._session_state.viewing_id or (
+                    self._session_state.ids[0] if self._session_state.ids else None
                 )
                 if session_id:
                     self._session_state.select(session_id)
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
-                    self.output_text.insert(tk.END, self._output_sessions.get(session_id, ""))
+                    self.output_text.insert(tk.END, self._session_state.sessions.get(session_id, ""))
                     self.output_text.see(tk.END)
                     self.output_text.config(state="disabled")
             except Exception:
@@ -6347,40 +6210,46 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _restore_session_files(self, session: dict[str, Any]) -> None:
         try:
-            OPLIDE._restore_session_file(self, session.get("model_file"), "model_file", self.model_text)
-            OPLIDE._restore_session_file(self, session.get("data_file"), "data_file", self.data_text)
+            OPLIDE._restore_session_file(self, session.get("model_file"), self._model_editor_state, self.model_text)
+            OPLIDE._restore_session_file(self, session.get("data_file"), self._data_editor_state, self.data_text)
             for path, gutter in (
-                (self.model_file, getattr(self, "model_gutter", None)),
-                (self.data_file, getattr(self, "data_gutter", None)),
+                (self._model_editor_state.path, getattr(self, "model_gutter", None)),
+                (self._data_editor_state.path, getattr(self, "data_gutter", None)),
             ):
                 if gutter is not None:
                     gutter.refresh()
                 OPLIDE._restore_fold_state(self, path, gutter)
             if hasattr(self, "editor_notebook"):
                 try:
-                    model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"
+                    model_label = (
+                        f"Model: {os.path.basename(self._model_editor_state.path)}"
+                        if self._model_editor_state.path
+                        else "Model"
+                    )
                     self.editor_notebook.tab(self.model_frame, text=model_label)
                 except Exception:
                     pass
                 try:
-                    data_label = f"Data: {os.path.basename(self.data_file)}" if self.data_file else "Data"
+                    data_label = (
+                        f"Data: {os.path.basename(self._data_editor_state.path)}" if self._data_editor_state.path else "Data"
+                    )
                     self.editor_notebook.tab(self.data_frame, text=data_label)
                 except Exception:
                     pass
         except Exception:
             pass
 
-    def _restore_session_file(self, path: Optional[str], attribute: str, text_widget: Any) -> None:
+    def _restore_session_file(self, path: Optional[str], editor: _EditorBufferState, text_widget: Any) -> None:
         if not path:
             return
-        setattr(self, attribute, path)
+        editor.path = path
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, content)
         except Exception:
-            setattr(self, attribute, None)
+            editor.path = None
 
     def _ensure_model_data_saved(
         self, model_target: Optional[str] = None, data_target: Optional[str] = None
@@ -6388,13 +6257,13 @@ class OPLIDE(TkinterDnD.Tk):
         """Ensure current editor buffers are saved to disk.
 
         Returns (model_path, data_path) or (None, None) on error.
-        Does not change `self.model_file`/`self.data_file` — caller may choose to.
+        Does not change `self._model_editor_state.path`/`self._data_editor_state.path` — caller may choose to.
         """
         try:
             tmp_dir = os.path.join(os.getcwd(), "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
-            model_path = model_target or getattr(self, "model_file", None) or os.path.join(tmp_dir, "temp_model.mod")
-            data_path = data_target or getattr(self, "data_file", None) or os.path.join(tmp_dir, "temp_data.dat")
+            model_path = model_target or self._model_editor_state.path or os.path.join(tmp_dir, "temp_model.mod")
+            data_path = data_target or self._data_editor_state.path or os.path.join(tmp_dir, "temp_data.dat")
             with open(model_path, "w", encoding="utf-8") as f:
                 f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
             with open(data_path, "w", encoding="utf-8") as f:
@@ -6411,9 +6280,9 @@ class OPLIDE(TkinterDnD.Tk):
             if not sel:
                 return
             index = int(sel[0])
-            if index < 0 or index >= len(self._output_session_ids):
+            if index < 0 or index >= len(self._session_state.ids):
                 return
-            sid = self._output_session_ids[index]
+            sid = self._session_state.ids[index]
             self._session_state.select(sid)
             self._show_output_session(sid)
         except Exception:
@@ -6698,7 +6567,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._clear_pending_genai_revisions()
 
         # Use the visible request timestamp for filenames
-        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._session_state.timestamps.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         def run():
@@ -6770,8 +6639,8 @@ class OPLIDE(TkinterDnD.Tk):
                     self.data_text.delete("1.0", tk.END)
                     self.data_text.insert(tk.END, data_code)
                     # Update file paths and tabs
-                    self.model_file = model_path
-                    self.data_file = data_path
+                    self._model_editor_state.path = model_path
+                    self._data_editor_state.path = data_path
                     self._record_output_session_artifacts(operation.session_id, model_text=model_code, data_text=data_code)
                     self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
                     self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
@@ -6817,7 +6686,7 @@ class OPLIDE(TkinterDnD.Tk):
             return
 
         # Track if a data file actually existed before this request
-        had_data_file = bool(self.data_file and os.path.exists(self.data_file))
+        had_data_file = bool(self._data_editor_state.path and os.path.exists(self._data_editor_state.path))
 
         # Ensure model/data are saved and get paths
         model_path, data_path = self._ensure_model_data_saved()
@@ -6845,7 +6714,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._clear_pending_genai_revisions()
 
         # Use visible request timestamp for filenames
-        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._session_state.timestamps.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         # Ensure a temp directory exists for any timestamped revised files
@@ -6954,11 +6823,13 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Ensure run_model uses these exact files and update tabs/highlighting
         try:
-            self.model_file = model_path
-            self.data_file = data_path
+            self._model_editor_state.path = model_path
+            self._data_editor_state.path = data_path
             try:
-                self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
-                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+                self.editor_notebook.tab(
+                    self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}"
+                )
+                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
             except Exception:
                 pass
             try:
@@ -7418,23 +7289,23 @@ class OPLIDE(TkinterDnD.Tk):
     def _mark_editor_baselines_saved(self) -> None:
         """Record the current model/data editor contents as the clean close baseline."""
         try:
-            self._model_saved_text = self._get_editor_text(self.model_text)
+            self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
         except Exception:
-            self._model_saved_text = ""
+            self._model_editor_state.saved_text = ""
         try:
-            self._data_saved_text = self._get_editor_text(self.data_text)
+            self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         except Exception:
-            self._data_saved_text = ""
+            self._data_editor_state.saved_text = ""
 
     def _has_unsaved_editor_changes(self) -> bool:
         """Return True when either model or data editor differs from its saved baseline."""
         try:
-            if self._get_editor_text(self.model_text) != self._model_saved_text:
+            if self._get_editor_text(self.model_text) != self._model_editor_state.saved_text:
                 return True
         except Exception:
             pass
         try:
-            if self._get_editor_text(self.data_text) != self._data_saved_text:
+            if self._get_editor_text(self.data_text) != self._data_editor_state.saved_text:
                 return True
         except Exception:
             pass
@@ -7547,7 +7418,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         # While running, do not repurpose this shortcut for Stop (Stop has no shortcut).
-        if self._solver_process and self._solver_process.is_alive():
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
             return "break"
         self.run_model()
         return "break"
@@ -8130,8 +8001,8 @@ class _FindReplaceDialog:
 class _ComparisonDialog:
     def __init__(self, host: OPLIDE) -> None:
         self.parent = host
-        self.model_file = host.model_file
-        self.data_file = host.data_file
+        self.model_file = host._model_editor_state.path
+        self.data_file = host._data_editor_state.path
         self._selected_genai_model = lambda: (host.genai_provider, host.genai_model)
         self._active_operation = lambda: host._active_operation
         self._start_operation = host._start_foreground_operation
