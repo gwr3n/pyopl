@@ -38,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Build and parse existing session-history JSON through the state owner while keeping disk I/O in the IDE.
 - Route session snapshot and fold-state updates through state helpers, normalizing folds before restoring editor widgets.
 - Move history create, append, remove, rename, select, and reset operations onto the in-file session-state object.
+- Centralize IDE solver process and result-queue lifecycle in an in-file owner, including failed-start cleanup and stale-poll isolation.
+- Validate solver worker message envelopes and success payloads before routing them to the IDE.
+- Separate solver input preparation, queue-event routing, and Tk progress/log presentation.
 
 ### Removed
 

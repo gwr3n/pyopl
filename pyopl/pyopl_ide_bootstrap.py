@@ -541,6 +541,7 @@ class _EditorGutter:
 #   - str
 #   - {"text": str, "images": [{"path": str}, ...]}
 _PromptInput = Any
+_SolverMessage = tuple[Literal["log", "progress", "success", "error"], Any]
 
 
 class _QueueTextWriter:
@@ -902,6 +903,94 @@ class _ForegroundOperation:
 
 
 @dataclass
+class _SolverProcessState:
+    process: Optional[multiprocessing.Process] = None
+    result_queue: Optional[multiprocessing.Queue] = None
+    session_id: Optional[str] = None
+
+    def start(
+        self, model_file: str, data_file: str, solver_choice: str, solver_settings: Optional[dict[str, Any]], session_id: str
+    ) -> None:
+        if self.process is not None or self.result_queue is not None:
+            raise RuntimeError("Solver process resources are already in use")
+        self.result_queue = multiprocessing.Queue()
+        try:
+            self.process = multiprocessing.Process(
+                target=_solve_wrapper,
+                args=(model_file, data_file, solver_choice, solver_settings, self.result_queue),
+            )
+            self.process.start()
+            self.session_id = session_id
+        except Exception:
+            self.cleanup(cancel_queue_thread=True)
+            raise
+
+    def handles(self) -> Optional[tuple[multiprocessing.Process, multiprocessing.Queue]]:
+        if self.process is None or self.result_queue is None:
+            return None
+        return self.process, self.result_queue
+
+    def read_nowait(self) -> _SolverMessage:
+        if self.result_queue is None:
+            raise RuntimeError("Solver result queue is not available")
+        message = self.result_queue.get_nowait()
+        if not isinstance(message, tuple) or len(message) != 2:
+            raise ValueError("expected a (kind, payload) solver message")
+        kind, payload = message
+        if kind == "success":
+            if not isinstance(payload, dict):
+                raise ValueError("solver success payload must be a dictionary")
+            return "success", payload
+        if kind == "progress":
+            return "progress", payload
+        if kind == "log":
+            return "log", payload
+        if kind == "error":
+            return "error", payload
+        raise ValueError(f"unknown solver message kind: {kind!r}")
+
+    def stop(self) -> None:
+        process = self.process
+        if process is None or not process.is_alive():
+            return
+        try:
+            process.terminate()
+            process.join(timeout=1.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=1.0)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to stop solver process")
+
+    def join(self, timeout: float) -> None:
+        if self.process is None:
+            return
+        try:
+            self.process.join(timeout=timeout)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to join solver process")
+
+    def cleanup(self, *, cancel_queue_thread: bool) -> None:
+        result_queue = self.result_queue
+        self.process = None
+        self.result_queue = None
+        self.session_id = None
+        if result_queue is None:
+            return
+        try:
+            result_queue.close()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to close solver result queue")
+        try:
+            if cancel_queue_thread:
+                result_queue.cancel_join_thread()
+            else:
+                result_queue.join_thread()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to finish solver result queue thread")
+
+
+@dataclass
 class _OutputSessionState:
     sessions: dict[str, str] = field(default_factory=dict)
     ids: list[str] = field(default_factory=list)
@@ -1154,8 +1243,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.show_genai_panel_var = tk.BooleanVar(value=True)
 
         # Solver process
-        self._solver_process: Optional[multiprocessing.Process] = None
-        self._solver_queue: Optional[multiprocessing.Queue] = None
+        self._solver_ipc = _SolverProcessState()
         self._current_solver_choice: str = "gurobi"
         self._solver_progress_window: Optional[tk.Toplevel] = None
         self._solver_progress_canvas: Optional[tk.Canvas] = None
@@ -1263,6 +1351,22 @@ class OPLIDE(TkinterDnD.Tk):
     @_output_sessions.setter
     def _output_sessions(self, value: dict[str, str]) -> None:
         self._session_state.sessions = value
+
+    @property
+    def _solver_process(self) -> Optional[multiprocessing.Process]:
+        return self._solver_ipc.process
+
+    @_solver_process.setter
+    def _solver_process(self, value: Optional[multiprocessing.Process]) -> None:
+        self._solver_ipc.process = value
+
+    @property
+    def _solver_queue(self) -> Optional[multiprocessing.Queue]:
+        return self._solver_ipc.result_queue
+
+    @_solver_queue.setter
+    def _solver_queue(self, value: Optional[multiprocessing.Queue]) -> None:
+        self._solver_ipc.result_queue = value
 
     @property
     def _output_session_ids(self) -> list[str]:
@@ -5867,14 +5971,8 @@ class OPLIDE(TkinterDnD.Tk):
         if operation is None:
             return
 
-        if not OPLIDE._validate_run_model_data(self, model_code, data_code, operation):
-            return
-
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        file_paths = OPLIDE._save_run_model_files(
-            self, model_code, data_code, tmp_dir, model_file_override, data_file_override, operation
+        file_paths = OPLIDE._prepare_solver_run(
+            self, model_code, data_code, operation, model_file_override, data_file_override
         )
         if file_paths is None:
             return
@@ -5886,6 +5984,25 @@ class OPLIDE(TkinterDnD.Tk):
         if not OPLIDE._start_solver_process(self, model_file, data_file, solver_choice, operation):
             return
 
+        OPLIDE._begin_solver_ui(self, solver_choice, operation)
+
+    def _prepare_solver_run(
+        self,
+        model_code: str,
+        data_code: str,
+        operation: _ForegroundOperation,
+        model_file_override: Optional[str],
+        data_file_override: Optional[str],
+    ) -> Optional[tuple[str, str]]:
+        if not OPLIDE._validate_run_model_data(self, model_code, data_code, operation):
+            return None
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return OPLIDE._save_run_model_files(
+            self, model_code, data_code, tmp_dir, model_file_override, data_file_override, operation
+        )
+
+    def _begin_solver_ui(self, solver_choice: str, operation: _ForegroundOperation) -> None:
         self._set_run_menu_running(True)
         self._show_solver_log_textbox()
 
@@ -5983,23 +6100,16 @@ class OPLIDE(TkinterDnD.Tk):
                 if not isinstance(solver_settings, dict):
                     raise ValueError(f"{settings_name} must contain a JSON object.")
                 self._append_output(f"\nSolver settings: loaded {settings_path}.\n", operation.session_id)
-            self._solver_queue = multiprocessing.Queue()
-            self._solver_process = multiprocessing.Process(
-                target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, solver_settings, self._solver_queue),
-            )
-            self._solver_process.start()
+            self._solver_ipc.start(model_file, data_file, solver_choice, solver_settings, operation.session_id)
         except Exception as exc:
             self.status_var.set(f"Error starting solve: {exc}")
             self._append_output(f"\nError starting solve: {exc}\n", operation.session_id)
-            self._solver_process = None
-            self._solver_queue = None
             self._finish_foreground_operation(operation)
             return False
         return True
 
     def stop_model(self) -> None:
-        p = self._solver_process
+        p = self._solver_ipc.process
         active = getattr(self, "_active_operation", None)
 
         if not (p and p.is_alive()):
@@ -6011,14 +6121,7 @@ class OPLIDE(TkinterDnD.Tk):
                 self._finish_foreground_operation(active)
             return
 
-        try:
-            p.terminate()
-            p.join(timeout=1.0)
-            if p.is_alive() and hasattr(p, "kill"):
-                p.kill()  # py3.7+ on Unix
-                p.join(timeout=1.0)
-        except Exception:
-            pass
+        self._solver_ipc.stop()
 
         self._cleanup_solver_ipc(cancel_queue_thread=True)
 
@@ -6034,50 +6137,33 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
         """Release solver process/queue resources to avoid multiprocessing tracker leaks."""
-        q = self._solver_queue
-        self._solver_process = None
-        self._solver_queue = None
-        if q is None:
-            return
-        try:
-            q.close()
-        except Exception:
-            pass
-        try:
-            if cancel_queue_thread:
-                q.cancel_join_thread()
-            else:
-                q.join_thread()
-        except Exception:
-            pass
+        self._solver_ipc.cleanup(cancel_queue_thread=cancel_queue_thread)
 
     def _poll_solver(self, operation: Optional[_ForegroundOperation] = None) -> None:
         # _poll_solver is scheduled via `after()`, so it can run after `stop_model()`
         # has already nulled these out.
-        p = self._solver_process
-        q = self._solver_queue
-        if not p or not q:
+        if operation is not None and self._solver_ipc.session_id not in (None, operation.session_id):
             return
+        handles = self._solver_ipc.handles()
+        if handles is None:
+            return
+        p = handles[0]
 
-        terminal_message = OPLIDE._drain_solver_queue(self, p, q, operation)
+        terminal_message = OPLIDE._drain_solver_queue(self, p, operation)
         if terminal_message is None:
             return
         kind, payload = terminal_message
 
-        OPLIDE._finalize_solver_poll(self, p, kind, payload, operation)
+        OPLIDE._finalize_solver_poll(self, kind, payload, operation)
 
     @staticmethod
     def _finalize_solver_poll(
         ide: Any,
-        process: multiprocessing.Process,
         kind: str,
         payload: Any,
         operation: Optional[_ForegroundOperation],
     ) -> None:
-        try:
-            process.join(timeout=0.1)
-        except Exception:
-            pass
+        ide._solver_ipc.join(timeout=0.1)
 
         OPLIDE._cleanup_solver_ipc(ide, cancel_queue_thread=False)
         ide._set_run_menu_running(False)
@@ -6190,35 +6276,46 @@ class OPLIDE(TkinterDnD.Tk):
         return True
 
     def _drain_solver_queue(
-        self, process: multiprocessing.Process, solver_queue: multiprocessing.Queue, operation: Optional[_ForegroundOperation]
-    ) -> Optional[tuple[str, Any]]:
+        self, process: multiprocessing.Process, operation: Optional[_ForegroundOperation]
+    ) -> Optional[_SolverMessage]:
         while True:
             try:
-                kind, payload = solver_queue.get_nowait()
+                kind, payload = self._solver_ipc.read_nowait()
             except queue.Empty:
                 if process.is_alive():
                     self.after(100, self._poll_solver, operation)
                     return None
-                self._set_run_menu_running(False)
-                self._restore_output_textbox()
-                self._append_output(
-                    "\nError: Solver process terminated unexpectedly.\n",
-                    operation.session_id if operation is not None else None,
-                )
-                self._stop_run_timer()
-                self.status_var.set("Error: Solver process terminated.")
-                self._finish_solver_progress(status="ended unexpectedly")
-                self._cleanup_solver_ipc(cancel_queue_thread=True)
-                self._finish_foreground_operation(operation)
+                OPLIDE._handle_solver_process_exit(self, operation)
                 return None
-            if kind == "progress":
-                if isinstance(payload, dict):
-                    self._record_solver_progress(payload)
-                continue
-            if kind == "log":
-                self._append_solver_log_text(str(payload))
+            except ValueError as exc:
+                return "error", f"Invalid solver worker message: {exc}"
+            if OPLIDE._present_solver_stream_event(self, kind, payload):
                 continue
             return kind, payload
+
+    def _handle_solver_process_exit(self, operation: Optional[_ForegroundOperation]) -> None:
+        self._set_run_menu_running(False)
+        self._restore_output_textbox()
+        self._append_output(
+            "\nError: Solver process terminated unexpectedly.\n", operation.session_id if operation is not None else None
+        )
+        self._stop_run_timer()
+        self.status_var.set("Error: Solver process terminated.")
+        self._finish_solver_progress(status="ended unexpectedly")
+        self._cleanup_solver_ipc(cancel_queue_thread=True)
+        self._finish_foreground_operation(operation)
+
+    def _present_solver_stream_event(self, kind: str, payload: Any) -> bool:
+        if kind == "progress":
+            if isinstance(payload, dict):
+                self._record_solver_progress(payload)
+            else:
+                logging.getLogger(__name__).warning("Ignoring solver progress event with non-dictionary payload")
+            return True
+        if kind == "log":
+            self._append_solver_log_text(str(payload))
+            return True
+        return False
 
     def _display_solve_results(
         self,

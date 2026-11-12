@@ -1063,8 +1063,7 @@ minimize x;
 
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
         running = SimpleNamespace(
-            _solver_process=Process(True),
-            _solver_queue=EmptyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(True), EmptyQueue()),
             after=mock.Mock(),
             _poll_solver=mock.Mock(),
         )
@@ -1072,8 +1071,7 @@ minimize x;
         running.after.assert_called_once()
 
         dead = SimpleNamespace(
-            _solver_process=Process(False),
-            _solver_queue=EmptyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(False), EmptyQueue()),
             _set_run_menu_running=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
             _append_output=mock.Mock(),
@@ -1120,8 +1118,7 @@ minimize x;
 
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _record_solver_progress=mock.Mock(),
             _append_solver_log_text=mock.Mock(),
             _set_run_menu_running=mock.Mock(),
@@ -1136,9 +1133,11 @@ minimize x;
             dummy, cancel_queue_thread=cancel_queue_thread
         )
 
-        OPLIDE._poll_solver(dummy, operation)
+        with self.assertLogs(pyopl_ide_bootstrap.__name__, level="WARNING") as logged:
+            OPLIDE._poll_solver(dummy, operation)
 
         dummy._record_solver_progress.assert_called_once_with({"runtime": 1})
+        self.assertIn("non-dictionary payload", logged.output[0])
         dummy._append_solver_log_text.assert_called_once_with("hello")
         dummy._finish_solver_progress.assert_called_once_with(status="failed")
         dummy._append_output.assert_called_once_with("\nError:\nboom\n", "s1")
@@ -1174,8 +1173,7 @@ minimize x;
             "solve", "Solve", "s1", solver_choice="gurobi", explain_after_solve=True
         )
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _set_run_menu_running=mock.Mock(),
             _stop_run_timer=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
@@ -1242,8 +1240,7 @@ minimize x;
             explain_after_solve=True,
         )
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _set_run_menu_running=mock.Mock(),
             _stop_run_timer=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
