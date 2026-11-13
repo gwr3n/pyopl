@@ -1979,6 +1979,7 @@ class OPLIDE(TkinterDnD.Tk):
         method: str,
         path: str,
         payload: Optional[dict[str, Any]],
+        cancelled: Optional[threading.Event] = None,
     ) -> dict[str, Any]:
         """Read or update the model and data editors for an MCP request."""
         if path != "/editors":
@@ -1987,20 +1988,29 @@ class OPLIDE(TkinterDnD.Tk):
             return OPLIDE._editor_buffer_texts(self)
         if method != "PUT" or payload is None:
             raise ValueError(f"Unsupported Rhetor IDE bridge method: {method}")
+        return OPLIDE._update_ide_bridge_editors(self, payload, cancelled)
 
+    def _update_ide_bridge_editors(self, payload: dict[str, Any], cancelled: Optional[threading.Event]) -> dict[str, Any]:
         updates = (("model_text", self.model_text, False), ("data_text", self.data_text, True))
         for payload_field, _text_widget, _is_data in updates:
             if payload_field in payload and not isinstance(payload[payload_field], str):
                 raise ValueError(f"{payload_field} must be a string")
 
-        changed = []
+        changed = [field for field, _, _ in updates if field in payload]
+        if not changed:
+            raise ValueError("Supply model_text, data_text, or both")
+        if not self._resolve_editor_replacement(
+            "Update from MCP",
+            model="model_text" in changed and payload.get("model_text") != self._get_editor_text(self.model_text),
+            data="data_text" in changed and payload.get("data_text") != self._get_editor_text(self.data_text),
+            cancelled=cancelled.is_set if cancelled is not None else None,
+        ) or (cancelled is not None and cancelled.is_set()):
+            raise ValueError("Editor update cancelled by user or request timeout")
+
         for payload_field, text_widget, is_data in updates:
             if payload_field not in payload:
                 continue
             OPLIDE._replace_editor_buffer(self, text_widget, payload[payload_field], is_data=is_data)
-            changed.append(payload_field)
-        if not changed:
-            raise ValueError("Supply model_text, data_text, or both")
         self.status_var.set("Updated from MCP")
         return {"updated": changed, **OPLIDE._editor_buffer_texts(self)}
 
@@ -2461,6 +2471,8 @@ class OPLIDE(TkinterDnD.Tk):
         """Clear editors, reset file paths, and prepare for a new model."""
         if not self._ensure_no_active_operation("New Model"):
             return
+        if not self._resolve_editor_replacement("New Model", model=True, data=True):
+            return
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
         self._model_editor_state.path = None
@@ -2490,6 +2502,8 @@ class OPLIDE(TkinterDnD.Tk):
             "New Session",
             "Are you sure you want to proceed? This will clear the current editors and session history.",
         ):
+            return
+        if not self._resolve_editor_replacement("New Session", model=True, data=True):
             return
         try:
             OPLIDE._reset_editors_for_new_session(self)
@@ -2897,6 +2911,8 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showinfo("Models", "No saved model/data pair is associated with the selected session.")
             return
         if not messagebox.askyesno("Restore Model", "Restore the selected model/data pair into the editors?"):
+            return
+        if not self._resolve_editor_replacement("Restore Model", model=has_model, data=has_data):
             return
         if has_model:
             self.model_text.delete("1.0", tk.END)
@@ -3860,6 +3876,11 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
+        pending = self._genai_revisions.pending
+        if pending is None or not self._resolve_editor_replacement(
+            "Apply revisions", model=bool(pending.revised_model), data=bool(pending.revised_data)
+        ):
+            return
         try:
             applied = self._genai_revisions.apply(lambda pending: OPLIDE._apply_pending_revision(self, pending))
         except Exception as exc:
@@ -4424,6 +4445,8 @@ class OPLIDE(TkinterDnD.Tk):
                 return
             if search.closed or selection[0] >= len(search.entries):
                 return
+            if not self._resolve_editor_replacement("Retrieve Exemplar", model=True, data=True):
+                return
             exemplar = search.entries[selection[0]]
             try:
                 model_path, data_path = self._copy_exemplar_to_tmp(
@@ -4433,8 +4456,8 @@ class OPLIDE(TkinterDnD.Tk):
                 logging.getLogger(__name__).exception("Failed to retrieve exemplar")
                 messagebox.showerror("Retrieve Exemplar", f"Failed to copy exemplar:\n{exc}", parent=dialog)
                 return
-            self._open_model_path(model_path)
-            self._open_data_path(data_path)
+            self._open_model_path(model_path, confirm_changes=False)
+            self._open_data_path(data_path, confirm_changes=False)
             self.status_var.set(f"Retrieved exemplar: {exemplar['name']}")
             close_dialog()
 
@@ -4533,8 +4556,10 @@ class OPLIDE(TkinterDnD.Tk):
         if fname:
             self._open_model_path(fname)
 
-    def _open_model_path(self, path: str) -> None:
+    def _open_model_path(self, path: str, *, confirm_changes: bool = True) -> bool:
         """Open a model path into the model editor."""
+        if confirm_changes and not self._resolve_editor_replacement("Open Model", model=True, data=False):
+            return False
         self._store_fold_state(self._model_editor_state.path, self.model_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as model_handle:
             self.model_text.delete(1.0, tk.END)
@@ -4548,6 +4573,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_notebook.select(self.model_frame)
         self.on_tab_changed(None)
         self._save_session()
+        return True
 
     def open_data(self) -> None:
         """Open a data file into the data editor."""
@@ -4557,8 +4583,10 @@ class OPLIDE(TkinterDnD.Tk):
         if fname:
             self._open_data_path(fname)
 
-    def _open_data_path(self, path: str) -> None:
+    def _open_data_path(self, path: str, *, confirm_changes: bool = True) -> bool:
         """Open a data path into the data editor."""
+        if confirm_changes and not self._resolve_editor_replacement("Open Data", model=False, data=True):
+            return False
         self._store_fold_state(self._data_editor_state.path, self.data_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
@@ -4572,6 +4600,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_notebook.select(self.data_frame)
         self.on_tab_changed(None)
         self._save_session()
+        return True
 
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
@@ -4592,13 +4621,20 @@ class OPLIDE(TkinterDnD.Tk):
         """Open dropped model and data files in their matching editors."""
         if not self._ensure_no_active_operation("Open dropped files"):
             return "break"
+        paths = self._dropped_paths(event)
+        if not self._resolve_editor_replacement(
+            "Open dropped files",
+            model=any(Path(path).suffix.lower() in (".mod", ".opl") for path in paths),
+            data=any(Path(path).suffix.lower() == ".dat" for path in paths),
+        ):
+            return "break"
         unsupported: list[str] = []
-        for path in self._dropped_paths(event):
+        for path in paths:
             suffix = Path(path).suffix.lower()
             if suffix in (".mod", ".opl"):
-                self._open_model_path(path)
+                self._open_model_path(path, confirm_changes=False)
             elif suffix == ".dat":
-                self._open_data_path(path)
+                self._open_data_path(path, confirm_changes=False)
             else:
                 unsupported.append(os.path.basename(path))
         if unsupported:
@@ -6774,18 +6810,18 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _prepare_genai_generation(self) -> bool:
         """Preserve or discard editor edits before Generate replaces the buffers."""
-        if not self._has_unsaved_editor_changes():
-            return True
-        keep = OPLIDE._confirm_genai_editor_changes(self, "Generate")
-        if keep is None:
-            return False
-        if not keep:
-            return OPLIDE._discard_genai_editor_changes(self, "Generate")
+        return OPLIDE._resolve_editor_replacement(self, "Generate", model=True, data=True)
 
+    def _save_editor_changes(
+        self, action: str, *, model: bool, data: bool, cancelled: Optional[Callable[[], bool]] = None
+    ) -> bool:
+        saves = []
         for editor, widget, frame, extension, label in (
             (self._model_editor_state, self.model_text, self.model_frame, ".mod", "Model"),
             (self._data_editor_state, self.data_text, self.data_frame, ".dat", "Data"),
         ):
+            if not (model if widget is self.model_text else data):
+                continue
             content = self._get_editor_text(widget)
             if content == editor.saved_text:
                 continue
@@ -6796,12 +6832,17 @@ class OPLIDE(TkinterDnD.Tk):
             )
             if not path:
                 return False
+            saves.append((editor, frame, path, content, label))
+
+        for editor, frame, path, content, label in saves:
+            if cancelled is not None and cancelled():
+                return False
             try:
                 with open(path, "w", encoding="utf-8") as saved_file:
                     saved_file.write(content)
             except (OSError, UnicodeError) as exc:
-                logging.getLogger(__name__).exception("Failed to save editor changes before Generate")
-                messagebox.showerror("Generate", f"Could not save {label.lower()} changes:\n{exc}", parent=self)
+                logging.getLogger(__name__).exception("Failed to save editor changes before %s", action)
+                messagebox.showerror(action, f"Could not save {label.lower()} changes:\n{exc}", parent=self)
                 return False
             editor.path = path
             editor.saved_text = content
@@ -6920,23 +6961,53 @@ class OPLIDE(TkinterDnD.Tk):
         """Open the docked GenAI composer in Ask mode."""
         self._open_genai_panel("ask")
 
-    def _confirm_genai_editor_changes(self, action: str) -> Optional[bool]:
+    def _prompt_unsaved_editor_changes(self, action: str) -> Optional[bool]:
         return messagebox.askyesnocancel(
             "Unsaved Changes",
             "The editors have unsaved changes.\n\n"
             f"Yes: Save changes and {action}.\n"
             f"No: Discard changes and {action}.\n"
-            "Cancel: Do not send the request.",
+            "Cancel: Leave the editors unchanged.",
             parent=self,
         )
 
-    def _discard_genai_editor_changes(self, action: str) -> bool:
+    def _resolve_editor_replacement(
+        self,
+        action: str,
+        *,
+        model: bool,
+        data: bool,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        if cancelled is not None and cancelled():
+            return False
+        model_dirty = model and self._get_editor_text(self.model_text) != self._model_editor_state.saved_text
+        data_dirty = data and self._get_editor_text(self.data_text) != self._data_editor_state.saved_text
+        if not model_dirty and not data_dirty:
+            return True
+        keep = OPLIDE._prompt_unsaved_editor_changes(self, action)
+        if keep is None or (cancelled is not None and cancelled()):
+            return False
+        if keep:
+            return OPLIDE._save_editor_changes(self, action, model=model_dirty, data=data_dirty, cancelled=cancelled)
+        return OPLIDE._discard_unsaved_editor_changes(self, action, model=model_dirty, data=data_dirty, cancelled=cancelled)
+
+    def _discard_unsaved_editor_changes(
+        self,
+        action: str,
+        *,
+        model: bool = True,
+        data: bool = True,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> bool:
         replacements = []
         try:
             for editor, widget in (
                 (self._model_editor_state, self.model_text),
                 (self._data_editor_state, self.data_text),
             ):
+                if not (model if widget is self.model_text else data):
+                    continue
                 if self._get_editor_text(widget) == editor.saved_text:
                     continue
                 if editor.path:
@@ -6949,6 +7020,8 @@ class OPLIDE(TkinterDnD.Tk):
             logging.getLogger(__name__).exception("Failed to discard editor changes before %s", action)
             messagebox.showerror(action, f"Could not restore the saved files:\n{exc}", parent=self)
             return False
+        if cancelled is not None and cancelled():
+            return False
         for editor, widget, content in replacements:
             self._replace_editor_buffer(widget, content, is_data=widget is self.data_text)
             editor.saved_text = self._get_editor_text(widget)
@@ -6957,10 +7030,10 @@ class OPLIDE(TkinterDnD.Tk):
     def _prepare_genai_feedback_files(self) -> tuple[Optional[str], Optional[str]]:
         """Resolve unsaved edits before writing the files used by Ask."""
         if self._has_unsaved_editor_changes():
-            keep = OPLIDE._confirm_genai_editor_changes(self, "Ask")
+            keep = OPLIDE._prompt_unsaved_editor_changes(self, "Ask")
             if keep is None:
                 return None, None
-            if not keep and not OPLIDE._discard_genai_editor_changes(self, "Ask"):
+            if not keep and not OPLIDE._discard_unsaved_editor_changes(self, "Ask"):
                 return None, None
 
         model_path, data_path = self._ensure_model_data_saved()

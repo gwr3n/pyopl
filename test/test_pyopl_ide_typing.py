@@ -486,6 +486,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _exemplar_search_cleanup=previous_cleanup,
             _available_exemplars=lambda roots: [exemplar],
             _copy_exemplar_to_tmp=mock.Mock(side_effect=OSError("copy failed")),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
             _open_model_path=mock.Mock(),
             _open_data_path=mock.Mock(),
             status_var=mock.Mock(),
@@ -517,6 +518,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
         host._open_model_path.assert_not_called()
         host._open_data_path.assert_not_called()
         dialog.destroy.assert_not_called()
+        host._resolve_editor_replacement.return_value = False
+        button.call_args_list[0].kwargs["command"]()
+        host._copy_exemplar_to_tmp.assert_called_once()
         host._exemplar_search_cleanup(None)
         worker.close.assert_called_once_with(wait=False)
 
@@ -2664,6 +2668,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _clear_pending_genai_revisions=lambda: None,
                 _save_session=lambda: None,
                 _get_editor_text=lambda widget: widget.get(),
+                _resolve_editor_replacement=mock.Mock(return_value=True),
             )
             dummy._record_output_session_artifacts = lambda *args, **kwargs: artifact_calls.append((args, kwargs))
 
@@ -2823,6 +2828,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             status_var=mock.Mock(),
             _clear_pending_genai_revisions=mock.Mock(),
             _save_session=mock.Mock(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
         )
         with (
             TemporaryDirectory() as tmpdir,
@@ -2843,6 +2849,22 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._apply_pending_genai_revisions(host)
         self.assertIsNone(host._genai_revisions.pending)
         host._clear_pending_genai_revisions.assert_called_once()
+
+    def test_cancelled_revision_keeps_pending_and_does_not_apply(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            "new model", "", "old model", "", "original.mod", "", "2026-11-12_16-00-00", False, "session-1"
+        )
+        host = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(pending),
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _clear_pending_genai_revisions=mock.Mock(),
+        )
+        with mock.patch.object(OPLIDE, "_apply_pending_revision") as apply_revision:
+            OPLIDE._apply_pending_genai_revisions(host)
+        host._resolve_editor_replacement.assert_called_once_with("Apply revisions", model=True, data=False)
+        self.assertIs(host._genai_revisions.pending, pending)
+        apply_revision.assert_not_called()
+        host._clear_pending_genai_revisions.assert_not_called()
 
     def test_revision_file_failure_removes_partial_model_file(self):
         pending = pyopl_ide_bootstrap._PendingGenAIRevision(
@@ -3287,6 +3309,54 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
 
 class TestGenAIRequestRunner(unittest.TestCase):
+    def test_editor_replacement_saves_only_affected_dirty_buffer(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            data_path = Path(tmpdir) / "data.dat"
+            model_path.write_text("saved model", encoding="utf-8")
+            data_path.write_text("saved data", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: "edited data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                _get_editor_text=lambda widget: widget.get(),
+                editor_notebook=mock.Mock(),
+                model_frame=object(),
+                data_frame=object(),
+                _save_session=mock.Mock(),
+            )
+            with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True):
+                self.assertTrue(OPLIDE._resolve_editor_replacement(host, "Open Model", model=True, data=False))
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "edited model")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+            self.assertEqual(host._data_editor_state.saved_text, "saved data")
+
+    def test_editor_replacement_does_not_save_after_bridge_timeout(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("saved model", encoding="utf-8")
+            cancelled = pyopl_ide_bootstrap.threading.Event()
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: ""),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+            )
+
+            def timeout_during_prompt(*_args, **_kwargs):
+                cancelled.set()
+                return True
+
+            with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", side_effect=timeout_during_prompt):
+                self.assertFalse(
+                    OPLIDE._resolve_editor_replacement(
+                        host, "Update from MCP", model=True, data=False, cancelled=cancelled.is_set
+                    )
+                )
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "saved model")
+
     def test_generate_unsaved_named_files_save_discard_or_cancel(self):
         class DummyText:
             def __init__(self, content):
@@ -3366,6 +3436,30 @@ class TestGenAIRequestRunner(unittest.TestCase):
                         self.assertFalse(OPLIDE._has_unsaved_editor_changes(host))
                     else:
                         self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+
+    def test_cancelling_second_save_as_leaves_both_untitled_buffers_unchanged(self):
+        with TemporaryDirectory() as tmpdir:
+            first_path = Path(tmpdir) / "model.mod"
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: "edited data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+                editor_notebook=mock.Mock(),
+                model_frame=object(),
+                data_frame=object(),
+                _save_session=mock.Mock(),
+            )
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", side_effect=[str(first_path), ""]),
+            ):
+                self.assertFalse(OPLIDE._resolve_editor_replacement(host, "New Model", model=True, data=True))
+            self.assertFalse(first_path.exists())
+            self.assertIsNone(host._model_editor_state.path)
+            self.assertIsNone(host._data_editor_state.path)
+            host._save_session.assert_not_called()
 
     def test_generate_does_not_proceed_if_saving_changes_fails(self):
         with TemporaryDirectory() as tmpdir:

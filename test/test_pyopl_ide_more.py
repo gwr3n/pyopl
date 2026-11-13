@@ -554,6 +554,7 @@ minimize x;
         dummy = SimpleNamespace(
             _ensure_no_active_operation=lambda _label: True,
             _dropped_paths=lambda _event: ["/tmp/my model.mod", "/tmp/input.dat"],
+            _resolve_editor_replacement=mock.Mock(return_value=True),
             _open_model_path=mock.Mock(),
             _open_data_path=mock.Mock(),
             status_var=DummyVar(),
@@ -562,8 +563,21 @@ minimize x;
         result = OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused"))
 
         self.assertEqual(result, "break")
-        dummy._open_model_path.assert_called_once_with("/tmp/my model.mod")
-        dummy._open_data_path.assert_called_once_with("/tmp/input.dat")
+        dummy._resolve_editor_replacement.assert_called_once_with("Open dropped files", model=True, data=True)
+        dummy._open_model_path.assert_called_once_with("/tmp/my model.mod", confirm_changes=False)
+        dummy._open_data_path.assert_called_once_with("/tmp/input.dat", confirm_changes=False)
+
+    def test_editor_drop_cancellation_does_not_open_any_files(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _dropped_paths=lambda _event: ["/tmp/model.mod", "/tmp/data.dat"],
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _open_model_path=mock.Mock(),
+            _open_data_path=mock.Mock(),
+        )
+        self.assertEqual(OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused")), "break")
+        dummy._open_model_path.assert_not_called()
+        dummy._open_data_path.assert_not_called()
 
     def test_open_model_shortcut_opens_model_and_stops_event(self):
         dummy = SimpleNamespace(open_model=mock.Mock())
@@ -604,6 +618,7 @@ minimize x;
             status_var=DummyVar(),
             _get_editor_text=lambda widget: widget.get(),
             _on_text_change=mock.Mock(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
         )
 
         self.assertEqual(
@@ -615,6 +630,7 @@ minimize x;
         self.assertEqual(result["updated"], ["data_text"])
         self.assertEqual(model.value, "old model")
         self.assertEqual(data.value, "new data")
+        dummy._resolve_editor_replacement.assert_called_once_with("Update from MCP", model=False, data=True, cancelled=None)
         dummy._on_text_change.assert_called_once_with(data, True)
         self.assertEqual(dummy.status_var.get(), "Updated from MCP")
 
@@ -818,6 +834,7 @@ minimize x;
             data_frame=object(),
             highlight=mock.Mock(),
             status_var=DummyVar(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
         )
         with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesno", return_value=True):
             OPLIDE._restore_session_model(dummy)
@@ -828,6 +845,78 @@ minimize x;
         self.assertIsNone(dummy._data_editor_state.path)
         self.assertEqual(dummy.status_var.value, "Model restored from session")
         self.assertEqual(dummy.highlight.call_count, 2)
+        dummy._resolve_editor_replacement.assert_called_once_with("Restore Model", model=True, data=True)
+
+    def test_new_model_cancellation_preserves_editor_buffers(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+        )
+        OPLIDE.new_model(dummy)
+        dummy._resolve_editor_replacement.assert_called_once_with("New Model", model=True, data=True)
+        dummy.model_text.delete.assert_not_called()
+        dummy.data_text.delete.assert_not_called()
+
+    def test_new_session_cancellation_preserves_history(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _reset_editors_for_new_session=mock.Mock(),
+            _clear_output_session_state=mock.Mock(),
+        )
+        with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesno", return_value=True):
+            OPLIDE.new_session(dummy)
+        dummy._resolve_editor_replacement.assert_called_once_with("New Session", model=True, data=True)
+        dummy._reset_editors_for_new_session.assert_not_called()
+        dummy._clear_output_session_state.assert_not_called()
+
+    def test_open_model_cancellation_preserves_editor_and_data_path(self):
+        dummy = SimpleNamespace(
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            _store_fold_state=mock.Mock(),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "new.mod"
+            model_path.write_text("new model", encoding="utf-8")
+            self.assertFalse(OPLIDE._open_model_path(dummy, str(model_path)))
+        dummy._resolve_editor_replacement.assert_called_once_with("Open Model", model=True, data=False)
+        dummy.model_text.delete.assert_not_called()
+        dummy.data_text.delete.assert_not_called()
+
+    def test_mcp_cancelled_update_reports_error_without_mutating_editor(self):
+        model = DummyText("edited model")
+        dummy = SimpleNamespace(
+            model_text=model,
+            data_text=DummyText("data"),
+            _get_editor_text=lambda widget: widget.get(),
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            status_var=DummyVar(),
+        )
+        with self.assertRaisesRegex(ValueError, "cancelled"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "replacement"})
+        self.assertEqual(model.value, "edited model")
+
+    def test_mcp_timeout_after_dialog_prevents_editor_update(self):
+        cancelled = pyopl_ide_bootstrap.threading.Event()
+        model = DummyText("edited model")
+
+        def time_out(*_args, **_kwargs):
+            cancelled.set()
+            return True
+
+        dummy = SimpleNamespace(
+            model_text=model,
+            data_text=DummyText("data"),
+            _get_editor_text=lambda widget: widget.get(),
+            _resolve_editor_replacement=mock.Mock(side_effect=time_out),
+        )
+        with self.assertRaisesRegex(ValueError, "timeout"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "replacement"}, cancelled)
+        self.assertEqual(model.value, "edited model")
 
     def test_load_session_restores_content_addressed_artifacts_files_and_tabs(self):
         """Session loading restores output history, snapshot stores, editor files, and tab labels."""

@@ -31,7 +31,7 @@ class TestRhetorIDEBridge(unittest.TestCase):
             request_thread = threading.Thread(target=request_bridge)
             request_thread.start()
             while request_thread.is_alive():
-                bridge.process_pending(lambda method, path, payload: {"method": method, "path": path})
+                bridge.process_pending(lambda method, path, payload, cancelled: {"method": method, "path": path})
                 request_thread.join(timeout=0.01)
 
             bridge.stop()
@@ -77,7 +77,9 @@ class TestRhetorIDEBridge(unittest.TestCase):
             request_thread = threading.Thread(target=request_bridge)
             request_thread.start()
             while request_thread.is_alive():
-                bridge.process_pending(lambda method, path, payload: {"method": method, "path": path, "payload": payload})
+                bridge.process_pending(
+                    lambda method, path, payload, cancelled: {"method": method, "path": path, "payload": payload}
+                )
                 request_thread.join(timeout=0.01)
 
             bridge.stop()
@@ -148,9 +150,12 @@ class TestRhetorIDEBridge(unittest.TestCase):
             ):
                 urllib.request.urlopen(request)
 
+            called = []
+            bridge.process_pending(lambda *args: called.append(args))
             bridge.stop()
 
         self.assertEqual(raised.exception.code, 504)
+        self.assertEqual(called, [])
 
     def test_stop_ignores_unreadable_or_foreign_connection_info(self):
         with TemporaryDirectory() as tmp_dir:
