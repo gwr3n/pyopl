@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve unsaved data edits when applying a model-only GenAI revision.
+- Show GenAI method import errors in the IDE for Generate and Ask requests.
 - Ground concrete observable-mapping prompts with compiled column names for
   supplied model data, including tuple-indexed variables.
 - Report SciPy/HiGHS MIP dual bounds in the model's objective sense, including

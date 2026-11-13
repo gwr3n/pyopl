@@ -3912,9 +3912,9 @@ class OPLIDE(TkinterDnD.Tk):
             self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
-        mark_baselines_saved = getattr(self, "_mark_editor_baselines_saved", None)
-        if callable(mark_baselines_saved):
-            mark_baselines_saved()
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
+        if data_tgt:
+            self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         self._append_output("\nRevisions applied to editors.\n", session_id)
 
     def _get_active_editor(self) -> scrolledtext.ScrolledText:
@@ -6772,8 +6772,13 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        # Resolve selected generator module
-        gen_module = self._import_selected_genai_module()
+        try:
+            gen_module = self._import_selected_genai_module()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to load GenAI method")
+            self.status_var.set("GenAI: error")
+            messagebox.showerror("GenAI Error", _concise_genai_error(exc))
+            return
 
         operation = self._start_foreground_operation(
             kind="genai-generate",
@@ -6883,8 +6888,13 @@ class OPLIDE(TkinterDnD.Tk):
         if not model_path:
             return
 
-        # Resolve selected generator module
-        gen_module = self._import_selected_genai_module()
+        try:
+            gen_module = self._import_selected_genai_module()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to load GenAI method")
+            self.status_var.set("GenAI: error")
+            messagebox.showerror("GenAI Error", _concise_genai_error(exc))
+            return
 
         operation = self._start_foreground_operation(
             kind="genai-feedback",

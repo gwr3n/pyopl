@@ -2663,6 +2663,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _append_output=lambda text, session_id=None: log.append((text, session_id)),
                 _clear_pending_genai_revisions=lambda: None,
                 _save_session=lambda: None,
+                _get_editor_text=lambda widget: widget.get(),
             )
             dummy._record_output_session_artifacts = lambda *args, **kwargs: artifact_calls.append((args, kwargs))
 
@@ -2681,6 +2682,68 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     )
                 ],
             )
+
+    def test_apply_genai_revisions_preserves_unsaved_unchanged_data(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        cases = (
+            ("new model", "", "edited data", "old data", True),
+            ("new model", "", "old data", "old data", False),
+            ("", "new data", "edited data", "old data", False),
+            ("new model", "new data", "edited data", "old data", False),
+        )
+        for revised_model, revised_data, current_data, saved_data, dirty in cases:
+            with self.subTest(revised_model=revised_model, revised_data=revised_data, current_data=current_data):
+                with TemporaryDirectory() as tmpdir:
+                    model_path = Path(tmpdir) / "model.mod"
+                    data_path = Path(tmpdir) / "data.dat"
+                    model_path.write_text("old model", encoding="utf-8")
+                    data_path.write_text(saved_data, encoding="utf-8")
+                    pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+                        revised_model,
+                        revised_data,
+                        "old model",
+                        saved_data,
+                        str(model_path),
+                        str(data_path),
+                        "2026-05-03_01-20-41",
+                        True,
+                        "session-1",
+                    )
+                    host = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(model_path), saved_text="old model"
+                        ),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(data_path), saved_text=saved_data),
+                        model_text=DummyText("edited model"),
+                        data_text=DummyText(current_data),
+                        editor_notebook=mock.Mock(),
+                        model_frame=object(),
+                        data_frame=object(),
+                        highlight=mock.Mock(),
+                        _record_output_session_artifacts=mock.Mock(),
+                        _append_output=mock.Mock(),
+                        _get_editor_text=lambda widget: widget.get(),
+                    )
+                    host._mark_editor_baselines_saved = lambda: OPLIDE._mark_editor_baselines_saved(host)
+
+                    with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
+                        OPLIDE._apply_pending_revision(host, pending)
+
+                    self.assertEqual(OPLIDE._has_unsaved_editor_changes(host), dirty)
+                    self.assertEqual(Path(host._model_editor_state.path).read_text(), host.model_text.content)
+                    self.assertEqual(Path(host._data_editor_state.path).read_text(), revised_data or saved_data)
 
     def test_pending_unsaved_genai_revisions_use_tmp_timestamp_basename(self):
         with TemporaryDirectory() as tmpdir:
@@ -3212,6 +3275,30 @@ class TestGenAIRequestRunner(unittest.TestCase):
             model_text=mock.Mock(),
             data_text=mock.Mock(),
         )
+
+    def test_import_failure_is_reported_for_generate_and_ask(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1")
+        for request in (OPLIDE._run_genai_generate, OPLIDE._run_genai_feedback):
+            with self.subTest(request=request.__name__):
+                host = self._request_host(None, operation, [])
+                host.genai_method_var = mock.Mock()
+                host.genai_method_var.get.return_value = "pyopl_standard"
+                host._import_selected_genai_module = lambda: OPLIDE._import_selected_genai_module(host)
+                host._start_foreground_operation = mock.Mock()
+                host._data_editor_state = SimpleNamespace(path=None)
+                host._ensure_model_data_saved = mock.Mock(return_value=("model.mod", None))
+                error = ModuleNotFoundError("No module named 'optional_dependency'", name="optional_dependency")
+                with (
+                    mock.patch("importlib.import_module", side_effect=error),
+                    mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                    self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+                ):
+                    request(host, "prompt")
+
+                showerror.assert_called_once_with("GenAI Error", "ModuleNotFoundError: No module named 'optional_dependency'")
+                host.status_var.set.assert_called_once_with("GenAI: error")
+                host._start_foreground_operation.assert_not_called()
+                host._clear_pending_genai_revisions.assert_not_called()
 
     def test_generate_snapshots_selection_and_discards_cancelled_completion(self):
         with TemporaryDirectory() as tmpdir:
