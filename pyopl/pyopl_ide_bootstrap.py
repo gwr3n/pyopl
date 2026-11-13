@@ -4655,52 +4655,25 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
-        if not self._model_editor_state.path:
-            fname = filedialog.asksaveasfilename(
+        path = self._model_editor_state.path
+        if not path:
+            path = filedialog.asksaveasfilename(
                 defaultextension=".mod",
                 filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
             )
-            if not fname:
-                return
-            self._model_editor_state.path = fname
-        # "end-1c" means "end minus 1 character" (the implicit newline)
-        content = self.model_text.get("1.0", "end-1c")
-        with open(self._model_editor_state.path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
-        # Update tab title
-        try:
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
-        except Exception:
-            pass
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        if path:
+            OPLIDE._save_editor_to_path(self, self._model_editor_state, self.model_text, self.model_frame, path, "Model")
 
     def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
-        if not self._data_editor_state.path:
-            fname = filedialog.asksaveasfilename(
+        path = self._data_editor_state.path
+        if not path:
+            path = filedialog.asksaveasfilename(
                 defaultextension=".dat",
                 filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
             )
-            if not fname:
-                return
-            self._data_editor_state.path = fname
-        content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self._data_editor_state.path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
-        # Update tab title
-        try:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path)}")
-        except Exception:
-            pass
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        if path:
+            OPLIDE._save_editor_to_path(self, self._data_editor_state, self.data_text, self.data_frame, path, "Data")
 
     def save_model_as(self) -> None:
         """Save the model to a new file and update the tab title."""
@@ -4710,16 +4683,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self._model_editor_state.path = fname
-        content = self.model_text.get(1.0, tk.END).rstrip("\n")
-        with open(self._model_editor_state.path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        OPLIDE._save_editor_to_path(self, self._model_editor_state, self.model_text, self.model_frame, fname, "Model")
 
     def save_data_as(self) -> None:
         """Save the data to a new file and update the tab title."""
@@ -4729,12 +4693,22 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self._data_editor_state.path = fname
-        content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self._data_editor_state.path, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
-        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path)}")
+        OPLIDE._save_editor_to_path(self, self._data_editor_state, self.data_text, self.data_frame, fname, "Data")
+
+    def _save_editor_to_path(
+        self, editor: _EditorBufferState, widget: tk.Text, frame: ttk.Frame, path: str, label: str
+    ) -> None:
+        content = self._get_editor_text(widget)
+        try:
+            with open(path, "w", encoding="utf-8") as file_obj:
+                file_obj.write(content)
+        except (OSError, UnicodeError) as exc:
+            logging.getLogger(__name__).exception("Failed to save %s file", label.lower())
+            messagebox.showerror(f"Save {label}", f"Could not save {label.lower()} file:\n{exc}", parent=self)
+            return
+        editor.path = path
+        editor.saved_text = content
+        self.editor_notebook.tab(frame, text=f"{label}: {os.path.basename(path)}")
         try:
             self._save_session()
         except Exception:

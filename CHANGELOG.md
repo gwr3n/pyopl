@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve trailing newlines on model/data Save As and regular Data Save; keep the previous file path and clean baseline if saving fails.
 - Protect editor replacements (new model/session, file open/drop, exemplar and session restore, revision apply, and MCP writes) with a scoped Save / Discard / Cancel prompt; time out remote editor updates after 30 seconds without applying a late update.
 - Warn before Generate replaces unsaved editor changes, offering Save, Discard, or Cancel; Save As preserves untitled work.
 - Report failed Ask revision application while keeping the pending revision available for retry.

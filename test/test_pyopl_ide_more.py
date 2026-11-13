@@ -1099,8 +1099,8 @@ minimize x;
             with mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(data_path)):
                 OPLIDE.save_data_as(dummy)
 
-            self.assertEqual(model_path.read_text(encoding="utf-8"), "model body")
-            self.assertEqual(data_path.read_text(encoding="utf-8"), "data body")
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "model body\n")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "data body\n")
             self.assertEqual(dummy._model_editor_state.saved_text, "model body\n")
             self.assertEqual(dummy._data_editor_state.saved_text, "data body\n")
             self.assertEqual(
@@ -1108,6 +1108,87 @@ minimize x;
                 [("model-frame", {"text": "Model: saved.mod"}), ("data-frame", {"text": "Data: saved.dat"})],
             )
             self.assertEqual(dummy._save_session.call_count, 2)
+
+    def test_save_as_failure_keeps_original_paths_and_dirty_baselines(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for kind, save_as in (("model", OPLIDE.save_model_as), ("data", OPLIDE.save_data_as)):
+                with self.subTest(kind=kind):
+                    extension = ".mod" if kind == "model" else ".dat"
+                    original = Path(tmpdir) / f"original{extension}"
+                    destination = Path(tmpdir) / f"failed{extension}"
+                    original.write_text("saved content", encoding="utf-8")
+                    dummy = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(original), saved_text="saved content"
+                        ),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(original), saved_text="saved content"
+                        ),
+                        model_text=DummyText("edited content\n"),
+                        data_text=DummyText("edited content\n"),
+                        editor_notebook=mock.Mock(),
+                        model_frame="model-frame",
+                        data_frame="data-frame",
+                        _get_editor_text=lambda widget: widget.get(),
+                        _save_session=mock.Mock(),
+                    )
+                    with (
+                        mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(destination)),
+                        mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                        mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                    ):
+                        save_as(dummy)
+                    editor = getattr(dummy, f"_{kind}_editor_state")
+                    self.assertEqual(editor.path, str(original))
+                    self.assertEqual(editor.saved_text, "saved content")
+                    self.assertEqual(original.read_text(encoding="utf-8"), "saved content")
+                    self.assertFalse(destination.exists())
+                    dummy._save_session.assert_not_called()
+                    showerror.assert_called_once()
+
+    def test_regular_data_save_preserves_trailing_newlines(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "data.dat"
+            dummy = SimpleNamespace(
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(path)),
+                data_text=DummyText("data body\n\n"),
+                editor_notebook=mock.Mock(),
+                data_frame="data-frame",
+                _get_editor_text=lambda widget: widget.get(),
+                _save_session=mock.Mock(),
+            )
+            OPLIDE.save_data(dummy)
+            self.assertEqual(path.read_text(encoding="utf-8"), "data body\n\n")
+            self.assertEqual(dummy._data_editor_state.saved_text, "data body\n\n")
+
+    def test_untitled_save_failure_does_not_assign_file_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for kind, save in (("model", OPLIDE.save_model), ("data", OPLIDE.save_data)):
+                with self.subTest(kind=kind):
+                    extension = ".mod" if kind == "model" else ".dat"
+                    path = Path(tmpdir) / f"failed{extension}"
+                    dummy = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        model_text=DummyText("edited"),
+                        data_text=DummyText("edited"),
+                        editor_notebook=mock.Mock(),
+                        model_frame="model-frame",
+                        data_frame="data-frame",
+                        _get_editor_text=lambda widget: widget.get(),
+                        _save_session=mock.Mock(),
+                    )
+                    with (
+                        mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(path)),
+                        mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                        mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                        self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+                    ):
+                        save(dummy)
+                    self.assertIsNone(getattr(dummy, f"_{kind}_editor_state").path)
+                    self.assertFalse(path.exists())
+                    dummy._save_session.assert_not_called()
+                    showerror.assert_called_once()
 
     def test_copy_exemplar_to_tmp_uses_exemplar_name_and_unique_timestamped_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
