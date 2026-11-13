@@ -2811,6 +2811,39 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIsNone(dummy._genai_revisions.pending)
         dummy._close_pending_genai_diff_preview.assert_called_once_with()
 
+    def test_apply_revision_reports_write_failure_and_keeps_pending_for_retry(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            "new model", "", "old model", "", "original.mod", "", "2026-11-12_16-00-00", False, "session-1"
+        )
+        host = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(pending),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="original.mod"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            model_text=mock.Mock(),
+            status_var=mock.Mock(),
+            _clear_pending_genai_revisions=mock.Mock(),
+            _save_session=mock.Mock(),
+        )
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+            mock.patch.object(pyopl_ide_bootstrap, "_write_genai_revision_files", side_effect=OSError("disk full")),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+        ):
+            OPLIDE._apply_pending_genai_revisions(host)
+
+        self.assertIs(host._genai_revisions.pending, pending)
+        host._clear_pending_genai_revisions.assert_not_called()
+        host._save_session.assert_not_called()
+        host.status_var.set.assert_called_once_with("GenAI: failed to apply revisions")
+        showerror.assert_called_once_with("GenAI Error", "Failed to apply revisions:\nOSError: disk full", parent=host)
+
+        with mock.patch.object(OPLIDE, "_apply_pending_revision"):
+            OPLIDE._apply_pending_genai_revisions(host)
+        self.assertIsNone(host._genai_revisions.pending)
+        host._clear_pending_genai_revisions.assert_called_once()
+
     def test_revision_file_failure_removes_partial_model_file(self):
         pending = pyopl_ide_bootstrap._PendingGenAIRevision(
             revised_model="new model",
@@ -3254,6 +3287,108 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
 
 class TestGenAIRequestRunner(unittest.TestCase):
+    def test_ask_unsaved_changes_keep_discard_or_cancel(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        for decision in (True, False, None):
+            with self.subTest(decision=decision), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "model.mod"
+                data_path = Path(tmpdir) / "data.dat"
+                model_path.write_text("saved model", encoding="utf-8")
+                data_path.write_text("saved data", encoding="utf-8")
+                host = SimpleNamespace(
+                    model_text=DummyText("edited model"),
+                    data_text=DummyText("edited data"),
+                    _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                    _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                    _get_editor_text=lambda widget: widget.get(),
+                    _replace_editor_buffer=lambda widget, text, **_kwargs: setattr(widget, "content", text),
+                )
+                host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+                host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
+
+                with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=decision) as prompt:
+                    result = OPLIDE._prepare_genai_feedback_files(host)
+
+                prompt.assert_called_once()
+                expected = "edited" if decision is True else "saved"
+                if decision is None:
+                    self.assertEqual(result, (None, None))
+                    self.assertEqual(model_path.read_text(encoding="utf-8"), "saved model")
+                    self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+                    self.assertEqual(host.model_text.content, "edited model")
+                    self.assertEqual(host.data_text.content, "edited data")
+                    self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+                else:
+                    self.assertEqual(result, (str(model_path), str(data_path)))
+                    self.assertEqual(model_path.read_text(encoding="utf-8"), f"{expected} model")
+                    self.assertEqual(data_path.read_text(encoding="utf-8"), f"{expected} data")
+                    self.assertEqual(host.model_text.content, f"{expected} model")
+                    self.assertEqual(host.data_text.content, f"{expected} data")
+                    self.assertFalse(OPLIDE._has_unsaved_editor_changes(host))
+
+    def test_ask_discard_aborts_without_changes_if_saved_file_cannot_be_read(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "missing.mod"
+            data_path = Path(tmpdir) / "data.dat"
+            data_path.write_text("saved data", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=mock.Mock(),
+                data_text=mock.Mock(),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                _get_editor_text=lambda widget: "edited model" if widget is host.model_text else "edited data",
+                _replace_editor_buffer=mock.Mock(),
+            )
+            host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+            host._ensure_model_data_saved = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=False),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                self.assertEqual(OPLIDE._prepare_genai_feedback_files(host), (None, None))
+            host._replace_editor_buffer.assert_not_called()
+            host._ensure_model_data_saved.assert_not_called()
+            showerror.assert_called_once()
+            self.assertFalse(model_path.exists())
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+
+    def test_ask_keep_preserves_trailing_newlines_and_untitled_stays_unsaved(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("saved", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited\n\n"),
+                data_text=SimpleNamespace(get=lambda *_args: "untitled data\n"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+            )
+            host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+            host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+            ):
+                model, data = OPLIDE._prepare_genai_feedback_files(host)
+
+            self.assertEqual(model, str(model_path))
+            self.assertEqual(Path(model).read_text(encoding="utf-8"), "edited\n\n")
+            self.assertEqual(Path(data).read_text(encoding="utf-8"), "untitled data\n")
+            self.assertIsNone(host._data_editor_state.path)
+            self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+
     def _request_host(self, generator, operation, scheduled):
         return SimpleNamespace(
             genai_provider="selected-provider",
@@ -3274,6 +3409,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
             status_var=mock.Mock(),
             model_text=mock.Mock(),
             data_text=mock.Mock(),
+            _prepare_genai_feedback_files=mock.Mock(return_value=("model.mod", None)),
         )
 
     def test_import_failure_is_reported_for_generate_and_ask(self):
@@ -3286,7 +3422,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
                 host._import_selected_genai_module = lambda: OPLIDE._import_selected_genai_module(host)
                 host._start_foreground_operation = mock.Mock()
                 host._data_editor_state = SimpleNamespace(path=None)
-                host._ensure_model_data_saved = mock.Mock(return_value=("model.mod", None))
+                host._prepare_genai_feedback_files.return_value = ("model.mod", None)
                 error = ModuleNotFoundError("No module named 'optional_dependency'", name="optional_dependency")
                 with (
                     mock.patch("importlib.import_module", side_effect=error),
@@ -3299,6 +3435,20 @@ class TestGenAIRequestRunner(unittest.TestCase):
                 host.status_var.set.assert_called_once_with("GenAI: error")
                 host._start_foreground_operation.assert_not_called()
                 host._clear_pending_genai_revisions.assert_not_called()
+
+    def test_cancelled_ask_does_not_start_request(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+        host = self._request_host(mock.Mock(), operation, [])
+        host._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        host._prepare_genai_feedback_files.return_value = (None, None)
+        host._import_selected_genai_module = mock.Mock()
+        host._start_foreground_operation = mock.Mock()
+
+        OPLIDE._run_genai_feedback(host, "question")
+
+        host._import_selected_genai_module.assert_not_called()
+        host._start_foreground_operation.assert_not_called()
+        host._append_output.assert_not_called()
 
     def test_generate_snapshots_selection_and_discards_cancelled_completion(self):
         with TemporaryDirectory() as tmpdir:
@@ -3344,7 +3494,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
             generator.generative_feedback.return_value = {"feedback": "suggestion", "revised_model": "new model"}
             host = self._request_host(generator, operation, scheduled)
             host._data_editor_state = SimpleNamespace(path=None)
-            host._ensure_model_data_saved = lambda: (str(model_path), None)
+            host._prepare_genai_feedback_files.return_value = (str(model_path), None)
             host._set_pending_genai_revisions = mock.Mock()
             host.model_text.get.return_value = "original model"
             host.data_text.get.return_value = "original data"
@@ -3377,7 +3527,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
             generator.generative_feedback.side_effect = ValueError("provider failed")
             host = self._request_host(generator, operation, scheduled)
             host._data_editor_state = SimpleNamespace(path=None)
-            host._ensure_model_data_saved = lambda: (str(Path(tmpdir) / "model.mod"), None)
+            host._prepare_genai_feedback_files.return_value = (str(Path(tmpdir) / "model.mod"), None)
             host._set_pending_genai_revisions = mock.Mock()
             thread = mock.Mock()
             with (

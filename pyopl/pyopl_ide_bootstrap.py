@@ -3860,7 +3860,14 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
-        if not self._genai_revisions.apply(lambda pending: OPLIDE._apply_pending_revision(self, pending)):
+        try:
+            applied = self._genai_revisions.apply(lambda pending: OPLIDE._apply_pending_revision(self, pending))
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to apply GenAI revisions")
+            self.status_var.set("GenAI: failed to apply revisions")
+            messagebox.showerror("GenAI Error", f"Failed to apply revisions:\n{_concise_genai_error(exc)}", parent=self)
+            return
+        if not applied:
             return
 
         self.status_var.set("GenAI: revisions applied")
@@ -6491,9 +6498,9 @@ class OPLIDE(TkinterDnD.Tk):
             model_path = model_target or self._model_editor_state.path or os.path.join(tmp_dir, "temp_model.mod")
             data_path = data_target or self._data_editor_state.path or os.path.join(tmp_dir, "temp_data.dat")
             with open(model_path, "w", encoding="utf-8") as f:
-                f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
+                f.write(self.model_text.get("1.0", "end-1c"))
             with open(data_path, "w", encoding="utf-8") as f:
-                f.write(self.data_text.get(1.0, tk.END).rstrip("\n"))
+                f.write(self.data_text.get("1.0", "end-1c"))
             return model_path, data_path
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to write temp files: {e}")
@@ -6873,6 +6880,56 @@ class OPLIDE(TkinterDnD.Tk):
         """Open the docked GenAI composer in Ask mode."""
         self._open_genai_panel("ask")
 
+    def _discard_genai_feedback_changes(self) -> bool:
+        replacements = []
+        try:
+            for editor, widget in (
+                (self._model_editor_state, self.model_text),
+                (self._data_editor_state, self.data_text),
+            ):
+                if self._get_editor_text(widget) == editor.saved_text:
+                    continue
+                if editor.path:
+                    with open(editor.path, "r", encoding="utf-8") as saved_file:
+                        content = saved_file.read()
+                else:
+                    content = editor.saved_text
+                replacements.append((editor, widget, content))
+        except (OSError, UnicodeError) as exc:
+            logging.getLogger(__name__).exception("Failed to discard editor changes before Ask")
+            messagebox.showerror("Ask", f"Could not restore the saved files:\n{exc}", parent=self)
+            return False
+        for editor, widget, content in replacements:
+            self._replace_editor_buffer(widget, content, is_data=widget is self.data_text)
+            editor.saved_text = self._get_editor_text(widget)
+        return True
+
+    def _prepare_genai_feedback_files(self) -> tuple[Optional[str], Optional[str]]:
+        """Resolve unsaved edits before writing the files used by Ask."""
+        if self._has_unsaved_editor_changes():
+            keep = messagebox.askyesnocancel(
+                "Unsaved Changes",
+                "The editors have unsaved changes.\n\n"
+                "Yes: Save changes and Ask.\n"
+                "No: Discard changes and Ask.\n"
+                "Cancel: Do not send the request.",
+                parent=self,
+            )
+            if keep is None:
+                return None, None
+            if not keep and not OPLIDE._discard_genai_feedback_changes(self):
+                return None, None
+
+        model_path, data_path = self._ensure_model_data_saved()
+        if model_path:
+            for editor, widget in (
+                (self._model_editor_state, self.model_text),
+                (self._data_editor_state, self.data_text),
+            ):
+                if editor.path:
+                    editor.saved_text = self._get_editor_text(widget)
+        return model_path, data_path
+
     def _run_genai_feedback(self, prompt_input: _PromptInput) -> None:
         """Request GenAI feedback from the docked composer input."""
         provider, model_name = self.genai_provider, self.genai_model
@@ -6883,8 +6940,7 @@ class OPLIDE(TkinterDnD.Tk):
         # Track if a data file actually existed before this request
         had_data_file = bool(self._data_editor_state.path and os.path.exists(self._data_editor_state.path))
 
-        # Ensure model/data are saved and get paths
-        model_path, data_path = self._ensure_model_data_saved()
+        model_path, data_path = self._prepare_genai_feedback_files()
         if not model_path:
             return
 

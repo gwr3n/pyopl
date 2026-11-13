@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report failed Ask revision application while keeping the pending revision available for retry.
+- Ask now prompts to save, discard, or cancel when the model or data editor has unsaved changes.
 - Preserve unsaved data edits when applying a model-only GenAI revision.
 - Show GenAI method import errors in the IDE for Generate and Ask requests.
 - Ground concrete observable-mapping prompts with compiled column names for
