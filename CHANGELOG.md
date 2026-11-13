@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Warn before Generate replaces unsaved editor changes, offering Save, Discard, or Cancel; Save As preserves untitled work.
 - Report failed Ask revision application while keeping the pending revision available for retry.
 - Ask now prompts to save, discard, or cancel when the model or data editor has unsaved changes.
 - Preserve unsaved data edits when applying a model-only GenAI revision.

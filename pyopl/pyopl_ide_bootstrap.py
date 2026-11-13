@@ -6772,6 +6772,43 @@ class OPLIDE(TkinterDnD.Tk):
         """Open the docked GenAI composer in generation mode."""
         self._open_genai_panel("generate")
 
+    def _prepare_genai_generation(self) -> bool:
+        """Preserve or discard editor edits before Generate replaces the buffers."""
+        if not self._has_unsaved_editor_changes():
+            return True
+        keep = OPLIDE._confirm_genai_editor_changes(self, "Generate")
+        if keep is None:
+            return False
+        if not keep:
+            return OPLIDE._discard_genai_editor_changes(self, "Generate")
+
+        for editor, widget, frame, extension, label in (
+            (self._model_editor_state, self.model_text, self.model_frame, ".mod", "Model"),
+            (self._data_editor_state, self.data_text, self.data_frame, ".dat", "Data"),
+        ):
+            content = self._get_editor_text(widget)
+            if content == editor.saved_text:
+                continue
+            path = editor.path or filedialog.asksaveasfilename(
+                parent=self,
+                defaultextension=extension,
+                filetypes=[(f"{label} files", f"*{extension}"), ("All files", "*.*")],
+            )
+            if not path:
+                return False
+            try:
+                with open(path, "w", encoding="utf-8") as saved_file:
+                    saved_file.write(content)
+            except (OSError, UnicodeError) as exc:
+                logging.getLogger(__name__).exception("Failed to save editor changes before Generate")
+                messagebox.showerror("Generate", f"Could not save {label.lower()} changes:\n{exc}", parent=self)
+                return False
+            editor.path = path
+            editor.saved_text = content
+            self.editor_notebook.tab(frame, text=f"{label}: {os.path.basename(path)}")
+            self._save_session()
+        return True
+
     def _run_genai_generate(self, prompt_input: _PromptInput) -> None:
         """Generate model and data from the docked GenAI composer input."""
         provider, model_name = self.genai_provider, self.genai_model
@@ -6785,6 +6822,9 @@ class OPLIDE(TkinterDnD.Tk):
             logging.getLogger(__name__).exception("Failed to load GenAI method")
             self.status_var.set("GenAI: error")
             messagebox.showerror("GenAI Error", _concise_genai_error(exc))
+            return
+
+        if not self._prepare_genai_generation():
             return
 
         operation = self._start_foreground_operation(
@@ -6880,7 +6920,17 @@ class OPLIDE(TkinterDnD.Tk):
         """Open the docked GenAI composer in Ask mode."""
         self._open_genai_panel("ask")
 
-    def _discard_genai_feedback_changes(self) -> bool:
+    def _confirm_genai_editor_changes(self, action: str) -> Optional[bool]:
+        return messagebox.askyesnocancel(
+            "Unsaved Changes",
+            "The editors have unsaved changes.\n\n"
+            f"Yes: Save changes and {action}.\n"
+            f"No: Discard changes and {action}.\n"
+            "Cancel: Do not send the request.",
+            parent=self,
+        )
+
+    def _discard_genai_editor_changes(self, action: str) -> bool:
         replacements = []
         try:
             for editor, widget in (
@@ -6896,8 +6946,8 @@ class OPLIDE(TkinterDnD.Tk):
                     content = editor.saved_text
                 replacements.append((editor, widget, content))
         except (OSError, UnicodeError) as exc:
-            logging.getLogger(__name__).exception("Failed to discard editor changes before Ask")
-            messagebox.showerror("Ask", f"Could not restore the saved files:\n{exc}", parent=self)
+            logging.getLogger(__name__).exception("Failed to discard editor changes before %s", action)
+            messagebox.showerror(action, f"Could not restore the saved files:\n{exc}", parent=self)
             return False
         for editor, widget, content in replacements:
             self._replace_editor_buffer(widget, content, is_data=widget is self.data_text)
@@ -6907,17 +6957,10 @@ class OPLIDE(TkinterDnD.Tk):
     def _prepare_genai_feedback_files(self) -> tuple[Optional[str], Optional[str]]:
         """Resolve unsaved edits before writing the files used by Ask."""
         if self._has_unsaved_editor_changes():
-            keep = messagebox.askyesnocancel(
-                "Unsaved Changes",
-                "The editors have unsaved changes.\n\n"
-                "Yes: Save changes and Ask.\n"
-                "No: Discard changes and Ask.\n"
-                "Cancel: Do not send the request.",
-                parent=self,
-            )
+            keep = OPLIDE._confirm_genai_editor_changes(self, "Ask")
             if keep is None:
                 return None, None
-            if not keep and not OPLIDE._discard_genai_feedback_changes(self):
+            if not keep and not OPLIDE._discard_genai_editor_changes(self, "Ask"):
                 return None, None
 
         model_path, data_path = self._ensure_model_data_saved()
