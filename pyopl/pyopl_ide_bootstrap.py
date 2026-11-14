@@ -1152,6 +1152,7 @@ class _SolverProcessState:
 class _EditorBufferState:
     path: Optional[str] = None
     saved_text: str = ""
+    marked_tab_text: Optional[str] = None
     highlight_after_ids: dict[str, str] = field(default_factory=dict)
     highlight_version: int = 0
     syntax_error: Optional[str] = None
@@ -2995,6 +2996,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         self.model_text.bind("<KeyRelease>", _on_model_changed)
         self.model_text.bind("<ButtonRelease-1>", _on_model_changed)
+        self.model_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.model_text))
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
         # Data editor
@@ -3020,6 +3022,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.data_gutter = _EditorGutter(self, self.data_text, data_gutter_canvas)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
+        self.data_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.data_text))
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
         # Undo/Redo on widgets (overrides Text default bindings)
@@ -4135,6 +4138,24 @@ class OPLIDE(TkinterDnD.Tk):
         dlg.bind("<Escape>", on_cancel)
         dlg.wait_window()
         return result["value"]
+
+    def _on_editor_modified(self, text_widget: tk.Text) -> None:
+        if text_widget.edit_modified():
+            text_widget.edit_modified(False)
+            self._update_editor_tab(text_widget)
+
+    def _update_editor_tab(self, text_widget: tk.Text) -> None:
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        frame = self.model_frame if text_widget is self.model_text else self.data_frame
+        current_label = self.editor_notebook.tab(frame, "text")
+        label = current_label
+        if label == editor.marked_tab_text:
+            label = label[:-3]
+        dirty = self._get_editor_text(text_widget) != editor.saved_text
+        display_label = f"{label} • " if dirty else label
+        editor.marked_tab_text = display_label if dirty else None
+        if display_label != current_label:
+            self.editor_notebook.tab(frame, text=display_label)
 
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
@@ -7018,6 +7039,7 @@ class OPLIDE(TkinterDnD.Tk):
             ):
                 if editor.path:
                     editor.saved_text = self._get_editor_text(widget)
+                    self._update_editor_tab(widget)
         return model_path, data_path
 
     def _run_genai_feedback(self, prompt_input: _PromptInput) -> None:
@@ -7138,6 +7160,8 @@ class OPLIDE(TkinterDnD.Tk):
                     self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}"
                 )
                 self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
+                self._update_editor_tab(self.model_text)
+                self._update_editor_tab(self.data_text)
             except Exception:
                 pass
             try:

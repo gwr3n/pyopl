@@ -126,6 +126,90 @@ class EditorText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_editor_tabs_follow_modified_events_and_saves(self):
+        tk = pyopl_ide_bootstrap.tk
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        notebook = pyopl_ide_bootstrap.ttk.Notebook(root)
+        model_frame = pyopl_ide_bootstrap.ttk.Frame(notebook)
+        data_frame = pyopl_ide_bootstrap.ttk.Frame(notebook)
+        notebook.add(model_frame, text="Model")
+        notebook.add(data_frame, text="Data: original.dat")
+        model = tk.Text(model_frame, undo=True)
+        data = tk.Text(data_frame, undo=True)
+        host = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            model_frame=model_frame,
+            data_frame=data_frame,
+            editor_notebook=notebook,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _get_editor_text=lambda widget: widget.get("1.0", "end-1c"),
+            _save_session=mock.Mock(),
+        )
+        host._update_editor_tab = lambda widget: OPLIDE._update_editor_tab(host, widget)
+        for widget in (model, data):
+            widget.bind("<<Modified>>", lambda event: OPLIDE._on_editor_modified(host, event.widget))
+
+        model.insert("1.0", "model")
+        data.insert("1.0", "data")
+        root.update()
+        self.assertEqual(notebook.tab(model_frame, "text"), "Model • ")
+        self.assertEqual(notebook.tab(data_frame, "text"), "Data: original.dat • ")
+
+        model.edit_undo()
+        root.update()
+        self.assertEqual(notebook.tab(model_frame, "text"), "Model")
+        self.assertEqual(notebook.tab(data_frame, "text"), "Data: original.dat • ")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "saved.dat")
+            OPLIDE._save_editor_to_path(host, host._data_editor_state, data, data_frame, path, "Data")
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
+            data.insert("end", " more")
+            root.update()
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat • ")
+            with (
+                mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
+            ):
+                OPLIDE._save_editor_to_path(host, host._data_editor_state, data, data_frame, path, "Data")
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat • ")
+            data.delete("1.0", "end")
+            data.insert("1.0", "data")
+            root.update()
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
+
+    def test_editor_tab_preserves_snapshot_and_bullet_in_filename(self):
+        notebook = mock.Mock()
+        labels = {"model": "Model: example • ", "data": "Data: session snapshot"}
+        notebook.tab.side_effect = lambda frame, option=None, **kwargs: (
+            labels.update({frame: kwargs["text"]}) if kwargs else labels[frame]
+        )
+        model, data = DummyText("edited"), DummyText("snapshot")
+        host = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            model_frame="model",
+            data_frame="data",
+            editor_notebook=notebook,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _get_editor_text=lambda widget: widget.get(),
+        )
+        OPLIDE._update_editor_tab(host, model)
+        OPLIDE._update_editor_tab(host, data)
+        self.assertEqual(labels["model"], "Model: example •  • ")
+        self.assertEqual(labels["data"], "Data: session snapshot • ")
+        model.value = ""
+        OPLIDE._update_editor_tab(host, model)
+        self.assertEqual(labels["model"], "Model: example • ")
+
     def test_standard_edit_event_targets_focused_widget(self):
         focused_widget = mock.Mock()
         ide = OPLIDE.__new__(OPLIDE)

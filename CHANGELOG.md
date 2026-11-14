@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mark model and data tabs with a bullet when their editor has unsaved changes.
 - Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.
 - Add focused coverage for projected observable mappings, indexed expressions,
   parameter contracts, grounding, and input validation.

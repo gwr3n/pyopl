@@ -3517,6 +3517,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
                     _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
                     _get_editor_text=lambda widget: widget.get(),
                     _replace_editor_buffer=lambda widget, text, **_kwargs: setattr(widget, "content", text),
+                    _update_editor_tab=mock.Mock(),
                 )
                 host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
                 host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
@@ -3577,6 +3578,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
                 _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved"),
                 _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 _get_editor_text=lambda widget: widget.get(),
+                _update_editor_tab=mock.Mock(),
             )
             host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
             host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
@@ -3591,6 +3593,7 @@ class TestGenAIRequestRunner(unittest.TestCase):
             self.assertEqual(Path(data).read_text(encoding="utf-8"), "untitled data\n")
             self.assertIsNone(host._data_editor_state.path)
             self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+            host._update_editor_tab.assert_called_once_with(host.model_text)
 
     def _request_host(self, generator, operation, scheduled):
         return SimpleNamespace(
