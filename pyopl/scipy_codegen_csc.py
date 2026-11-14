@@ -2914,7 +2914,12 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("stats['nit'] = getattr(res, 'nit', None)")
         self._add_code_line("stats['crossover_nit'] = getattr(res, 'crossover_nit', None)")
         self._add_code_line("stats['mip_node_count'] = getattr(res, 'mip_node_count', None)")
-        self._add_code_line("stats['mip_dual_bound'] = getattr(res, 'mip_dual_bound', None)")
+        self._add_code_line("dual_bound = getattr(res, 'mip_dual_bound', None)")
+        self._add_code_line("if dual_bound is not None:")
+        self.indent_level += 1
+        self._add_code_line("dual_bound = (-dual_bound if sense == 'maximize' else dual_bound) + objective_offset")
+        self.indent_level -= 1
+        self._add_code_line("stats['mip_dual_bound'] = dual_bound")
         self._add_code_line("stats['mip_gap'] = getattr(res, 'mip_gap', None)")
         self._add_code_line("stats['time'] = end_time - start_time")
         self._add_code_line("has_incumbent = res.x is not None and res.fun is not None")

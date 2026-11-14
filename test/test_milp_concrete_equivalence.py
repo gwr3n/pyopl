@@ -14,7 +14,7 @@ from pyopl.equivalence.concrete import (
 )
 from pyopl.linear_problem import LinearProblem
 from pyopl.pyopl_core import linear_problem_from_opl
-from pyopl.pyopl_ide_bootstrap import OPLIDE
+from pyopl.pyopl_ide_bootstrap import _format_equivalence_result
 
 
 class CompareTests(unittest.TestCase):
@@ -321,7 +321,7 @@ class CompareTests(unittest.TestCase):
             counterexample="normalized graphs are not isomorphic",
         )
 
-        formatted = OPLIDE._format_equivalence_result(
+        formatted = _format_equivalence_result(
             result,
             "/tmp/left.mod",
             "/tmp/right.mod",
@@ -347,7 +347,7 @@ class CompareTests(unittest.TestCase):
             reason="no compatible parameter and variable mapping found",
         )
 
-        formatted = OPLIDE._format_equivalence_result(result, "/tmp/left.mod", "/tmp/right.mod")
+        formatted = _format_equivalence_result(result, "/tmp/left.mod", "/tmp/right.mod")
 
         self.assertIn("Status: unknown", formatted)
         self.assertIn("Equivalent: Undetermined", formatted)

@@ -126,6 +126,90 @@ class EditorText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_editor_tabs_follow_modified_events_and_saves(self):
+        tk = pyopl_ide_bootstrap.tk
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        notebook = pyopl_ide_bootstrap.ttk.Notebook(root)
+        model_frame = pyopl_ide_bootstrap.ttk.Frame(notebook)
+        data_frame = pyopl_ide_bootstrap.ttk.Frame(notebook)
+        notebook.add(model_frame, text="Model")
+        notebook.add(data_frame, text="Data: original.dat")
+        model = tk.Text(model_frame, undo=True)
+        data = tk.Text(data_frame, undo=True)
+        host = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            model_frame=model_frame,
+            data_frame=data_frame,
+            editor_notebook=notebook,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _get_editor_text=lambda widget: widget.get("1.0", "end-1c"),
+            _save_session=mock.Mock(),
+        )
+        host._update_editor_tab = lambda widget: OPLIDE._update_editor_tab(host, widget)
+        for widget in (model, data):
+            widget.bind("<<Modified>>", lambda event: OPLIDE._on_editor_modified(host, event.widget))
+
+        model.insert("1.0", "model")
+        data.insert("1.0", "data")
+        root.update()
+        self.assertEqual(notebook.tab(model_frame, "text"), "Model • ")
+        self.assertEqual(notebook.tab(data_frame, "text"), "Data: original.dat • ")
+
+        model.edit_undo()
+        root.update()
+        self.assertEqual(notebook.tab(model_frame, "text"), "Model")
+        self.assertEqual(notebook.tab(data_frame, "text"), "Data: original.dat • ")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = str(Path(tmpdir) / "saved.dat")
+            OPLIDE._save_editor_to_path(host, host._data_editor_state, data, data_frame, path, "Data")
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
+            data.insert("end", " more")
+            root.update()
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat • ")
+            with (
+                mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror"),
+            ):
+                OPLIDE._save_editor_to_path(host, host._data_editor_state, data, data_frame, path, "Data")
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat • ")
+            data.delete("1.0", "end")
+            data.insert("1.0", "data")
+            root.update()
+            self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
+
+    def test_editor_tab_preserves_snapshot_and_bullet_in_filename(self):
+        notebook = mock.Mock()
+        labels = {"model": "Model: example • ", "data": "Data: session snapshot"}
+        notebook.tab.side_effect = lambda frame, option=None, **kwargs: (
+            labels.update({frame: kwargs["text"]}) if kwargs else labels[frame]
+        )
+        model, data = DummyText("edited"), DummyText("snapshot")
+        host = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            model_frame="model",
+            data_frame="data",
+            editor_notebook=notebook,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _get_editor_text=lambda widget: widget.get(),
+        )
+        OPLIDE._update_editor_tab(host, model)
+        OPLIDE._update_editor_tab(host, data)
+        self.assertEqual(labels["model"], "Model: example •  • ")
+        self.assertEqual(labels["data"], "Data: session snapshot • ")
+        model.value = ""
+        OPLIDE._update_editor_tab(host, model)
+        self.assertEqual(labels["model"], "Model: example • ")
+
     def test_standard_edit_event_targets_focused_widget(self):
         focused_widget = mock.Mock()
         ide = OPLIDE.__new__(OPLIDE)
@@ -458,7 +542,11 @@ minimize x;
         )
         path = "./models/example.mod"
         key = OPLIDE._fold_state_key(path)
-        dummy = SimpleNamespace(_fold_view_states={key: {"folded_lines": [2, 99], "edited_at": "2026-08-21T12:00:00+00:00"}})
+        dummy = SimpleNamespace(
+            _session_state=pyopl_ide_bootstrap._OutputSessionState(
+                fold_view_states={key: {"folded_lines": [2, 99], "edited_at": "2026-08-21T12:00:00+00:00"}}
+            )
+        )
 
         OPLIDE._restore_fold_state(dummy, path, gutter)
 
@@ -476,14 +564,29 @@ minimize x;
         }
         oldest_key = OPLIDE._fold_state_key("file-0.mod")
         newest_path = "newest.mod"
-        dummy = SimpleNamespace(_fold_view_states=states)
+        dummy = SimpleNamespace(_session_state=pyopl_ide_bootstrap._OutputSessionState(fold_view_states=states))
         gutter = SimpleNamespace(folded_lines={3})
 
         OPLIDE._store_fold_state(dummy, newest_path, gutter, touch=True)
 
-        self.assertEqual(len(dummy._fold_view_states), pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
-        self.assertNotIn(oldest_key, dummy._fold_view_states)
-        self.assertEqual(dummy._fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
+        self.assertEqual(len(dummy._session_state.fold_view_states), pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES)
+        self.assertNotIn(oldest_key, dummy._session_state.fold_view_states)
+        self.assertEqual(dummy._session_state.fold_view_states[OPLIDE._fold_state_key(newest_path)]["folded_lines"], [3])
+
+    def test_fold_view_state_load_normalizes_lines_and_enforces_limit(self):
+        limit = pyopl_ide_bootstrap.MAX_FOLD_VIEW_STATES
+        paths = [f"file-{index}.mod" for index in range(limit + 1)]
+        payload = {
+            "fold_view_states": {
+                path: {"folded_lines": [2, 0, "3", 2], "edited_at": f"{index:04d}"} for index, path in enumerate(paths)
+            }
+        }
+
+        restored = pyopl_ide_bootstrap._OutputSessionState.normalize_fold_view_states(payload["fold_view_states"])
+
+        self.assertEqual(len(restored), limit)
+        self.assertNotIn(OPLIDE._fold_state_key(paths[0]), restored)
+        self.assertEqual(restored[OPLIDE._fold_state_key(paths[-1])]["folded_lines"], [2])
 
     def test_genai_panel_disables_composer_inputs_while_request_is_active(self):
         class Widget:
@@ -503,7 +606,7 @@ minimize x;
         widgets = [Widget() for _ in range(6)]
         dummy = SimpleNamespace(
             _active_operation=SimpleNamespace(kind="genai-generate"),
-            _genai_attachment_paths=[],
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
             genai_panel_mode_var=DummyVar("generate"),
             genai_prompt_title_var=DummyVar(),
             genai_submit_label_var=DummyVar(),
@@ -535,6 +638,7 @@ minimize x;
         dummy = SimpleNamespace(
             _ensure_no_active_operation=lambda _label: True,
             _dropped_paths=lambda _event: ["/tmp/my model.mod", "/tmp/input.dat"],
+            _resolve_editor_replacement=mock.Mock(return_value=True),
             _open_model_path=mock.Mock(),
             _open_data_path=mock.Mock(),
             status_var=DummyVar(),
@@ -543,8 +647,21 @@ minimize x;
         result = OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused"))
 
         self.assertEqual(result, "break")
-        dummy._open_model_path.assert_called_once_with("/tmp/my model.mod")
-        dummy._open_data_path.assert_called_once_with("/tmp/input.dat")
+        dummy._resolve_editor_replacement.assert_called_once_with("Open dropped files", model=True, data=True)
+        dummy._open_model_path.assert_called_once_with("/tmp/my model.mod", confirm_changes=False)
+        dummy._open_data_path.assert_called_once_with("/tmp/input.dat", confirm_changes=False)
+
+    def test_editor_drop_cancellation_does_not_open_any_files(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _dropped_paths=lambda _event: ["/tmp/model.mod", "/tmp/data.dat"],
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _open_model_path=mock.Mock(),
+            _open_data_path=mock.Mock(),
+        )
+        self.assertEqual(OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused")), "break")
+        dummy._open_model_path.assert_not_called()
+        dummy._open_data_path.assert_not_called()
 
     def test_open_model_shortcut_opens_model_and_stops_event(self):
         dummy = SimpleNamespace(open_model=mock.Mock())
@@ -563,16 +680,17 @@ minimize x;
         dummy.open_data.assert_called_once_with()
 
     def test_attachment_drop_filters_files_and_renders_pdf(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
+        attachments.render_pdf = mock.Mock(return_value=["/tmp/rendered/page_1.png"])
         dummy = SimpleNamespace(
-            _genai_attachment_paths=[],
-            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png"]),
+            _genai_attachments=attachments,
             _refresh_genai_attachment_list=mock.Mock(),
         )
 
         OPLIDE._add_genai_attachment_paths(dummy, ["/tmp/sketch.png", "/tmp/notes.txt", "/tmp/formulation.pdf"])
 
-        self.assertEqual(dummy._genai_attachment_paths, ["/tmp/sketch.png", "/tmp/rendered/page_1.png"])
-        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/formulation.pdf")
+        self.assertEqual(attachments.paths, ["/tmp/sketch.png", "/tmp/rendered/page_1.png"])
+        self.assertEqual(attachments.render_pdf.call_args.args[0], "/tmp/formulation.pdf")
         dummy._refresh_genai_attachment_list.assert_called_once_with()
 
     def test_mcp_bridge_handler_reads_and_partially_updates_editors(self):
@@ -584,6 +702,7 @@ minimize x;
             status_var=DummyVar(),
             _get_editor_text=lambda widget: widget.get(),
             _on_text_change=mock.Mock(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
         )
 
         self.assertEqual(
@@ -595,6 +714,7 @@ minimize x;
         self.assertEqual(result["updated"], ["data_text"])
         self.assertEqual(model.value, "old model")
         self.assertEqual(data.value, "new data")
+        dummy._resolve_editor_replacement.assert_called_once_with("Update from MCP", model=False, data=True, cancelled=None)
         dummy._on_text_change.assert_called_once_with(data, True)
         self.assertEqual(dummy.status_var.get(), "Updated from MCP")
 
@@ -603,6 +723,8 @@ minimize x;
 
         with self.assertRaisesRegex(ValueError, "data_text must be a string"):
             OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"data_text": None})
+        with self.assertRaisesRegex(ValueError, "data_text must be a string"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "new model", "data_text": None})
         self.assertEqual(model.value, "old model")
         self.assertEqual(data.value, "new data")
 
@@ -752,15 +874,14 @@ minimize x;
 
         dummy = SimpleNamespace(
             request_listbox=Listbox((1,)),
-            _output_session_ids=["s1", "s2"],
-            _output_sessions={"s1": "first\n", "s2": "second\n"},
-            _viewing_output_session_id=None,
-            _current_output_session_id="s1",
+            _session_state=pyopl_ide_bootstrap._OutputSessionState(
+                ids=["s1", "s2"], sessions={"s1": "first\n", "s2": "second\n"}, current_id="s1"
+            ),
         )
 
         self.assertEqual(OPLIDE._get_selected_output_session_text(dummy), "second")
         dummy.request_listbox = Listbox(())
-        dummy._viewing_output_session_id = "s1"
+        dummy._session_state.viewing_id = "s1"
         self.assertEqual(OPLIDE._get_selected_output_session_text(dummy), "first")
 
         self.assertEqual(
@@ -790,23 +911,96 @@ minimize x;
             _get_output_session_artifacts=mock.Mock(return_value={"model_text": "m", "data_text": "d"}),
             model_text=model,
             data_text=data,
-            model_file="old.mod",
-            data_file="old.dat",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="old.mod"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="old.dat"),
             editor_notebook=SimpleNamespace(tab=mock.Mock()),
             model_frame=object(),
             data_frame=object(),
             highlight=mock.Mock(),
             status_var=DummyVar(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
         )
         with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesno", return_value=True):
             OPLIDE._restore_session_model(dummy)
 
         self.assertEqual(model.value, "m")
         self.assertEqual(data.value, "d")
-        self.assertIsNone(dummy.model_file)
-        self.assertIsNone(dummy.data_file)
+        self.assertIsNone(dummy._model_editor_state.path)
+        self.assertIsNone(dummy._data_editor_state.path)
         self.assertEqual(dummy.status_var.value, "Model restored from session")
         self.assertEqual(dummy.highlight.call_count, 2)
+        dummy._resolve_editor_replacement.assert_called_once_with("Restore Model", model=True, data=True)
+
+    def test_new_model_cancellation_preserves_editor_buffers(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+        )
+        OPLIDE.new_model(dummy)
+        dummy._resolve_editor_replacement.assert_called_once_with("New Model", model=True, data=True)
+        dummy.model_text.delete.assert_not_called()
+        dummy.data_text.delete.assert_not_called()
+
+    def test_new_session_cancellation_preserves_history(self):
+        dummy = SimpleNamespace(
+            _ensure_no_active_operation=lambda _label: True,
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _reset_editors_for_new_session=mock.Mock(),
+            _clear_output_session_state=mock.Mock(),
+        )
+        with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesno", return_value=True):
+            OPLIDE.new_session(dummy)
+        dummy._resolve_editor_replacement.assert_called_once_with("New Session", model=True, data=True)
+        dummy._reset_editors_for_new_session.assert_not_called()
+        dummy._clear_output_session_state.assert_not_called()
+
+    def test_open_model_cancellation_preserves_editor_and_data_path(self):
+        dummy = SimpleNamespace(
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            _store_fold_state=mock.Mock(),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "new.mod"
+            model_path.write_text("new model", encoding="utf-8")
+            self.assertFalse(OPLIDE._open_model_path(dummy, str(model_path)))
+        dummy._resolve_editor_replacement.assert_called_once_with("Open Model", model=True, data=False)
+        dummy.model_text.delete.assert_not_called()
+        dummy.data_text.delete.assert_not_called()
+
+    def test_mcp_cancelled_update_reports_error_without_mutating_editor(self):
+        model = DummyText("edited model")
+        dummy = SimpleNamespace(
+            model_text=model,
+            data_text=DummyText("data"),
+            _get_editor_text=lambda widget: widget.get(),
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            status_var=DummyVar(),
+        )
+        with self.assertRaisesRegex(ValueError, "cancelled"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "replacement"})
+        self.assertEqual(model.value, "edited model")
+
+    def test_mcp_timeout_after_dialog_prevents_editor_update(self):
+        cancelled = pyopl_ide_bootstrap.threading.Event()
+        model = DummyText("edited model")
+
+        def time_out(*_args, **_kwargs):
+            cancelled.set()
+            return True
+
+        dummy = SimpleNamespace(
+            model_text=model,
+            data_text=DummyText("data"),
+            _get_editor_text=lambda widget: widget.get(),
+            _resolve_editor_replacement=mock.Mock(side_effect=time_out),
+        )
+        with self.assertRaisesRegex(ValueError, "timeout"):
+            OPLIDE._handle_ide_bridge_request(dummy, "PUT", "/editors", {"model_text": "replacement"}, cancelled)
+        self.assertEqual(model.value, "edited model")
 
     def test_load_session_restores_content_addressed_artifacts_files_and_tabs(self):
         """Session loading restores output history, snapshot stores, editor files, and tab labels."""
@@ -870,36 +1064,29 @@ minimize x;
             data_text = DummyText()
             listbox = Listbox()
             notebook = Notebook()
-            dummy = SimpleNamespace(
-                _session_file_path=lambda: str(session_path),
-                _output_sessions={},
-                _output_session_ids=[],
-                _output_session_display={},
-                _output_session_label={},
-                _output_session_timestamp={},
-                _output_session_artifacts={},
-                _model_snapshots={},
-                _data_snapshots={},
-                _current_output_session_id=None,
-                _viewing_output_session_id=None,
-                request_listbox=listbox,
-                output_text=output_text,
-                model_file=None,
-                data_file=None,
-                model_text=model_text,
-                data_text=data_text,
-                editor_notebook=notebook,
-                model_frame="model-frame",
-                data_frame="data-frame",
-            )
+            dummy = OPLIDE.__new__(OPLIDE)
+            dummy.tk = SimpleNamespace()
+            dummy._session_state = pyopl_ide_bootstrap._OutputSessionState()
+            dummy._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            dummy._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            dummy._session_file_path = lambda: str(session_path)
+            dummy.request_listbox = listbox
+            dummy.output_text = output_text
+            dummy._model_editor_state.path = None
+            dummy._data_editor_state.path = None
+            dummy.model_text = model_text
+            dummy.data_text = data_text
+            dummy.editor_notebook = notebook
+            dummy.model_frame = "model-frame"
+            dummy.data_frame = "data-frame"
 
             OPLIDE._load_session(dummy)
 
-        self.assertEqual(dummy._output_sessions, {"s1": "output"})
-        self.assertEqual(dummy._output_session_timestamp["s1"], "2026-01-01 10:00:00")
-        self.assertEqual(dummy._output_session_label["s1"], "Solve")
+        self.assertEqual(dummy._session_state.sessions, {"s1": "output"})
+        self.assertEqual(dummy._session_state.timestamps["s1"], "2026-01-01 10:00:00")
+        self.assertEqual(dummy._session_state.labels["s1"], "Solve")
         self.assertEqual(
-            dummy._output_session_artifacts,
+            dummy._session_state.artifacts,
             {"s1": {"model_hash": "sha256:model", "data_hash": "sha256:data"}},
         )
         self.assertEqual(
@@ -980,8 +1167,8 @@ minimize x;
 
             notebook = Notebook()
             dummy = SimpleNamespace(
-                model_file=None,
-                data_file=None,
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 model_text=DummyText("model body\n"),
                 data_text=DummyText("data body\n"),
                 editor_notebook=notebook,
@@ -996,15 +1183,96 @@ minimize x;
             with mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(data_path)):
                 OPLIDE.save_data_as(dummy)
 
-            self.assertEqual(model_path.read_text(encoding="utf-8"), "model body")
-            self.assertEqual(data_path.read_text(encoding="utf-8"), "data body")
-            self.assertEqual(dummy._model_saved_text, "model body\n")
-            self.assertEqual(dummy._data_saved_text, "data body\n")
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "model body\n")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "data body\n")
+            self.assertEqual(dummy._model_editor_state.saved_text, "model body\n")
+            self.assertEqual(dummy._data_editor_state.saved_text, "data body\n")
             self.assertEqual(
                 notebook.calls[-2:],
                 [("model-frame", {"text": "Model: saved.mod"}), ("data-frame", {"text": "Data: saved.dat"})],
             )
             self.assertEqual(dummy._save_session.call_count, 2)
+
+    def test_save_as_failure_keeps_original_paths_and_dirty_baselines(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for kind, save_as in (("model", OPLIDE.save_model_as), ("data", OPLIDE.save_data_as)):
+                with self.subTest(kind=kind):
+                    extension = ".mod" if kind == "model" else ".dat"
+                    original = Path(tmpdir) / f"original{extension}"
+                    destination = Path(tmpdir) / f"failed{extension}"
+                    original.write_text("saved content", encoding="utf-8")
+                    dummy = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(original), saved_text="saved content"
+                        ),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(original), saved_text="saved content"
+                        ),
+                        model_text=DummyText("edited content\n"),
+                        data_text=DummyText("edited content\n"),
+                        editor_notebook=mock.Mock(),
+                        model_frame="model-frame",
+                        data_frame="data-frame",
+                        _get_editor_text=lambda widget: widget.get(),
+                        _save_session=mock.Mock(),
+                    )
+                    with (
+                        mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(destination)),
+                        mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                        mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                    ):
+                        save_as(dummy)
+                    editor = getattr(dummy, f"_{kind}_editor_state")
+                    self.assertEqual(editor.path, str(original))
+                    self.assertEqual(editor.saved_text, "saved content")
+                    self.assertEqual(original.read_text(encoding="utf-8"), "saved content")
+                    self.assertFalse(destination.exists())
+                    dummy._save_session.assert_not_called()
+                    showerror.assert_called_once()
+
+    def test_regular_data_save_preserves_trailing_newlines(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "data.dat"
+            dummy = SimpleNamespace(
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(path)),
+                data_text=DummyText("data body\n\n"),
+                editor_notebook=mock.Mock(),
+                data_frame="data-frame",
+                _get_editor_text=lambda widget: widget.get(),
+                _save_session=mock.Mock(),
+            )
+            OPLIDE.save_data(dummy)
+            self.assertEqual(path.read_text(encoding="utf-8"), "data body\n\n")
+            self.assertEqual(dummy._data_editor_state.saved_text, "data body\n\n")
+
+    def test_untitled_save_failure_does_not_assign_file_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for kind, save in (("model", OPLIDE.save_model), ("data", OPLIDE.save_data)):
+                with self.subTest(kind=kind):
+                    extension = ".mod" if kind == "model" else ".dat"
+                    path = Path(tmpdir) / f"failed{extension}"
+                    dummy = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        model_text=DummyText("edited"),
+                        data_text=DummyText("edited"),
+                        editor_notebook=mock.Mock(),
+                        model_frame="model-frame",
+                        data_frame="data-frame",
+                        _get_editor_text=lambda widget: widget.get(),
+                        _save_session=mock.Mock(),
+                    )
+                    with (
+                        mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(path)),
+                        mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                        mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                        self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+                    ):
+                        save(dummy)
+                    self.assertIsNone(getattr(dummy, f"_{kind}_editor_state").path)
+                    self.assertFalse(path.exists())
+                    dummy._save_session.assert_not_called()
+                    showerror.assert_called_once()
 
     def test_copy_exemplar_to_tmp_uses_exemplar_name_and_unique_timestamped_paths(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1035,6 +1303,57 @@ minimize x;
             self.assertEqual(cloned_model.read_text(encoding="utf-8"), "original model")
             self.assertEqual(cloned_data.read_text(encoding="utf-8"), "original data")
 
+    def test_copy_exemplar_to_tmp_removes_only_its_partial_files(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_model = root / "source.mod"
+            source_data = root / "source.dat"
+            source_model.write_text("model", encoding="utf-8")
+            source_data.write_text("data", encoding="utf-8")
+            copy = pyopl_ide_bootstrap.shutil.copyfileobj
+
+            def fail_on_data(source, target):
+                copy(source, target)
+                if target.name.endswith(".dat"):
+                    raise OSError("copy failed")
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap.shutil, "copyfileobj", side_effect=fail_on_data),
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    OPLIDE._copy_exemplar_to_tmp(source_model, source_data, "fleet")
+
+            self.assertEqual(list((root / "tmp").iterdir()), [])
+            self.assertEqual(source_model.read_text(encoding="utf-8"), "model")
+            self.assertEqual(source_data.read_text(encoding="utf-8"), "data")
+
+    def test_copy_exemplar_to_tmp_does_not_overwrite_existing_destination(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_model = root / "source.mod"
+            source_data = root / "source.dat"
+            source_model.write_text("new model", encoding="utf-8")
+            source_data.write_text("new data", encoding="utf-8")
+            existing_model = root / "tmp" / "fleet.mod"
+            existing_model.parent.mkdir()
+            existing_model.write_text("existing model", encoding="utf-8")
+            target_data = root / "tmp" / "fleet.dat"
+
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(
+                    OPLIDE,
+                    "_unique_timestamped_model_data_paths",
+                    return_value=(existing_model, target_data),
+                ),
+            ):
+                with self.assertRaises(FileExistsError):
+                    OPLIDE._copy_exemplar_to_tmp(source_model, source_data, "fleet")
+
+            self.assertEqual(existing_model.read_text(encoding="utf-8"), "existing model")
+            self.assertFalse(target_data.exists())
+
     def test_poll_solver_empty_queue_handles_running_and_unexpected_exit(self):
         """Polling reschedules live solvers and reports dead solvers with no terminal message."""
 
@@ -1057,8 +1376,7 @@ minimize x;
 
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
         running = SimpleNamespace(
-            _solver_process=Process(True),
-            _solver_queue=EmptyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(True), EmptyQueue()),
             after=mock.Mock(),
             _poll_solver=mock.Mock(),
         )
@@ -1066,8 +1384,7 @@ minimize x;
         running.after.assert_called_once()
 
         dead = SimpleNamespace(
-            _solver_process=Process(False),
-            _solver_queue=EmptyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(False), EmptyQueue()),
             _set_run_menu_running=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
             _append_output=mock.Mock(),
@@ -1114,8 +1431,7 @@ minimize x;
 
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "s1")
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _record_solver_progress=mock.Mock(),
             _append_solver_log_text=mock.Mock(),
             _set_run_menu_running=mock.Mock(),
@@ -1130,9 +1446,11 @@ minimize x;
             dummy, cancel_queue_thread=cancel_queue_thread
         )
 
-        OPLIDE._poll_solver(dummy, operation)
+        with self.assertLogs(pyopl_ide_bootstrap.__name__, level="WARNING") as logged:
+            OPLIDE._poll_solver(dummy, operation)
 
         dummy._record_solver_progress.assert_called_once_with({"runtime": 1})
+        self.assertIn("non-dictionary payload", logged.output[0])
         dummy._append_solver_log_text.assert_called_once_with("hello")
         dummy._finish_solver_progress.assert_called_once_with(status="failed")
         dummy._append_output.assert_called_once_with("\nError:\nboom\n", "s1")
@@ -1168,8 +1486,7 @@ minimize x;
             "solve", "Solve", "s1", solver_choice="gurobi", explain_after_solve=True
         )
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _set_run_menu_running=mock.Mock(),
             _stop_run_timer=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
@@ -1236,8 +1553,7 @@ minimize x;
             explain_after_solve=True,
         )
         dummy = SimpleNamespace(
-            _solver_process=Process(),
-            _solver_queue=Queue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(Process(), Queue()),
             _set_run_menu_running=mock.Mock(),
             _stop_run_timer=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
@@ -1358,8 +1674,8 @@ minimize x;
             dummy = SimpleNamespace(
                 model_text=DummyText("model\n"),
                 data_text=DummyText("data\n"),
-                model_file=None,
-                data_file=None,
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             )
             with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
                 result = OPLIDE._ensure_model_data_saved(dummy)
@@ -1367,15 +1683,20 @@ minimize x;
             self.assertTrue(Path(result[0]).read_text(encoding="utf-8"), "model")
             self.assertTrue(Path(result[1]).read_text(encoding="utf-8"), "data")
 
-            dummy = SimpleNamespace(model_text=DummyText("model"), data_text=DummyText("data"))
+            dummy = SimpleNamespace(
+                model_text=DummyText("model"),
+                data_text=DummyText("data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            )
             result = OPLIDE._ensure_model_data_saved(dummy, str(model_path), str(data_path))
             self.assertEqual(result, (str(model_path), str(data_path)))
 
         dummy = SimpleNamespace(
             model_text=DummyText("new"),
             data_text=DummyText("same"),
-            _model_saved_text="old",
-            _data_saved_text="same",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(saved_text="old"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(saved_text="same"),
         )
         dummy._get_editor_text = lambda widget: widget.get()
         self.assertTrue(OPLIDE._has_unsaved_editor_changes(dummy))
@@ -1383,15 +1704,23 @@ minimize x;
         dummy = SimpleNamespace(
             _has_unsaved_editor_changes=mock.Mock(return_value=False),
             _confirm_quit_with_unsaved_changes=mock.Mock(return_value=False),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(highlight_after_ids={"validate": "model-id"}),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(highlight_after_ids={"fast": "data-id"}),
+            after_cancel=mock.Mock(),
             stop_model=mock.Mock(),
             _save_settings=mock.Mock(),
             _save_session=mock.Mock(),
-            _cleanup_genai_pdf_temp_dir=mock.Mock(),
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
             destroy=mock.Mock(),
             quit=mock.Mock(),
         )
         OPLIDE._on_close(dummy)
         self.assertTrue(dummy._shutting_down)
+        self.assertTrue(dummy._exemplar_save_state.closed)
+        self.assertEqual(dummy.after_cancel.call_count, 2)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {})
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {})
         dummy.stop_model.assert_called_once()
         dummy.destroy.assert_called_once()
         dummy.quit.assert_called_once()

@@ -16,7 +16,7 @@ from platformdirs import user_config_dir
 
 BRIDGE_INFO_PATH = Path(user_config_dir("rhetor")) / "ide-mcp.json"
 BRIDGE_HOST = "127.0.0.1"
-BRIDGE_REQUEST_TIMEOUT = 10.0
+BRIDGE_REQUEST_TIMEOUT = 30.0
 
 
 class _BridgeHTTPServer(ThreadingHTTPServer):
@@ -31,6 +31,7 @@ class BridgeRequest:
     path: str
     payload: Optional[dict[str, Any]]
     completed: threading.Event = field(default_factory=threading.Event)
+    cancelled: threading.Event = field(default_factory=threading.Event)
     response: Optional[dict[str, Any]] = None
     error: Optional[BaseException] = None
 
@@ -76,6 +77,7 @@ class RhetorIDEBridge:
                 request = BridgeRequest(self.command, self.path, payload)
                 bridge._requests.put(request)
                 if not request.completed.wait(BRIDGE_REQUEST_TIMEOUT):
+                    request.cancelled.set()
                     self._send_json(504, {"error": "Rhetor IDE did not respond in time"})
                 elif request.error is not None:
                     self._send_json(400, {"error": str(request.error)})
@@ -98,7 +100,7 @@ class RhetorIDEBridge:
         self._thread.start()
         self._publish_connection_info(self._server.server_port)
 
-    def process_pending(self, handler: Callable[[str, str, Optional[dict[str, Any]]], dict[str, Any]]) -> int:
+    def process_pending(self, handler: Callable[[str, str, Optional[dict[str, Any]], threading.Event], dict[str, Any]]) -> int:
         """Process all queued requests on the caller's thread."""
         processed = 0
         while True:
@@ -107,7 +109,8 @@ class RhetorIDEBridge:
             except queue.Empty:
                 return processed
             try:
-                request.response = handler(request.method, request.path, request.payload)
+                if not request.cancelled.is_set():
+                    request.response = handler(request.method, request.path, request.payload, request.cancelled)
             except BaseException as exc:
                 request.error = exc
             finally:

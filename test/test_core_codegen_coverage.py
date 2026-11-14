@@ -295,6 +295,21 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(result["stats"]["mip_gap"], 0.0)
         self.assertIsNotNone(result["stats"]["mip_dual_bound"])
 
+    def test_scipy_mip_dual_bound_uses_model_objective_sense_and_offset(self):
+        for objective, constraint, expected in (
+            ("maximize", "x <= 3", 10.0),
+            ("minimize", "x >= 3", 10.0),
+        ):
+            with self.subTest(objective=objective), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "mip.mod"
+                model_path.write_text(f"dvar int+ x; {objective} x + 7; subject to {{ {constraint}; }}", encoding="utf-8")
+                result = solve_with_scipy(model_path, solver_settings={"disp": False})
+
+                self.assertEqual(result["status"], "OPTIMAL")
+                self.assertAlmostEqual(result["objective_value"], expected)
+                self.assertAlmostEqual(result["stats"]["mip_dual_bound"], expected)
+                self.assertEqual(result["stats"]["mip_gap"], 0.0)
+
     def test_generated_solvers_apply_injected_settings(self):
         ast = {
             "declarations": [{"type": "dvar", "var_type": "float+", "name": "x"}],

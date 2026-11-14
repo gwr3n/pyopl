@@ -1,6 +1,7 @@
 import os
 import queue
 import unittest
+from builtins import open as builtin_open
 from contextlib import redirect_stdout
 from datetime import datetime
 from io import StringIO
@@ -30,6 +31,223 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", "right.dat"))
         self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", ""))
         self.assertFalse(pyopl_ide_bootstrap._data_paths_are_paired("", "right.dat"))
+
+    def test_comparison_request_validates_paths_for_compare_and_mapping_generation(self):
+        with TemporaryDirectory() as tmpdir:
+            left = Path(tmpdir) / "left.mod"
+            right = Path(tmpdir) / "right.mod"
+            left_data = Path(tmpdir) / "left.dat"
+            right_data = Path(tmpdir) / "right.dat"
+            for path in (left, right, left_data, right_data):
+                path.write_text("", encoding="utf-8")
+            missing_mapping = str(Path(tmpdir) / "missing.json")
+            request = pyopl_ide_bootstrap._ComparisonRequest(
+                str(left), str(left_data), str(right), str(right_data), "abstract", missing_mapping
+            )
+
+            request.validate_paths()
+            with self.assertRaises(pyopl_ide_bootstrap._ComparisonInputError) as missing:
+                request.validate_paths(include_mapping=True)
+            self.assertFalse(missing.exception.warning)
+            self.assertEqual(str(missing.exception), f"Observable mapping file does not exist:\n{missing_mapping}")
+
+            invalid = (
+                ("", "", str(right), "", "Choose both a left model and a right model.", True),
+                (str(left), str(left_data), str(right), "", "Choose both data files or leave both data fields empty.", True),
+                (str(left), "", str(Path(tmpdir) / "missing.mod"), "", "Right model file does not exist:", False),
+            )
+            for left_model, left_dat, right_model, right_dat, expected, warning in invalid:
+                with self.subTest(expected=expected):
+                    candidate = pyopl_ide_bootstrap._ComparisonRequest(
+                        left_model, left_dat, right_model, right_dat, "abstract"
+                    )
+                    with self.assertRaises(pyopl_ide_bootstrap._ComparisonInputError) as error:
+                        candidate.validate_paths(include_mapping=True)
+                    self.assertEqual(error.exception.warning, warning)
+                    self.assertIn(expected, str(error.exception))
+
+    def test_comparison_process_owner_starts_and_releases_worker(self):
+        request = pyopl_ide_bootstrap._ComparisonRequest("left.mod", "", "right.mod", "", "abstract")
+        result_queue = mock.Mock()
+        process = mock.Mock()
+        owner = pyopl_ide_bootstrap._ComparisonProcessState()
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process) as process_cls,
+        ):
+            owner.start(request)
+
+        process_cls.assert_called_once_with(
+            target=pyopl_ide_bootstrap._compare_models_wrapper,
+            args=("left.mod", "", "right.mod", "", "abstract", result_queue, ""),
+        )
+        process.start.assert_called_once_with()
+        result_queue.get_nowait.return_value = ("success", "result")
+        self.assertEqual(owner.read_nowait(), ("success", "result"))
+
+        owner.finish()
+
+        process.join.assert_called_once_with(timeout=0.1)
+        result_queue.close.assert_called_once_with()
+        result_queue.join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+        self.assertIsNone(owner.result_queue)
+
+    def test_comparison_process_owner_cleans_up_failed_start_and_interrupt(self):
+        request = pyopl_ide_bootstrap._ComparisonRequest("left.mod", "", "right.mod", "", "abstract")
+        result_queue = mock.Mock()
+        process = mock.Mock()
+        process.start.side_effect = OSError("cannot spawn")
+        owner = pyopl_ide_bootstrap._ComparisonProcessState()
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process),
+        ):
+            with self.assertRaises(OSError):
+                owner.start(request)
+
+        result_queue.cancel_join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+
+        process.start.side_effect = None
+        process.is_alive.side_effect = [True, True]
+        owner.process = process
+        interrupt_queue = mock.Mock()
+        owner.result_queue = interrupt_queue
+        owner.interrupt()
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        interrupt_queue.cancel_join_thread.assert_called_once_with()
+        self.assertIsNone(owner.process)
+        self.assertIsNone(owner.result_queue)
+
+    def test_comparison_process_owner_rejects_invalid_messages(self):
+        owner = pyopl_ide_bootstrap._ComparisonProcessState(result_queue=mock.Mock())
+        owner.result_queue.get_nowait.return_value = ("unexpected", "payload")
+
+        with self.assertRaisesRegex(ValueError, "Invalid comparison worker message"):
+            owner.read_nowait()
+
+    def test_comparison_dialog_validates_completes_and_cancels_without_tk(self):
+        class DummyVar:
+            instances = []
+
+            def __init__(self, value=""):
+                self.value = value
+                self.instances.append(self)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        buttons = {}
+
+        def make_button(*_args, **kwargs):
+            button = mock.Mock()
+            button.command = kwargs.get("command")
+
+            def config(**updates):
+                if "command" in updates:
+                    button.command = updates["command"]
+
+            button.config.side_effect = config
+            buttons[kwargs.get("text")] = button
+            return button
+
+        dialog = mock.Mock()
+        dialog.after.return_value = "poll-id"
+        dialog.winfo_exists.return_value = True
+        result_text = mock.Mock()
+        host = SimpleNamespace(
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            genai_provider=None,
+            genai_model=None,
+            _active_operation=None,
+            _ensure_no_active_operation=mock.Mock(return_value=True),
+            _start_foreground_operation=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+            interrupt_active_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=mock.Mock(),
+            after=mock.Mock(),
+        )
+        result = SimpleNamespace(
+            status="unknown", level="inconclusive", reason="no proof", proof_steps=(), counterexample=None
+        )
+        first_queue, second_queue, third_queue = mock.Mock(), mock.Mock(), mock.Mock()
+        first_queue.get_nowait.return_value = ("success", result)
+        third_queue.get_nowait.side_effect = pyopl_ide_bootstrap.queue.Empty
+        first_process, second_process, third_process = mock.Mock(), mock.Mock(), mock.Mock()
+        third_process.is_alive.return_value = False
+
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "LabelFrame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
+            mock.patch.object(pyopl_ide_bootstrap.scrolledtext, "ScrolledText", return_value=result_text),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            mock.patch.object(
+                pyopl_ide_bootstrap.multiprocessing, "Queue", side_effect=[first_queue, second_queue, third_queue]
+            ),
+            mock.patch.object(
+                pyopl_ide_bootstrap.multiprocessing, "Process", side_effect=[first_process, second_process, third_process]
+            ),
+            mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=mock.Mock()) as thread_cls,
+        ):
+            OPLIDE.compare_models(host)
+            compare_button = buttons["Compare"]
+            compare_button.command()
+            showwarning.assert_called_once()
+
+            left_path = Path(tmpdir) / "left.mod"
+            right_path = Path(tmpdir) / "right.mod"
+            left_path.write_text("minimize 0;", encoding="utf-8")
+            right_path.write_text("minimize 0;", encoding="utf-8")
+            DummyVar.instances[1].set(str(left_path))
+            DummyVar.instances[3].set(str(right_path))
+            compare_button.command()
+            poll = dialog.after.call_args.args[1:]
+            poll[0](*poll[1:])
+            self.assertIn("Status: unknown", result_text.insert.call_args.args[1])
+            first_queue.join_thread.assert_called_once()
+
+            escape = next(call.args[1] for call in dialog.bind.call_args_list if call.args[0] == "<Escape>")
+            mapping_operation = pyopl_ide_bootstrap._ForegroundOperation("genai-observable-mapping", "Mapping", "s1")
+            host.genai_provider = "openai"
+            host.genai_model = "selected-model"
+            host._start_foreground_operation.return_value = mapping_operation
+            host._active_operation = mapping_operation
+            host.interrupt_active_operation.side_effect = lambda: setattr(host, "_active_operation", None)
+            buttons["Generate"].command()
+            thread_cls.return_value.start.assert_called_once_with()
+            escape(None)
+            host.interrupt_active_operation.assert_called_once_with()
+
+            compare_button.command()
+            escape(None)
+            second_queue.cancel_join_thread.assert_called_once()
+            dialog.after_cancel.assert_called_once_with("poll-id")
+            self.assertFalse(dialog.destroy.called)
+
+            compare_button.command()
+            poll = dialog.after.call_args.args[1:]
+            poll[0](*poll[1:])
+            third_queue.cancel_join_thread.assert_called_once()
+            showerror.assert_called_once_with("Compare models", "Comparison process terminated unexpectedly.", parent=dialog)
+            escape(None)
+            dialog.destroy.assert_called_once()
 
     def test_compare_wrapper_reports_semantic_error_without_traceback(self):
         result_queue = mock.Mock()
@@ -187,23 +405,6 @@ class TestPyOPLIDETyping(unittest.TestCase):
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
 
-    def test_rank_exemplars_preserves_rag_order(self):
-        low = Path("/tmp/low.md")
-        high = Path("/tmp/high.md")
-        exemplars = [
-            {"name": "low", "description_path": low},
-            {"name": "high", "description_path": high},
-        ]
-        with mock.patch.object(
-            pyopl_ide_bootstrap,
-            "rank_problem_descriptions",
-            return_value=[{"path": str(high)}, {"path": str(low)}],
-        ) as rank:
-            ranked = OPLIDE._rank_exemplars("assignment", exemplars, [Path("/tmp/opl_models")])
-
-        self.assertEqual([entry["name"] for entry in ranked], ["high", "low"])
-        rank.assert_called_once_with(query="assignment", models_dir=[Path("/tmp/opl_models")], top_k=0)
-
     def test_classify_exemplar_search_result_handles_worker_messages(self):
         low = {"name": "low", "description_path": Path("/tmp/low.md")}
         high = {"name": "high", "description_path": Path("/tmp/high.md")}
@@ -228,9 +429,117 @@ class TestPyOPLIDETyping(unittest.TestCase):
         for message, current_generation, expected in cases:
             with self.subTest(message=message):
                 self.assertEqual(
-                    OPLIDE._classify_exemplar_search_result(message, current_generation, exemplars),
+                    pyopl_ide_bootstrap._ExemplarSearchState.classify_result(message, current_generation, exemplars),
                     expected,
                 )
+
+    def test_exemplar_search_owns_timers_generations_and_worker_shutdown(self):
+        exemplar = {"name": "fleet", "description_path": Path("/tmp/fleet.md")}
+        worker = mock.Mock()
+        worker.is_alive.return_value = True
+        search = pyopl_ide_bootstrap._ExemplarSearchState(worker, [exemplar])
+        dialog = mock.Mock()
+        dialog.after.side_effect = ["search-1", "search-2", "poll-1"]
+
+        search.schedule_search(dialog, mock.Mock())
+        search.schedule_search(dialog, mock.Mock())
+        self.assertFalse(search.start_search("  "))
+        self.assertTrue(search.start_search("fleet"))
+        worker.submit.assert_called_once_with(2, "fleet")
+        worker.get_nowait.side_effect = [
+            ("ready", None, None),
+            ("success", 1, [{"path": "/tmp/fleet.md"}]),
+            ("success", 2, [{"path": "/tmp/fleet.md"}]),
+            queue.Empty(),
+        ]
+        self.assertEqual(search.drain(), [("ready", None), ("success", [exemplar])])
+        self.assertTrue(search.worker_ready)
+        search.schedule_poll(dialog, mock.Mock())
+        search.close(dialog)
+        search.close(dialog)
+
+        self.assertEqual(dialog.after_cancel.call_args_list, [mock.call("search-1"), mock.call("poll-1")])
+        worker.close.assert_called_once_with(wait=False)
+        self.assertEqual(search.drain(), [])
+        search.schedule_search(dialog, mock.Mock())
+        self.assertEqual(dialog.after.call_count, 3)
+
+    def test_exemplar_search_reports_unavailable_worker(self):
+        worker = mock.Mock()
+        worker.is_alive.return_value = False
+        search = pyopl_ide_bootstrap._ExemplarSearchState(worker, [])
+
+        with self.assertRaisesRegex(RuntimeError, "unavailable"):
+            search.start_search("query")
+        worker.submit.assert_not_called()
+
+    def test_retrieve_copy_failure_keeps_dialog_and_editors_unchanged(self):
+        exemplar = {
+            "name": "fleet",
+            "description_path": Path("/tmp/fleet.md"),
+            "model_path": Path("/tmp/fleet.mod"),
+            "data_path": Path("/tmp/fleet.dat"),
+        }
+        previous_cleanup = mock.Mock()
+        host = SimpleNamespace(
+            _ensure_no_active_operation=lambda action: True,
+            _exemplar_search_cleanup=previous_cleanup,
+            _available_exemplars=lambda roots: [exemplar],
+            _copy_exemplar_to_tmp=mock.Mock(side_effect=OSError("copy failed")),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
+            _open_model_path=mock.Mock(),
+            _open_data_path=mock.Mock(),
+            status_var=mock.Mock(),
+        )
+        dialog = mock.Mock()
+        dialog.after.return_value = "poll-id"
+        exemplar_list = mock.Mock()
+        exemplar_list.curselection.return_value = (0,)
+        worker = mock.Mock()
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.GenAIStrategyBase, "default_models_dirs", return_value=[]),
+            mock.patch.object(pyopl_ide_bootstrap, "ExemplarRankingWorker", return_value=worker),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Listbox", return_value=exemplar_list),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Text", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Scrollbar", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", return_value=mock.Mock()) as button,
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+        ):
+            OPLIDE.retrieve_exemplar(host)
+            button.call_args_list[0].kwargs["command"]()
+
+        previous_cleanup.assert_called_once_with(None)
+        self.assertIn("copy failed", showerror.call_args.args[1])
+        host._open_model_path.assert_not_called()
+        host._open_data_path.assert_not_called()
+        dialog.destroy.assert_not_called()
+        host._resolve_editor_replacement.return_value = False
+        button.call_args_list[0].kwargs["command"]()
+        host._copy_exemplar_to_tmp.assert_called_once()
+        host._exemplar_search_cleanup(None)
+        worker.close.assert_called_once_with(wait=False)
+
+    def test_exemplar_catalog_only_lists_complete_triplets_once(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            complete = root / "complete"
+            complete.mkdir()
+            (complete / "complete.md").write_text("description", encoding="utf-8")
+            (complete / "complete.mod").write_text("model", encoding="utf-8")
+            (complete / "complete.dat").write_text("data", encoding="utf-8")
+            incomplete = root / "incomplete"
+            incomplete.mkdir()
+            (incomplete / "incomplete.md").write_text("description", encoding="utf-8")
+
+            entries = OPLIDE._available_exemplars([root, root])
+
+            self.assertEqual([entry["name"] for entry in entries], ["complete"])
+            self.assertEqual(entries[0]["model_path"], complete / "complete.mod")
 
     def test_file_menu_quit_entry_is_platform_appropriate(self):
         class FakeMenu:
@@ -290,8 +599,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
     def test_start_solver_process_loads_settings_from_working_directory(self):
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
         dummy = SimpleNamespace(
-            _solver_queue=None,
-            _solver_process=None,
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
             status_var=mock.Mock(),
             _append_output=mock.Mock(),
             _finish_foreground_operation=mock.Mock(),
@@ -313,15 +621,66 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 os.chdir(old_cwd)
 
         self.assertTrue(started)
+        self.assertEqual(dummy._solver_ipc.session_id, operation.session_id)
         process_cls.assert_called_once_with(
             target=pyopl_ide_bootstrap._solve_wrapper,
-            args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_queue),
+            args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
         )
         process.start.assert_called_once_with()
         dummy._append_output.assert_called_once_with(
             f"\nSolver settings: loaded {settings_path}.\n",
             "session-1",
         )
+
+    def test_start_solver_process_failure_releases_queue_and_ignores_late_poll(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
+        result_queue = mock.Mock()
+        process = mock.Mock()
+        process.start.side_effect = OSError("cannot spawn")
+        dummy = SimpleNamespace(
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
+            status_var=mock.Mock(),
+            _append_output=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
+            mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process),
+        ):
+            started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+
+        self.assertFalse(started)
+        self.assertIsNone(dummy._solver_ipc.handles())
+        result_queue.close.assert_called_once_with()
+        result_queue.cancel_join_thread.assert_called_once_with()
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
+        OPLIDE._poll_solver(dummy, operation)
+        result_queue.get_nowait.assert_not_called()
+
+    def test_old_solver_poll_does_not_consume_new_solver_queue(self):
+        result_queue = mock.Mock()
+        dummy = SimpleNamespace(_solver_ipc=pyopl_ide_bootstrap._SolverProcessState(mock.Mock(), result_queue, "new-session"))
+        old_operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "old-session")
+
+        OPLIDE._poll_solver(dummy, old_operation)
+
+        result_queue.get_nowait.assert_not_called()
+
+    def test_solver_process_stop_terminates_and_kills_unresponsive_worker(self):
+        process = mock.Mock()
+        process.is_alive.side_effect = [True, True]
+        owner = pyopl_ide_bootstrap._SolverProcessState(process=process)
+
+        owner.stop()
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(process.join.call_args_list, [mock.call(timeout=1.0), mock.call(timeout=1.0)])
+        owner.join(timeout=0.1)
+        self.assertEqual(process.join.call_args_list[-1], mock.call(timeout=0.1))
 
     def test_export_model_dialog_supports_lp_and_mps(self):
         class DummyText:
@@ -345,7 +704,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             model_text=DummyText("dvar float+ x; minimize x; subject to { x >= 1; }"),
             data_text=DummyText(""),
             solver=DummyVar("gurobi"),
-            model_file="example.mod",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="example.mod"),
             status_var=DummyVar(),
             _append_output=mock.Mock(),
             _clear_output=mock.Mock(),
@@ -411,6 +770,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                         "Reviewed fleet assignment problem.",
                     )
                 ),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -461,6 +821,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=OPLIDE._write_exemplar,
                 _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
                 _review_exemplar_draft=mock.Mock(side_effect=lambda draft, _root: draft),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -498,6 +859,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="cancelled"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -519,6 +881,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="fleet"),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _save_session=mock.Mock(),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider=None,
                 genai_model=None,
             )
@@ -545,6 +908,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="failed"),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -585,6 +949,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="race"),
                 _review_exemplar_draft=mock.Mock(side_effect=create_competing_destination),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -614,6 +979,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _session_file_path=lambda: str(session_path),
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _ask_short_text=mock.Mock(return_value="async"),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
                 genai_provider="openai",
                 genai_model="test-model",
             )
@@ -629,8 +995,71 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
             worker.assert_called_once_with()
             distill.assert_not_called()
-            self.assertTrue(dummy._exemplar_save_pending)
+            self.assertTrue(dummy._exemplar_save_state.pending)
             self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+
+    def test_save_exemplar_snapshots_inputs_and_blocks_duplicate_preparation(self):
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            session_path = root / ".pyopl_session"
+            session_path.write_text("original session", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "original model"),
+                data_text=SimpleNamespace(get=lambda *_args: "original data"),
+                status_var=mock.Mock(),
+                _save_session=mock.Mock(),
+                _session_file_path=lambda: str(session_path),
+                _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
+                _ask_short_text=mock.Mock(return_value="fleet"),
+                _review_exemplar_draft=mock.Mock(return_value=None),
+                _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                genai_provider="openai",
+                genai_model="first-model",
+                after=lambda _delay, callback, *args: callback(*args),
+            )
+            thread = mock.Mock()
+            with (
+                mock.patch.object(Path, "cwd", return_value=root),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showinfo") as showinfo,
+                mock.patch.object(pyopl_ide_bootstrap, "distill_exemplar_description", return_value="description") as distill,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE.save_exemplar(host)
+                OPLIDE.save_exemplar(host)
+                host.genai_provider, host.genai_model = "other-provider", "other-model"
+                host.model_text.get = lambda *_args: "changed model"
+                session_path.write_text("changed session", encoding="utf-8")
+                thread_cls.call_args.kwargs["target"]()
+
+            showinfo.assert_called_once()
+            host._ask_short_text.assert_called_once()
+            self.assertEqual(thread_cls.call_count, 1)
+            distill.assert_called_once_with(
+                model="original model",
+                data="original data",
+                source_session="original session",
+                provider="openai",
+                model_name="first-model",
+            )
+            self.assertFalse(host._exemplar_save_state.pending)
+            self.assertFalse((root / "opl_models").exists())
+
+    def test_exemplar_save_state_releases_pending_when_worker_cannot_start(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState()
+        with mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", side_effect=RuntimeError("cannot start")):
+            with self.assertRaisesRegex(RuntimeError, "cannot start"):
+                state.start(mock.Mock())
+        self.assertFalse(state.pending)
+
+    def test_exemplar_preparation_completion_after_shutdown_skips_review(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True, closed=True)
+        host = SimpleNamespace(_exemplar_save_state=state, _review_exemplar_draft=mock.Mock())
+        draft = pyopl_ide_bootstrap.ExemplarDraft("name", "model", "data", "description", "session")
+
+        OPLIDE._finish_exemplar_preparation(host, draft, Path("/tmp/opl_models"))
+
+        self.assertFalse(state.pending)
+        host._review_exemplar_draft.assert_not_called()
 
     def test_reviewed_exemplar_description_preserves_model_and_data(self):
         draft = pyopl_ide_bootstrap.ExemplarDraft(
@@ -654,7 +1083,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     OPLIDE._resolve_exemplar_destination(root, invalid_name)
 
-        dummy = SimpleNamespace(_save_session=mock.Mock(), _ask_short_text=mock.Mock(return_value=None))
+        dummy = SimpleNamespace(
+            _save_session=mock.Mock(),
+            _ask_short_text=mock.Mock(return_value=None),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+        )
         OPLIDE.save_exemplar(dummy)
         dummy._save_session.assert_not_called()
 
@@ -695,9 +1128,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         dummy = SimpleNamespace(
             _shutting_down=False,
-            _highlight_after_ids={},
-            _last_syntax_error_by_widget={},
-            _last_syntax_error="old error",
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="old error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="data error"),
             status_syntax_var=DummyStatus(),
             after=lambda *args, **kwargs: "after-id",
             after_cancel=lambda _after_id: None,
@@ -711,14 +1143,78 @@ class TestPyOPLIDETyping(unittest.TestCase):
             dummy, text_widget
         )
         text = DummyText()
+        dummy.model_text = text
 
         OPLIDE._schedule_highlight(dummy, text, is_data=False)
 
-        self.assertEqual(dummy._highlight_after_ids, {})
-        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
-        self.assertIsNone(dummy._last_syntax_error)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {})
+        self.assertIsNone(dummy._model_editor_state.syntax_error)
+        self.assertEqual(dummy._data_editor_state.syntax_error, "data error")
         self.assertEqual(dummy.status_syntax_var.value, "Syntax validation disabled for large text")
         self.assertTrue(any(tag == "ERROR" for tag, _start, _end in text.removed))
+
+    def test_model_and_data_highlight_callbacks_are_independent(self):
+        model_text = mock.Mock()
+        data_text = mock.Mock()
+        dummy = SimpleNamespace(
+            model_text=model_text,
+            data_text=data_text,
+            _shutting_down=False,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _highlight_debounce_ms=150,
+            _highlight_validate_idle_ms=800,
+            after=mock.Mock(side_effect=["model-first", "data-fast", "data-validate", "model-second"]),
+            after_cancel=mock.Mock(),
+            _run_scheduled_highlight=mock.Mock(),
+            _text_too_large_for_highlight=lambda _widget: False,
+            highlight=mock.Mock(),
+            editor_notebook=SimpleNamespace(select=lambda: "model", index=lambda _tab: 0),
+        )
+        dummy._cancel_scheduled_highlight = lambda widget, kind: OPLIDE._cancel_scheduled_highlight(dummy, widget, kind)
+
+        OPLIDE._schedule_highlight(dummy, model_text, is_data=False)
+        OPLIDE._schedule_highlight(dummy, data_text, is_data=True)
+        OPLIDE._schedule_highlight(dummy, model_text, is_data=False)
+
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {"validate": "model-second"})
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {"fast": "data-fast", "validate": "data-validate"})
+        dummy.after_cancel.assert_called_once_with("model-first")
+
+        old_version = dummy.after.call_args_list[0].args[-1]
+        OPLIDE._run_scheduled_highlight(dummy, model_text, is_data=False, validate=True, version=old_version)
+        self.assertEqual(dummy._model_editor_state.highlight_after_ids, {"validate": "model-second"})
+        dummy.highlight.assert_not_called()
+
+        OPLIDE._run_scheduled_highlight(dummy, data_text, is_data=True, validate=False)
+        self.assertEqual(dummy._data_editor_state.highlight_after_ids, {"validate": "data-validate"})
+        dummy.highlight.assert_called_once_with(data_text, is_data=True, validate=False)
+
+    def test_editor_paths_and_saved_baselines_have_independent_state(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        ide._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        ide.model_text = DummyText("model")
+        ide.data_text = DummyText("data")
+        ide._model_editor_state.path = "model.mod"
+        ide._data_editor_state.path = "data.dat"
+        OPLIDE._mark_editor_baselines_saved(ide)
+
+        self.assertEqual(ide._model_editor_state.path, "model.mod")
+        self.assertEqual(ide._data_editor_state.path, "data.dat")
+        self.assertFalse(OPLIDE._has_unsaved_editor_changes(ide))
+
+        ide.data_text.value = "changed data"
+        self.assertTrue(OPLIDE._has_unsaved_editor_changes(ide))
+        self.assertEqual(ide._model_editor_state.saved_text, "model")
+        self.assertEqual(ide._data_editor_state.saved_text, "data")
 
     def test_update_caret_preserves_large_text_status(self):
         class DummyText:
@@ -783,6 +1279,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 self.value = value
 
         text = DummyText()
+        error_message = "Parser Error on line 13: Semantic Error (Line 13): Syntax error in .dat file at end of file (EOF)."
         dummy = SimpleNamespace(
             status_caret_var=DummyVar(),
             status_syntax_var=DummyVar(),
@@ -793,10 +1290,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
             genai_model=None,
             genai_method_var=SimpleNamespace(get=lambda: "pyopl_generative"),
             _genai_methods=[("SyntAGM", "pyopl_generative")],
-            _last_syntax_error_by_widget={
-                id(text): "Parser Error on line 13: Semantic Error (Line 13): Syntax error in .dat file at end of file (EOF)."
-            },
-            _last_syntax_error=None,
+            model_text=text,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error=error_message),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
         )
         dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
         dummy._refresh_status_context = lambda: OPLIDE._refresh_status_context(dummy)
@@ -844,13 +1340,12 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 solver_choice="scipy",
             )
             dummy = SimpleNamespace(
-                _solver_process=None,
-                _solver_queue=None,
+                _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
                 model_text=DummyText("dvar float+ x;\nminimize x;\nsubject to { x >= 1; }"),
                 data_text=DummyText(""),
                 solver=DummyVar("scipy"),
-                data_file=None,
-                model_file=None,
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 status_var=DummyVar(),
                 _start_foreground_operation=mock.Mock(return_value=operation),
                 _finish_foreground_operation=mock.Mock(),
@@ -874,11 +1369,34 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._start_run_timer.assert_called_once_with("Solving model...")
         dummy.after.assert_called_once()
 
+    def test_run_model_validation_failure_does_not_start_solver_ui(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
+        dummy = SimpleNamespace(
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
+            model_text=SimpleNamespace(get=lambda *_args: "int required = ...;"),
+            data_text=SimpleNamespace(get=lambda *_args: ""),
+            solver=SimpleNamespace(get=lambda: "scipy"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            status_var=mock.Mock(),
+            _start_foreground_operation=mock.Mock(return_value=operation),
+            _finish_foreground_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _show_solver_log_textbox=mock.Mock(),
+        )
+
+        OPLIDE.run_model(dummy)
+
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
+        dummy._append_output.assert_called_once_with("\nError: Data missing for: required\n", "session-1")
+        dummy._set_run_menu_running.assert_not_called()
+        dummy._show_solver_log_textbox.assert_not_called()
+
     def test_save_run_model_files_uses_shared_solve_timestamp_for_unsaved_files(self):
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
         dummy = SimpleNamespace(
-            model_file=None,
-            data_file=None,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             status_var=mock.Mock(),
             _append_output=mock.Mock(),
             _finish_foreground_operation=mock.Mock(),
@@ -937,8 +1455,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             solver_choice="scipy",
         )
         dummy = SimpleNamespace(
-            _solver_process=DummyProcess(),
-            _solver_queue=DummyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(DummyProcess(), DummyQueue()),
             _set_run_menu_running=mock.Mock(),
             _append_solver_log_text=mock.Mock(),
             _record_solver_progress=mock.Mock(),
@@ -959,6 +1476,23 @@ class TestPyOPLIDETyping(unittest.TestCase):
             {"status": "OPTIMAL"}, session_id="session-1", solver_choice="scipy"
         )
         dummy._restore_output_textbox.assert_called_once()
+
+    def test_malformed_solver_worker_messages_use_error_path(self):
+        cases = (
+            (("success", "not a result"), "success payload must be a dictionary"),
+            (("unknown", "payload"), "unknown solver message kind"),
+            (("log",), "expected a (kind, payload) solver message"),
+        )
+        for message, detail in cases:
+            with self.subTest(message=message):
+                result_queue = mock.Mock()
+                result_queue.get_nowait.return_value = message
+                dummy = SimpleNamespace(_solver_ipc=pyopl_ide_bootstrap._SolverProcessState(mock.Mock(), result_queue))
+
+                kind, payload = OPLIDE._drain_solver_queue(dummy, dummy._solver_ipc.process, None)
+
+                self.assertEqual(kind, "error")
+                self.assertIn(detail, payload)
 
     def test_model_error_marks_solver_progress_failed_without_explanation(self):
         operation = pyopl_ide_bootstrap._ForegroundOperation(
@@ -1015,8 +1549,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
         dummy = SimpleNamespace(
-            _solver_process=DummyProcess(),
-            _solver_queue=DummyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(DummyProcess(), DummyQueue()),
             _solver_log_text=SimpleNamespace(
                 get=lambda *_args: "Traceback (most recent call last):\nSyntaxError: bad token\n"
             ),
@@ -1102,9 +1635,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy = SimpleNamespace(
             _solver_log_text=log_text,
             output_text=output_text,
-            _viewing_output_session_id="session-1",
-            _current_output_session_id="session-1",
-            _output_sessions={"session-1": "Solve header\nFinal result\n"},
+            _session_state=pyopl_ide_bootstrap._OutputSessionState(
+                sessions={"session-1": "Solve header\nFinal result\n"},
+                current_id="session-1",
+                viewing_id="session-1",
+            ),
         )
         dummy._destroy_scrolled_text = lambda text_widget: OPLIDE._destroy_scrolled_text(dummy, text_widget)
 
@@ -1284,8 +1819,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
     def test_stop_model_when_idle_does_not_finish_solver_progress(self):
         dummy = SimpleNamespace(
-            _solver_process=None,
-            _solver_queue=None,
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
             _active_operation=None,
             _cleanup_solver_ipc=mock.Mock(),
             _stop_run_timer=mock.Mock(),
@@ -1304,6 +1838,37 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._set_run_menu_running.assert_called_once_with(False)
         dummy._finish_solver_progress.assert_not_called()
         dummy._append_output.assert_not_called()
+
+    def test_stop_model_releases_queue_and_ignores_late_poll(self):
+        process = mock.Mock()
+        process.is_alive.side_effect = [True, True, False]
+        result_queue = mock.Mock()
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
+        dummy = SimpleNamespace(
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(process, result_queue),
+            _active_operation=operation,
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dummy, cancel_queue_thread=cancel_queue_thread
+        )
+
+        OPLIDE.stop_model(dummy)
+        OPLIDE._poll_solver(dummy, operation)
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_not_called()
+        result_queue.cancel_join_thread.assert_called_once_with()
+        result_queue.get_nowait.assert_not_called()
+        dummy._append_output.assert_called_once_with("\nExecution stopped by user.\n", "session-1")
+        dummy._finish_solver_progress.assert_called_once_with(status="stopped")
+        dummy._finish_foreground_operation.assert_called_once_with(operation)
 
     def test_save_settings_persists_display_solver_progress(self):
         class DummyVar:
@@ -1330,9 +1895,117 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._save_settings(dummy)
 
             payload = pyopl_ide_bootstrap.json.loads(config_path.read_text(encoding="utf-8"))
+            loaded = OPLIDE._load_settings(dummy)
 
         self.assertFalse(payload["display-solver-progress"])
         self.assertEqual(payload["solver"], "scipy")
+        self.assertEqual(loaded, payload)
+
+    def test_initialize_preferences_keeps_valid_values_with_invalid_font_size(self):
+        class DummyVar:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        saved = {
+            "font-size": "not a number",
+            "theme": "darkly",
+            "solver": "scipy",
+            "verbose-llm-logs": True,
+            "display-solver-progress": False,
+            "genai-method": "pyopl_standard",
+            "genai-selection": {"provider": "elm", "model": "selected-model"},
+        }
+        dummy = SimpleNamespace(
+            _init_settings_storage=lambda: None,
+            _load_settings=lambda: saved,
+            current_font_size=12,
+            debug=False,
+            solver=DummyVar("gurobi"),
+            genai_selection_var=DummyVar(""),
+        )
+        dummy._restore_genai_selection = lambda value: OPLIDE._restore_genai_selection(dummy, value)
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "BooleanVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "IntVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+        ):
+            theme, loaded = OPLIDE._initialize_preferences(dummy)
+
+        self.assertIs(loaded, saved)
+        self.assertEqual(theme, "darkly")
+        self.assertEqual(dummy.current_font_size, 12)
+        self.assertEqual(dummy.solver.get(), "scipy")
+        self.assertFalse(dummy.display_solver_progress_var.get())
+        self.assertTrue(dummy.verbose_llm_var.get())
+        self.assertEqual(dummy.genai_method_var.get(), "pyopl_standard")
+        self.assertEqual(dummy.genai_selection_var.get(), "elm|selected-model")
+
+    def test_invalid_saved_genai_method_does_not_import_composer_mode(self):
+        for saved_method in ("ask", "generate", "pyopl.genai.ask", "", None, []):
+            with self.subTest(saved_method=saved_method):
+                preferences = pyopl_ide_bootstrap._parse_ide_preferences({"genai-method": saved_method}, 12, False)
+                self.assertEqual(preferences.genai_method, "pyopl_generative")
+
+                selection = mock.Mock()
+                selection.get.return_value = preferences.genai_method
+                generator = OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+                self.assertEqual(generator.__name__, "pyopl.genai.pyopl_generative")
+                selection.set.assert_not_called()
+
+    def test_invalid_runtime_genai_method_uses_default_without_import_warning(self):
+        selection = mock.Mock()
+        selection.get.return_value = "ask"
+        with mock.patch.object(pyopl_ide_bootstrap.logging.getLogger(pyopl_ide_bootstrap.__name__), "warning") as warning:
+            generator = OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+        warning.assert_not_called()
+        self.assertEqual(generator.__name__, "pyopl.genai.pyopl_generative")
+        selection.set.assert_called_once_with("pyopl_generative")
+
+    def test_selected_genai_import_propagates_missing_dependency(self):
+        selection = mock.Mock()
+        selection.get.return_value = "pyopl_standard"
+        with mock.patch(
+            "importlib.import_module", side_effect=ModuleNotFoundError("missing dependency", name="optional_dependency")
+        ):
+            with self.assertRaisesRegex(ModuleNotFoundError, "missing dependency"):
+                OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection))
+        selection.set.assert_not_called()
+
+    def test_missing_selected_genai_module_falls_back(self):
+        selection = mock.Mock()
+        selection.get.return_value = "pyopl_standard"
+        generator = mock.sentinel.generator
+        with (
+            mock.patch(
+                "importlib.import_module",
+                side_effect=[ModuleNotFoundError("missing method", name="pyopl.genai.pyopl_standard"), generator],
+            ) as import_module,
+            mock.patch.object(pyopl_ide_bootstrap.logging.getLogger(pyopl_ide_bootstrap.__name__), "warning"),
+        ):
+            self.assertIs(OPLIDE._import_selected_genai_module(SimpleNamespace(genai_method_var=selection)), generator)
+        import_module.assert_any_call("pyopl.genai.pyopl_standard")
+        import_module.assert_any_call("pyopl.genai.pyopl_generative")
+        selection.set.assert_called_once_with("pyopl_generative")
+
+    def test_load_settings_rejects_non_object_json_with_warning(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "settings.json"
+            path.write_text("[]", encoding="utf-8")
+            dummy = SimpleNamespace(_config_path=path)
+            output = StringIO()
+
+            with redirect_stdout(output):
+                loaded = OPLIDE._load_settings(dummy)
+
+        self.assertEqual(loaded, {})
+        self.assertIn("settings must contain a JSON object", output.getvalue())
 
     def test_solver_selection_persists_and_refreshes_status(self):
         class DummyVar:
@@ -1376,8 +2049,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         text = DummyText("dvar float+ x;\nminimize x;\nsubject to {\n")
         dummy = SimpleNamespace(
-            _last_syntax_error_by_widget={},
-            _last_syntax_error="old error",
+            model_text=text,
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="old error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
         )
         dummy._text_too_large_for_highlight = lambda text_widget: OPLIDE._text_too_large_for_highlight(dummy, text_widget)
         dummy._disable_highlight_for_large_text = lambda text_widget: OPLIDE._disable_highlight_for_large_text(
@@ -1389,8 +2063,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         OPLIDE.highlight(dummy, text, is_data=False, validate=True)
 
         self.assertFalse(any(tag == "ERROR" for tag, _start, _end in text.tags))
-        self.assertIsNone(dummy._last_syntax_error_by_widget[id(text)])
-        self.assertIsNone(dummy._last_syntax_error)
+        self.assertIsNone(dummy._model_editor_state.syntax_error)
 
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
@@ -1587,41 +2260,253 @@ class TestPyOPLIDETyping(unittest.TestCase):
         # end of string len=11 => line 2, col len('world')=5
         self.assertEqual(OPLIDE._index_from_pos(None, s, len(s)), "2.5")
 
+    def test_highlight_ranges_map_model_tokens_and_data_keywords_to_lines(self):
+        code = "param limit = 12;\nset S = {true, 3.5};"
+        index = pyopl_ide_bootstrap._make_text_indexer(code)
+        self.assertEqual(index(-1), "1.0")
+        self.assertEqual(index(len(code) + 5), index(len(code)))
+
+        tokens = [
+            SimpleNamespace(type="PARAM", index=0, value="param"),
+            SimpleNamespace(type="NAME", index=6, value="limit"),
+            SimpleNamespace(type="UNKNOWN", index=12, value="="),
+        ]
+        self.assertEqual(
+            pyopl_ide_bootstrap._token_highlight_ranges(tokens, index),
+            {"PARAM": ["1.0", "1.5"], "NAME": ["1.6", "1.11"]},
+        )
+        ranges = pyopl_ide_bootstrap._data_highlight_ranges(code, index)
+        self.assertEqual(ranges["PARAM"], ["1.0", "1.5"])
+        self.assertEqual(ranges["SET"], ["2.0", "2.3"])
+        self.assertEqual(ranges["BOOLEAN"], ["2.9", "2.13"])
+        self.assertEqual(ranges["NUMBER"], ["1.14", "1.16", "2.15", "2.18"])
+
+    def test_find_previous_match_wraps_and_handles_case_and_regex(self):
+        find = pyopl_ide_bootstrap._find_previous_match
+        self.assertEqual(find("Alpha beta alpha", "alpha", 7, False, False), (0, 5))
+        self.assertEqual(find("Alpha beta alpha", "alpha", 0, False, False), (11, 16))
+        self.assertEqual(find("Alpha beta alpha", "alpha", 7, False, True), (11, 16))
+        self.assertEqual(find("abc 123 abc", r"\d+", 8, True, True), (4, 7))
+
+    def test_find_replace_dialog_owns_shortcuts_and_replace_all_without_tk(self):
+        class DummyVar:
+            instances = []
+
+            def __init__(self, value=""):
+                self.value = value
+                self.instances.append(self)
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        buttons = {}
+        entries = []
+
+        def make_button(*_args, **kwargs):
+            button = mock.Mock()
+            button.command = kwargs["command"]
+            buttons[kwargs["text"]] = button
+            return button
+
+        def make_entry(*_args, **kwargs):
+            entry = mock.Mock()
+            entry.get.side_effect = kwargs["textvariable"].get
+            entries.append(entry)
+            return entry
+
+        dialog = mock.Mock()
+        dialog.winfo_exists.return_value = True
+        model_text, data_text = mock.Mock(), mock.Mock()
+        model_text.get.return_value = "alpha beta Alpha"
+        host = SimpleNamespace(
+            data_text=data_text,
+            _ensure_no_active_operation=mock.Mock(return_value=True),
+            _undo=mock.Mock(),
+            _redo=mock.Mock(),
+            _get_active_editor=mock.Mock(return_value=model_text),
+            _on_text_change=mock.Mock(),
+        )
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "BooleanVar", DummyVar),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Checkbutton", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=make_entry),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
+        ):
+            OPLIDE._open_find_replace_dialog(host, replace=True)
+            DummyVar.instances[0].set("alpha")
+            DummyVar.instances[1].set("omega")
+            model_text.tag_ranges.return_value = ()
+            model_text.search.return_value = "1.0"
+            buttons["Next"].command()
+            buttons["Replace All"].command()
+            data_text.get.return_value = "alpha"
+            host._get_active_editor.return_value = data_text
+            buttons["Replace All"].command()
+            undo = next(call.args[1] for call in dialog.bind.call_args_list if call.args[0] == "<Control-z>")
+            undo(None)
+            buttons["Close"].command()
+
+        model_text.replace.assert_called_once_with("1.0", "end-1c", "omega beta omega")
+        model_text.tag_add.assert_any_call("find_match", "1.0", "1.0+5c")
+        data_text.replace.assert_called_once_with("1.0", "end-1c", "omega")
+        self.assertEqual(
+            host._on_text_change.call_args_list,
+            [mock.call(model_text, is_data=False), mock.call(data_text, is_data=True)],
+        )
+        host._undo.assert_called_once_with()
+        entries[0].focus_set.assert_called_once_with()
+        dialog.destroy.assert_called_once_with()
+
     def test_append_output_can_target_non_current_session(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.tk = SimpleNamespace()
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
+
+        first = OPLIDE._begin_new_output_session(ide, "First")
+        second = OPLIDE._begin_new_output_session(ide, "Second")
+
+        OPLIDE._append_output(ide, "\nfirst-session-update\n", first)
+
+        self.assertIn("first-session-update", ide._session_state.sessions[first])
+        self.assertNotIn("first-session-update", ide._session_state.sessions[second])
+
+    def test_real_ide_session_fields_share_one_state_through_create_append_remove(self):
+        class DummyText:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, *_args):
+                return self.value
+
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.model_text = DummyText("model\n")
+        ide.data_text = DummyText("data\n")
+
+        session_id, _display = ide._session_state.begin("Solve:", datetime(2026, 1, 1))
+        OPLIDE._snapshot_output_session_artifacts(ide, session_id)
+        ide._session_state.select(session_id, make_current=True)
+        ide._session_state.append("finished")
+
+        self.assertEqual(ide._session_state.sessions[session_id], "Solve:\nfinished")
+        self.assertEqual(set(ide._session_state.model_snapshots.values()), {"model"})
+        self.assertEqual(set(ide._session_state.data_snapshots.values()), {"data"})
+
+        ide._session_state.remove(session_id, 0)
+
+        self.assertEqual(ide._session_state.ids, [])
+        self.assertEqual(ide._session_state.sessions, {})
+        self.assertEqual(ide._session_state.model_snapshots, {})
+        self.assertIsNone(ide._session_state.current_id)
+        self.assertIsNone(ide._session_state.viewing_id)
+
+        ide._session_state.fold_view_states = {"model.mod": {"folded_lines": [1], "edited_at": ""}}
+        OPLIDE._clear_output_session_state(ide)
+        self.assertEqual(ide._session_state.fold_view_states, {})
+
+    def test_save_session_preserves_payload_shape_from_grouped_state(self):
+        with TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / ".pyopl_session"
+            ide = OPLIDE.__new__(OPLIDE)
+            ide._session_state = pyopl_ide_bootstrap._OutputSessionState(
+                sessions={"s1": "Solve:\nresult"},
+                ids=["s1"],
+                display={"s1": "2026-01-01 10:00:00 • Solve"},
+                labels={"s1": "Solve"},
+                timestamps={"s1": "2026-01-01 10:00:00"},
+                fold_view_states={"model.mod": {"folded_lines": [2], "edited_at": "now"}},
+                current_id="s1",
+                viewing_id="s1",
+            )
+            ide._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            ide._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            ide._model_editor_state.path = "model.mod"
+            ide._data_editor_state.path = None
+            ide.model_gutter = None
+            ide.data_gutter = None
+            ide._session_file_path = lambda: str(path)
+            OPLIDE._record_output_session_artifacts(ide, "s1", model_text="model", data_text="data")
+
+            OPLIDE._save_session(ide)
+
+            saved = pyopl_ide_bootstrap.json.loads(path.read_text(encoding="utf-8"))
+            restored = OPLIDE.__new__(OPLIDE)
+            restored._session_state = pyopl_ide_bootstrap._OutputSessionState()
+            restored.request_listbox = mock.Mock()
+            restored.output_text = mock.Mock()
+            restored.output_text.winfo_exists.return_value = False
+            OPLIDE._restore_session_history(restored, saved)
+            OPLIDE._restore_fold_view_states(restored, saved)
+
+        self.assertEqual(
+            set(saved),
+            {
+                "output_sessions",
+                "output_session_ids",
+                "output_session_display",
+                "output_session_label",
+                "output_session_timestamp",
+                "output_session_artifacts",
+                "model_snapshots",
+                "data_snapshots",
+                "current_output_session_id",
+                "viewing_output_session_id",
+                "model_file",
+                "data_file",
+                "fold_view_states",
+                "saved_at",
+            },
         )
+        self.assertEqual(saved["output_sessions"], {"s1": "Solve:\nresult"})
+        self.assertEqual(saved["model_file"], "model.mod")
+        self.assertIsNone(saved["data_file"])
+        self.assertEqual(saved["fold_view_states"]["model.mod"]["folded_lines"], [2])
+        self.assertEqual(set(saved["model_snapshots"].values()), {"model"})
+        self.assertEqual(set(saved["data_snapshots"].values()), {"data"})
+        self.assertEqual(restored._session_state.sessions, saved["output_sessions"])
+        self.assertEqual(restored._session_state.artifacts, saved["output_session_artifacts"])
+        self.assertEqual(restored._session_state.current_id, "s1")
+        self.assertEqual(restored._session_state.viewing_id, "s1")
+        self.assertEqual(restored._session_state.fold_view_states[OPLIDE._fold_state_key("model.mod")]["folded_lines"], [2])
 
-        first = OPLIDE._begin_new_output_session(dummy, "First")
-        second = OPLIDE._begin_new_output_session(dummy, "Second")
+    def test_selecting_another_session_does_not_replace_current_request(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState(current_id="s1", viewing_id="s1")
 
-        OPLIDE._append_output(dummy, "\nfirst-session-update\n", first)
+        ide._session_state.select("s2")
+        self.assertEqual(ide._session_state.current_id, "s1")
+        self.assertEqual(ide._session_state.viewing_id, "s2")
 
-        self.assertIn("first-session-update", dummy._output_sessions[first])
-        self.assertNotIn("first-session-update", dummy._output_sessions[second])
+        ide._session_state.select(None)
+        self.assertEqual(ide._session_state.current_id, "s1")
+        self.assertIsNone(ide._session_state.viewing_id)
 
-    def test_begin_new_output_session_initializes_missing_artifact_metadata(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
-        )
+        ide._session_state.select("s2", make_current=True)
+        self.assertEqual(ide._session_state.current_id, "s2")
 
-        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
+    def test_begin_new_output_session_initializes_artifact_metadata(self):
+        ide = OPLIDE.__new__(OPLIDE)
+        ide.tk = SimpleNamespace()
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
 
-        self.assertIn(session_id, dummy._output_session_timestamp)
-        self.assertIn(session_id, dummy._output_session_artifacts)
-        self.assertEqual(dummy._output_session_artifacts[session_id], {})
+        session_id = OPLIDE._begin_new_output_session(ide, "Solve: Solving model...")
+
+        self.assertIn(session_id, ide._session_state.timestamps)
+        self.assertIn(session_id, ide._session_state.artifacts)
+        self.assertEqual(ide._session_state.artifacts[session_id], {})
 
     def test_begin_new_output_session_snapshots_current_editor_state(self):
         class DummyText:
@@ -1631,66 +2516,104 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def get(self, *_args):
                 return self.content
 
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
-            model_text=DummyText("dvar int x;\n"),
-            data_text=DummyText("x = 3;\n"),
-        )
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState()
+        ide.request_listbox = mock.Mock()
+        ide._save_session = lambda: None
+        ide._show_output_session = lambda session_id: None
+        ide.model_text = DummyText("dvar int x;\n")
+        ide.data_text = DummyText("x = 3;\n")
 
-        session_id = OPLIDE._begin_new_output_session(dummy, "Solve: Solving model...")
-        artifacts = dummy._output_session_artifacts[session_id]
+        session_id = OPLIDE._begin_new_output_session(ide, "Solve: Solving model...")
+        artifacts = ide._session_state.artifacts[session_id]
 
         self.assertEqual(artifacts["model_hash"], OPLIDE._session_snapshot_hash("dvar int x;"))
         self.assertEqual(artifacts["data_hash"], OPLIDE._session_snapshot_hash("x = 3;"))
-        self.assertEqual(dummy._model_snapshots, {artifacts["model_hash"]: "dvar int x;"})
-        self.assertEqual(dummy._data_snapshots, {artifacts["data_hash"]: "x = 3;"})
+        self.assertEqual(ide._session_state.model_snapshots, {artifacts["model_hash"]: "dvar int x;"})
+        self.assertEqual(ide._session_state.data_snapshots, {artifacts["data_hash"]: "x = 3;"})
 
     def test_output_session_snapshots_are_deduplicated(self):
-        dummy = SimpleNamespace(_output_session_artifacts={}, _model_snapshots={}, _data_snapshots={})
+        dummy = SimpleNamespace(_session_state=pyopl_ide_bootstrap._OutputSessionState())
 
         OPLIDE._record_output_session_artifacts(dummy, "s1", model_text="same model", data_text="same data")
         OPLIDE._record_output_session_artifacts(dummy, "s2", model_text="same model", data_text="same data")
 
-        self.assertEqual(dummy._output_session_artifacts["s1"], dummy._output_session_artifacts["s2"])
-        self.assertEqual(len(dummy._model_snapshots), 1)
-        self.assertEqual(len(dummy._data_snapshots), 1)
+        self.assertEqual(dummy._session_state.artifacts["s1"], dummy._session_state.artifacts["s2"])
+        self.assertEqual(len(dummy._session_state.model_snapshots), 1)
+        self.assertEqual(len(dummy._session_state.data_snapshots), 1)
 
     def test_prune_session_snapshots_keeps_only_referenced_content(self):
-        dummy = SimpleNamespace(_output_session_artifacts={}, _model_snapshots={}, _data_snapshots={})
+        dummy = SimpleNamespace(_session_state=pyopl_ide_bootstrap._OutputSessionState())
         OPLIDE._record_output_session_artifacts(dummy, "s1", model_text="old model", data_text="shared data")
         OPLIDE._record_output_session_artifacts(dummy, "s2", model_text="new model", data_text="shared data")
         old_model_hash = OPLIDE._session_snapshot_hash("old model")
 
-        dummy._output_session_artifacts.pop("s1")
+        dummy._session_state.artifacts.pop("s1")
         OPLIDE._prune_session_snapshots(dummy)
 
-        self.assertNotIn(old_model_hash, dummy._model_snapshots)
-        self.assertEqual(set(dummy._model_snapshots.values()), {"new model"})
-        self.assertEqual(set(dummy._data_snapshots.values()), {"shared data"})
+        self.assertNotIn(old_model_hash, dummy._session_state.model_snapshots)
+        self.assertEqual(set(dummy._session_state.model_snapshots.values()), {"new model"})
+        self.assertEqual(set(dummy._session_state.data_snapshots.values()), {"shared data"})
 
-    def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
-        dummy = SimpleNamespace(
-            _output_sessions={},
-            _output_session_ids=[],
-            _output_session_display={},
-            _current_output_session_id=None,
-            _viewing_output_session_id=None,
-            _save_session=lambda: None,
-            _show_output_session=lambda session_id: None,
+    def test_remove_output_session_prunes_only_unreferenced_snapshots(self):
+        state = pyopl_ide_bootstrap._OutputSessionState(
+            ids=["s1", "s2"],
+            sessions={"s1": "first", "s2": "second"},
+            display={"s1": "first", "s2": "second"},
+            labels={"s1": "Solve", "s2": "Solve"},
+            timestamps={"s1": "earlier", "s2": "later"},
+            current_id="s1",
+            viewing_id="s2",
+        )
+        state.record_artifacts(
+            state.artifacts, state.model_snapshots, state.data_snapshots, "s1", "first model", "shared data"
+        )
+        state.record_artifacts(
+            state.artifacts, state.model_snapshots, state.data_snapshots, "s2", "second model", "shared data"
         )
 
-        first = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
-        dummy._output_session_display["session-1"] = first
-        second = OPLIDE._make_output_session_display(dummy, "2026-05-03 12:00:00", "Ask")
+        state.remove("s1", 0)
+
+        self.assertEqual(state.ids, ["s2"])
+        self.assertEqual(state.sessions, {"s2": "second"})
+        self.assertEqual(state.artifacts.keys(), {"s2"})
+        self.assertEqual(set(state.model_snapshots.values()), {"second model"})
+        self.assertEqual(set(state.data_snapshots.values()), {"shared data"})
+        self.assertIsNone(state.current_id)
+        self.assertEqual(state.viewing_id, "s2")
+
+    def test_begin_new_output_session_disambiguates_same_second_display_labels(self):
+        state = pyopl_ide_bootstrap._OutputSessionState()
+
+        first = state.make_display("2026-05-03 12:00:00", "Ask")
+        state.display["session-1"] = first
+        second = state.make_display("2026-05-03 12:00:00", "Ask")
 
         self.assertEqual(first, "2026-05-03 12:00:00 • Ask")
         self.assertEqual(second, "2026-05-03 12:00:00 • Ask (2)")
+
+    def test_rename_session_updates_record_and_visible_label_without_collision(self):
+        timestamp = "2026-05-03 12:00:00"
+        listbox = mock.Mock()
+        ide = OPLIDE.__new__(OPLIDE)
+        ide._session_state = pyopl_ide_bootstrap._OutputSessionState(
+            ids=["s1", "s2"],
+            timestamps={"s1": timestamp, "s2": timestamp},
+            labels={"s1": "First", "s2": "Taken"},
+            display={"s1": f"{timestamp} • First", "s2": f"{timestamp} • Taken"},
+        )
+        ide._get_selected_request_session_id = lambda: "s1"
+        ide._ask_short_text = lambda **_kwargs: "Taken"
+        ide._save_session = mock.Mock()
+        ide.request_listbox = listbox
+
+        OPLIDE._rename_selected_request(ide)
+
+        self.assertEqual(ide._session_state.labels, {"s1": "Taken", "s2": "Taken"})
+        self.assertEqual(ide._session_state.display["s1"], f"{timestamp} • Taken (2)")
+        self.assertEqual(ide._session_state.display["s2"], f"{timestamp} • Taken")
+        listbox.insert.assert_called_once_with(0, f"{timestamp} • Taken (2)")
+        ide._save_session.assert_called_once()
 
     def test_apply_pending_genai_revisions_persists_inline_session_snapshot(self):
         class DummyText:
@@ -1719,17 +2642,21 @@ class TestPyOPLIDETyping(unittest.TestCase):
             log = []
             artifact_calls = []
             dummy = SimpleNamespace(
-                _genai_pending_revisions={
-                    "revised_model": "dvar int y;\n",
-                    "revised_data": "y = 2;\n",
-                    "model_path": str(original_model),
-                    "data_path": str(original_data),
-                    "safe_ts": "2026-05-03_01-20-41",
-                    "had_data_file": True,
-                    "session_id": "session-1",
-                },
-                model_file=str(original_model),
-                data_file=str(original_data),
+                _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(
+                    pyopl_ide_bootstrap._PendingGenAIRevision(
+                        revised_model="dvar int y;\n",
+                        revised_data="y = 2;\n",
+                        current_model="dvar int x;\n",
+                        current_data="old = 1;\n",
+                        model_path=str(original_model),
+                        data_path=str(original_data),
+                        safe_ts="2026-05-03_01-20-41",
+                        had_data_file=True,
+                        session_id="session-1",
+                    )
+                ),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(original_model)),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(original_data)),
                 model_text=DummyText("dvar int x;\n"),
                 data_text=DummyText("old = 1;\n"),
                 editor_notebook=DummyNotebook(),
@@ -1740,14 +2667,17 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _append_output=lambda text, session_id=None: log.append((text, session_id)),
                 _clear_pending_genai_revisions=lambda: None,
                 _save_session=lambda: None,
+                _get_editor_text=lambda widget: widget.get(),
+                _resolve_editor_replacement=mock.Mock(return_value=True),
             )
             dummy._record_output_session_artifacts = lambda *args, **kwargs: artifact_calls.append((args, kwargs))
 
             with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
                 OPLIDE._apply_pending_genai_revisions(dummy)
 
-            self.assertEqual(Path(dummy.model_file).name, "model_2026-05-03_01-20-41.mod")
-            self.assertEqual(Path(dummy.data_file).name, "data_2026-05-03_01-20-41.dat")
+            self.assertEqual(Path(dummy._model_editor_state.path).name, "model_2026-05-03_01-20-41.mod")
+            self.assertEqual(Path(dummy._data_editor_state.path).name, "data_2026-05-03_01-20-41.dat")
+            self.assertIsNone(dummy._genai_revisions.pending)
             self.assertEqual(
                 artifact_calls,
                 [
@@ -1758,23 +2688,209 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 ],
             )
 
-    def test_pending_unsaved_genai_revisions_use_tmp_timestamp_basename(self):
-        dummy = SimpleNamespace(model_text=SimpleNamespace(get=lambda *_args: "model"))
+    def test_apply_genai_revisions_preserves_unsaved_unchanged_data(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
 
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        cases = (
+            ("new model", "", "edited data", "old data", True),
+            ("new model", "", "old data", "old data", False),
+            ("", "new data", "edited data", "old data", False),
+            ("new model", "new data", "edited data", "old data", False),
+        )
+        for revised_model, revised_data, current_data, saved_data, dirty in cases:
+            with self.subTest(revised_model=revised_model, revised_data=revised_data, current_data=current_data):
+                with TemporaryDirectory() as tmpdir:
+                    model_path = Path(tmpdir) / "model.mod"
+                    data_path = Path(tmpdir) / "data.dat"
+                    model_path.write_text("old model", encoding="utf-8")
+                    data_path.write_text(saved_data, encoding="utf-8")
+                    pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+                        revised_model,
+                        revised_data,
+                        "old model",
+                        saved_data,
+                        str(model_path),
+                        str(data_path),
+                        "2026-05-03_01-20-41",
+                        True,
+                        "session-1",
+                    )
+                    host = SimpleNamespace(
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(
+                            path=str(model_path), saved_text="old model"
+                        ),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(path=str(data_path), saved_text=saved_data),
+                        model_text=DummyText("edited model"),
+                        data_text=DummyText(current_data),
+                        editor_notebook=mock.Mock(),
+                        model_frame=object(),
+                        data_frame=object(),
+                        highlight=mock.Mock(),
+                        _record_output_session_artifacts=mock.Mock(),
+                        _append_output=mock.Mock(),
+                        _get_editor_text=lambda widget: widget.get(),
+                    )
+                    host._mark_editor_baselines_saved = lambda: OPLIDE._mark_editor_baselines_saved(host)
+
+                    with mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir):
+                        OPLIDE._apply_pending_revision(host, pending)
+
+                    self.assertEqual(OPLIDE._has_unsaved_editor_changes(host), dirty)
+                    self.assertEqual(Path(host._model_editor_state.path).read_text(), host.model_text.content)
+                    self.assertEqual(Path(host._data_editor_state.path).read_text(), revised_data or saved_data)
+
+    def test_pending_unsaved_genai_revisions_use_tmp_timestamp_basename(self):
         with TemporaryDirectory() as tmpdir:
-            model_target, data_target = OPLIDE._write_pending_revision_files(
-                dummy,
+            pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+                revised_model="revised model",
+                revised_data="revised data",
+                current_model="model",
+                current_data="",
+                model_path=str(Path(tmpdir) / "temp_model.mod"),
+                data_path=str(Path(tmpdir) / "temp_data.dat"),
+                safe_ts="2026-08-24_00-47-51",
+                had_data_file=False,
+                session_id=None,
+            )
+            model_target, data_target = pyopl_ide_bootstrap._write_genai_revision_files(
+                pending,
                 tmpdir,
-                "revised model",
-                "revised data",
-                str(Path(tmpdir) / "temp_model.mod"),
-                str(Path(tmpdir) / "temp_data.dat"),
-                "2026-08-24_00-47-51",
-                False,
+                pending.model_path,
+                pending.data_path,
+                pending.safe_ts,
+                pending.current_model,
             )
 
             self.assertEqual(Path(model_target).name, "tmp_2026-08-24_00-47-51.mod")
             self.assertEqual(Path(data_target).name, "tmp_2026-08-24_00-47-51.dat")
+            second_model, second_data = pyopl_ide_bootstrap._write_genai_revision_files(
+                pending, tmpdir, pending.model_path, pending.data_path, pending.safe_ts, pending.current_model
+            )
+            self.assertEqual(Path(second_model).name, "tmp_2026-08-24_00-47-51_1.mod")
+            self.assertEqual(Path(second_data).name, "tmp_2026-08-24_00-47-51_1.dat")
+
+    def test_pending_genai_revisions_preview_before_apply_and_survive_failure(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            revised_model="new model",
+            revised_data="",
+            current_model="old model",
+            current_data="",
+            model_path="original.mod",
+            data_path="",
+            safe_ts="2026-11-12_16-00-00",
+            had_data_file=False,
+            session_id="session-1",
+        )
+        dummy = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(),
+            genai_pending_var=mock.Mock(),
+            genai_pending_frame=mock.Mock(),
+            _show_pending_genai_diff_preview=mock.Mock(),
+            _close_pending_genai_diff_preview=mock.Mock(),
+        )
+
+        OPLIDE._set_pending_genai_revisions(dummy, pending)
+
+        self.assertIs(dummy._genai_revisions.pending, pending)
+        dummy._show_pending_genai_diff_preview.assert_called_once_with()
+
+        def fail_apply(_pending):
+            raise OSError("disk failure")
+
+        with self.assertRaisesRegex(OSError, "disk failure"):
+            dummy._genai_revisions.apply(fail_apply)
+        self.assertIs(dummy._genai_revisions.pending, pending)
+        self.assertTrue(dummy._genai_revisions.apply(lambda _pending: None))
+        OPLIDE._clear_pending_genai_revisions(dummy)
+        self.assertIsNone(dummy._genai_revisions.pending)
+        dummy._close_pending_genai_diff_preview.assert_called_once_with()
+
+    def test_apply_revision_reports_write_failure_and_keeps_pending_for_retry(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            "new model", "", "old model", "", "original.mod", "", "2026-11-12_16-00-00", False, "session-1"
+        )
+        host = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(pending),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(path="original.mod"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            model_text=mock.Mock(),
+            status_var=mock.Mock(),
+            _clear_pending_genai_revisions=mock.Mock(),
+            _save_session=mock.Mock(),
+            _resolve_editor_replacement=mock.Mock(return_value=True),
+        )
+        with (
+            TemporaryDirectory() as tmpdir,
+            mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+            mock.patch.object(pyopl_ide_bootstrap, "_write_genai_revision_files", side_effect=OSError("disk full")),
+            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+        ):
+            OPLIDE._apply_pending_genai_revisions(host)
+
+        self.assertIs(host._genai_revisions.pending, pending)
+        host._clear_pending_genai_revisions.assert_not_called()
+        host._save_session.assert_not_called()
+        host.status_var.set.assert_called_once_with("GenAI: failed to apply revisions")
+        showerror.assert_called_once_with("GenAI Error", "Failed to apply revisions:\nOSError: disk full", parent=host)
+
+        with mock.patch.object(OPLIDE, "_apply_pending_revision"):
+            OPLIDE._apply_pending_genai_revisions(host)
+        self.assertIsNone(host._genai_revisions.pending)
+        host._clear_pending_genai_revisions.assert_called_once()
+
+    def test_cancelled_revision_keeps_pending_and_does_not_apply(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            "new model", "", "old model", "", "original.mod", "", "2026-11-12_16-00-00", False, "session-1"
+        )
+        host = SimpleNamespace(
+            _genai_revisions=pyopl_ide_bootstrap._GenAIRevisionState(pending),
+            _resolve_editor_replacement=mock.Mock(return_value=False),
+            _clear_pending_genai_revisions=mock.Mock(),
+        )
+        with mock.patch.object(OPLIDE, "_apply_pending_revision") as apply_revision:
+            OPLIDE._apply_pending_genai_revisions(host)
+        host._resolve_editor_replacement.assert_called_once_with("Apply revisions", model=True, data=False)
+        self.assertIs(host._genai_revisions.pending, pending)
+        apply_revision.assert_not_called()
+        host._clear_pending_genai_revisions.assert_not_called()
+
+    def test_revision_file_failure_removes_partial_model_file(self):
+        pending = pyopl_ide_bootstrap._PendingGenAIRevision(
+            revised_model="new model",
+            revised_data="new data",
+            current_model="old model",
+            current_data="old data",
+            model_path="source.mod",
+            data_path="source.dat",
+            safe_ts="2026-11-12_16-00-00",
+            had_data_file=True,
+            session_id="session-1",
+        )
+
+        def failing_open(path, *args, **kwargs):
+            if str(path).endswith(".dat"):
+                raise OSError("cannot write data")
+            return builtin_open(path, *args, **kwargs)
+
+        with TemporaryDirectory() as tmpdir:
+            with mock.patch.object(pyopl_ide_bootstrap, "open", failing_open, create=True):
+                with self.assertRaisesRegex(OSError, "cannot write data"):
+                    pyopl_ide_bootstrap._write_genai_revision_files(
+                        pending, tmpdir, pending.model_path, pending.data_path, pending.safe_ts, pending.current_model
+                    )
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
     def test_start_foreground_operation_blocks_overlap(self):
         class DummyVar:
@@ -1879,15 +2995,15 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 events.append("cancel_join_thread")
 
         dummy = SimpleNamespace(
-            _solver_process=object(),
-            _solver_queue=DummyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(object(), DummyQueue(), "session-1"),
         )
 
         OPLIDE._cleanup_solver_ipc(dummy, cancel_queue_thread=False)
 
         self.assertEqual(events, ["close", "join_thread"])
-        self.assertIsNone(dummy._solver_process)
-        self.assertIsNone(dummy._solver_queue)
+        self.assertIsNone(dummy._solver_ipc.process)
+        self.assertIsNone(dummy._solver_ipc.result_queue)
+        self.assertIsNone(dummy._solver_ipc.session_id)
 
     def test_cleanup_solver_ipc_can_cancel_queue_thread(self):
         events = []
@@ -1903,15 +3019,14 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 events.append("cancel_join_thread")
 
         dummy = SimpleNamespace(
-            _solver_process=object(),
-            _solver_queue=DummyQueue(),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(object(), DummyQueue()),
         )
 
         OPLIDE._cleanup_solver_ipc(dummy, cancel_queue_thread=True)
 
         self.assertEqual(events, ["close", "cancel_join_thread"])
-        self.assertIsNone(dummy._solver_process)
-        self.assertIsNone(dummy._solver_queue)
+        self.assertIsNone(dummy._solver_ipc.process)
+        self.assertIsNone(dummy._solver_ipc.result_queue)
 
     def test_interrupt_active_non_solve_operation_marks_cancelled(self):
         class DummyVar:
@@ -1929,7 +3044,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         )
         dummy = SimpleNamespace(
             _active_operation=op,
-            _solver_process=None,
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
             status_var=DummyVar(),
         )
         dummy._append_output = lambda text, session_id=None: log.append((text, session_id))
@@ -1949,8 +3064,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(formatted, "\nPrompt:\nMaximize profit subject to capacity.\n\n")
 
     def test_format_prompt_for_output_with_attachments(self):
+        dummy = SimpleNamespace(_genai_attachments=pyopl_ide_bootstrap._GenAIAttachments())
         formatted = OPLIDE._format_prompt_for_output(
-            None,
+            dummy,
             "Question",
             {
                 "text": "Please explain the bottleneck.",
@@ -1966,7 +3082,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
     def test_format_prompt_for_output_uses_friendly_attachment_labels(self):
         dummy = SimpleNamespace(
-            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(
+                labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+            )
         )
 
         formatted = OPLIDE._format_prompt_for_output(
@@ -1979,30 +3097,28 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertNotIn("/tmp/rendered/page_1.png", formatted)
 
     def test_attachment_list_label_compacts_rendered_pdf_page(self):
-        dummy = SimpleNamespace(
-            _genai_attachment_display_labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(
+            labels={"/tmp/rendered/page_1.png": "/Users/gwren/Downloads/diet-problem.pdf page 1"}
         )
 
         self.assertEqual(
-            OPLIDE._list_label_for_genai_attachment_path(dummy, "/tmp/rendered/page_1.png"),
+            attachments.list_label("/tmp/rendered/page_1.png"),
             "diet-problem.pdf page 1",
         )
 
     def test_attachment_list_label_keeps_image_basename(self):
-        dummy = SimpleNamespace(_genai_attachment_display_labels={})
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
 
         self.assertEqual(
-            OPLIDE._list_label_for_genai_attachment_path(
-                dummy, "/Users/gwren/Downloads/Screenshot 2026-06-30 at 21.37.52.png"
-            ),
+            attachments.list_label("/Users/gwren/Downloads/Screenshot 2026-06-30 at 21.37.52.png"),
             "Screenshot 2026-06-30 at 21.37.52.png",
         )
 
     def test_genai_add_images_converts_pdf_to_rendered_paths(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(paths=["/tmp/existing.png"])
+        attachments.render_pdf = mock.Mock(return_value=["/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png"])
         dummy = SimpleNamespace(
-            _genai_attachment_paths=["/tmp/existing.png"],
-            _genai_attachment_display_labels={},
-            _render_genai_pdf_attachment=mock.Mock(return_value=["/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png"]),
+            _genai_attachments=attachments,
             _refresh_genai_attachment_list=mock.Mock(),
         )
 
@@ -2014,11 +3130,42 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE._genai_add_images(dummy)
 
         self.assertEqual(
-            dummy._genai_attachment_paths,
+            attachments.paths,
             ["/tmp/existing.png", "/tmp/rendered/page_1.png", "/tmp/rendered/page_2.png", "/tmp/photo.png"],
         )
-        dummy._render_genai_pdf_attachment.assert_called_once_with("/tmp/sketch.pdf")
+        self.assertEqual(attachments.render_pdf.call_args.args[0], "/tmp/sketch.pdf")
         dummy._refresh_genai_attachment_list.assert_called_once()
+
+    def test_genai_prompt_uses_attachment_snapshot_after_list_clears(self):
+        attachments = pyopl_ide_bootstrap._GenAIAttachments(paths=["/tmp/sketch.png"])
+        dummy = SimpleNamespace(
+            genai_prompt_text=SimpleNamespace(get=lambda *_args: ""),
+            genai_panel_mode_var=SimpleNamespace(get=lambda: "generate"),
+            _genai_attachments=attachments,
+        )
+
+        prompt_input = OPLIDE._collect_genai_prompt_input(dummy)
+        attachments.clear()
+
+        self.assertEqual(prompt_input, {"text": "", "images": [{"path": "/tmp/sketch.png"}]})
+        self.assertIsNone(OPLIDE._collect_genai_prompt_input(dummy))
+
+    def test_clearing_attachments_removes_rendered_pdf_temp_dir(self):
+        with TemporaryDirectory() as tmpdir:
+            render_dir = Path(tmpdir) / "rendered"
+            render_dir.mkdir()
+            page = render_dir / "page_1.png"
+            page.write_text("png", encoding="utf-8")
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(
+                paths=[str(page)], labels={str(page): "paper.pdf page 1"}, pdf_temp_dir=str(render_dir)
+            )
+
+            attachments.clear()
+
+            self.assertFalse(render_dir.exists())
+            self.assertEqual(attachments.snapshot(), ())
+            self.assertEqual(attachments.labels, {})
+            self.assertIsNone(attachments.pdf_temp_dir)
 
     def test_render_genai_pdf_attachment_rejects_large_pdf(self):
         class FakeDocument:
@@ -2032,13 +3179,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         fake_document = FakeDocument()
         fake_fitz = SimpleNamespace(open=mock.Mock(return_value=fake_document))
-        dummy = SimpleNamespace()
+        attachments = pyopl_ide_bootstrap._GenAIAttachments()
 
-        with (
-            mock.patch.dict("sys.modules", {"fitz": fake_fitz}),
-            mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
-        ):
-            rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/too-large.pdf")
+        with (mock.patch.dict("sys.modules", {"fitz": fake_fitz}),):
+            showwarning = mock.Mock()
+            rendered = attachments.render_pdf("/tmp/too-large.pdf", mock.Mock(), showwarning)
 
         self.assertEqual(rendered, [])
         showwarning.assert_called_once()
@@ -2068,20 +3213,54 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 self.y_scale = y_scale
 
         with TemporaryDirectory() as tmpdir:
-            dummy = SimpleNamespace(_genai_pdf_temp_dir=tmpdir, _genai_attachment_display_labels={})
-            dummy._ensure_genai_pdf_temp_dir = lambda: OPLIDE._ensure_genai_pdf_temp_dir(dummy)
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(pdf_temp_dir=tmpdir)
             fake_fitz = SimpleNamespace(open=mock.Mock(return_value=FakeDocument()), Matrix=FakeMatrix)
 
             with mock.patch.dict("sys.modules", {"fitz": fake_fitz}):
-                rendered = OPLIDE._render_genai_pdf_attachment(dummy, "/tmp/sketch.pdf")
+                rendered = attachments.render_pdf("/tmp/sketch.pdf", mock.Mock(), mock.Mock())
 
             self.assertEqual(len(rendered), 2)
             self.assertTrue(rendered[0].endswith("page_1.png"))
             self.assertTrue(rendered[1].endswith("page_2.png"))
             self.assertTrue(Path(rendered[0]).exists())
             self.assertTrue(Path(rendered[1]).exists())
-            self.assertEqual(dummy._genai_attachment_display_labels[rendered[0]], "/tmp/sketch.pdf page 1")
-            self.assertEqual(dummy._genai_attachment_display_labels[rendered[1]], "/tmp/sketch.pdf page 2")
+            self.assertEqual(attachments.labels[rendered[0]], "/tmp/sketch.pdf page 1")
+            self.assertEqual(attachments.labels[rendered[1]], "/tmp/sketch.pdf page 2")
+
+    def test_failed_pdf_render_removes_partial_pages_and_labels(self):
+        class FakePage:
+            def __init__(self, index):
+                self.index = index
+
+            def get_pixmap(self, **_kwargs):
+                return self
+
+            def save(self, path):
+                if self.index:
+                    raise OSError("render failed")
+                Path(path).write_text("page one", encoding="utf-8")
+
+        class FakeDocument:
+            page_count = 2
+
+            def load_page(self, index):
+                return FakePage(index)
+
+            def close(self):
+                pass
+
+        with TemporaryDirectory() as tmpdir:
+            attachments = pyopl_ide_bootstrap._GenAIAttachments(pdf_temp_dir=tmpdir)
+            fake_fitz = SimpleNamespace(open=lambda _path: FakeDocument(), Matrix=lambda *_args: object())
+            on_error = mock.Mock()
+
+            with mock.patch.dict("sys.modules", {"fitz": fake_fitz}):
+                rendered = attachments.render_pdf("/tmp/sketch.pdf", on_error, mock.Mock())
+
+            self.assertEqual(rendered, [])
+            self.assertEqual(attachments.labels, {})
+            self.assertEqual(list(Path(tmpdir).iterdir()), [])
+            self.assertIn("render failed", on_error.call_args.args[0])
 
     def test_append_output_to_prompt_input_text_only(self):
         merged = OPLIDE._append_output_to_prompt_input(
@@ -2127,6 +3306,520 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 "images": [{"path": "/tmp/chart.png"}],
             },
         )
+
+
+class TestGenAIRequestRunner(unittest.TestCase):
+    def test_editor_replacement_saves_only_affected_dirty_buffer(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            data_path = Path(tmpdir) / "data.dat"
+            model_path.write_text("saved model", encoding="utf-8")
+            data_path.write_text("saved data", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: "edited data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                _get_editor_text=lambda widget: widget.get(),
+                editor_notebook=mock.Mock(),
+                model_frame=object(),
+                data_frame=object(),
+                _save_session=mock.Mock(),
+            )
+            with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True):
+                self.assertTrue(OPLIDE._resolve_editor_replacement(host, "Open Model", model=True, data=False))
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "edited model")
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+            self.assertEqual(host._data_editor_state.saved_text, "saved data")
+
+    def test_editor_replacement_does_not_save_after_bridge_timeout(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("saved model", encoding="utf-8")
+            cancelled = pyopl_ide_bootstrap.threading.Event()
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: ""),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+            )
+
+            def timeout_during_prompt(*_args, **_kwargs):
+                cancelled.set()
+                return True
+
+            with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", side_effect=timeout_during_prompt):
+                self.assertFalse(
+                    OPLIDE._resolve_editor_replacement(
+                        host, "Update from MCP", model=True, data=False, cancelled=cancelled.is_set
+                    )
+                )
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "saved model")
+
+    def test_generate_unsaved_named_files_save_discard_or_cancel(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        for decision in (True, False, None):
+            with self.subTest(decision=decision), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "model.mod"
+                data_path = Path(tmpdir) / "data.dat"
+                model_path.write_text("saved model", encoding="utf-8")
+                data_path.write_text("saved data", encoding="utf-8")
+                host = SimpleNamespace(
+                    model_text=DummyText("edited model\n"),
+                    data_text=DummyText("edited data\n"),
+                    _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                    _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                    _get_editor_text=lambda widget: widget.get(),
+                    _replace_editor_buffer=lambda widget, text, **_kwargs: setattr(widget, "content", text),
+                    editor_notebook=mock.Mock(),
+                    model_frame=object(),
+                    data_frame=object(),
+                    _save_session=mock.Mock(),
+                )
+                host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+
+                with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=decision) as prompt:
+                    proceed = OPLIDE._prepare_genai_generation(host)
+
+                prompt.assert_called_once()
+                self.assertEqual(proceed, decision is not None)
+                if decision is None:
+                    self.assertEqual(host.model_text.content, "edited model\n")
+                    self.assertEqual(host.data_text.content, "edited data\n")
+                    expected_model, expected_data = "saved model", "saved data"
+                elif decision is False:
+                    self.assertEqual(host.model_text.content, "saved model")
+                    self.assertEqual(host.data_text.content, "saved data")
+                    expected_model, expected_data = "saved model", "saved data"
+                else:
+                    expected_model, expected_data = "edited model\n", "edited data\n"
+                self.assertEqual(model_path.read_text(encoding="utf-8"), expected_model)
+                self.assertEqual(data_path.read_text(encoding="utf-8"), expected_data)
+
+    def test_generate_save_as_preserves_untitled_editor_or_cancels(self):
+        with TemporaryDirectory() as tmpdir:
+            for save_path in (str(Path(tmpdir) / "saved.mod"), ""):
+                with self.subTest(save_path=save_path):
+                    host = SimpleNamespace(
+                        model_text=SimpleNamespace(get=lambda *_args: "untitled model\n"),
+                        data_text=SimpleNamespace(get=lambda *_args: ""),
+                        _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                        _get_editor_text=lambda widget: widget.get(),
+                        editor_notebook=mock.Mock(),
+                        model_frame=object(),
+                        data_frame=object(),
+                        _save_session=mock.Mock(),
+                    )
+                    host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+                    with (
+                        mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+                        mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=save_path),
+                    ):
+                        self.assertEqual(OPLIDE._prepare_genai_generation(host), bool(save_path))
+                    self.assertEqual(host._model_editor_state.path, save_path or None)
+                    if save_path:
+                        self.assertEqual(Path(save_path).read_text(encoding="utf-8"), "untitled model\n")
+                        self.assertFalse(OPLIDE._has_unsaved_editor_changes(host))
+                    else:
+                        self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+
+    def test_cancelling_second_save_as_leaves_both_untitled_buffers_unchanged(self):
+        with TemporaryDirectory() as tmpdir:
+            first_path = Path(tmpdir) / "model.mod"
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: "edited data"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+                editor_notebook=mock.Mock(),
+                model_frame=object(),
+                data_frame=object(),
+                _save_session=mock.Mock(),
+            )
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", side_effect=[str(first_path), ""]),
+            ):
+                self.assertFalse(OPLIDE._resolve_editor_replacement(host, "New Model", model=True, data=True))
+            self.assertFalse(first_path.exists())
+            self.assertIsNone(host._model_editor_state.path)
+            self.assertIsNone(host._data_editor_state.path)
+            host._save_session.assert_not_called()
+
+    def test_generate_does_not_proceed_if_saving_changes_fails(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("saved model", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited model"),
+                data_text=SimpleNamespace(get=lambda *_args: ""),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+                editor_notebook=mock.Mock(),
+                model_frame=object(),
+                data_frame=object(),
+                _save_session=mock.Mock(),
+            )
+            host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(pyopl_ide_bootstrap, "open", side_effect=OSError("disk full"), create=True),
+                self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+            ):
+                self.assertFalse(OPLIDE._prepare_genai_generation(host))
+
+            self.assertEqual(model_path.read_text(encoding="utf-8"), "saved model")
+            self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+            host._save_session.assert_not_called()
+            showerror.assert_called_once_with("Generate", "Could not save model changes:\ndisk full", parent=host)
+
+    def test_ask_unsaved_changes_keep_discard_or_cancel(self):
+        class DummyText:
+            def __init__(self, content):
+                self.content = content
+
+            def get(self, *_args):
+                return self.content
+
+            def delete(self, *_args):
+                self.content = ""
+
+            def insert(self, *_args):
+                self.content = _args[-1]
+
+        for decision in (True, False, None):
+            with self.subTest(decision=decision), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "model.mod"
+                data_path = Path(tmpdir) / "data.dat"
+                model_path.write_text("saved model", encoding="utf-8")
+                data_path.write_text("saved data", encoding="utf-8")
+                host = SimpleNamespace(
+                    model_text=DummyText("edited model"),
+                    data_text=DummyText("edited data"),
+                    _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                    _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                    _get_editor_text=lambda widget: widget.get(),
+                    _replace_editor_buffer=lambda widget, text, **_kwargs: setattr(widget, "content", text),
+                    _update_editor_tab=mock.Mock(),
+                )
+                host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+                host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
+
+                with mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=decision) as prompt:
+                    result = OPLIDE._prepare_genai_feedback_files(host)
+
+                prompt.assert_called_once()
+                expected = "edited" if decision is True else "saved"
+                if decision is None:
+                    self.assertEqual(result, (None, None))
+                    self.assertEqual(model_path.read_text(encoding="utf-8"), "saved model")
+                    self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+                    self.assertEqual(host.model_text.content, "edited model")
+                    self.assertEqual(host.data_text.content, "edited data")
+                    self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+                else:
+                    self.assertEqual(result, (str(model_path), str(data_path)))
+                    self.assertEqual(model_path.read_text(encoding="utf-8"), f"{expected} model")
+                    self.assertEqual(data_path.read_text(encoding="utf-8"), f"{expected} data")
+                    self.assertEqual(host.model_text.content, f"{expected} model")
+                    self.assertEqual(host.data_text.content, f"{expected} data")
+                    self.assertFalse(OPLIDE._has_unsaved_editor_changes(host))
+
+    def test_ask_discard_aborts_without_changes_if_saved_file_cannot_be_read(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "missing.mod"
+            data_path = Path(tmpdir) / "data.dat"
+            data_path.write_text("saved data", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=mock.Mock(),
+                data_text=mock.Mock(),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved model"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(data_path), "saved data"),
+                _get_editor_text=lambda widget: "edited model" if widget is host.model_text else "edited data",
+                _replace_editor_buffer=mock.Mock(),
+            )
+            host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+            host._ensure_model_data_saved = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=False),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                self.assertEqual(OPLIDE._prepare_genai_feedback_files(host), (None, None))
+            host._replace_editor_buffer.assert_not_called()
+            host._ensure_model_data_saved.assert_not_called()
+            showerror.assert_called_once()
+            self.assertFalse(model_path.exists())
+            self.assertEqual(data_path.read_text(encoding="utf-8"), "saved data")
+
+    def test_ask_keep_preserves_trailing_newlines_and_untitled_stays_unsaved(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "model.mod"
+            model_path.write_text("saved", encoding="utf-8")
+            host = SimpleNamespace(
+                model_text=SimpleNamespace(get=lambda *_args: "edited\n\n"),
+                data_text=SimpleNamespace(get=lambda *_args: "untitled data\n"),
+                _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(str(model_path), "saved"),
+                _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+                _get_editor_text=lambda widget: widget.get(),
+                _update_editor_tab=mock.Mock(),
+            )
+            host._has_unsaved_editor_changes = lambda: OPLIDE._has_unsaved_editor_changes(host)
+            host._ensure_model_data_saved = lambda: OPLIDE._ensure_model_data_saved(host)
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "askyesnocancel", return_value=True),
+            ):
+                model, data = OPLIDE._prepare_genai_feedback_files(host)
+
+            self.assertEqual(model, str(model_path))
+            self.assertEqual(Path(model).read_text(encoding="utf-8"), "edited\n\n")
+            self.assertEqual(Path(data).read_text(encoding="utf-8"), "untitled data\n")
+            self.assertIsNone(host._data_editor_state.path)
+            self.assertTrue(OPLIDE._has_unsaved_editor_changes(host))
+            host._update_editor_tab.assert_called_once_with(host.model_text)
+
+    def _request_host(self, generator, operation, scheduled):
+        return SimpleNamespace(
+            genai_provider="selected-provider",
+            genai_model="selected-model",
+            verbose_llm_var=SimpleNamespace(get=lambda: False),
+            genai_method_var=SimpleNamespace(get=lambda: "default"),
+            _label_for_method=lambda value: value,
+            _import_selected_genai_module=lambda: generator,
+            _start_foreground_operation=lambda **kwargs: operation,
+            _finish_foreground_operation=mock.Mock(),
+            _append_output=mock.Mock(),
+            _format_prompt_for_output=lambda label, prompt: label,
+            _clear_pending_genai_revisions=mock.Mock(),
+            _session_state=SimpleNamespace(timestamps={operation.session_id: "2026-01-01 12:00:00"}),
+            after=lambda delay, callback, *args: scheduled.append((callback, args)),
+            _clear_genai_composer=mock.Mock(),
+            _save_session=mock.Mock(),
+            status_var=mock.Mock(),
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            _prepare_genai_feedback_files=mock.Mock(return_value=("model.mod", None)),
+            _prepare_genai_generation=mock.Mock(return_value=True),
+        )
+
+    def test_import_failure_is_reported_for_generate_and_ask(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1")
+        for request in (OPLIDE._run_genai_generate, OPLIDE._run_genai_feedback):
+            with self.subTest(request=request.__name__):
+                host = self._request_host(None, operation, [])
+                host.genai_method_var = mock.Mock()
+                host.genai_method_var.get.return_value = "pyopl_standard"
+                host._import_selected_genai_module = lambda: OPLIDE._import_selected_genai_module(host)
+                host._start_foreground_operation = mock.Mock()
+                host._data_editor_state = SimpleNamespace(path=None)
+                host._prepare_genai_feedback_files.return_value = ("model.mod", None)
+                error = ModuleNotFoundError("No module named 'optional_dependency'", name="optional_dependency")
+                with (
+                    mock.patch("importlib.import_module", side_effect=error),
+                    mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                    self.assertLogs(pyopl_ide_bootstrap.__name__, level="ERROR"),
+                ):
+                    request(host, "prompt")
+
+                showerror.assert_called_once_with("GenAI Error", "ModuleNotFoundError: No module named 'optional_dependency'")
+                host.status_var.set.assert_called_once_with("GenAI: error")
+                host._start_foreground_operation.assert_not_called()
+                host._clear_pending_genai_revisions.assert_not_called()
+
+    def test_cancelled_ask_does_not_start_request(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+        host = self._request_host(mock.Mock(), operation, [])
+        host._data_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+        host._prepare_genai_feedback_files.return_value = (None, None)
+        host._import_selected_genai_module = mock.Mock()
+        host._start_foreground_operation = mock.Mock()
+
+        OPLIDE._run_genai_feedback(host, "question")
+
+        host._import_selected_genai_module.assert_not_called()
+        host._start_foreground_operation.assert_not_called()
+        host._append_output.assert_not_called()
+
+    def test_cancelled_generate_does_not_start_request(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai-generate", "Generate", "session-1")
+        host = self._request_host(mock.Mock(), operation, [])
+        host._prepare_genai_generation.return_value = False
+        host._start_foreground_operation = mock.Mock()
+
+        OPLIDE._run_genai_generate(host, "prompt")
+
+        host._start_foreground_operation.assert_not_called()
+        host._append_output.assert_not_called()
+
+    def test_generate_snapshots_selection_and_discards_cancelled_completion(self):
+        with TemporaryDirectory() as tmpdir:
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-generate", "Generate", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_generate"
+
+            def generate(prompt, model_path, data_path, **kwargs):
+                Path(model_path).write_text("generated model")
+                Path(data_path).write_text("generated data")
+                kwargs["progress"]("working")
+                return "assessment"
+
+            generator.generative_solve.side_effect = generate
+            host = self._request_host(generator, operation, scheduled)
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE._run_genai_generate(host, "prompt")
+                host.genai_provider, host.genai_model = "changed-provider", "changed-model"
+                thread_cls.call_args.kwargs["target"]()
+
+            self.assertEqual(generator.generative_solve.call_args.kwargs["llm_provider"], "selected-provider")
+            self.assertEqual(generator.generative_solve.call_args.kwargs["model_name"], "selected-model")
+            operation.cancel_requested = True
+            for callback, args in scheduled:
+                callback(*args)
+            host._append_output.assert_called_once_with("Prompt", "session-1")
+            host._finish_foreground_operation.assert_not_called()
+            host.model_text.delete.assert_not_called()
+
+    def test_feedback_snapshots_selection_and_previews_revision(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "original.mod"
+            model_path.write_text("original model")
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_feedback"
+            generator.generative_feedback.return_value = {"feedback": "suggestion", "revised_model": "new model"}
+            host = self._request_host(generator, operation, scheduled)
+            host._data_editor_state = SimpleNamespace(path=None)
+            host._prepare_genai_feedback_files.return_value = (str(model_path), None)
+            host._set_pending_genai_revisions = mock.Mock()
+            host.model_text.get.return_value = "original model"
+            host.data_text.get.return_value = "original data"
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+            ):
+                OPLIDE._run_genai_feedback(host, "question")
+                host.genai_provider, host.genai_model = "changed-provider", "changed-model"
+                thread_cls.call_args.kwargs["target"]()
+
+            self.assertEqual(generator.generative_feedback.call_args.kwargs["llm_provider"], "selected-provider")
+            self.assertEqual(generator.generative_feedback.call_args.kwargs["model_name"], "selected-model")
+            for callback, args in scheduled:
+                callback(*args)
+            pending = host._set_pending_genai_revisions.call_args.args[0]
+            self.assertEqual(pending.revised_model, "new model")
+            self.assertEqual(pending.current_model, "original model")
+            self.assertEqual(pending.session_id, "session-1")
+            host._append_output.assert_any_call("\nFeedback:\nsuggestion\n", "session-1")
+            host.model_text.delete.assert_not_called()
+
+    def test_feedback_provider_failure_is_reported_in_request_session(self):
+        with TemporaryDirectory() as tmpdir:
+            operation = pyopl_ide_bootstrap._ForegroundOperation("genai-feedback", "Ask", "session-1")
+            scheduled = []
+            generator = mock.Mock()
+            generator.__name__ = "pyopl.test_genai_feedback_error"
+            generator.generative_feedback.side_effect = ValueError("provider failed")
+            host = self._request_host(generator, operation, scheduled)
+            host._data_editor_state = SimpleNamespace(path=None)
+            host._prepare_genai_feedback_files.return_value = (str(Path(tmpdir) / "model.mod"), None)
+            host._set_pending_genai_revisions = mock.Mock()
+            thread = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=tmpdir),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=thread) as thread_cls,
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                OPLIDE._run_genai_feedback(host, "question")
+                thread_cls.call_args.kwargs["target"]()
+                for callback, args in scheduled:
+                    callback(*args)
+
+            showerror.assert_called_once()
+            host._append_output.assert_any_call("\nGenAI Error: provider failed\n", "session-1")
+            host.status_var.set.assert_called_with("GenAI: error")
+            host._set_pending_genai_revisions.assert_not_called()
+
+    def test_generate_and_feedback_use_selected_provider_and_session_progress(self):
+        operation = pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1")
+        scheduled = []
+        append_output = mock.Mock()
+        gen_module = mock.Mock()
+        gen_module.__name__ = "pyopl.test_genai_runner"
+        gen_module.generative_solve.side_effect = lambda *args, **kwargs: kwargs["progress"]("generating")
+        gen_module.generative_feedback.side_effect = lambda *args, **kwargs: kwargs["progress"]("asking")
+        runner = pyopl_ide_bootstrap._GenAIRequestRunner(
+            operation,
+            "selected-provider",
+            "selected-model",
+            gen_module,
+            False,
+            lambda delay, callback, *args: scheduled.append((callback, args)),
+            append_output,
+        )
+
+        runner.generate("prompt", "model.mod", "data.dat")
+        runner.feedback("prompt", "model.mod", "data.dat")
+        self.assertEqual(gen_module.generative_solve.call_args.kwargs["llm_provider"], "selected-provider")
+        self.assertEqual(gen_module.generative_solve.call_args.kwargs["model_name"], "selected-model")
+        self.assertEqual(gen_module.generative_feedback.call_args.kwargs["llm_provider"], "selected-provider")
+        self.assertEqual(gen_module.generative_feedback.call_args.kwargs["model_name"], "selected-model")
+
+        for callback, args in scheduled:
+            callback(*args)
+        append_output.assert_has_calls([mock.call("generating\n", "session-1"), mock.call("asking\n", "session-1")])
+
+        operation.cancel_requested = True
+        gen_module.generative_feedback.call_args.kwargs["progress"]("late")
+        for callback, args in scheduled:
+            callback(*args)
+        self.assertEqual(append_output.call_count, 2)
+
+    def test_verbose_logger_restored_after_provider_failure(self):
+        import logging
+
+        logger = logging.getLogger("pyopl.test_genai_runner_failure")
+        previous_level, previous_handlers = logger.level, list(logger.handlers)
+        gen_module = mock.Mock()
+        gen_module.__name__ = logger.name
+        gen_module.generative_feedback.side_effect = ValueError("provider failed")
+        runner = pyopl_ide_bootstrap._GenAIRequestRunner(
+            pyopl_ide_bootstrap._ForegroundOperation("genai", "GenAI", "session-1"),
+            "provider",
+            "model",
+            gen_module,
+            True,
+            mock.Mock(),
+            mock.Mock(),
+        )
+
+        with self.assertRaisesRegex(ValueError, "provider failed"):
+            runner.feedback("prompt", "model.mod", "data.dat")
+        self.assertEqual(logger.level, previous_level)
+        self.assertEqual(logger.handlers, previous_handlers)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 # --- Standard Library Imports ---
+import bisect
 import difflib
 import hashlib
 import json
@@ -47,7 +48,6 @@ from .genai.pyopl_generative import (
     generative_indexed_observable_mapping,
     generative_observable_mapping,
 )
-from .genai.rag_helper import rank_problem_descriptions
 from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
@@ -116,6 +116,72 @@ MAX_HIGHLIGHT_CHARS = 10_000
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
+GENAI_METHODS = (
+    ("SyntAGM", "pyopl_generative"),
+    ("Standard", "pyopl_standard"),
+    ("Chain of Thought", "pyopl_chain_of_thought"),
+    ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
+    ("CAFA", "pyopl_cafa"),
+    ("Chain of Experts", "pyopl_chain_of_experts"),
+    ("Reflexion", "pyopl_reflexion"),
+)
+
+
+@dataclass(frozen=True)
+class _IDEPreferences:
+    font_size: int
+    theme: Optional[str]
+    solver: Optional[str]
+    verbose_llm_logs: bool
+    display_solver_progress: bool
+    genai_method: str
+
+
+def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool) -> _IDEPreferences:
+    try:
+        saved_font_size = int(settings.get("font-size", font_size))
+    except (TypeError, ValueError):
+        saved_font_size = font_size
+    theme = settings.get("theme")
+    solver = settings.get("solver")
+    display_progress = settings.get("display-solver-progress", True)
+    genai_method = settings.get("genai-method")
+    return _IDEPreferences(
+        font_size=saved_font_size,
+        theme=theme if isinstance(theme, str) and theme in ("flatly", "darkly") else None,
+        solver=solver if solver in ("gurobi", "scipy") else None,
+        verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
+        display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
+        genai_method=(
+            genai_method
+            if isinstance(genai_method, str) and any(genai_method == key for _, key in GENAI_METHODS)
+            else "pyopl_generative"
+        ),
+    )
+
+
+def _parse_genai_selection(saved_selection: Any) -> Optional[tuple[str, str]]:
+    if isinstance(saved_selection, str) and "|" in saved_selection:
+        provider, model = saved_selection.split("|", 1)
+        return (provider, model) if provider and model else None
+    if isinstance(saved_selection, dict):
+        provider_value, model_value = saved_selection.get("provider"), saved_selection.get("model")
+        if provider_value and model_value:
+            return str(provider_value), str(model_value)
+    return None
+
+
+def _read_ide_settings(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as settings_file:
+        payload = json.load(settings_file)
+    if not isinstance(payload, dict):
+        raise ValueError("IDE settings must contain a JSON object")
+    return payload
+
+
+def _write_ide_settings(path: Path, payload: dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as settings_file:
+        json.dump(payload, settings_file, indent=4)
 
 
 def _concise_genai_error(exc: Exception) -> str:
@@ -488,6 +554,7 @@ class _EditorGutter:
 #   - str
 #   - {"text": str, "images": [{"path": str}, ...]}
 _PromptInput = Any
+_SolverMessage = tuple[Literal["log", "progress", "success", "error"], Any]
 
 
 class _QueueTextWriter:
@@ -722,6 +789,114 @@ def _data_paths_are_paired(left_data: str, right_data: str) -> bool:
     return bool(left_data) == bool(right_data)
 
 
+class _ComparisonInputError(ValueError):
+    def __init__(self, message: str, *, warning: bool) -> None:
+        super().__init__(message)
+        self.warning = warning
+
+
+@dataclass(frozen=True)
+class _ComparisonRequest:
+    left_model: str
+    left_data: str
+    right_model: str
+    right_data: str
+    strategy: str
+    observable_mapping_file: str = ""
+
+    def validate_paths(self, *, include_mapping: bool = False) -> None:
+        if not self.left_model or not self.right_model:
+            raise _ComparisonInputError("Choose both a left model and a right model.", warning=True)
+        if not _data_paths_are_paired(self.left_data, self.right_data):
+            raise _ComparisonInputError("Choose both data files or leave both data fields empty.", warning=True)
+        paths = [
+            ("Left model", self.left_model),
+            ("Right model", self.right_model),
+            ("Left data", self.left_data),
+            ("Right data", self.right_data),
+        ]
+        if include_mapping:
+            paths.append(("Observable mapping", self.observable_mapping_file))
+        for label, path in paths:
+            if path and not os.path.exists(path):
+                raise _ComparisonInputError(f"{label} file does not exist:\n{path}", warning=False)
+
+
+@dataclass
+class _ComparisonProcessState:
+    process: Optional[multiprocessing.Process] = None
+    result_queue: Optional[multiprocessing.Queue] = None
+
+    def start(self, request: _ComparisonRequest) -> None:
+        if self.process is not None or self.result_queue is not None:
+            raise RuntimeError("Comparison process resources are already in use")
+        self.result_queue = multiprocessing.Queue()
+        try:
+            self.process = multiprocessing.Process(
+                target=_compare_models_wrapper,
+                args=(
+                    request.left_model,
+                    request.left_data,
+                    request.right_model,
+                    request.right_data,
+                    request.strategy,
+                    self.result_queue,
+                    request.observable_mapping_file,
+                ),
+            )
+            self.process.start()
+        except Exception:
+            self.cleanup(cancel_queue_thread=True)
+            raise
+
+    def read_nowait(self) -> tuple[str, Any]:
+        if self.result_queue is None:
+            raise RuntimeError("Comparison result queue is not available")
+        message = self.result_queue.get_nowait()
+        if not isinstance(message, tuple) or len(message) != 2 or message[0] not in ("success", "validation_error", "error"):
+            raise ValueError("Invalid comparison worker message")
+        return message
+
+    def interrupt(self) -> None:
+        process = self.process
+        if process is not None and process.is_alive():
+            try:
+                process.terminate()
+                process.join(timeout=1.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=1.0)
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to interrupt comparison process")
+        self.cleanup(cancel_queue_thread=True)
+
+    def finish(self) -> None:
+        if self.process is not None:
+            try:
+                self.process.join(timeout=0.1)
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to join comparison process")
+        self.cleanup(cancel_queue_thread=False)
+
+    def cleanup(self, *, cancel_queue_thread: bool) -> None:
+        result_queue = self.result_queue
+        self.process = None
+        self.result_queue = None
+        if result_queue is None:
+            return
+        try:
+            result_queue.close()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to close comparison result queue")
+        try:
+            if cancel_queue_thread:
+                result_queue.cancel_join_thread()
+            else:
+                result_queue.join_thread()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to finish comparison result queue thread")
+
+
 def _read_mapping_generation_inputs(
     left_model: str,
     right_model: str,
@@ -826,6 +1001,43 @@ def _format_comparison_validation_error(detail: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _format_equivalence_result(
+    result: ModelComparisonResult,
+    left_model: str,
+    right_model: str,
+    left_data: str = "",
+    right_data: str = "",
+    strategy: str = "abstract",
+) -> str:
+    """Format a comparison result without depending on the dialog widgets."""
+    equivalence_label = {
+        "equivalent": "Yes",
+        "different": "No",
+        "unknown": "Undetermined",
+    }[result.status]
+    lines = [
+        "Compare models",
+        "",
+        f"Strategy: {strategy}",
+        f"Status: {result.status}",
+        f"Equivalent: {equivalence_label}",
+        f"Level: {result.level}",
+        f"Reason: {result.reason}",
+        "",
+        "Inputs:",
+        f"  Left model: {left_model}",
+        f"  Left data: {left_data or '(none)'}",
+        f"  Right model: {right_model}",
+        f"  Right data: {right_data or '(none)'}",
+    ]
+    if result.proof_steps:
+        lines.extend(["", "Proof steps:"])
+        lines.extend(f"  {index}. {step}" for index, step in enumerate(result.proof_steps, start=1))
+    if result.counterexample:
+        lines.extend(["", "Counterexample:", f"  {result.counterexample}"])
+    return "\n".join(lines) + "\n"
+
+
 class _CodeGenerator(Protocol):
     def generate_code(self) -> str: ...
 
@@ -846,6 +1058,775 @@ class _ForegroundOperation:
     data_file: Optional[str] = None
     explain_after_solve: bool = False
     cancel_requested: bool = False
+
+
+@dataclass
+class _SolverProcessState:
+    process: Optional[multiprocessing.Process] = None
+    result_queue: Optional[multiprocessing.Queue] = None
+    session_id: Optional[str] = None
+
+    def start(
+        self, model_file: str, data_file: str, solver_choice: str, solver_settings: Optional[dict[str, Any]], session_id: str
+    ) -> None:
+        if self.process is not None or self.result_queue is not None:
+            raise RuntimeError("Solver process resources are already in use")
+        self.result_queue = multiprocessing.Queue()
+        try:
+            self.process = multiprocessing.Process(
+                target=_solve_wrapper,
+                args=(model_file, data_file, solver_choice, solver_settings, self.result_queue),
+            )
+            self.process.start()
+            self.session_id = session_id
+        except Exception:
+            self.cleanup(cancel_queue_thread=True)
+            raise
+
+    def handles(self) -> Optional[tuple[multiprocessing.Process, multiprocessing.Queue]]:
+        if self.process is None or self.result_queue is None:
+            return None
+        return self.process, self.result_queue
+
+    def read_nowait(self) -> _SolverMessage:
+        if self.result_queue is None:
+            raise RuntimeError("Solver result queue is not available")
+        message = self.result_queue.get_nowait()
+        if not isinstance(message, tuple) or len(message) != 2:
+            raise ValueError("expected a (kind, payload) solver message")
+        kind, payload = message
+        if kind == "success":
+            if not isinstance(payload, dict):
+                raise ValueError("solver success payload must be a dictionary")
+            return "success", payload
+        if kind == "progress":
+            return "progress", payload
+        if kind == "log":
+            return "log", payload
+        if kind == "error":
+            return "error", payload
+        raise ValueError(f"unknown solver message kind: {kind!r}")
+
+    def stop(self) -> None:
+        process = self.process
+        if process is None or not process.is_alive():
+            return
+        try:
+            process.terminate()
+            process.join(timeout=1.0)
+            if process.is_alive() and hasattr(process, "kill"):
+                process.kill()
+                process.join(timeout=1.0)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to stop solver process")
+
+    def join(self, timeout: float) -> None:
+        if self.process is None:
+            return
+        try:
+            self.process.join(timeout=timeout)
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to join solver process")
+
+    def cleanup(self, *, cancel_queue_thread: bool) -> None:
+        result_queue = self.result_queue
+        self.process = None
+        self.result_queue = None
+        self.session_id = None
+        if result_queue is None:
+            return
+        try:
+            result_queue.close()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to close solver result queue")
+        try:
+            if cancel_queue_thread:
+                result_queue.cancel_join_thread()
+            else:
+                result_queue.join_thread()
+        except Exception:
+            logging.getLogger(__name__).exception("Failed to finish solver result queue thread")
+
+
+@dataclass
+class _EditorBufferState:
+    path: Optional[str] = None
+    saved_text: str = ""
+    marked_tab_text: Optional[str] = None
+    highlight_after_ids: dict[str, str] = field(default_factory=dict)
+    highlight_version: int = 0
+    syntax_error: Optional[str] = None
+
+    def consume_highlight(self, validate: bool, version: Optional[int]) -> bool:
+        if version is not None and version != self.highlight_version:
+            return False
+        self.highlight_after_ids.pop("validate" if validate else "fast", None)
+        return True
+
+
+@dataclass
+class _GenAIAttachments:
+    paths: list[str] = field(default_factory=list)
+    labels: dict[str, str] = field(default_factory=dict)
+    pdf_temp_dir: Optional[str] = None
+
+    def snapshot(self) -> tuple[str, ...]:
+        return tuple(self.paths)
+
+    def label(self, path: str) -> str:
+        return self.labels.get(path) or path
+
+    def list_label(self, path: str) -> str:
+        label = self.label(path)
+        if label == path:
+            return os.path.basename(path)
+        match = re.match(r"^(.*\.pdf)( page \d+)$", label, re.IGNORECASE)
+        if match:
+            return f"{os.path.basename(match.group(1))}{match.group(2)}"
+        return label
+
+    def add_paths(self, paths: list[str], on_error: Callable[[str], object], on_warning: Callable[[str], object]) -> None:
+        supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".pdf"}
+        for path in paths:
+            path_str = str(path)
+            if not path_str or Path(path_str).suffix.lower() not in supported_suffixes:
+                continue
+            images = self.render_pdf(path_str, on_error, on_warning) if path_str.lower().endswith(".pdf") else (path_str,)
+            for image in images:
+                if image not in self.paths:
+                    self.paths.append(image)
+
+    def remove_at(self, index: int) -> None:
+        if 0 <= index < len(self.paths):
+            self.labels.pop(self.paths.pop(index), None)
+
+    def clear(self) -> None:
+        self.paths.clear()
+        self.labels.clear()
+        self.cleanup()
+
+    def ensure_temp_dir(self) -> str:
+        if self.pdf_temp_dir and os.path.isdir(self.pdf_temp_dir):
+            return self.pdf_temp_dir
+        self.pdf_temp_dir = tempfile.mkdtemp(prefix="rhetor_syntagm_pdf_")
+        return self.pdf_temp_dir
+
+    def cleanup(self) -> None:
+        if self.pdf_temp_dir is None:
+            return
+        try:
+            shutil.rmtree(self.pdf_temp_dir)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logging.getLogger(__name__).exception("Failed to clean up rendered GenAI PDF attachments")
+            return
+        self.pdf_temp_dir = None
+
+    def render_pdf(self, pdf_path: str, on_error: Callable[[str], object], on_warning: Callable[[str], object]) -> list[str]:
+        try:
+            import fitz  # type: ignore[import-not-found]
+        except ImportError:
+            on_error("PDF attachments require PyMuPDF. Install it with: pip install PyMuPDF")
+            return []
+
+        try:
+            document = fitz.open(pdf_path)
+        except Exception as exc:
+            on_error(f"Could not open PDF attachment:\n{exc}")
+            return []
+
+        try:
+            return self._render_pdf_pages(document, pdf_path, lambda x, y: fitz.Matrix(x, y), on_warning)
+        except Exception as exc:
+            on_error(f"Could not render PDF attachment:\n{exc}")
+            return []
+        finally:
+            document.close()
+
+    def _render_pdf_pages(
+        self,
+        document: Any,
+        pdf_path: str,
+        matrix_factory: Callable[[float, float], Any],
+        on_warning: Callable[[str], object],
+    ) -> list[str]:
+        raw_page_count = getattr(document, "page_count", None)
+        page_count = int(raw_page_count if raw_page_count is not None else len(document))
+        if page_count > GENAI_MAX_PDF_PAGES:
+            on_warning(
+                f"SyntAGM accepts PDFs up to {GENAI_MAX_PDF_PAGES} pages. "
+                "For longer documents, attach screenshots of the relevant formulation."
+            )
+            return []
+
+        stem = Path(pdf_path).stem or "attachment"
+        temp_dir = tempfile.mkdtemp(prefix=f"{stem}_", dir=self.ensure_temp_dir())
+        rendered_paths: list[str] = []
+        try:
+            matrix = matrix_factory(GENAI_PDF_RENDER_DPI / 72.0, GENAI_PDF_RENDER_DPI / 72.0)
+            for page_index in range(page_count):
+                page = document.load_page(page_index)
+                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+                image_path = os.path.join(temp_dir, f"page_{page_index + 1}.png")
+                pixmap.save(image_path)
+                self.labels[image_path] = f"{pdf_path} page {page_index + 1}"
+                rendered_paths.append(image_path)
+        except Exception:
+            for path in rendered_paths:
+                self.labels.pop(path, None)
+            try:
+                shutil.rmtree(temp_dir)
+            except OSError:
+                logging.getLogger(__name__).exception("Failed to clean up incomplete PDF rendering")
+            raise
+        return rendered_paths
+
+
+@dataclass(frozen=True)
+class _PendingGenAIRevision:
+    revised_model: str
+    revised_data: str
+    current_model: str
+    current_data: str
+    model_path: str
+    data_path: str
+    safe_ts: str
+    had_data_file: bool
+    session_id: Optional[str]
+
+
+@dataclass
+class _GenAIRevisionState:
+    pending: Optional[_PendingGenAIRevision] = None
+
+    def set(self, pending: _PendingGenAIRevision) -> None:
+        self.pending = pending
+
+    def clear(self) -> None:
+        self.pending = None
+
+    def apply(self, apply_revision: Callable[[_PendingGenAIRevision], None]) -> bool:
+        pending = self.pending
+        if pending is None:
+            return False
+        apply_revision(pending)
+        self.pending = None
+        return True
+
+
+@dataclass
+class _ExemplarSearchState:
+    worker: ExemplarRankingWorker
+    exemplars: list[dict[str, Any]]
+    entries: list[dict[str, Any]] = field(init=False)
+    generation: int = 0
+    search_after_id: Optional[str] = None
+    poll_after_id: Optional[str] = None
+    worker_ready: bool = False
+    closed: bool = False
+
+    def __post_init__(self) -> None:
+        self.entries = self.exemplars
+
+    @staticmethod
+    def classify_result(
+        message: tuple[str, Optional[int], Any], generation: int, exemplars: list[dict[str, Any]]
+    ) -> tuple[str, Any]:
+        kind, message_generation, payload = message
+        if kind == "ready":
+            return "ready", None
+        if kind == "startup_error":
+            return "startup_error", payload
+        if message_generation != generation:
+            return "ignore", None
+        if kind != "success" or not isinstance(payload, list):
+            return "error", payload
+
+        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
+        ranked = [
+            exemplar_by_description[Path(hit["path"]).resolve()]
+            for hit in payload
+            if isinstance(hit, dict) and "path" in hit and Path(hit["path"]).resolve() in exemplar_by_description
+        ]
+        return "success", ranked
+
+    def schedule_search(self, dialog: tk.Misc, callback: Callable[[], None]) -> None:
+        if self.closed:
+            return
+        if self.search_after_id is not None:
+            dialog.after_cancel(self.search_after_id)
+        self.search_after_id = dialog.after(250, callback)
+
+    def start_search(self, query: str) -> bool:
+        self.search_after_id = None
+        if self.closed:
+            return False
+        self.generation += 1
+        if not query.strip():
+            return False
+        if not self.worker.is_alive():
+            raise RuntimeError("Semantic search is unavailable.")
+        self.worker.submit(self.generation, query)
+        return True
+
+    def drain(self) -> list[tuple[str, Any]]:
+        self.poll_after_id = None
+        if self.closed:
+            return []
+        messages: list[tuple[str, Any]] = []
+        while True:
+            try:
+                message = self.worker.get_nowait()
+            except queue.Empty:
+                break
+            action, payload = self.classify_result(message, self.generation, self.exemplars)
+            if action == "ready":
+                self.worker_ready = True
+            if action != "ignore":
+                messages.append((action, payload))
+        return messages
+
+    def schedule_poll(self, dialog: tk.Misc, callback: Callable[[], None]) -> None:
+        if not self.closed:
+            self.poll_after_id = dialog.after(50, callback)
+
+    def close(self, dialog: tk.Misc) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        for after_id in (self.search_after_id, self.poll_after_id):
+            if after_id is not None:
+                try:
+                    dialog.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+        self.search_after_id = None
+        self.poll_after_id = None
+        self.worker.close(wait=False)
+
+
+@dataclass(frozen=True)
+class _ExemplarPreparation:
+    name: str
+    model: str
+    data: str
+    source_session: str
+    provider: str
+    model_name: str
+
+    def prepare(self) -> ExemplarDraft:
+        description = distill_exemplar_description(
+            model=self.model,
+            data=self.data,
+            source_session=self.source_session,
+            provider=self.provider,
+            model_name=self.model_name,
+        )
+        return ExemplarDraft(self.name, self.model, self.data, description, self.source_session)
+
+
+@dataclass
+class _ExemplarSaveState:
+    pending: bool = False
+    closed: bool = False
+
+    def start(self, prepare: Callable[[], None]) -> None:
+        self.pending = True
+        try:
+            threading.Thread(target=prepare, daemon=True).start()
+        except Exception:
+            self.pending = False
+            raise
+
+    def finish(self) -> None:
+        self.pending = False
+
+
+class _GenAIProgressLogHandler(logging.Handler):
+    def __init__(self, progress: Callable[[str], None]) -> None:
+        super().__init__()
+        self._progress = progress
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            message = record.getMessage()
+        self._progress(message)
+
+
+class _GenAIRequestRunner:
+    def __init__(
+        self,
+        operation: _ForegroundOperation,
+        provider: str,
+        model_name: str,
+        generator: Any,
+        verbose: bool,
+        schedule: Callable[..., Any],
+        append_output: Callable[[str, Optional[str]], None],
+    ) -> None:
+        self.operation = operation
+        self.provider = provider
+        self.model_name = model_name
+        self.generator = generator
+        self.verbose = verbose
+        self.schedule = schedule
+        self.append_output = append_output
+        self.logger = logging.getLogger(getattr(generator, "__name__", "pyopl.genai.pyopl_generative"))
+
+    def progress(self, message: str) -> None:
+        if not self.operation.cancel_requested:
+            self.schedule(0, self._append_progress, message if message.endswith("\n") else message + "\n")
+
+    def _append_progress(self, message: str) -> None:
+        if not self.operation.cancel_requested:
+            self.append_output(message, self.operation.session_id)
+
+    def _invoke(self, call: Callable[[Callable[[str], None]], Any]) -> Any:
+        handler: Optional[_GenAIProgressLogHandler] = None
+        old_level = self.logger.level
+        if self.verbose:
+            handler = _GenAIProgressLogHandler(self.progress)
+            handler.setLevel(logging.DEBUG)
+            self.logger.addHandler(handler)
+            self.logger.setLevel(logging.DEBUG)
+        try:
+            return call(self.progress)
+        finally:
+            if handler is not None:
+                self.logger.removeHandler(handler)
+                self.logger.setLevel(old_level)
+
+    def generate(self, prompt_input: _PromptInput, model_path: str, data_path: str) -> Any:
+        return self._invoke(
+            lambda progress: self.generator.generative_solve(
+                prompt_input,
+                model_path,
+                data_path,
+                model_name=self.model_name,
+                llm_provider=self.provider,
+                progress=progress,
+            )
+        )
+
+    def feedback(self, prompt_input: _PromptInput, model_path: str, data_path: Optional[str]) -> Any:
+        return self._invoke(
+            lambda progress: self.generator.generative_feedback(
+                prompt_input,
+                model_path,
+                data_path,
+                model_name=self.model_name,
+                llm_provider=self.provider,
+                progress=progress,
+            )
+        )
+
+    def start(self, worker: Callable[[], None]) -> None:
+        threading.Thread(target=worker, daemon=True).start()
+
+
+def _unique_revision_path(base_path: str, extension: str) -> str:
+    target = base_path + extension
+    suffix = 1
+    while os.path.exists(target):
+        target = f"{base_path}_{suffix}{extension}"
+        suffix += 1
+    return target
+
+
+def _write_genai_revision_files(
+    pending: _PendingGenAIRevision,
+    tmp_dir: str,
+    model_path: str,
+    data_path: str,
+    safe_ts: str,
+    current_model_text: str,
+) -> tuple[str, Optional[str]]:
+    def strip_ts_suffix(name: str) -> str:
+        match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
+        return match.group(1) if match and match.group(1) else name
+
+    model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
+    model_ext = model_ext or ".mod"
+    model_base_name = strip_ts_suffix(model_base_name)
+    if model_base_name == "temp_model":
+        model_base_name = "tmp"
+    model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
+    model_tgt = _unique_revision_path(model_base, model_ext)
+    data_tgt = None
+    try:
+        with open(model_tgt, "w", encoding="utf-8") as file_obj:
+            file_obj.write(pending.revised_model if pending.revised_model else current_model_text)
+
+        if pending.revised_data:
+            if pending.had_data_file:
+                data_base_name, data_ext = os.path.splitext(os.path.basename(data_path))
+                data_ext = data_ext or ".dat"
+            else:
+                data_base_name, data_ext = model_base_name, ".dat"
+            data_base_name = strip_ts_suffix(data_base_name)
+            data_base = os.path.join(tmp_dir, f"{data_base_name}_{safe_ts}")
+            data_tgt = _unique_revision_path(data_base, data_ext)
+            with open(data_tgt, "w", encoding="utf-8") as file_obj:
+                file_obj.write(pending.revised_data)
+    except OSError:
+        for target in (model_tgt, data_tgt):
+            if target is not None:
+                try:
+                    os.remove(target)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logging.getLogger(__name__).exception("Failed to clean up incomplete GenAI revision file: %s", target)
+        raise
+    return model_tgt, data_tgt
+
+
+def _make_text_indexer(code: str) -> Callable[[int], str]:
+    line_starts = [0] + [index + 1 for index, char in enumerate(code) if char == "\n"]
+
+    def index(position: int) -> str:
+        position = max(0, min(position, len(code)))
+        line_index = bisect.bisect_right(line_starts, position) - 1
+        return f"{line_index + 1}.{position - line_starts[line_index]}"
+
+    return index
+
+
+def _token_highlight_ranges(tokens: list[Any], index: Callable[[int], str]) -> dict[str, list[str]]:
+    ranges: dict[str, list[str]] = {}
+    for token in tokens:
+        if token.type in TOKEN_COLORS:
+            ranges.setdefault(token.type, []).extend((index(token.index), index(token.index + len(str(token.value)))))
+    return ranges
+
+
+def _data_highlight_ranges(code: str, index: Callable[[int], str]) -> dict[str, list[str]]:
+    ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
+    for keyword in ("param", "set", "true", "false"):
+        tag = "PARAM" if keyword == "param" else "SET" if keyword == "set" else "BOOLEAN"
+        for match in re.finditer(r"\b" + keyword + r"\b", code):
+            ranges[tag].extend((index(match.start()), index(match.end())))
+    ranges["NUMBER"] = [
+        position for match in re.finditer(r"\d+(\.\d+)?", code) for position in (index(match.start()), index(match.end()))
+    ]
+    return ranges
+
+
+@dataclass
+class _OutputSessionState:
+    sessions: dict[str, str] = field(default_factory=dict)
+    ids: list[str] = field(default_factory=list)
+    display: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    timestamps: dict[str, str] = field(default_factory=dict)
+    artifacts: dict[str, dict[str, str]] = field(default_factory=dict)
+    model_snapshots: dict[str, str] = field(default_factory=dict)
+    data_snapshots: dict[str, str] = field(default_factory=dict)
+    fold_view_states: dict[str, dict[str, Any]] = field(default_factory=dict)
+    current_id: Optional[str] = None
+    viewing_id: Optional[str] = None
+
+    @staticmethod
+    def label_for_header(header: str) -> str:
+        header_lower = header.strip().lower()
+        if header_lower.startswith("genai: generating"):
+            return "Generate"
+        if header_lower.startswith("genai: requesting feedback"):
+            return "Ask"
+        if header_lower.startswith("solve:"):
+            return "Solve"
+        if header_lower.startswith("export model"):
+            return "Export"
+        if header_lower.startswith("genai:"):
+            return "GenAI"
+        return "Session"
+
+    def make_display(self, timestamp: str, label: str, exclude_session_id: Optional[str] = None) -> str:
+        base = f"{timestamp} • {label}"
+        existing = {display for sid, display in self.display.items() if sid != exclude_session_id}
+        if base not in existing:
+            return base
+        suffix = 2
+        while True:
+            candidate = f"{base} ({suffix})"
+            if candidate not in existing:
+                return candidate
+            suffix += 1
+
+    def begin(self, header: str, created_at: datetime) -> tuple[str, str]:
+        timestamp = created_at.strftime("%Y-%m-%d %H:%M:%S")
+        label = self.label_for_header(header)
+        display = self.make_display(timestamp, label)
+        session_id = created_at.strftime("%Y-%m-%d %H:%M:%S.%f")
+        self.sessions[session_id] = (header + "\n") if header else ""
+        self.display[session_id] = display
+        self.labels[session_id] = label
+        self.timestamps[session_id] = timestamp
+        self.artifacts.setdefault(session_id, {})
+        self.ids.insert(0, session_id)
+        return session_id, display
+
+    def append(self, text: str, session_id: Optional[str] = None) -> Optional[str]:
+        sid = session_id or self.current_id
+        if sid:
+            self.sessions[sid] = self.sessions.get(sid, "") + text
+        return sid
+
+    def remove(self, session_id: str, index: int) -> None:
+        self.ids.pop(index)
+        self.sessions.pop(session_id, None)
+        self.display.pop(session_id, None)
+        self.labels.pop(session_id, None)
+        self.timestamps.pop(session_id, None)
+        self.artifacts.pop(session_id, None)
+        self.model_snapshots, self.data_snapshots = self.prune_snapshots(
+            self.artifacts, self.model_snapshots, self.data_snapshots
+        )
+        if self.current_id == session_id:
+            self.current_id = None
+        if self.viewing_id == session_id:
+            self.viewing_id = None
+
+    def rename(self, session_id: str, label: str) -> str:
+        timestamp = self.timestamps.get(session_id, session_id)
+        display = self.make_display(timestamp, label, exclude_session_id=session_id)
+        self.labels[session_id] = label
+        self.display[session_id] = display
+        return display
+
+    def select(self, session_id: Optional[str], *, make_current: bool = False) -> None:
+        self.viewing_id = session_id
+        if session_id is not None and (make_current or not self.current_id):
+            self.current_id = session_id
+
+    def clear_history(self) -> None:
+        self.sessions.clear()
+        self.ids.clear()
+        self.display.clear()
+        self.labels.clear()
+        self.timestamps.clear()
+        self.artifacts.clear()
+        self.fold_view_states.clear()
+        self.current_id = None
+        self.viewing_id = None
+
+    def to_payload(self, model_file: Optional[str], data_file: Optional[str], saved_at: str) -> dict[str, Any]:
+        return {
+            "output_sessions": self.sessions,
+            "output_session_ids": self.ids,
+            "output_session_display": self.display,
+            "output_session_label": self.labels,
+            "output_session_timestamp": self.timestamps,
+            "output_session_artifacts": self.artifacts,
+            "model_snapshots": self.model_snapshots,
+            "data_snapshots": self.data_snapshots,
+            "current_output_session_id": self.current_id,
+            "viewing_output_session_id": self.viewing_id,
+            "model_file": model_file,
+            "data_file": data_file,
+            "fold_view_states": self.fold_view_states,
+            "saved_at": saved_at,
+        }
+
+    @classmethod
+    def from_payload(
+        cls, payload: dict[str, Any], current_id: Optional[str], viewing_id: Optional[str]
+    ) -> "_OutputSessionState":
+        return cls(
+            sessions=payload.get("output_sessions", {}) or {},
+            ids=payload.get("output_session_ids", []) or [],
+            display=payload.get("output_session_display", {}) or {},
+            labels=payload.get("output_session_label", {}) or {},
+            timestamps=payload.get("output_session_timestamp", {}) or {},
+            artifacts=_normalize_session_artifacts(payload.get("output_session_artifacts")),
+            model_snapshots=_normalize_session_snapshots(payload.get("model_snapshots")),
+            data_snapshots=_normalize_session_snapshots(payload.get("data_snapshots")),
+            current_id=payload.get("current_output_session_id") or current_id,
+            viewing_id=payload.get("viewing_output_session_id") or viewing_id,
+        )
+
+    @staticmethod
+    def snapshot_hash(content: str) -> str:
+        return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+
+    @staticmethod
+    def record_artifacts(
+        artifacts: dict[str, dict[str, str]],
+        model_snapshots: dict[str, str],
+        data_snapshots: dict[str, str],
+        session_id: str,
+        model_text: Any,
+        data_text: Any,
+    ) -> None:
+        artifact = dict(artifacts.get(session_id, {}))
+        if model_text is not _SESSION_ARTIFACT_UNSET:
+            content = str(model_text)
+            content_hash = _OutputSessionState.snapshot_hash(content)
+            model_snapshots[content_hash] = content
+            artifact["model_hash"] = content_hash
+        if data_text is not _SESSION_ARTIFACT_UNSET:
+            content = str(data_text)
+            content_hash = _OutputSessionState.snapshot_hash(content)
+            data_snapshots[content_hash] = content
+            artifact["data_hash"] = content_hash
+        artifacts[session_id] = artifact
+
+    @staticmethod
+    def prune_snapshots(
+        artifacts: dict[str, dict[str, str]], model_snapshots: dict[str, str], data_snapshots: dict[str, str]
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        model_hashes = {artifact.get("model_hash") for artifact in artifacts.values()}
+        data_hashes = {artifact.get("data_hash") for artifact in artifacts.values()}
+        return (
+            {key: value for key, value in model_snapshots.items() if key in model_hashes},
+            {key: value for key, value in data_snapshots.items() if key in data_hashes},
+        )
+
+    @staticmethod
+    def store_fold_state(states: dict[str, dict[str, Any]], path: str, folded_lines: set[int], *, touch: bool) -> None:
+        key = _fold_state_key(path)
+        previous = states.get(key, {})
+        if not touch and not previous and not folded_lines:
+            return
+        edited_at = datetime.now(timezone.utc).isoformat() if touch else str(previous.get("edited_at") or "")
+        states[key] = {"folded_lines": sorted(int(line) for line in folded_lines), "edited_at": edited_at}
+        while len(states) > MAX_FOLD_VIEW_STATES:
+            oldest_key = min(states, key=lambda state_key: (str(states[state_key].get("edited_at") or ""), state_key))
+            del states[oldest_key]
+
+    @staticmethod
+    def normalize_fold_view_states(raw_states: Any) -> dict[str, dict[str, Any]]:
+        states: dict[str, dict[str, Any]] = {}
+        for path, state in (raw_states or {}).items():
+            if not isinstance(path, str) or not isinstance(state, dict):
+                continue
+            raw_lines = state.get("folded_lines", [])
+            if not isinstance(raw_lines, list):
+                continue
+            lines = sorted({line for line in raw_lines if isinstance(line, int) and line > 0})
+            states[_fold_state_key(path)] = {"folded_lines": lines, "edited_at": str(state.get("edited_at") or "")}
+        return dict(
+            sorted(states.items(), key=lambda item: (item[1]["edited_at"], item[0]), reverse=True)[:MAX_FOLD_VIEW_STATES]
+        )
+
+
+def _normalize_session_snapshots(raw_snapshots: Any) -> dict[str, str]:
+    return {str(content_hash): str(content) for content_hash, content in (raw_snapshots or {}).items()}
+
+
+def _normalize_session_artifacts(raw_artifacts: Any) -> dict[str, dict[str, str]]:
+    return {
+        str(session_id): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
+        for session_id, artifact in (raw_artifacts or {}).items()
+        if isinstance(artifact, dict)
+    }
+
+
+def _fold_state_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
 
 
 class _StatusVarProxy:
@@ -874,10 +1855,8 @@ class OPLIDE(TkinterDnD.Tk):
         self.title("Rhetor")
         self._configure_macos_application_identity("Rhetor")
         self.geometry("1150x700")
-        self.model_file: Optional[str] = None
-        self.data_file: Optional[str] = None
-        self._model_saved_text = ""
-        self._data_saved_text = ""
+        self._model_editor_state = _EditorBufferState()
+        self._data_editor_state = _EditorBufferState()
         self.current_font_size = 12
         self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
         self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
@@ -887,8 +1866,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.show_genai_panel_var = tk.BooleanVar(value=True)
 
         # Solver process
-        self._solver_process: Optional[multiprocessing.Process] = None
-        self._solver_queue: Optional[multiprocessing.Queue] = None
+        self._solver_ipc = _SolverProcessState()
         self._current_solver_choice: str = "gurobi"
         self._solver_progress_window: Optional[tk.Toplevel] = None
         self._solver_progress_canvas: Optional[tk.Canvas] = None
@@ -913,15 +1891,11 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_notebook: Optional[ttk.Notebook] = None
         self._genai_diff_preview_texts: dict[str, tk.Text] = {}
         self._exemplar_search_cleanup: Optional[Callable[[Any], None]] = None
+        self._exemplar_save_state = _ExemplarSaveState()
 
         # --- Highlight scheduling (prevents UI lag on large files) ---
         self._highlight_debounce_ms = 150  # fast pass while typing
         self._highlight_validate_idle_ms = 800  # expensive lex/parse after idle
-        self._highlight_after_ids: dict[tuple[int, str], str] = {}
-
-        # Track last syntax error per editor (prevents cross-editor contamination)
-        self._last_syntax_error_by_widget: dict[int, Optional[str]] = {}
-        self._last_syntax_error: Optional[str] = None
 
         # GenAI selection state
         self.genai_selection_var = tk.StringVar(value="")  # format: "provider|model"
@@ -936,23 +1910,10 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_context_var = tk.StringVar(value="No GenAI model selected")
         self.genai_attachment_summary_var = tk.StringVar(value="No visual attachments")
         self.genai_pending_var = tk.StringVar(value="")
-        self._genai_attachment_paths: list[str] = []
-        self._genai_attachment_display_labels: dict[str, str] = {}
-        self._genai_pdf_temp_dir: Optional[str] = None
-        self._genai_pending_revisions: Optional[dict[str, Any]] = None
+        self._genai_attachments = _GenAIAttachments()
+        self._genai_revisions = _GenAIRevisionState()
 
-        # Output sessions
-        self._output_sessions: dict[str, str] = {}
-        self._output_session_ids: list[str] = []
-        self._output_session_display: dict[str, str] = {}
-        self._output_session_label: dict[str, str] = {}
-        self._output_session_timestamp: dict[str, str] = {}
-        self._output_session_artifacts: dict[str, dict[str, str]] = {}
-        self._model_snapshots: dict[str, str] = {}
-        self._data_snapshots: dict[str, str] = {}
-        self._fold_view_states: dict[str, dict[str, Any]] = {}
-        self._current_output_session_id: Optional[str] = None
-        self._viewing_output_session_id: Optional[str] = None
+        self._session_state = _OutputSessionState()
         self._active_operation: Optional[_ForegroundOperation] = None
 
         desired_theme, loaded_settings = self._initialize_preferences()
@@ -1000,6 +1961,13 @@ class OPLIDE(TkinterDnD.Tk):
         except OSError as exc:
             logging.getLogger(__name__).warning("Could not start Rhetor IDE MCP bridge: %s", exc)
 
+    def _editor_state_for_widget(self, text_widget: tk.Text) -> _EditorBufferState:
+        if text_widget is self.model_text:
+            return self._model_editor_state
+        if text_widget is self.data_text:
+            return self._data_editor_state
+        raise ValueError("Unknown editor widget")
+
     def _poll_ide_bridge(self) -> None:
         """Dispatch pending MCP bridge requests on Tk's event thread."""
         if getattr(self, "_shutting_down", False):
@@ -1012,40 +1980,51 @@ class OPLIDE(TkinterDnD.Tk):
         method: str,
         path: str,
         payload: Optional[dict[str, Any]],
+        cancelled: Optional[threading.Event] = None,
     ) -> dict[str, Any]:
         """Read or update the model and data editors for an MCP request."""
         if path != "/editors":
             raise ValueError(f"Unknown Rhetor IDE bridge path: {path}")
         if method == "GET":
-            return {
-                "model_text": self._get_editor_text(self.model_text),
-                "data_text": self._get_editor_text(self.data_text),
-            }
+            return OPLIDE._editor_buffer_texts(self)
         if method != "PUT" or payload is None:
             raise ValueError(f"Unsupported Rhetor IDE bridge method: {method}")
+        return OPLIDE._update_ide_bridge_editors(self, payload, cancelled)
 
+    def _update_ide_bridge_editors(self, payload: dict[str, Any], cancelled: Optional[threading.Event]) -> dict[str, Any]:
         updates = (("model_text", self.model_text, False), ("data_text", self.data_text, True))
         for payload_field, _text_widget, _is_data in updates:
             if payload_field in payload and not isinstance(payload[payload_field], str):
                 raise ValueError(f"{payload_field} must be a string")
 
-        changed = []
+        changed = [field for field, _, _ in updates if field in payload]
+        if not changed:
+            raise ValueError("Supply model_text, data_text, or both")
+        if not self._resolve_editor_replacement(
+            "Update from MCP",
+            model="model_text" in changed and payload.get("model_text") != self._get_editor_text(self.model_text),
+            data="data_text" in changed and payload.get("data_text") != self._get_editor_text(self.data_text),
+            cancelled=cancelled.is_set if cancelled is not None else None,
+        ) or (cancelled is not None and cancelled.is_set()):
+            raise ValueError("Editor update cancelled by user or request timeout")
+
         for payload_field, text_widget, is_data in updates:
             if payload_field not in payload:
                 continue
-            text = payload[payload_field]
-            text_widget.delete("1.0", tk.END)
-            text_widget.insert("1.0", text)
-            self._on_text_change(text_widget, is_data)
-            changed.append(payload_field)
-        if not changed:
-            raise ValueError("Supply model_text, data_text, or both")
+            OPLIDE._replace_editor_buffer(self, text_widget, payload[payload_field], is_data=is_data)
         self.status_var.set("Updated from MCP")
+        return {"updated": changed, **OPLIDE._editor_buffer_texts(self)}
+
+    def _editor_buffer_texts(self) -> dict[str, str]:
         return {
-            "updated": changed,
             "model_text": self._get_editor_text(self.model_text),
             "data_text": self._get_editor_text(self.data_text),
         }
+
+    def _replace_editor_buffer(self, text_widget: tk.Text, text: str, *, is_data: bool) -> None:
+        text_widget.delete("1.0", tk.END)
+        text_widget.insert("1.0", text)
+        self._on_text_change(text_widget, is_data)
 
     def _initialize_preferences(self) -> tuple[Any, dict[str, Any]]:
         self._init_settings_storage()
@@ -1053,60 +2032,28 @@ class OPLIDE(TkinterDnD.Tk):
         if not isinstance(loaded_settings, dict):
             loaded_settings = {}
 
-        desired_theme: Optional[str] = None
-        try:
-            self.current_font_size = int(loaded_settings.get("font-size", self.current_font_size))
-            desired_theme = loaded_settings.get("theme")
-            saved_solver = loaded_settings.get("solver")
-            if saved_solver in ("gurobi", "scipy"):
-                self.solver.set(saved_solver)
-                self._current_solver_choice = saved_solver
-        except Exception:
-            pass
+        preferences = _parse_ide_preferences(loaded_settings, self.current_font_size, self.debug)
+        self.current_font_size = preferences.font_size
+        if preferences.solver is not None:
+            self.solver.set(preferences.solver)
+            self._current_solver_choice = preferences.solver
 
-        default_verbose = bool(loaded_settings.get("verbose-llm-logs", self.debug))
-        self.verbose_llm_var = tk.BooleanVar(value=default_verbose)
-        display_solver_progress = loaded_settings.get("display-solver-progress", True)
-        if not isinstance(display_solver_progress, bool):
-            display_solver_progress = True
-        self.display_solver_progress_var = tk.BooleanVar(value=display_solver_progress)
+        self.verbose_llm_var = tk.BooleanVar(value=preferences.verbose_llm_logs)
+        self.display_solver_progress_var = tk.BooleanVar(value=preferences.display_solver_progress)
         self.font_size_var = tk.IntVar(value=self.current_font_size)
 
-        self._genai_methods = [
-            ("SyntAGM", "pyopl_generative"),
-            ("Standard", "pyopl_standard"),
-            ("Chain of Thought", "pyopl_chain_of_thought"),
-            ("Tree of Thoughts", "pyopl_tree_of_thoughts"),
-            ("CAFA", "pyopl_cafa"),
-            ("Chain of Experts", "pyopl_chain_of_experts"),
-            ("Reflexion", "pyopl_reflexion"),
-        ]
-        saved_method = loaded_settings.get("genai-method")
-        if not isinstance(saved_method, str) or not saved_method:
-            saved_method = "pyopl_generative"
-        self.genai_method_var = tk.StringVar(value=saved_method)
+        self._genai_methods = list(GENAI_METHODS)
+        self.genai_method_var = tk.StringVar(value=preferences.genai_method)
         self._desired_genai_provider: Optional[str] = None
         self._desired_genai_model: Optional[str] = None
         self._restore_genai_selection(loaded_settings.get("genai-selection"))
-        return desired_theme, loaded_settings
+        return preferences.theme, loaded_settings
 
     def _restore_genai_selection(self, saved_selection: Any) -> None:
-        try:
-            if isinstance(saved_selection, str) and "|" in saved_selection:
-                provider, model = saved_selection.split("|", 1)
-                if provider and model:
-                    self._desired_genai_provider = provider
-                    self._desired_genai_model = model
-                    self.genai_selection_var.set(saved_selection)
-            elif isinstance(saved_selection, dict):
-                provider_value = saved_selection.get("provider")
-                model_value = saved_selection.get("model")
-                if provider_value and model_value:
-                    self._desired_genai_provider = str(provider_value)
-                    self._desired_genai_model = str(model_value)
-                    self.genai_selection_var.set(f"{provider_value}|{model_value}")
-        except Exception:
-            pass
+        selection = _parse_genai_selection(saved_selection)
+        if selection is not None:
+            self._desired_genai_provider, self._desired_genai_model = selection
+            self.genai_selection_var.set("|".join(selection))
 
     def _register_macos_quit_handler(self) -> None:
         """Route macOS app-menu Quit through the IDE close handler."""
@@ -1508,7 +2455,7 @@ class OPLIDE(TkinterDnD.Tk):
         active = getattr(self, "_active_operation", None)
         if active is None:
             return
-        if active.kind == "solve" and self._solver_process and self._solver_process.is_alive():
+        if active.kind == "solve" and self._solver_ipc.process and self._solver_ipc.process.is_alive():
             self.stop_model()
             return
 
@@ -1525,10 +2472,12 @@ class OPLIDE(TkinterDnD.Tk):
         """Clear editors, reset file paths, and prepare for a new model."""
         if not self._ensure_no_active_operation("New Model"):
             return
+        if not self._resolve_editor_replacement("New Model", model=True, data=True):
+            return
         self.model_text.delete(1.0, tk.END)
         self.data_text.delete(1.0, tk.END)
-        self.model_file = None
-        self.data_file = None
+        self._model_editor_state.path = None
+        self._data_editor_state.path = None
 
         # Reset tab labels
         self.editor_notebook.tab(self.model_frame, text="Model")
@@ -1555,6 +2504,8 @@ class OPLIDE(TkinterDnD.Tk):
             "Are you sure you want to proceed? This will clear the current editors and session history.",
         ):
             return
+        if not self._resolve_editor_replacement("New Session", model=True, data=True):
+            return
         try:
             OPLIDE._reset_editors_for_new_session(self)
             OPLIDE._clear_output_session_state(self)
@@ -1574,8 +2525,8 @@ class OPLIDE(TkinterDnD.Tk):
                 text_widget.delete(1.0, tk.END)
             except Exception:
                 pass
-        self.model_file = None
-        self.data_file = None
+        self._model_editor_state.path = None
+        self._data_editor_state.path = None
         self._mark_editor_baselines_saved()
         try:
             self.editor_notebook.tab(self.model_frame, text="Model")
@@ -1591,22 +2542,7 @@ class OPLIDE(TkinterDnD.Tk):
             pass
 
     def _clear_output_session_state(self) -> None:
-        defaults: dict[str, dict[Any, Any] | list[Any]] = {
-            "_output_sessions": {},
-            "_output_session_ids": [],
-            "_output_session_display": {},
-            "_output_session_label": {},
-            "_output_session_timestamp": {},
-            "_output_session_artifacts": {},
-            "_fold_view_states": {},
-        }
-        for attribute, fallback in defaults.items():
-            try:
-                getattr(self, attribute).clear()
-            except Exception:
-                setattr(self, attribute, fallback)
-        self._current_output_session_id = None
-        self._viewing_output_session_id = None
+        self._session_state.clear_history()
 
     def _remove_persisted_session(self) -> None:
         try:
@@ -1825,9 +2761,9 @@ class OPLIDE(TkinterDnD.Tk):
             index = int(sel[0]) if sel else getattr(self, "_last_request_popup_index", None)
         except Exception:
             index = getattr(self, "_last_request_popup_index", None)
-        if index is None or index < 0 or index >= len(self._output_session_ids):
+        if index is None or index < 0 or index >= len(self._session_state.ids):
             return None
-        return self._output_session_ids[index]
+        return self._session_state.ids[index]
 
     def _record_output_session_artifacts(
         self,
@@ -1838,38 +2774,23 @@ class OPLIDE(TkinterDnD.Tk):
         """Associate a session with content-addressed model/data snapshots."""
         if not session_id:
             return
-        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
-            self._output_session_artifacts = {}
-        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
-            self._model_snapshots = {}
-        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
-            self._data_snapshots = {}
-        artifact = dict(self._output_session_artifacts.get(session_id, {}))
-        if model_text is not _SESSION_ARTIFACT_UNSET:
-            content = str(model_text)
-            content_hash = OPLIDE._session_snapshot_hash(content)
-            self._model_snapshots[content_hash] = content
-            artifact["model_hash"] = content_hash
-        if data_text is not _SESSION_ARTIFACT_UNSET:
-            content = str(data_text)
-            content_hash = OPLIDE._session_snapshot_hash(content)
-            self._data_snapshots[content_hash] = content
-            artifact["data_hash"] = content_hash
-        self._output_session_artifacts[session_id] = artifact
+        _OutputSessionState.record_artifacts(
+            self._session_state.artifacts,
+            self._session_state.model_snapshots,
+            self._session_state.data_snapshots,
+            session_id,
+            model_text,
+            data_text,
+        )
 
     @staticmethod
     def _session_snapshot_hash(content: str) -> str:
-        return f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}"
+        return _OutputSessionState.snapshot_hash(content)
 
     def _prune_session_snapshots(self) -> None:
-        model_hashes = {artifact.get("model_hash") for artifact in self._output_session_artifacts.values()}
-        data_hashes = {artifact.get("data_hash") for artifact in self._output_session_artifacts.values()}
-        self._model_snapshots = {
-            content_hash: content for content_hash, content in self._model_snapshots.items() if content_hash in model_hashes
-        }
-        self._data_snapshots = {
-            content_hash: content for content_hash, content in self._data_snapshots.items() if content_hash in data_hashes
-        }
+        self._session_state.model_snapshots, self._session_state.data_snapshots = _OutputSessionState.prune_snapshots(
+            self._session_state.artifacts, self._session_state.model_snapshots, self._session_state.data_snapshots
+        )
 
     def _snapshot_output_session_artifacts(self, session_id: Optional[str]) -> None:
         """Snapshot the current editor state for a session when possible."""
@@ -1885,14 +2806,14 @@ class OPLIDE(TkinterDnD.Tk):
         """Return the stored model/data snapshot content for a session."""
         if not session_id:
             return {}
-        artifact = self._output_session_artifacts.get(session_id, {})
+        artifact = self._session_state.artifacts.get(session_id, {})
         resolved: dict[str, str] = {}
         model_hash = artifact.get("model_hash")
         data_hash = artifact.get("data_hash")
-        if isinstance(model_hash, str) and model_hash in getattr(self, "_model_snapshots", {}):
-            resolved["model_text"] = self._model_snapshots[model_hash]
-        if isinstance(data_hash, str) and data_hash in getattr(self, "_data_snapshots", {}):
-            resolved["data_text"] = self._data_snapshots[data_hash]
+        if isinstance(model_hash, str) and model_hash in self._session_state.model_snapshots:
+            resolved["model_text"] = self._session_state.model_snapshots[model_hash]
+        if isinstance(data_hash, str) and data_hash in self._session_state.data_snapshots:
+            resolved["data_text"] = self._session_state.data_snapshots[data_hash]
         return resolved
 
     def _show_session_model_preview(self) -> None:
@@ -1992,14 +2913,16 @@ class OPLIDE(TkinterDnD.Tk):
             return
         if not messagebox.askyesno("Restore Model", "Restore the selected model/data pair into the editors?"):
             return
+        if not self._resolve_editor_replacement("Restore Model", model=has_model, data=has_data):
+            return
         if has_model:
             self.model_text.delete("1.0", tk.END)
             self.model_text.insert(tk.END, model_text)
-            self.model_file = None
+            self._model_editor_state.path = None
         if has_data:
             self.data_text.delete("1.0", tk.END)
             self.data_text.insert(tk.END, data_text)
-            self.data_file = None
+            self._data_editor_state.path = None
         if has_model:
             self.editor_notebook.tab(self.model_frame, text="Model: session snapshot")
         if has_data:
@@ -2073,6 +2996,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         self.model_text.bind("<KeyRelease>", _on_model_changed)
         self.model_text.bind("<ButtonRelease-1>", _on_model_changed)
+        self.model_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.model_text))
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
         # Data editor
@@ -2098,6 +3022,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.data_gutter = _EditorGutter(self, self.data_text, data_gutter_canvas)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
+        self.data_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.data_text))
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
         # Undo/Redo on widgets (overrides Text default bindings)
@@ -2255,11 +3180,9 @@ class OPLIDE(TkinterDnD.Tk):
             if hasattr(self, "output_text") and self.output_text.winfo_exists():
                 self.output_text.pack(fill=tk.BOTH, expand=1)
             if hasattr(self, "output_text") and self.output_text.winfo_exists():
-                session_id = getattr(self, "_viewing_output_session_id", None) or getattr(
-                    self, "_current_output_session_id", None
-                )
+                session_id = self._session_state.viewing_id or self._session_state.current_id
                 if session_id:
-                    content = self._output_sessions.get(session_id, "")
+                    content = self._session_state.sessions.get(session_id, "")
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
                     self.output_text.insert(tk.END, content)
@@ -2547,7 +3470,7 @@ class OPLIDE(TkinterDnD.Tk):
             else:
                 self.genai_attach_output_check.grid_remove()
 
-        attachment_count = len(getattr(self, "_genai_attachment_paths", []))
+        attachment_count = len(self._genai_attachments.paths)
         if attachment_count == 0:
             self.genai_attachment_summary_var.set("No visual attachments")
         elif attachment_count == 1:
@@ -2595,33 +3518,15 @@ class OPLIDE(TkinterDnD.Tk):
         """Clear the docked GenAI composer state."""
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.delete("1.0", tk.END)
-        self._genai_attachment_paths.clear()
-        self._genai_attachment_display_labels.clear()
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.clear()
         self._refresh_genai_attachment_list()
-
-    def _label_for_genai_attachment_path(self, path: str) -> str:
-        """Return a user-facing label for an attachment path."""
-        labels = getattr(self, "_genai_attachment_display_labels", {})
-        label = labels.get(path) if isinstance(labels, dict) else None
-        return label or path
-
-    def _list_label_for_genai_attachment_path(self, path: str) -> str:
-        """Return the compact label shown in the composer attachment list."""
-        label = OPLIDE._label_for_genai_attachment_path(self, path)
-        if label == path:
-            return os.path.basename(path)
-        match = re.match(r"^(.*\.pdf)( page \d+)$", label, re.IGNORECASE)
-        if match:
-            return f"{os.path.basename(match.group(1))}{match.group(2)}"
-        return label
 
     def _refresh_genai_attachment_list(self) -> None:
         """Refresh the composer attachment list."""
         if hasattr(self, "genai_attachment_listbox"):
             self.genai_attachment_listbox.delete(0, tk.END)
-            for path in self._genai_attachment_paths:
-                self.genai_attachment_listbox.insert(tk.END, self._list_label_for_genai_attachment_path(path))
+            for path in self._genai_attachments.paths:
+                self.genai_attachment_listbox.insert(tk.END, self._genai_attachments.list_label(path))
         self._refresh_genai_panel_state()
 
     def _genai_add_images(self) -> None:
@@ -2644,87 +3549,12 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _add_genai_attachment_paths(self, paths: list[str]) -> None:
         """Add supported visual paths to the docked GenAI composer."""
-        supported_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".pdf"}
-        for path in paths:
-            path_str = str(path)
-            if not path_str or Path(path_str).suffix.lower() not in supported_suffixes:
-                continue
-            if path_str.lower().endswith(".pdf"):
-                for rendered_path in self._render_genai_pdf_attachment(path_str):
-                    if rendered_path not in self._genai_attachment_paths:
-                        self._genai_attachment_paths.append(rendered_path)
-            elif path_str not in self._genai_attachment_paths:
-                self._genai_attachment_paths.append(path_str)
+        self._genai_attachments.add_paths(
+            paths,
+            lambda message: messagebox.showerror("GenAI", message, parent=self),
+            lambda message: messagebox.showwarning("GenAI", message, parent=self),
+        )
         self._refresh_genai_attachment_list()
-
-    def _ensure_genai_pdf_temp_dir(self) -> str:
-        """Return the temporary directory used for rendered PDF attachment pages."""
-        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
-        if temp_dir and os.path.isdir(temp_dir):
-            return temp_dir
-        temp_dir = tempfile.mkdtemp(prefix="rhetor_syntagm_pdf_")
-        self._genai_pdf_temp_dir = temp_dir
-        return temp_dir
-
-    def _cleanup_genai_pdf_temp_dir(self) -> None:
-        """Remove temporary rendered PDF attachment pages."""
-        temp_dir = getattr(self, "_genai_pdf_temp_dir", None)
-        if temp_dir:
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            self._genai_pdf_temp_dir = None
-
-    def _render_genai_pdf_attachment(self, pdf_path: str) -> list[str]:
-        """Render a short PDF attachment to image paths accepted by SyntAGM."""
-        try:
-            import fitz  # type: ignore[import-not-found]
-        except Exception:
-            messagebox.showerror(
-                "GenAI",
-                "PDF attachments require PyMuPDF. Install it with: pip install PyMuPDF",
-                parent=self,
-            )
-            return []
-
-        try:
-            document = fitz.open(pdf_path)
-        except Exception as exc:
-            messagebox.showerror("GenAI", f"Could not open PDF attachment:\n{exc}", parent=self)
-            return []
-
-        rendered_paths: list[str] = []
-        try:
-            raw_page_count = getattr(document, "page_count", None)
-            page_count = int(raw_page_count if raw_page_count is not None else len(document))
-            if page_count > GENAI_MAX_PDF_PAGES:
-                messagebox.showwarning(
-                    "GenAI",
-                    f"SyntAGM accepts PDFs up to {GENAI_MAX_PDF_PAGES} pages. "
-                    "For longer documents, attach screenshots of the relevant formulation.",
-                    parent=self,
-                )
-                return []
-
-            stem = Path(pdf_path).stem or "attachment"
-            temp_dir = tempfile.mkdtemp(prefix=f"{stem}_", dir=self._ensure_genai_pdf_temp_dir())
-            scale = GENAI_PDF_RENDER_DPI / 72.0
-            matrix = fitz.Matrix(scale, scale)
-            for page_index in range(page_count):
-                page = document.load_page(page_index)
-                pixmap = page.get_pixmap(matrix=matrix, alpha=False)
-                image_path = os.path.join(temp_dir, f"page_{page_index + 1}.png")
-                pixmap.save(image_path)
-                self._genai_attachment_display_labels[image_path] = f"{pdf_path} page {page_index + 1}"
-                rendered_paths.append(image_path)
-        except Exception as exc:
-            messagebox.showerror("GenAI", f"Could not render PDF attachment:\n{exc}", parent=self)
-            return []
-        finally:
-            document.close()
-
-        return rendered_paths
 
     def _genai_remove_selected_image(self) -> None:
         """Remove the selected attachment from the composer."""
@@ -2734,16 +3564,12 @@ class OPLIDE(TkinterDnD.Tk):
         if not sel:
             return
         idx = int(sel[0])
-        if 0 <= idx < len(self._genai_attachment_paths):
-            removed_path = self._genai_attachment_paths.pop(idx)
-            self._genai_attachment_display_labels.pop(removed_path, None)
+        self._genai_attachments.remove_at(idx)
         self._refresh_genai_attachment_list()
 
     def _genai_clear_images(self) -> None:
         """Clear all attached images from the composer."""
-        self._genai_attachment_paths.clear()
-        self._genai_attachment_display_labels.clear()
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.clear()
         self._refresh_genai_attachment_list()
 
     def _on_genai_attachment_right_click(self, event: Optional[tk.Event]) -> None:
@@ -2764,7 +3590,7 @@ class OPLIDE(TkinterDnD.Tk):
                         self.genai_attachment_listbox.activate(idx)
                         selected_index = idx
 
-            has_any = bool(self._genai_attachment_paths)
+            has_any = bool(self._genai_attachments.paths)
             self.genai_attachment_menu.entryconfigure(
                 "Remove selected", state=("normal" if selected_index is not None else "disabled")
             )
@@ -2782,10 +3608,9 @@ class OPLIDE(TkinterDnD.Tk):
             return None
         text_val = self.genai_prompt_text.get("1.0", tk.END).rstrip()
         prompt_input: Optional[_PromptInput]
-        if self._genai_attachment_paths:
-            if not text_val.strip() and not self._genai_attachment_paths:
-                return None
-            prompt_input = {"text": text_val, "images": [{"path": p} for p in self._genai_attachment_paths]}
+        attachment_paths = self._genai_attachments.snapshot()
+        if attachment_paths:
+            prompt_input = {"text": text_val, "images": [{"path": path} for path in attachment_paths]}
         else:
             if not text_val.strip():
                 return None
@@ -2807,17 +3632,17 @@ class OPLIDE(TkinterDnD.Tk):
                 sel = self.request_listbox.curselection()
                 if sel:
                     index = int(sel[0])
-                    if 0 <= index < len(self._output_session_ids):
-                        session_id = self._output_session_ids[index]
+                    if 0 <= index < len(self._session_state.ids):
+                        session_id = self._session_state.ids[index]
             except Exception:
                 session_id = None
         if not session_id:
-            session_id = getattr(self, "_viewing_output_session_id", None)
+            session_id = self._session_state.viewing_id
         if not session_id:
-            session_id = getattr(self, "_current_output_session_id", None)
+            session_id = self._session_state.current_id
         if not session_id:
             return ""
-        return str(self._output_sessions.get(session_id, "")).rstrip()
+        return str(self._session_state.sessions.get(session_id, "")).rstrip()
 
     def _append_output_to_prompt_input(self, prompt_input: _PromptInput, session_output: str) -> _PromptInput:
         """Append selected output history to the prompt text while preserving attachments."""
@@ -2851,7 +3676,7 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        if self._genai_attachment_paths and not self._selected_genai_method_supports_images():
+        if self._genai_attachments.paths and not self._selected_genai_method_supports_images():
             method_label = self._label_for_method(self.genai_method_var.get())
             messagebox.showwarning(
                 "GenAI",
@@ -2869,11 +3694,11 @@ class OPLIDE(TkinterDnD.Tk):
         else:
             self._run_genai_generate(prompt_input)
 
-    def _set_pending_genai_revisions(self, pending: dict[str, Any]) -> None:
+    def _set_pending_genai_revisions(self, pending: _PendingGenAIRevision) -> None:
         """Expose pending revised model/data through inline panel actions."""
-        self._genai_pending_revisions = pending
-        revised_model = bool(pending.get("revised_model"))
-        revised_data = bool(pending.get("revised_data"))
+        self._genai_revisions.set(pending)
+        revised_model = bool(pending.revised_model)
+        revised_data = bool(pending.revised_data)
         labels = []
         if revised_model:
             labels.append("model")
@@ -2886,7 +3711,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _clear_pending_genai_revisions(self) -> None:
         """Hide inline revision actions when no revisions are pending."""
-        self._genai_pending_revisions = None
+        self._genai_revisions.clear()
         self.genai_pending_var.set("")
         if hasattr(self, "genai_pending_frame"):
             self.genai_pending_frame.grid_remove()
@@ -2986,8 +3811,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _show_pending_genai_diff_preview(self) -> None:
         """Show a VS Code-like diff preview for pending Ask revisions."""
-        pending = self._genai_pending_revisions
-        if not pending:
+        pending = self._genai_revisions.pending
+        if pending is None:
             return
         try:
             self._ensure_pending_genai_diff_preview_window()
@@ -3038,16 +3863,12 @@ class OPLIDE(TkinterDnD.Tk):
         self._genai_diff_preview_notebook = notebook
         self._genai_diff_preview_texts = {}
 
-    def _populate_pending_genai_diff_tabs(self, notebook: ttk.Notebook, pending: dict[str, Any]) -> None:
+    def _populate_pending_genai_diff_tabs(self, notebook: ttk.Notebook, pending: _PendingGenAIRevision) -> None:
         tabs: list[tuple[str, str, str]] = []
-        revised_model = str(pending.get("revised_model") or "")
-        revised_data = str(pending.get("revised_data") or "")
-        current_model = str(pending.get("current_model") or "")
-        current_data = str(pending.get("current_data") or "")
-        if revised_model:
-            tabs.append(("Model", current_model, revised_model))
-        if revised_data:
-            tabs.append(("Data", current_data, revised_data))
+        if pending.revised_model:
+            tabs.append(("Model", pending.current_model, pending.revised_model))
+        if pending.revised_data:
+            tabs.append(("Data", pending.current_data, pending.revised_data))
         self._genai_diff_preview_texts = {}
         for label, original, revised in tabs:
             frame = ttk.Frame(notebook, padding=(0, 0, 0, 0))
@@ -3058,32 +3879,21 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _apply_pending_genai_revisions(self) -> None:
         """Apply pending Ask revisions from the docked GenAI panel."""
-        pending = self._genai_pending_revisions
-        if not pending:
+        pending = self._genai_revisions.pending
+        if pending is None or not self._resolve_editor_replacement(
+            "Apply revisions", model=bool(pending.revised_model), data=bool(pending.revised_data)
+        ):
+            return
+        try:
+            applied = self._genai_revisions.apply(lambda pending: OPLIDE._apply_pending_revision(self, pending))
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to apply GenAI revisions")
+            self.status_var.set("GenAI: failed to apply revisions")
+            messagebox.showerror("GenAI Error", f"Failed to apply revisions:\n{_concise_genai_error(exc)}", parent=self)
+            return
+        if not applied:
             return
 
-        revised_model = str(pending.get("revised_model") or "")
-        revised_data = str(pending.get("revised_data") or "")
-        model_path = str(pending.get("model_path") or self.model_file or "")
-        data_path = str(pending.get("data_path") or self.data_file or "")
-        safe_ts = str(pending.get("safe_ts") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-        had_data_file = bool(pending.get("had_data_file"))
-        session_id = pending.get("session_id")
-
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        model_tgt, data_tgt = OPLIDE._write_pending_revision_files(
-            self,
-            tmp_dir,
-            revised_model,
-            revised_data,
-            model_path,
-            data_path,
-            safe_ts,
-            had_data_file,
-        )
-        OPLIDE._apply_pending_revision_editors(self, revised_model, revised_data, model_tgt, data_tgt, session_id)
         self.status_var.set("GenAI: revisions applied")
         self._clear_pending_genai_revisions()
         try:
@@ -3091,54 +3901,18 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
 
-    @staticmethod
-    def _write_pending_revision_files(
-        self: Any,
-        tmp_dir: str,
-        revised_model: str,
-        revised_data: str,
-        model_path: str,
-        data_path: str,
-        safe_ts: str,
-        had_data_file: bool,
-    ) -> tuple[str, Optional[str]]:
-        def strip_ts_suffix(name: str) -> str:
-            match = re.match(r"^(.*?)(?:_\d{4}-\d{2}-\d{2}_\d{2}(?:-|_)\d{2}(?:-|_)\d{2})(?:_\d+)?$", name)
-            return match.group(1) if match and match.group(1) else name
-
-        model_base_name, model_ext = os.path.splitext(os.path.basename(model_path))
-        model_ext = model_ext or ".mod"
-        model_base_name = strip_ts_suffix(model_base_name)
-        if model_base_name == "temp_model":
-            model_base_name = "tmp"
-        model_base = os.path.join(tmp_dir, f"{model_base_name}_{safe_ts}")
-        model_tgt = OPLIDE._unique_revision_path(model_base, model_ext)
-        model_content = revised_model if revised_model else self.model_text.get("1.0", tk.END)
-        with open(model_tgt, "w", encoding="utf-8") as file_obj:
-            file_obj.write(model_content)
-
-        data_tgt = None
-        if revised_data:
-            if had_data_file:
-                data_base_name, data_ext = os.path.splitext(os.path.basename(data_path))
-                data_ext = data_ext or ".dat"
-            else:
-                data_base_name, data_ext = model_base_name, ".dat"
-            data_base_name = strip_ts_suffix(data_base_name)
-            data_base = os.path.join(tmp_dir, f"{data_base_name}_{safe_ts}")
-            data_tgt = OPLIDE._unique_revision_path(data_base, data_ext)
-            with open(data_tgt, "w", encoding="utf-8") as file_obj:
-                file_obj.write(revised_data)
-        return model_tgt, data_tgt
-
-    @staticmethod
-    def _unique_revision_path(base_path: str, extension: str) -> str:
-        target = base_path + extension
-        suffix = 1
-        while os.path.exists(target):
-            target = f"{base_path}_{suffix}{extension}"
-            suffix += 1
-        return target
+    def _apply_pending_revision(self, pending: _PendingGenAIRevision) -> None:
+        model_path = pending.model_path or self._model_editor_state.path or ""
+        data_path = pending.data_path or self._data_editor_state.path or ""
+        safe_ts = pending.safe_ts or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        model_tgt, data_tgt = _write_genai_revision_files(
+            pending, tmp_dir, model_path, data_path, safe_ts, self.model_text.get("1.0", tk.END)
+        )
+        OPLIDE._apply_pending_revision_editors(
+            self, pending.revised_model, pending.revised_data, model_tgt, data_tgt, pending.session_id
+        )
 
     def _apply_pending_revision_editors(
         self,
@@ -3155,23 +3929,23 @@ class OPLIDE(TkinterDnD.Tk):
             self.data_text.delete("1.0", tk.END)
             self.data_text.insert(tk.END, revised_data)
 
-        self.model_file = model_tgt
+        self._model_editor_state.path = model_tgt
         if data_tgt:
-            self.data_file = data_tgt
+            self._data_editor_state.path = data_tgt
         self._record_output_session_artifacts(
             session_id,
             model_text=self.model_text.get("1.0", tk.END).rstrip("\n"),
             data_text=self.data_text.get("1.0", tk.END).rstrip("\n"),
         )
 
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
+        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}")
         if data_tgt:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
         self.highlight(self.model_text, is_data=False)
         self.highlight(self.data_text, is_data=True)
-        mark_baselines_saved = getattr(self, "_mark_editor_baselines_saved", None)
-        if callable(mark_baselines_saved):
-            mark_baselines_saved()
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
+        if data_tgt:
+            self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         self._append_output("\nRevisions applied to editors.\n", session_id)
 
     def _get_active_editor(self) -> scrolledtext.ScrolledText:
@@ -3186,250 +3960,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Open a modal Find/Replace dialog with optional regex support."""
         if not self._ensure_no_active_operation("Find and Replace"):
             return
-        dlg = tk.Toplevel(self)
-        dlg.title("Find and Replace")
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        dlg.grab_set()
-
-        # Allow undo/redo while the dialog is active by binding the
-        # common shortcuts to the IDE handlers on the dialog. These
-        # bindings run when focus is inside entry widgets.
-        def _dlg_undo(ev: Optional[tk.Event] = None) -> str:
-            self._undo()
-            return "break"
-
-        def _dlg_redo(ev: Optional[tk.Event] = None) -> str:
-            self._redo()
-            return "break"
-
-        dlg.bind("<Control-z>", _dlg_undo)
-        dlg.bind("<Control-Z>", _dlg_undo)
-        dlg.bind("<Control-Shift-Z>", _dlg_redo)
-        dlg.bind("<Control-y>", _dlg_redo)
-        # macOS Command variants
-        if sys.platform == "darwin":
-            dlg.bind("<Command-z>", _dlg_undo)
-            dlg.bind("<Command-Z>", _dlg_undo)
-            dlg.bind("<Command-Shift-Z>", _dlg_redo)
-            dlg.bind("<Command-y>", _dlg_redo)
-
-        fg_var = tk.StringVar()
-        rp_var = tk.StringVar()
-        regex_var = tk.BooleanVar(value=False)
-        case_var = tk.BooleanVar(value=False)
-
-        ttk.Label(dlg, text="Find:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 2))
-        find_entry = ttk.Entry(dlg, textvariable=fg_var, width=40)
-        find_entry.grid(row=0, column=1, columnspan=3, padx=6, pady=(8, 2))
-
-        ttk.Label(dlg, text="Replace:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
-        replace_entry = ttk.Entry(dlg, textvariable=rp_var, width=40)
-        replace_entry.grid(row=1, column=1, columnspan=3, padx=6, pady=2)
-
-        regex_cb = ttk.Checkbutton(dlg, text="Regex", variable=regex_var)
-        regex_cb.grid(row=2, column=1, sticky="w", padx=6)
-        case_cb = ttk.Checkbutton(dlg, text="Case sensitive", variable=case_var)
-        case_cb.grid(row=2, column=2, sticky="w", padx=6)
-
-        # Buttons
-        def _highlight_match(start_idx: str, end_idx: str) -> None:
-            w = self._get_active_editor()
-            # Clear previous highlights and selection, then mark this match
-            w.tag_remove("find_match", "1.0", tk.END)
-            w.tag_remove("sel", "1.0", tk.END)
-            w.tag_add("find_match", start_idx, end_idx)
-            w.tag_add("sel", start_idx, end_idx)
-            w.tag_configure("find_match", background="#ffe58f")
-            w.mark_set("insert", end_idx)
-            w.see(start_idx)
-
-        def _find_next(ev: Optional[tk.Event] = None) -> str:
-            pattern = find_entry.get()
-            if not pattern:
-                return "break"
-            w = self._get_active_editor()
-            text = w.get("1.0", "end-1c")
-            # Choose a sensible start index: after current highlighted match,
-            # or the widget's insert if it has focus, otherwise start of buffer.
-            if w.tag_ranges("find_match"):
-                start = w.index(w.tag_ranges("find_match")[1])
-            elif w.focus_get() is w:
-                start = w.index("insert")
-            else:
-                start = "1.0"
-            # Convert start to integer offset (chars from 1.0)
-            if regex_var.get():
-                flags = 0 if case_var.get() else re.IGNORECASE
-                try:
-                    for m in re.finditer(pattern, text, flags):
-                        s_off = m.start()
-                        cnt = w.count("1.0", start, "chars")
-                        if s_off >= (cnt[0] if cnt else 0):
-                            # compute indices
-                            s = w.index(f"1.0 + {m.start()} chars")
-                            e = w.index(f"1.0 + {m.end()} chars")
-                            _highlight_match(s, e)
-                            return "break"
-                except re.error:
-                    messagebox.showerror("Regex error", "Invalid regular expression")
-                    return "break"
-            else:
-                # use Tk text search
-                if case_var.get():
-                    res = w.search(pattern, start, tk.END)
-                    if not res:
-                        res = w.search(pattern, "1.0", start)
-                else:
-                    res = w.search(pattern, start, tk.END, nocase=True)
-                    if not res:
-                        res = w.search(pattern, "1.0", start, nocase=True)
-                if res:
-                    end = f"{res}+{len(pattern)}c"
-                    _highlight_match(res, end)
-            return "break"
-
-        def _find_prev(ev: Optional[tk.Event] = None) -> str:
-            pattern = find_entry.get()
-            if not pattern:
-                return "break"
-            w = self._get_active_editor()
-            text = w.get("1.0", "end-1c")
-            ranges = w.tag_ranges("find_match")
-            if ranges:
-                start_idx = str(ranges[0])
-            else:
-                if w.tag_ranges("sel"):
-                    start_idx = str(w.index("sel.first"))
-                elif w.focus_get() is w:
-                    start_idx = str(w.index("insert"))
-                else:
-                    start_idx = "1.0"
-            sc = w.count("1.0", start_idx, "chars")
-            boundary_off = sc[0] if sc else 0
-            try:
-                prev_match = OPLIDE._find_previous_match(text, pattern, boundary_off, regex_var.get(), case_var.get())
-            except re.error:
-                messagebox.showerror("Regex error", "Invalid regular expression")
-                return "break"
-
-            if prev_match:
-                s_idx = w.index(f"1.0 + {prev_match[0]} chars")
-                e_idx = w.index(f"1.0 + {prev_match[1]} chars")
-                _highlight_match(s_idx, e_idx)
-            return "break"
-
-        def _replace_one() -> None:
-            w = self._get_active_editor()
-            try:
-                sel_start = w.index("sel.first")
-                sel_end = w.index("sel.last")
-            except Exception:
-                # if nothing selected, find next and then replace
-                _find_next()
-                try:
-                    sel_start = w.index("sel.first")
-                    sel_end = w.index("sel.last")
-                except Exception:
-                    # Fallback: use the currently highlighted match if present
-                    ranges = w.tag_ranges("find_match")
-                    if ranges:
-                        sel_start = str(ranges[0])
-                        sel_end = str(ranges[1])
-                    else:
-                        return
-            replacement = replace_entry.get()
-            if regex_var.get():
-                # compute absolute offsets
-                # Replace only the selected region using Text.replace so undo groups correctly
-                segment = w.get(sel_start, sel_end)
-                try:
-                    new_segment = re.sub(find_entry.get(), replacement, segment, count=1)
-                except re.error:
-                    messagebox.showerror("Regex error", "Invalid regular expression")
-                    return
-                w.replace(sel_start, sel_end, new_segment)
-            else:
-                # Use Text.replace to make this a single undoable action
-                w.replace(sel_start, sel_end, replacement)
-            w.tag_remove("find_match", "1.0", tk.END)
-            w.tag_remove("sel", "1.0", tk.END)
-            # Notify change so UI state (dirty flag) updates
-            try:
-                self._on_text_change(w, is_data=(w is self.data_text))
-            except Exception:
-                pass
-            w.tag_remove("sel", "1.0", tk.END)
-
-        def _replace_all() -> None:
-            w = self._get_active_editor()
-            full = w.get("1.0", "end-1c")
-            if regex_var.get():
-                try:
-                    flags = 0 if case_var.get() else re.IGNORECASE
-                    new = re.sub(find_entry.get(), replace_entry.get(), full, flags=flags)
-                except re.error:
-                    messagebox.showerror("Regex error", "Invalid regular expression")
-                    return
-            else:
-                if case_var.get():
-                    new = full.replace(find_entry.get(), replace_entry.get())
-                else:
-                    # case-insensitive replace: do manual loop
-                    pat = find_entry.get()
-                    if not pat:
-                        return
-                    new = re.sub(re.escape(pat), lambda m: replace_entry.get(), full, flags=re.IGNORECASE)
-            # Replace entire buffer in one operation so undo/redo works as expected
-            w.replace("1.0", "end-1c", new)
-            w.tag_remove("find_match", "1.0", tk.END)
-            w.tag_remove("sel", "1.0", tk.END)
-            try:
-                self._on_text_change(w, is_data=(w is self.data_text))
-            except Exception:
-                pass
-            w.tag_remove("sel", "1.0", tk.END)
-
-        btn_frame = ttk.Frame(dlg)
-        btn_frame.grid(row=3, column=0, columnspan=4, pady=8)
-        ttk.Button(btn_frame, text="Prev", command=_find_prev).grid(row=0, column=0, padx=4)
-        ttk.Button(btn_frame, text="Next", command=_find_next).grid(row=0, column=1, padx=4)
-        ttk.Button(btn_frame, text="Replace", command=_replace_one).grid(row=0, column=2, padx=4)
-        ttk.Button(btn_frame, text="Replace All", command=_replace_all).grid(row=0, column=3, padx=4)
-        ttk.Button(btn_frame, text="Close", command=dlg.destroy).grid(row=0, column=4, padx=4)
-
-        # Keyboard bindings inside dialog
-        dlg.bind("<Return>", _find_next)
-        dlg.bind("<Shift-Return>", _find_prev)
-        find_entry.focus_set()
-
-    @staticmethod
-    def _find_previous_match(
-        text: str, pattern: str, boundary_off: int, use_regex: bool, case_sensitive: bool
-    ) -> Optional[tuple[int, int]]:
-        matches: list[tuple[int, int]] = []
-        if use_regex:
-            flags = 0 if case_sensitive else re.IGNORECASE
-            matches = [(match.start(), match.end()) for match in re.finditer(pattern, text, flags)]
-        elif case_sensitive:
-            start_pos = 0
-            while True:
-                index = text.find(pattern, start_pos)
-                if index == -1:
-                    break
-                matches.append((index, index + len(pattern)))
-                start_pos = index + max(1, len(pattern))
-        else:
-            escaped_pattern = re.escape(pattern)
-            matches = [(match.start(), match.end()) for match in re.finditer(escaped_pattern, text, re.IGNORECASE)]
-
-        previous_match: Optional[tuple[int, int]] = None
-        for start, end in matches:
-            if start < boundary_off:
-                previous_match = (start, end)
-            else:
-                break
-        return previous_match or (matches[-1] if matches else None)
+        _FindReplaceDialog(self).open()
 
     # --- Event Handlers and Core Logic ---
     def _on_request_right_click(self, event: Optional[tk.Event]) -> None:
@@ -3457,10 +3988,10 @@ class OPLIDE(TkinterDnD.Tk):
         """Delete the currently selected output session."""
         try:
             index = self._selected_request_index()
-            if index is None or index < 0 or index >= len(self._output_session_ids):
+            if index is None or index < 0 or index >= len(self._session_state.ids):
                 return
 
-            sid = self._output_session_ids[index]
+            sid = self._session_state.ids[index]
             active = getattr(self, "_active_operation", None)
             if active is not None and active.session_id == sid:
                 self._show_active_session_delete_warning()
@@ -3468,7 +3999,7 @@ class OPLIDE(TkinterDnD.Tk):
             if not messagebox.askyesno("Delete Session", "Delete the selected session?"):
                 return
 
-            self._remove_output_session(sid, index)
+            self._session_state.remove(sid, index)
             self._select_session_after_delete(index)
             self.status_var.set("Session deleted.")
         except Exception:
@@ -3490,19 +4021,6 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
 
-    def _remove_output_session(self, session_id: str, index: int) -> None:
-        self._output_session_ids.pop(index)
-        self._output_sessions.pop(session_id, None)
-        self._output_session_display.pop(session_id, None)
-        self._output_session_label.pop(session_id, None)
-        self._output_session_timestamp.pop(session_id, None)
-        self._output_session_artifacts.pop(session_id, None)
-        OPLIDE._prune_session_snapshots(self)
-        if self._current_output_session_id == session_id:
-            self._current_output_session_id = None
-        if self._viewing_output_session_id == session_id:
-            self._viewing_output_session_id = None
-
     def _select_session_after_delete(self, deleted_index: int) -> None:
         try:
             self.request_listbox.delete(deleted_index)
@@ -3510,15 +4028,15 @@ class OPLIDE(TkinterDnD.Tk):
             pass
         count = self.request_listbox.size()
         if count <= 0:
-            self._viewing_output_session_id = None
+            self._session_state.select(None)
             self._clear_output_widget_after_delete()
             return
         new_index = min(deleted_index, count - 1)
         self.request_listbox.selection_clear(0, tk.END)
         self.request_listbox.selection_set(new_index)
         self.request_listbox.activate(new_index)
-        new_sid = self._output_session_ids[new_index]
-        self._viewing_output_session_id = new_sid
+        new_sid = self._session_state.ids[new_index]
+        self._session_state.select(new_sid)
         self._show_output_session(new_sid)
 
     def _clear_output_widget_after_delete(self) -> None:
@@ -3533,10 +4051,10 @@ class OPLIDE(TkinterDnD.Tk):
         if not session_id:
             return
 
-        timestamp = self._output_session_timestamp.get(session_id, session_id)
-        current_label = self._output_session_label.get(session_id, "")
+        timestamp = self._session_state.timestamps.get(session_id, session_id)
+        current_label = self._session_state.labels.get(session_id, "")
         if not current_label:
-            display = self._output_session_display.get(session_id, "")
+            display = self._session_state.display.get(session_id, "")
             prefix = f"{timestamp} • "
             current_label = display[len(prefix) :] if display.startswith(prefix) else (display or "Session")
 
@@ -3556,12 +4074,10 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showerror("Change label", "The session label cannot exceed 50 characters.")
             return
 
-        display = self._make_output_session_display(timestamp, new_label, exclude_session_id=session_id)
-        self._output_session_label[session_id] = new_label
-        self._output_session_display[session_id] = display
+        display = self._session_state.rename(session_id, new_label)
 
         try:
-            index = self._output_session_ids.index(session_id)
+            index = self._session_state.ids.index(session_id)
         except ValueError:
             return
 
@@ -3623,6 +4139,24 @@ class OPLIDE(TkinterDnD.Tk):
         dlg.wait_window()
         return result["value"]
 
+    def _on_editor_modified(self, text_widget: tk.Text) -> None:
+        if text_widget.edit_modified():
+            text_widget.edit_modified(False)
+            self._update_editor_tab(text_widget)
+
+    def _update_editor_tab(self, text_widget: tk.Text) -> None:
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        frame = self.model_frame if text_widget is self.model_text else self.data_frame
+        current_label = self.editor_notebook.tab(frame, "text")
+        label = current_label
+        if label == editor.marked_tab_text:
+            label = label[:-3]
+        dirty = self._get_editor_text(text_widget) != editor.saved_text
+        display_label = f"{label} • " if dirty else label
+        editor.marked_tab_text = display_label if dirty else None
+        if display_label != current_label:
+            self.editor_notebook.tab(frame, text=display_label)
+
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
         # Keep caret responsive immediately
@@ -3633,13 +4167,23 @@ class OPLIDE(TkinterDnD.Tk):
         self._schedule_highlight(text_widget, is_data)
 
     def _cancel_scheduled_highlight(self, text_widget: tk.Text, kind: str) -> None:
-        key = (id(text_widget), kind)
-        after_id = self._highlight_after_ids.pop(key, None)
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        after_id = editor.highlight_after_ids.pop(kind, None)
         if after_id:
             try:
                 self.after_cancel(after_id)
             except Exception:
                 pass
+
+    def _cancel_editor_highlights(self) -> None:
+        for editor in (self._model_editor_state, self._data_editor_state):
+            editor.highlight_version += 1
+            for after_id in editor.highlight_after_ids.values():
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+            editor.highlight_after_ids.clear()
 
     def _text_too_large_for_highlight(self, text_widget: tk.Text) -> bool:
         try:
@@ -3666,8 +4210,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _disable_highlight_for_large_text(self, text_widget: tk.Text) -> None:
         self._clear_highlight_tags(text_widget)
-        self._last_syntax_error_by_widget[id(text_widget)] = None
-        self._last_syntax_error = None
+        OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = None
         try:
             self.status_syntax_var.set("Syntax validation disabled for large text")
         except Exception:
@@ -3681,6 +4224,9 @@ class OPLIDE(TkinterDnD.Tk):
         # Cancel any pending runs for this widget
         self._cancel_scheduled_highlight(text_widget, "fast")
         self._cancel_scheduled_highlight(text_widget, "validate")
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        editor.highlight_version += 1
+        version = editor.highlight_version
 
         if self._text_too_large_for_highlight(text_widget):
             self._disable_highlight_for_large_text(text_widget)
@@ -3688,32 +4234,40 @@ class OPLIDE(TkinterDnD.Tk):
 
         if is_data:
             # Data: fast regex highlight shortly after typing, then expensive validate after idle
-            self._highlight_after_ids[(id(text_widget), "fast")] = self.after(
+            editor.highlight_after_ids["fast"] = self.after(
                 self._highlight_debounce_ms,
                 self._run_scheduled_highlight,
                 text_widget,
                 True,
                 False,  # validate=False => regex-only path for .dat
+                version,
             )
-            self._highlight_after_ids[(id(text_widget), "validate")] = self.after(
+            editor.highlight_after_ids["validate"] = self.after(
                 self._highlight_validate_idle_ms,
                 self._run_scheduled_highlight,
                 text_widget,
                 True,
                 True,  # validate=True => lexer+parser
+                version,
             )
         else:
             # Model: skip any fast pass; only lex/parse after user pauses
-            self._highlight_after_ids[(id(text_widget), "validate")] = self.after(
+            editor.highlight_after_ids["validate"] = self.after(
                 self._highlight_validate_idle_ms,
                 self._run_scheduled_highlight,
                 text_widget,
                 False,
                 True,
+                version,
             )
 
-    def _run_scheduled_highlight(self, text_widget: tk.Text, is_data: bool, validate: bool) -> None:
+    def _run_scheduled_highlight(
+        self, text_widget: tk.Text, is_data: bool, validate: bool, version: Optional[int] = None
+    ) -> None:
         """Run highlight if widget still exists."""
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        if not editor.consume_highlight(validate, version):
+            return
         if getattr(self, "_shutting_down", False):
             return
         try:
@@ -3779,47 +4333,12 @@ class OPLIDE(TkinterDnD.Tk):
                 )
         return sorted(exemplars.values(), key=lambda exemplar: str(exemplar["name"]).casefold())
 
-    @staticmethod
-    def _rank_exemplars(query: str, exemplars: list[dict[str, Any]], models_dirs: list[Path]) -> list[dict[str, Any]]:
-        """Sort complete exemplars with the same semantic ranking used by RAG."""
-        if not query.strip():
-            return exemplars
-        hits = rank_problem_descriptions(query=query, models_dir=models_dirs, top_k=0)
-        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
-        return [
-            exemplar_by_description[Path(hit["path"]).resolve()]
-            for hit in hits
-            if Path(hit["path"]).resolve() in exemplar_by_description
-        ]
-
-    @staticmethod
-    def _classify_exemplar_search_result(
-        message: tuple[str, Optional[int], Any],
-        current_generation: int,
-        exemplars: list[dict[str, Any]],
-    ) -> tuple[str, Any]:
-        kind, generation, payload = message
-        if kind == "ready":
-            return "ready", None
-        if kind == "startup_error":
-            return "startup_error", payload
-        if generation != current_generation:
-            return "ignore", None
-        if kind != "success" or not isinstance(payload, list):
-            return "error", payload
-
-        exemplar_by_description = {Path(exemplar["description_path"]).resolve(): exemplar for exemplar in exemplars}
-        ranked = [
-            exemplar_by_description[Path(hit["path"]).resolve()]
-            for hit in payload
-            if isinstance(hit, dict) and "path" in hit and Path(hit["path"]).resolve() in exemplar_by_description
-        ]
-        return "success", ranked
-
     def retrieve_exemplar(self) -> None:
         """Show searchable packaged and local exemplars and load the selected pair."""
         if not self._ensure_no_active_operation("Retrieve Exemplar"):
             return
+        if self._exemplar_search_cleanup is not None:
+            self._exemplar_search_cleanup(None)
 
         models_dirs = GenAIStrategyBase.default_models_dirs()
         exemplars = self._available_exemplars(models_dirs)
@@ -3869,17 +4388,10 @@ class OPLIDE(TkinterDnD.Tk):
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
 
-        ranking_worker = ExemplarRankingWorker(models_dirs)
-        result: dict[str, Any] = {
-            "exemplars": exemplars,
-            "generation": 0,
-            "search_after_id": None,
-            "poll_after_id": None,
-            "worker_ready": False,
-        }
+        search = _ExemplarSearchState(ExemplarRankingWorker(models_dirs), exemplars)
 
         def show_entries(entries: list[dict[str, Any]]) -> None:
-            result["exemplars"] = entries
+            search.entries = entries
             exemplar_list.delete(0, tk.END)
             for exemplar in entries:
                 exemplar_list.insert(tk.END, str(exemplar["name"]))
@@ -3893,7 +4405,7 @@ class OPLIDE(TkinterDnD.Tk):
             selection = exemplar_list.curselection()
             description = ""
             if selection:
-                entries = result["exemplars"]
+                entries = search.entries
                 if selection[0] < len(entries):
                     description_path = Path(entries[selection[0]]["description_path"])
                     try:
@@ -3908,87 +4420,73 @@ class OPLIDE(TkinterDnD.Tk):
             description_text.insert("1.0", description)
             description_text.configure(state="disabled")
 
-        def cleanup_search() -> None:
-            poll_after_id = result["poll_after_id"]
-            if poll_after_id is not None:
-                try:
-                    dialog.after_cancel(poll_after_id)
-                except tk.TclError:
-                    pass
-                result["poll_after_id"] = None
-            ranking_worker.close(wait=False)
-
         def poll_search() -> None:
-            result["poll_after_id"] = None
-            if not dialog.winfo_exists():
+            if search.closed:
                 return
-            while True:
-                try:
-                    message = ranking_worker.get_nowait()
-                except queue.Empty:
-                    break
-                action, payload = self._classify_exemplar_search_result(
-                    message,
-                    result["generation"],
-                    exemplars,
-                )
-                if action == "ready":
-                    result["worker_ready"] = True
-                elif action == "startup_error":
+            if not dialog.winfo_exists():
+                search.close(dialog)
+                if self._exemplar_search_cleanup is close_dialog:
+                    self._exemplar_search_cleanup = None
+                return
+            for action, payload in search.drain():
+                if action == "startup_error":
                     empty_var.set("Semantic search is unavailable.")
                     logging.getLogger(__name__).debug("Exemplar search startup failed: %s", payload)
                 elif action == "success":
                     show_entries(payload)
                 elif action == "error":
-                    logging.getLogger(__name__).debug("Exemplar search failed: %s", payload)
+                    logging.getLogger(__name__).warning("Exemplar search failed: %s", payload)
                     show_entries([])
-            if ranking_worker.is_alive():
-                result["poll_after_id"] = dialog.after(50, poll_search)
-            elif not result["worker_ready"]:
+                    empty_var.set("Semantic search failed.")
+            if search.worker.is_alive():
+                search.schedule_poll(dialog, poll_search)
+            elif not search.worker_ready:
                 empty_var.set("Semantic search is unavailable.")
 
         def run_search() -> None:
-            result["search_after_id"] = None
-            result["generation"] += 1
-            generation = result["generation"]
+            if search.closed:
+                return
             query = search_var.get()
-            if not query.strip():
+            try:
+                searching = search.start_search(query)
+            except RuntimeError as exc:
+                empty_var.set(str(exc))
+                return
+            if not searching:
                 show_entries(exemplars)
                 return
             empty_var.set("Searching...")
-            ranking_worker.submit(generation, query)
 
         def schedule_search(_event: Any = None) -> None:
-            search_after_id = result["search_after_id"]
-            if search_after_id is not None:
-                dialog.after_cancel(search_after_id)
-            result["search_after_id"] = dialog.after(250, run_search)
+            search.schedule_search(dialog, run_search)
 
         def retrieve(_event: Any = None) -> None:
             selection = exemplar_list.curselection()
             if not selection:
                 return
-            exemplar = result["exemplars"][selection[0]]
-            model_path, data_path = self._copy_exemplar_to_tmp(
-                Path(exemplar["model_path"]),
-                Path(exemplar["data_path"]),
-                str(exemplar["name"]),
-            )
-            self._open_model_path(model_path)
-            self._open_data_path(data_path)
+            if search.closed or selection[0] >= len(search.entries):
+                return
+            if not self._resolve_editor_replacement("Retrieve Exemplar", model=True, data=True):
+                return
+            exemplar = search.entries[selection[0]]
+            try:
+                model_path, data_path = self._copy_exemplar_to_tmp(
+                    Path(exemplar["model_path"]), Path(exemplar["data_path"]), str(exemplar["name"])
+                )
+            except (OSError, UnicodeError) as exc:
+                logging.getLogger(__name__).exception("Failed to retrieve exemplar")
+                messagebox.showerror("Retrieve Exemplar", f"Failed to copy exemplar:\n{exc}", parent=dialog)
+                return
+            self._open_model_path(model_path, confirm_changes=False)
+            self._open_data_path(data_path, confirm_changes=False)
             self.status_var.set(f"Retrieved exemplar: {exemplar['name']}")
             close_dialog()
 
         def close_dialog(_event: Any = None) -> None:
-            search_after_id = result["search_after_id"]
-            if search_after_id is not None:
-                try:
-                    dialog.after_cancel(search_after_id)
-                except tk.TclError:
-                    pass
-                result["search_after_id"] = None
-            cleanup_search()
-            if getattr(self, "_exemplar_search_cleanup", None) is close_dialog:
+            if search.closed:
+                return
+            search.close(dialog)
+            if self._exemplar_search_cleanup is close_dialog:
                 self._exemplar_search_cleanup = None
             dialog.destroy()
 
@@ -4005,8 +4503,14 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.bind("<Escape>", close_dialog)
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
         show_entries(exemplars)
-        ranking_worker.start()
-        result["poll_after_id"] = dialog.after(50, poll_search)
+        try:
+            search.worker.start()
+        except Exception as exc:
+            close_dialog()
+            logging.getLogger(__name__).exception("Failed to start exemplar search")
+            messagebox.showerror("Retrieve Exemplar", f"Semantic search is unavailable:\n{exc}", parent=self)
+            return
+        search.schedule_poll(dialog, poll_search)
         search_entry.focus_set()
 
     @staticmethod
@@ -4029,8 +4533,19 @@ class OPLIDE(TkinterDnD.Tk):
         model_path, data_path = OPLIDE._unique_timestamped_model_data_paths(
             tmp_dir, exemplar_name or "exemplar", safe_timestamp
         )
-        shutil.copyfile(model_source, model_path)
-        shutil.copyfile(data_source, data_path)
+        created: list[Path] = []
+        try:
+            for source, target in ((model_source, model_path), (data_source, data_path)):
+                with source.open("rb") as source_file, target.open("xb") as target_file:
+                    created.append(target)
+                    shutil.copyfileobj(source_file, target_file)
+        except Exception:
+            for target in created:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    logging.getLogger(__name__).exception("Failed to clean up incomplete exemplar copy: %s", target)
+            raise
         return str(model_path), str(data_path)
 
     def open_file(self) -> None:
@@ -4062,14 +4577,16 @@ class OPLIDE(TkinterDnD.Tk):
         if fname:
             self._open_model_path(fname)
 
-    def _open_model_path(self, path: str) -> None:
+    def _open_model_path(self, path: str, *, confirm_changes: bool = True) -> bool:
         """Open a model path into the model editor."""
-        self._store_fold_state(self.model_file, self.model_gutter, touch=False)
+        if confirm_changes and not self._resolve_editor_replacement("Open Model", model=True, data=False):
+            return False
+        self._store_fold_state(self._model_editor_state.path, self.model_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as model_handle:
             self.model_text.delete(1.0, tk.END)
             self.model_text.insert(tk.END, model_handle.read())
-        self.model_file = path
-        self._model_saved_text = self._get_editor_text(self.model_text)
+        self._model_editor_state.path = path
+        self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
         self.highlight(self.model_text)
         self._restore_fold_state(path, self.model_gutter)
         self._update_caret_position(self.model_text)
@@ -4077,6 +4594,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_notebook.select(self.model_frame)
         self.on_tab_changed(None)
         self._save_session()
+        return True
 
     def open_data(self) -> None:
         """Open a data file into the data editor."""
@@ -4086,14 +4604,16 @@ class OPLIDE(TkinterDnD.Tk):
         if fname:
             self._open_data_path(fname)
 
-    def _open_data_path(self, path: str) -> None:
+    def _open_data_path(self, path: str, *, confirm_changes: bool = True) -> bool:
         """Open a data path into the data editor."""
-        self._store_fold_state(self.data_file, self.data_gutter, touch=False)
+        if confirm_changes and not self._resolve_editor_replacement("Open Data", model=False, data=True):
+            return False
+        self._store_fold_state(self._data_editor_state.path, self.data_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
             self.data_text.insert(tk.END, data_handle.read())
-        self.data_file = path
-        self._data_saved_text = self._get_editor_text(self.data_text)
+        self._data_editor_state.path = path
+        self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         self.highlight(self.data_text, is_data=True)
         self._restore_fold_state(path, self.data_gutter)
         self._update_caret_position(self.data_text)
@@ -4101,6 +4621,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_notebook.select(self.data_frame)
         self.on_tab_changed(None)
         self._save_session()
+        return True
 
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
@@ -4121,13 +4642,20 @@ class OPLIDE(TkinterDnD.Tk):
         """Open dropped model and data files in their matching editors."""
         if not self._ensure_no_active_operation("Open dropped files"):
             return "break"
+        paths = self._dropped_paths(event)
+        if not self._resolve_editor_replacement(
+            "Open dropped files",
+            model=any(Path(path).suffix.lower() in (".mod", ".opl") for path in paths),
+            data=any(Path(path).suffix.lower() == ".dat" for path in paths),
+        ):
+            return "break"
         unsupported: list[str] = []
-        for path in self._dropped_paths(event):
+        for path in paths:
             suffix = Path(path).suffix.lower()
             if suffix in (".mod", ".opl"):
-                self._open_model_path(path)
+                self._open_model_path(path, confirm_changes=False)
             elif suffix == ".dat":
-                self._open_data_path(path)
+                self._open_data_path(path, confirm_changes=False)
             else:
                 unsupported.append(os.path.basename(path))
         if unsupported:
@@ -4144,557 +4672,29 @@ class OPLIDE(TkinterDnD.Tk):
         if not self._ensure_no_active_operation("Compare models"):
             return
 
-        dialog = tk.Toplevel(self)
-        dialog.title("Compare models")
-        dialog.transient(self)
-        dialog.geometry("760x600")
-        dialog.minsize(680, 500)
-
-        root = ttk.Frame(dialog, padding=12)
-        root.pack(fill=tk.BOTH, expand=True)
-        root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
-
-        strategy_frame = ttk.Frame(root)
-        strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
-        strategy_frame.columnconfigure(1, uniform="comparison-strategy")
-        strategy_frame.columnconfigure(2, minsize=4)
-        strategy_frame.columnconfigure(3, uniform="comparison-strategy")
-        strategy_var = tk.StringVar(value="abstract")
-
-        def set_strategy(strategy: str) -> None:
-            strategy_var.set(strategy)
-            abstract_button.configure(style=("GenaiModeActive.TButton" if strategy == "abstract" else "GenaiMode.TButton"))
-            concrete_button.configure(style=("GenaiModeActive.TButton" if strategy == "concrete" else "GenaiMode.TButton"))
-
-        strategy_button_width = max(len("Abstract"), len("Concrete"))
-        abstract_button = ttk.Button(
-            strategy_frame,
-            text="Abstract",
-            style="GenaiModeActive.TButton",
-            width=strategy_button_width,
-            command=lambda: set_strategy("abstract"),
-        )
-        abstract_button.grid(row=0, column=1, sticky="ew")
-        concrete_button = ttk.Button(
-            strategy_frame,
-            text="Concrete",
-            style="GenaiMode.TButton",
-            width=strategy_button_width,
-            command=lambda: set_strategy("concrete"),
-        )
-        concrete_button.grid(row=0, column=3, sticky="ew")
-
-        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
-        path_frame.grid(row=1, column=0, sticky="ew")
-        path_frame.columnconfigure(1, weight=1)
-        path_frame.columnconfigure(3, minsize=90)
-
-        left_model_var = tk.StringVar(value=self.model_file or "")
-        left_data_var = tk.StringVar(value=self.data_file or "")
-        right_model_var = tk.StringVar()
-        right_data_var = tk.StringVar()
-        observable_mapping_var = tk.StringVar()
-
-        def browse_model(target: tk.StringVar) -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select model file",
-                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
-            )
-            if fname:
-                target.set(fname)
-
-        def browse_data(target: tk.StringVar) -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select data file",
-                filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
-            )
-            if fname:
-                target.set(fname)
-
-        def browse_observable_mapping() -> None:
-            fname = filedialog.askopenfilename(
-                parent=dialog,
-                title="Select observable mapping JSON",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            )
-            if fname:
-                observable_mapping_var.set(fname)
-
-        browse_buttons: list[ttk.Button] = []
-        compare_process: Optional[multiprocessing.Process] = None
-        compare_queue: Optional[multiprocessing.Queue] = None
-
-        def add_path_row(
-            row: int,
-            label: str,
-            var: tk.StringVar,
-            browse_command: Callable[[], None],
-        ) -> None:
-            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-            entry = ttk.Entry(path_frame, textvariable=var)
-            entry.grid(row=row, column=1, sticky="ew", pady=4)
-            browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
-            browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
-            browse_buttons.append(browse_button)
-
-        add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
-        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
-        add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
-        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
-        add_path_row(4, "Observable mapping", observable_mapping_var, browse_observable_mapping)
-        mapping_generate_button = ttk.Button(path_frame, text="Generate")
-        mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
-
-        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
-        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
-        result_frame.rowconfigure(0, weight=1)
-        result_frame.columnconfigure(0, weight=1)
-
-        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
-        result_text.grid(row=0, column=0, sticky="nsew")
-        result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
-        result_text.config(state="disabled")
-
-        button_frame = ttk.Frame(root)
-        button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        button_frame.columnconfigure(0, weight=1)
-        compare_button = ttk.Button(button_frame, text="Compare")
-        compare_button.grid(row=0, column=1, padx=(0, 8))
-        close_button = ttk.Button(button_frame, text="Close", command=dialog.destroy)
-        close_button.grid(row=0, column=2)
-
-        def set_compare_running(running: bool) -> None:
-            state = "disabled" if running else "normal"
-            for control in browse_buttons:
-                control.config(state=state)
-            mapping_generate_button.config(state=state)
-            abstract_button.config(state=state)
-            concrete_button.config(state=state)
-            close_button.config(state=state)
-            compare_button.config(
-                text=("Interrupt" if running else "Compare"),
-                command=(interrupt_compare if running else do_compare),
-                state="normal",
-            )
-
-        def set_mapping_running(running: bool) -> None:
-            state = "disabled" if running else "normal"
-            for control in browse_buttons:
-                control.config(state=state)
-            abstract_button.config(state=state)
-            concrete_button.config(state=state)
-            compare_button.config(state=state)
-            close_button.config(state=state)
-            mapping_generate_button.config(
-                text=("Interrupt" if running else "Generate"),
-                command=(interrupt_mapping if running else generate_observable_mapping),
-                state="normal",
-            )
-
-        def set_result(text: str) -> None:
-            result_text.config(state="normal")
-            result_text.delete("1.0", tk.END)
-            result_text.insert(tk.END, text)
-            result_text.config(state="disabled")
-
-        def cleanup_compare_process(*, cancel_queue_thread: bool) -> None:
-            nonlocal compare_process, compare_queue
-            q = compare_queue
-            compare_process = None
-            compare_queue = None
-            if q is None:
-                return
-            try:
-                q.close()
-            except Exception:
-                pass
-            try:
-                if cancel_queue_thread:
-                    q.cancel_join_thread()
-                else:
-                    q.join_thread()
-            except Exception:
-                pass
-
-        def interrupt_mapping() -> None:
-            active = getattr(self, "_active_operation", None)
-            if active is None or active.kind != "genai-observable-mapping":
-                return
-            self.interrupt_active_operation()
-            set_mapping_running(False)
-            set_result("Observable mapping generation interrupted.\n")
-
-        def generate_observable_mapping() -> None:
-            left_model = left_model_var.get().strip()
-            right_model = right_model_var.get().strip()
-            left_data = left_data_var.get().strip()
-            right_data = right_data_var.get().strip()
-
-            if not left_model or not right_model:
-                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
-                return
-            if not _data_paths_are_paired(left_data, right_data):
-                messagebox.showwarning(
-                    "Compare models",
-                    "Choose both data files or leave both data fields empty.",
-                    parent=dialog,
-                )
-                return
-            for label, path in (
-                ("Left model", left_model),
-                ("Right model", right_model),
-                ("Left data", left_data),
-                ("Right data", right_data),
-            ):
-                if path and not os.path.exists(path):
-                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
-                    return
-            selected_genai_model = self.genai_model
-            if not self.genai_provider or not selected_genai_model:
-                messagebox.showwarning(
-                    "Compare models", "Select a GenAI provider and model before generating a mapping.", parent=dialog
-                )
-                return
-
-            operation = self._start_foreground_operation(
-                kind="genai-observable-mapping",
-                label="Generate Observable Mapping",
-                header="GenAI: Generating observable mapping...",
-                status=f"GenAI: generating observable mapping with {self.genai_provider} - {self.genai_model} ...",
-                model_file=left_model,
-                data_file=left_data,
-            )
-            if operation is None:
-                return
-            set_mapping_running(True)
-            self._append_output(
-                f"Generating an observable mapping for:\n{left_model}\n{right_model}\n",
-                operation.session_id,
-            )
-
-            def progress(message: str) -> None:
-                if not operation.cancel_requested:
-                    self.after(
-                        0,
-                        self._append_output,
-                        (message if message.endswith("\n") else message + "\n"),
-                        operation.session_id,
-                    )
-
-            def finish_cancelled() -> None:
-                set_mapping_running(False)
-                self._finish_foreground_operation(operation)
-
-            def run() -> None:
-                try:
-                    mapping_text = _generate_dialog_mapping_text(
-                        left_model,
-                        right_model,
-                        left_data,
-                        right_data,
-                        strategy_var.get(),
-                        selected_genai_model,
-                        self.genai_provider,
-                        progress,
-                    )
-                    if operation.cancel_requested:
-                        self.after(0, finish_cancelled)
-                        return
-
-                    tmp_dir = Path.cwd() / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    descriptor, mapping_path = tempfile.mkstemp(
-                        prefix="observable_mapping_",
-                        suffix=".json",
-                        dir=str(tmp_dir),
-                        text=True,
-                    )
-                    with os.fdopen(descriptor, "w", encoding="utf-8") as file_obj:
-                        file_obj.write(mapping_text)
-
-                    def apply_mapping() -> None:
-                        if operation.cancel_requested:
-                            try:
-                                os.unlink(mapping_path)
-                            except OSError:
-                                pass
-                            finish_cancelled()
-                            return
-                        observable_mapping_var.set(mapping_path)
-                        set_mapping_running(False)
-                        self._finish_foreground_operation(operation)
-                        set_result(f"Generated observable mapping:\n{mapping_path}\n\n{mapping_text}")
-                        self.status_var.set("GenAI: observable mapping generated")
-
-                    self.after(0, apply_mapping)
-                except Exception as exc:
-
-                    def on_error(error: Exception) -> None:
-                        set_mapping_running(False)
-                        self._finish_foreground_operation(operation)
-                        if operation.cancel_requested:
-                            return
-                        detail = _concise_genai_error(error)
-                        set_result(f"Observable mapping generation failed.\n\n{detail}\n")
-                        messagebox.showerror("GenAI Error", detail, parent=dialog)
-                        self.status_var.set("GenAI: observable mapping error")
-
-                    self.after(0, on_error, exc)
-
-            threading.Thread(target=run, daemon=True).start()
-
-        def interrupt_compare() -> None:
-            p = compare_process
-            if p is not None and p.is_alive():
-                try:
-                    p.terminate()
-                    p.join(timeout=1.0)
-                    if p.is_alive() and hasattr(p, "kill"):
-                        p.kill()
-                        p.join(timeout=1.0)
-                except Exception:
-                    pass
-            cleanup_compare_process(cancel_queue_thread=True)
-            set_compare_running(False)
-            set_result("Comparison interrupted by user.\n")
-            self.status_var.set("Compare models interrupted.")
-
-        def poll_compare(left_model: str, right_model: str, left_data: str, right_data: str) -> None:
-            p = compare_process
-            q = compare_queue
-            if p is None or q is None:
-                return
-
-            try:
-                kind, payload = q.get_nowait()
-            except queue.Empty:
-                if p.is_alive():
-                    dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
-                    return
-                cleanup_compare_process(cancel_queue_thread=True)
-                set_compare_running(False)
-                set_result("Comparison failed.\n\nComparison process terminated unexpectedly.\n")
-                self.status_var.set("Compare models failed: process terminated unexpectedly.")
-                messagebox.showerror(
-                    "Compare models",
-                    "Comparison process terminated unexpectedly.",
-                    parent=dialog,
-                )
-                return
-
-            try:
-                p.join(timeout=0.1)
-            except Exception:
-                pass
-            cleanup_compare_process(cancel_queue_thread=False)
-            set_compare_running(False)
-
-            if kind == "success" and hasattr(payload, "status") and hasattr(payload, "proof_steps"):
-                set_result(
-                    self._format_equivalence_result(
-                        payload,
-                        left_model,
-                        right_model,
-                        left_data,
-                        right_data,
-                        strategy_var.get(),
-                    )
-                )
-                self.status_var.set(f"Compare models: {payload.status}")
-                return
-
-            if kind == "validation_error":
-                detail = str(payload)
-                set_result(_format_comparison_validation_error(detail))
-                self.status_var.set("Compare models: model validation issue")
-                return
-
-            detail = str(payload)
-            logging.getLogger(__name__).error("Compare models failed: %s", detail)
-            set_result(f"Comparison failed.\n\n{detail}\n")
-            messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
-
-        def do_compare() -> None:
-            nonlocal compare_process, compare_queue
-            left_model = left_model_var.get().strip()
-            right_model = right_model_var.get().strip()
-            left_data = left_data_var.get().strip()
-            right_data = right_data_var.get().strip()
-            observable_mapping_file = observable_mapping_var.get().strip()
-            strategy = strategy_var.get()
-
-            if not left_model or not right_model:
-                messagebox.showwarning("Compare models", "Choose both a left model and a right model.", parent=dialog)
-                return
-            if not _data_paths_are_paired(left_data, right_data):
-                messagebox.showwarning(
-                    "Compare models",
-                    "Choose both data files or leave both data fields empty.",
-                    parent=dialog,
-                )
-                return
-            paths = [
-                ("Left model", left_model),
-                ("Right model", right_model),
-                ("Left data", left_data),
-                ("Right data", right_data),
-                ("Observable mapping", observable_mapping_file),
-            ]
-            for label, path in paths:
-                if path and not os.path.exists(path):
-                    messagebox.showerror("Compare models", f"{label} file does not exist:\n{path}", parent=dialog)
-                    return
-
-            try:
-                compare_queue = multiprocessing.Queue()
-                compare_process = multiprocessing.Process(
-                    target=_compare_models_wrapper,
-                    args=(
-                        left_model,
-                        left_data,
-                        right_model,
-                        right_data,
-                        strategy,
-                        compare_queue,
-                        observable_mapping_file,
-                    ),
-                )
-                compare_process.start()
-                set_compare_running(True)
-                set_result(f"Comparing models with the {strategy} strategy...\n")
-                self.status_var.set("Compare models running...")
-                dialog.after(100, poll_compare, left_model, right_model, left_data, right_data)
-            except Exception as exc:
-                logging.getLogger(__name__).exception("Compare models failed")
-                cleanup_compare_process(cancel_queue_thread=True)
-                set_compare_running(False)
-                detail = f"{type(exc).__name__}: {exc}"
-                set_result(f"Comparison failed.\n\n{detail}\n")
-                messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
-
-        compare_button.config(command=do_compare)
-        mapping_generate_button.config(command=generate_observable_mapping)
-
-        def mapping_is_running() -> bool:
-            active = getattr(self, "_active_operation", None)
-            return active is not None and active.kind == "genai-observable-mapping"
-
-        dialog.bind(
-            "<Return>",
-            lambda _event: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else do_compare()
-            ),
-        )
-        dialog.bind(
-            "<Escape>",
-            lambda _event: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
-            ),
-        )
-        dialog.protocol(
-            "WM_DELETE_WINDOW",
-            lambda: (
-                interrupt_compare()
-                if compare_process is not None
-                else interrupt_mapping() if mapping_is_running() else dialog.destroy()
-            ),
-        )
-        dialog.grab_set()
-        dialog.focus_set()
-
-    @staticmethod
-    def _format_equivalence_result(
-        result: ModelComparisonResult,
-        left_model: str,
-        right_model: str,
-        left_data: str = "",
-        right_data: str = "",
-        strategy: str = "abstract",
-    ) -> str:
-        """Format an EquivalenceResult for the compare-models dialog."""
-        equivalence_label = {
-            "equivalent": "Yes",
-            "different": "No",
-            "unknown": "Undetermined",
-        }[result.status]
-        lines = [
-            "Compare models",
-            "",
-            f"Strategy: {strategy}",
-            f"Status: {result.status}",
-            f"Equivalent: {equivalence_label}",
-            f"Level: {result.level}",
-            f"Reason: {result.reason}",
-            "",
-            "Inputs:",
-            f"  Left model: {left_model}",
-            f"  Left data: {left_data or '(none)'}",
-            f"  Right model: {right_model}",
-            f"  Right data: {right_data or '(none)'}",
-        ]
-        if result.proof_steps:
-            lines.extend(["", "Proof steps:"])
-            lines.extend(f"  {index}. {step}" for index, step in enumerate(result.proof_steps, start=1))
-        if result.counterexample:
-            lines.extend(["", "Counterexample:", f"  {result.counterexample}"])
-        return "\n".join(lines) + "\n"
+        _ComparisonDialog(self).open()
 
     def save_model(self) -> None:
         """Save the contents of the model editor to a file."""
-        if not self.model_file:
-            fname = filedialog.asksaveasfilename(
+        path = self._model_editor_state.path
+        if not path:
+            path = filedialog.asksaveasfilename(
                 defaultextension=".mod",
                 filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
             )
-            if not fname:
-                return
-            self.model_file = fname
-        # "end-1c" means "end minus 1 character" (the implicit newline)
-        content = self.model_text.get("1.0", "end-1c")
-        with open(self.model_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._model_saved_text = self._get_editor_text(self.model_text)
-        # Update tab title
-        try:
-            self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
-        except Exception:
-            pass
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        if path:
+            OPLIDE._save_editor_to_path(self, self._model_editor_state, self.model_text, self.model_frame, path, "Model")
 
     def save_data(self) -> None:
         """Save the contents of the data editor to a file."""
-        if not self.data_file:
-            fname = filedialog.asksaveasfilename(
+        path = self._data_editor_state.path
+        if not path:
+            path = filedialog.asksaveasfilename(
                 defaultextension=".dat",
                 filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
             )
-            if not fname:
-                return
-            self.data_file = fname
-        content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._data_saved_text = self._get_editor_text(self.data_text)
-        # Update tab title
-        try:
-            self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
-        except Exception:
-            pass
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        if path:
+            OPLIDE._save_editor_to_path(self, self._data_editor_state, self.data_text, self.data_frame, path, "Data")
 
     def save_model_as(self) -> None:
         """Save the model to a new file and update the tab title."""
@@ -4704,16 +4704,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self.model_file = fname
-        content = self.model_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.model_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._model_saved_text = self._get_editor_text(self.model_text)
-        self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
-        try:
-            self._save_session()
-        except Exception:
-            pass
+        OPLIDE._save_editor_to_path(self, self._model_editor_state, self.model_text, self.model_frame, fname, "Model")
 
     def save_data_as(self) -> None:
         """Save the data to a new file and update the tab title."""
@@ -4723,12 +4714,22 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if not fname:
             return
-        self.data_file = fname
-        content = self.data_text.get(1.0, tk.END).rstrip("\n")
-        with open(self.data_file, "w", encoding="utf-8") as f:
-            f.write(content)
-        self._data_saved_text = self._get_editor_text(self.data_text)
-        self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file)}")
+        OPLIDE._save_editor_to_path(self, self._data_editor_state, self.data_text, self.data_frame, fname, "Data")
+
+    def _save_editor_to_path(
+        self, editor: _EditorBufferState, widget: tk.Text, frame: ttk.Frame, path: str, label: str
+    ) -> None:
+        content = self._get_editor_text(widget)
+        try:
+            with open(path, "w", encoding="utf-8") as file_obj:
+                file_obj.write(content)
+        except (OSError, UnicodeError) as exc:
+            logging.getLogger(__name__).exception("Failed to save %s file", label.lower())
+            messagebox.showerror(f"Save {label}", f"Could not save {label.lower()} file:\n{exc}", parent=self)
+            return
+        editor.path = path
+        editor.saved_text = content
+        self.editor_notebook.tab(frame, text=f"{label}: {os.path.basename(path)}")
         try:
             self._save_session()
         except Exception:
@@ -4757,23 +4758,10 @@ class OPLIDE(TkinterDnD.Tk):
         self._clear_highlight_tags(text_widget)
 
         code = text_widget.get("1.0", tk.END)
-        line_starts = [0] + [i + 1 for i, char in enumerate(code) if char == "\n"]
-        import bisect
-
-        def fast_index(pos: int) -> str:
-            if pos < 0:
-                pos = 0
-            if pos > len(code):
-                pos = len(code)
-            # Find the line number (bisect_right returns insertion point, so index is i-1)
-            line_idx = bisect.bisect_right(line_starts, pos) - 1
-            line_start = line_starts[line_idx]
-            col = pos - line_start
-            return f"{line_idx + 1}.{col}"
+        fast_index = _make_text_indexer(code)
 
         # Store the most recent error for status bar display (per widget)
-        self._last_syntax_error_by_widget[id(text_widget)] = None
-        self._last_syntax_error = None
+        OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = None
 
         if is_data:
             OPLIDE._highlight_data(self, text_widget, code, fast_index, validate)
@@ -4787,8 +4775,7 @@ class OPLIDE(TkinterDnD.Tk):
         error_message = str(exc).splitlines()[0] if str(exc) else "Unknown syntax error"
         text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
         message = f"{prefix} on line {lineno}: {error_message}"
-        self._last_syntax_error_by_widget[id(text_widget)] = message
-        self._last_syntax_error = message
+        OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = message
 
     def _highlight_model(self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]) -> None:
         lexer = OPLLexer()
@@ -4803,7 +4790,7 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception as exc:
             if not self._is_transient_live_parse_error(exc):
                 self._set_highlight_error(text_widget, "Parser Error", exc)
-        OPLIDE._apply_token_highlighting(self, text_widget, tokens, fast_index)
+        OPLIDE._apply_tag_ranges(text_widget, _token_highlight_ranges(tokens, fast_index))
 
     def _highlight_data(
         self,
@@ -4824,32 +4811,7 @@ class OPLIDE(TkinterDnD.Tk):
                     parser.parse(iter(tokens), lexer=lexer)
                 except Exception as exc:
                     self._set_highlight_error(text_widget, "Parser Error", exc)
-        self._apply_data_highlighting(text_widget, code, fast_index)
-
-    def _apply_token_highlighting(self, text_widget: tk.Text, tokens: list[Any], fast_index: Callable[[int], str]) -> None:
-        tag_ranges: dict[str, list[str]] = {}
-        for token in tokens:
-            tag = token.type if token.type in TOKEN_COLORS else None
-            if tag:
-                tag_ranges.setdefault(tag, []).extend(
-                    [fast_index(token.index), fast_index(token.index + len(str(token.value)))]
-                )
-        OPLIDE._apply_tag_ranges(text_widget, tag_ranges)
-
-    def _apply_data_highlighting(self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]) -> None:
-        keyword_ranges: dict[str, list[str]] = {"PARAM": [], "SET": [], "BOOLEAN": []}
-        for keyword in ("param", "set", "true", "false"):
-            tag = "PARAM" if keyword == "param" else "SET" if keyword == "set" else "BOOLEAN"
-            for match in re.finditer(r"\b" + keyword + r"\b", code):
-                keyword_ranges[tag].extend([fast_index(match.start()), fast_index(match.end())])
-
-        number_ranges = [
-            index
-            for match in re.finditer(r"\d+(\.\d+)?", code)
-            for index in (fast_index(match.start()), fast_index(match.end()))
-        ]
-        keyword_ranges["NUMBER"] = number_ranges
-        OPLIDE._apply_tag_ranges(text_widget, keyword_ranges)
+        OPLIDE._apply_tag_ranges(text_widget, _data_highlight_ranges(code, fast_index))
 
     @staticmethod
     def _apply_tag_ranges(text_widget: tk.Text, tag_ranges: dict[str, list[str]]) -> None:
@@ -4941,12 +4903,7 @@ class OPLIDE(TkinterDnD.Tk):
 
                 error_lines = OPLIDE._error_lines(text_widget)
 
-                # Use per-widget last error message if available
-                last_error = None
-                try:
-                    last_error = self._last_syntax_error_by_widget.get(id(text_widget))
-                except Exception:
-                    last_error = getattr(self, "_last_syntax_error", None)
+                last_error = OPLIDE._editor_state_for_widget(self, text_widget).syntax_error
 
                 error_msg = OPLIDE._caret_error_message(error_lines, caret_line, last_error, _strip_hint)
 
@@ -5158,7 +5115,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _tick_run_timer(self) -> None:
         """Update status bar with elapsed time so far; reschedule if still running."""
-        p = self._solver_process
+        p = self._solver_ipc.process
         if not (p and p.is_alive()):
             self._stop_run_timer()
             return
@@ -5570,7 +5527,7 @@ class OPLIDE(TkinterDnD.Tk):
         data_file_override: Optional[str] = None,
     ) -> None:
         """Run the model using current editor contents, checking data file presence and validity."""
-        if self._solver_process and self._solver_process.is_alive():
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
             messagebox.showinfo("Solve Model", "Model is already running.")
             return
 
@@ -5591,14 +5548,8 @@ class OPLIDE(TkinterDnD.Tk):
         if operation is None:
             return
 
-        if not OPLIDE._validate_run_model_data(self, model_code, data_code, operation):
-            return
-
-        tmp_dir = os.path.join(os.getcwd(), "tmp")
-        os.makedirs(tmp_dir, exist_ok=True)
-
-        file_paths = OPLIDE._save_run_model_files(
-            self, model_code, data_code, tmp_dir, model_file_override, data_file_override, operation
+        file_paths = OPLIDE._prepare_solver_run(
+            self, model_code, data_code, operation, model_file_override, data_file_override
         )
         if file_paths is None:
             return
@@ -5610,6 +5561,25 @@ class OPLIDE(TkinterDnD.Tk):
         if not OPLIDE._start_solver_process(self, model_file, data_file, solver_choice, operation):
             return
 
+        OPLIDE._begin_solver_ui(self, solver_choice, operation)
+
+    def _prepare_solver_run(
+        self,
+        model_code: str,
+        data_code: str,
+        operation: _ForegroundOperation,
+        model_file_override: Optional[str],
+        data_file_override: Optional[str],
+    ) -> Optional[tuple[str, str]]:
+        if not OPLIDE._validate_run_model_data(self, model_code, data_code, operation):
+            return None
+        tmp_dir = os.path.join(os.getcwd(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return OPLIDE._save_run_model_files(
+            self, model_code, data_code, tmp_dir, model_file_override, data_file_override, operation
+        )
+
+    def _begin_solver_ui(self, solver_choice: str, operation: _ForegroundOperation) -> None:
         self._set_run_menu_running(True)
         self._show_solver_log_textbox()
 
@@ -5635,7 +5605,7 @@ class OPLIDE(TkinterDnD.Tk):
             )
             for match in re.finditer(pattern, model_code)
         }
-        if self.data_file and os.path.exists(self.data_file):
+        if self._data_editor_state.path and os.path.exists(self._data_editor_state.path):
             try:
                 from .pyopl_core import OPLDataLexer, OPLDataParser
 
@@ -5670,8 +5640,8 @@ class OPLIDE(TkinterDnD.Tk):
         operation: _ForegroundOperation,
     ) -> Optional[tuple[str, str]]:
         temp_model_file, temp_data_file = OPLIDE._temporary_model_data_paths(tmp_dir)
-        model_file = model_file_override or self.model_file or temp_model_file
-        data_file = data_file_override or self.data_file or temp_data_file
+        model_file = model_file_override or self._model_editor_state.path or temp_model_file
+        data_file = data_file_override or self._data_editor_state.path or temp_data_file
         try:
             with open(model_file, "w", encoding="utf-8") as file_obj:
                 file_obj.write(model_code)
@@ -5707,23 +5677,16 @@ class OPLIDE(TkinterDnD.Tk):
                 if not isinstance(solver_settings, dict):
                     raise ValueError(f"{settings_name} must contain a JSON object.")
                 self._append_output(f"\nSolver settings: loaded {settings_path}.\n", operation.session_id)
-            self._solver_queue = multiprocessing.Queue()
-            self._solver_process = multiprocessing.Process(
-                target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, solver_settings, self._solver_queue),
-            )
-            self._solver_process.start()
+            self._solver_ipc.start(model_file, data_file, solver_choice, solver_settings, operation.session_id)
         except Exception as exc:
             self.status_var.set(f"Error starting solve: {exc}")
             self._append_output(f"\nError starting solve: {exc}\n", operation.session_id)
-            self._solver_process = None
-            self._solver_queue = None
             self._finish_foreground_operation(operation)
             return False
         return True
 
     def stop_model(self) -> None:
-        p = self._solver_process
+        p = self._solver_ipc.process
         active = getattr(self, "_active_operation", None)
 
         if not (p and p.is_alive()):
@@ -5735,14 +5698,7 @@ class OPLIDE(TkinterDnD.Tk):
                 self._finish_foreground_operation(active)
             return
 
-        try:
-            p.terminate()
-            p.join(timeout=1.0)
-            if p.is_alive() and hasattr(p, "kill"):
-                p.kill()  # py3.7+ on Unix
-                p.join(timeout=1.0)
-        except Exception:
-            pass
+        self._solver_ipc.stop()
 
         self._cleanup_solver_ipc(cancel_queue_thread=True)
 
@@ -5758,50 +5714,33 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
         """Release solver process/queue resources to avoid multiprocessing tracker leaks."""
-        q = self._solver_queue
-        self._solver_process = None
-        self._solver_queue = None
-        if q is None:
-            return
-        try:
-            q.close()
-        except Exception:
-            pass
-        try:
-            if cancel_queue_thread:
-                q.cancel_join_thread()
-            else:
-                q.join_thread()
-        except Exception:
-            pass
+        self._solver_ipc.cleanup(cancel_queue_thread=cancel_queue_thread)
 
     def _poll_solver(self, operation: Optional[_ForegroundOperation] = None) -> None:
         # _poll_solver is scheduled via `after()`, so it can run after `stop_model()`
         # has already nulled these out.
-        p = self._solver_process
-        q = self._solver_queue
-        if not p or not q:
+        if operation is not None and self._solver_ipc.session_id not in (None, operation.session_id):
             return
+        handles = self._solver_ipc.handles()
+        if handles is None:
+            return
+        p = handles[0]
 
-        terminal_message = OPLIDE._drain_solver_queue(self, p, q, operation)
+        terminal_message = OPLIDE._drain_solver_queue(self, p, operation)
         if terminal_message is None:
             return
         kind, payload = terminal_message
 
-        OPLIDE._finalize_solver_poll(self, p, kind, payload, operation)
+        OPLIDE._finalize_solver_poll(self, kind, payload, operation)
 
     @staticmethod
     def _finalize_solver_poll(
         ide: Any,
-        process: multiprocessing.Process,
         kind: str,
         payload: Any,
         operation: Optional[_ForegroundOperation],
     ) -> None:
-        try:
-            process.join(timeout=0.1)
-        except Exception:
-            pass
+        ide._solver_ipc.join(timeout=0.1)
 
         OPLIDE._cleanup_solver_ipc(ide, cancel_queue_thread=False)
         ide._set_run_menu_running(False)
@@ -5914,35 +5853,46 @@ class OPLIDE(TkinterDnD.Tk):
         return True
 
     def _drain_solver_queue(
-        self, process: multiprocessing.Process, solver_queue: multiprocessing.Queue, operation: Optional[_ForegroundOperation]
-    ) -> Optional[tuple[str, Any]]:
+        self, process: multiprocessing.Process, operation: Optional[_ForegroundOperation]
+    ) -> Optional[_SolverMessage]:
         while True:
             try:
-                kind, payload = solver_queue.get_nowait()
+                kind, payload = self._solver_ipc.read_nowait()
             except queue.Empty:
                 if process.is_alive():
                     self.after(100, self._poll_solver, operation)
                     return None
-                self._set_run_menu_running(False)
-                self._restore_output_textbox()
-                self._append_output(
-                    "\nError: Solver process terminated unexpectedly.\n",
-                    operation.session_id if operation is not None else None,
-                )
-                self._stop_run_timer()
-                self.status_var.set("Error: Solver process terminated.")
-                self._finish_solver_progress(status="ended unexpectedly")
-                self._cleanup_solver_ipc(cancel_queue_thread=True)
-                self._finish_foreground_operation(operation)
+                OPLIDE._handle_solver_process_exit(self, operation)
                 return None
-            if kind == "progress":
-                if isinstance(payload, dict):
-                    self._record_solver_progress(payload)
-                continue
-            if kind == "log":
-                self._append_solver_log_text(str(payload))
+            except ValueError as exc:
+                return "error", f"Invalid solver worker message: {exc}"
+            if OPLIDE._present_solver_stream_event(self, kind, payload):
                 continue
             return kind, payload
+
+    def _handle_solver_process_exit(self, operation: Optional[_ForegroundOperation]) -> None:
+        self._set_run_menu_running(False)
+        self._restore_output_textbox()
+        self._append_output(
+            "\nError: Solver process terminated unexpectedly.\n", operation.session_id if operation is not None else None
+        )
+        self._stop_run_timer()
+        self.status_var.set("Error: Solver process terminated.")
+        self._finish_solver_progress(status="ended unexpectedly")
+        self._cleanup_solver_ipc(cancel_queue_thread=True)
+        self._finish_foreground_operation(operation)
+
+    def _present_solver_stream_event(self, kind: str, payload: Any) -> bool:
+        if kind == "progress":
+            if isinstance(payload, dict):
+                self._record_solver_progress(payload)
+            else:
+                logging.getLogger(__name__).warning("Ignoring solver progress event with non-dictionary payload")
+            return True
+        if kind == "log":
+            self._append_solver_log_text(str(payload))
+            return True
+        return False
 
     def _display_solve_results(
         self,
@@ -5972,8 +5922,8 @@ class OPLIDE(TkinterDnD.Tk):
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
             default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
-            if self.model_file:
-                base = os.path.splitext(os.path.basename(self.model_file or ""))[0]
+            if self._model_editor_state.path:
+                base = os.path.splitext(os.path.basename(self._model_editor_state.path or ""))[0]
                 default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
 
             dest_path = filedialog.asksaveasfilename(
@@ -6159,7 +6109,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def save_exemplar(self) -> None:
         """Distill and review the current session before saving a local RAG exemplar."""
-        if getattr(self, "_exemplar_save_pending", False):
+        if self._exemplar_save_state.pending:
             messagebox.showinfo(
                 "Save Exemplar",
                 "An exemplar description is already being generated.",
@@ -6210,40 +6160,43 @@ class OPLIDE(TkinterDnD.Tk):
             messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
             return
 
-        self._exemplar_save_pending = True
+        request = _ExemplarPreparation(file_stem, model, data, source_session, provider, model_name)
 
         def prepare_draft() -> None:
-            try:
-                description = distill_exemplar_description(
-                    model=model,
-                    data=data,
-                    source_session=source_session,
-                    provider=provider,
-                    model_name=model_name,
-                )
-                draft = ExemplarDraft(
-                    name=file_stem,
-                    model=model,
-                    data=data,
-                    description=description,
-                    source_session=source_session,
-                )
-            except Exception as exc:
-                self.after(0, OPLIDE._finish_exemplar_preparation_error, self, exc)
+            if self._exemplar_save_state.closed:
+                self._exemplar_save_state.finish()
                 return
-            self.after(0, OPLIDE._finish_exemplar_preparation, self, draft, models_root)
+            try:
+                draft = request.prepare()
+            except Exception as exc:
+                if not self._exemplar_save_state.closed:
+                    self.after(0, OPLIDE._finish_exemplar_preparation_error, self, exc)
+                else:
+                    self._exemplar_save_state.finish()
+                return
+            if not self._exemplar_save_state.closed:
+                self.after(0, OPLIDE._finish_exemplar_preparation, self, draft, models_root)
+            else:
+                self._exemplar_save_state.finish()
 
-        threading.Thread(target=prepare_draft, daemon=True).start()
+        try:
+            self._exemplar_save_state.start(prepare_draft)
+        except Exception as exc:
+            OPLIDE._finish_exemplar_preparation_error(self, exc)
 
     def _finish_exemplar_preparation_error(self, exc: Exception) -> None:
-        self._exemplar_save_pending = False
+        self._exemplar_save_state.finish()
+        if self._exemplar_save_state.closed:
+            return
         detail = f"{type(exc).__name__}: {exc}"
         logging.getLogger(__name__).error("Failed to prepare exemplar: %s", detail)
         self.status_var.set(f"Failed to save exemplar: {detail}")
         messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{_concise_genai_error(exc)}", parent=self)
 
     def _finish_exemplar_preparation(self, draft: ExemplarDraft, models_root: Path) -> None:
-        self._exemplar_save_pending = False
+        if self._exemplar_save_state.closed:
+            self._exemplar_save_state.finish()
+            return
         try:
             reviewed = self._review_exemplar_draft(draft, models_root)
             if reviewed is None:
@@ -6263,6 +6216,8 @@ class OPLIDE(TkinterDnD.Tk):
             self.status_var.set(f"Failed to save exemplar: {detail}")
             messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
             return
+        finally:
+            self._exemplar_save_state.finish()
 
         self.status_var.set(f"Saved exemplar to {destination}")
 
@@ -6273,12 +6228,10 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _append_output(self, text: str, session_id: Optional[str] = None) -> None:
         """Append text to the current output session and update the Output panel if visible."""
-        sid = session_id or getattr(self, "_current_output_session_id", None)
-        if sid:
-            self._output_sessions[sid] = self._output_sessions.get(sid, "") + text
+        sid = self._session_state.append(text, session_id)
         if (
             sid
-            and getattr(self, "_viewing_output_session_id", None) == sid
+            and self._session_state.viewing_id == sid
             and self.output_text.winfo_exists()
             and not getattr(self, "_solver_log_text", None)
         ):
@@ -6305,70 +6258,17 @@ class OPLIDE(TkinterDnD.Tk):
                 for image in images:
                     path = str(image.get("path", "")).strip() if isinstance(image, dict) else str(image).strip()
                     if path:
-                        lines.append(f"- {OPLIDE._label_for_genai_attachment_path(self, path)}\n")
+                        lines.append(f"- {self._genai_attachments.label(path)}\n")
             lines.append("\n")
             return "".join(lines)
 
         text = str(prompt_input).strip()
         return f"\n{label}:\n{text}\n\n"
 
-    def _label_for_output_session(self, header: str) -> str:
-        """Derive a short session label from the session header."""
-        header_lower = header.strip().lower()
-        if header_lower.startswith("genai: generating"):
-            return "Generate"
-        if header_lower.startswith("genai: requesting feedback"):
-            return "Ask"
-        if header_lower.startswith("solve:"):
-            return "Solve"
-        if header_lower.startswith("export model"):
-            return "Export"
-        if header_lower.startswith("genai:"):
-            return "GenAI"
-        return "Session"
-
-    def _make_output_session_display(self, timestamp: str, label: str, exclude_session_id: Optional[str] = None) -> str:
-        """Return a request-list label that stays unique even for same-second requests."""
-        base = f"{timestamp} • {label}"
-        existing = {
-            display for sid, display in getattr(self, "_output_session_display", {}).items() if sid != exclude_session_id
-        }
-        if base not in existing:
-            return base
-        suffix = 2
-        while True:
-            candidate = f"{base} ({suffix})"
-            if candidate not in existing:
-                return candidate
-            suffix += 1
-
-    # Output sessions (history)
     def _begin_new_output_session(self, header: str = "") -> str:
         """Create a new request session, add it to the list, and show it."""
-        dt = datetime.now()
-        timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
-        if not hasattr(self, "_output_session_timestamp") or self._output_session_timestamp is None:
-            self._output_session_timestamp = {}
-        if not hasattr(self, "_output_session_artifacts") or self._output_session_artifacts is None:
-            self._output_session_artifacts = {}
-        if not hasattr(self, "_model_snapshots") or self._model_snapshots is None:
-            self._model_snapshots = {}
-        if not hasattr(self, "_data_snapshots") or self._data_snapshots is None:
-            self._data_snapshots = {}
-        if not hasattr(self, "_output_session_label") or self._output_session_label is None:
-            self._output_session_label = {}
-        label = OPLIDE._label_for_output_session(self, header)
-        display = OPLIDE._make_output_session_display(self, timestamp, label)
-        session_id = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-        initial = (header + "\n") if header else ""
-        self._output_sessions[session_id] = initial
-        self._output_session_display[session_id] = display
-        self._output_session_label[session_id] = label
-        self._output_session_timestamp[session_id] = timestamp
-        self._output_session_artifacts.setdefault(session_id, {})
+        session_id, display = self._session_state.begin(header, datetime.now())
         OPLIDE._snapshot_output_session_artifacts(self, session_id)
-        self._output_session_ids.insert(0, session_id)
 
         # Update UI list (most recent at top)
         if hasattr(self, "request_listbox"):
@@ -6380,8 +6280,7 @@ class OPLIDE(TkinterDnD.Tk):
             except Exception:
                 pass
 
-        self._current_output_session_id = session_id
-        self._viewing_output_session_id = session_id
+        self._session_state.select(session_id, make_current=True)
         self._show_output_session(session_id)
         # Persist new session immediately
         try:
@@ -6392,7 +6291,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _show_output_session(self, session_id: str) -> None:
         """Display a session's content in the Output panel."""
-        content = self._output_sessions.get(session_id, "")
+        content = self._session_state.sessions.get(session_id, "")
         if hasattr(self, "output_text") and self.output_text.winfo_exists():
             self.output_text.config(state="normal")
             self.output_text.delete("1.0", tk.END)
@@ -6401,8 +6300,7 @@ class OPLIDE(TkinterDnD.Tk):
             self.output_text.config(state="disabled")
         # Remember viewing session and persist
         try:
-            self._viewing_output_session_id = session_id
-            self._current_output_session_id = self._current_output_session_id or session_id
+            self._session_state.select(session_id)
             self._save_session()
         except Exception:
             pass
@@ -6417,31 +6315,17 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _fold_state_key(path: str) -> str:
-        return os.path.normcase(os.path.abspath(os.path.expanduser(path)))
+        return _fold_state_key(path)
 
     def _store_fold_state(self, path: Optional[str], gutter: Any, *, touch: bool) -> None:
         if not path or gutter is None:
             return
-        key = OPLIDE._fold_state_key(path)
-        previous = self._fold_view_states.get(key, {})
-        if not touch and not previous and not gutter.folded_lines:
-            return
-        edited_at = datetime.now(timezone.utc).isoformat() if touch else str(previous.get("edited_at") or "")
-        self._fold_view_states[key] = {
-            "folded_lines": sorted(int(line) for line in gutter.folded_lines),
-            "edited_at": edited_at,
-        }
-        while len(self._fold_view_states) > MAX_FOLD_VIEW_STATES:
-            oldest_key = min(
-                self._fold_view_states,
-                key=lambda state_key: (str(self._fold_view_states[state_key].get("edited_at") or ""), state_key),
-            )
-            del self._fold_view_states[oldest_key]
+        _OutputSessionState.store_fold_state(self._session_state.fold_view_states, path, gutter.folded_lines, touch=touch)
 
     def _restore_fold_state(self, path: Optional[str], gutter: Any) -> None:
         if not path or gutter is None:
             return
-        state = self._fold_view_states.get(OPLIDE._fold_state_key(path), {})
+        state = self._session_state.fold_view_states.get(OPLIDE._fold_state_key(path), {})
         folded_lines = state.get("folded_lines", [])
         gutter.folded_lines = {int(line) for line in folded_lines if int(line) in gutter.fold_regions}
         gutter._apply_folds()
@@ -6449,9 +6333,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _on_fold_state_changed(self, gutter: Any) -> None:
         if gutter is getattr(self, "model_gutter", None):
-            path = self.model_file
+            path = self._model_editor_state.path
         elif gutter is getattr(self, "data_gutter", None):
-            path = self.data_file
+            path = self._data_editor_state.path
         else:
             return
         self._store_fold_state(path, gutter, touch=True)
@@ -6463,27 +6347,14 @@ class OPLIDE(TkinterDnD.Tk):
         This is intentionally tolerant: best-effort persistence without blocking UI.
         """
         try:
-            self._store_fold_state(self.model_file, getattr(self, "model_gutter", None), touch=False)
-            self._store_fold_state(self.data_file, getattr(self, "data_gutter", None), touch=False)
+            self._store_fold_state(self._model_editor_state.path, getattr(self, "model_gutter", None), touch=False)
+            self._store_fold_state(self._data_editor_state.path, getattr(self, "data_gutter", None), touch=False)
             OPLIDE._prune_session_snapshots(self)
             path = self._session_file_path()
             tmp_path = path + ".tmp"
-            payload = {
-                "output_sessions": self._output_sessions,
-                "output_session_ids": self._output_session_ids,
-                "output_session_display": self._output_session_display,
-                "output_session_label": self._output_session_label,
-                "output_session_timestamp": self._output_session_timestamp,
-                "output_session_artifacts": self._output_session_artifacts,
-                "model_snapshots": self._model_snapshots,
-                "data_snapshots": self._data_snapshots,
-                "current_output_session_id": self._current_output_session_id,
-                "viewing_output_session_id": self._viewing_output_session_id,
-                "model_file": self.model_file,
-                "data_file": self.data_file,
-                "fold_view_states": self._fold_view_states,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-            }
+            payload = self._session_state.to_payload(
+                self._model_editor_state.path, self._data_editor_state.path, datetime.now(timezone.utc).isoformat()
+            )
             # Write atomically
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -6521,53 +6392,35 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _normalize_session_snapshots(raw_snapshots: Any) -> dict[str, str]:
-        return {str(content_hash): str(content) for content_hash, content in (raw_snapshots or {}).items()}
+        return _normalize_session_snapshots(raw_snapshots)
 
     @staticmethod
     def _normalize_session_artifacts(raw_artifacts: Any) -> dict[str, dict[str, str]]:
-        return {
-            str(session_id): {key: str(artifact[key]) for key in ("model_hash", "data_hash") if key in artifact}
-            for session_id, artifact in (raw_artifacts or {}).items()
-            if isinstance(artifact, dict)
-        }
+        return _normalize_session_artifacts(raw_artifacts)
 
     def _restore_session_history(self, session: dict[str, Any]) -> None:
-        self._output_sessions = session.get("output_sessions", {}) or {}
-        self._output_session_ids = session.get("output_session_ids", []) or []
-        self._output_session_display = session.get("output_session_display", {}) or {}
-        self._output_session_label = session.get("output_session_label", {}) or {}
-        self._output_session_timestamp = session.get("output_session_timestamp", {}) or {}
-        self._model_snapshots = OPLIDE._normalize_session_snapshots(session.get("model_snapshots"))
-        self._data_snapshots = OPLIDE._normalize_session_snapshots(session.get("data_snapshots"))
-        self._output_session_artifacts = OPLIDE._normalize_session_artifacts(session.get("output_session_artifacts"))
+        history = _OutputSessionState.from_payload(session, self._session_state.current_id, self._session_state.viewing_id)
+        self._session_state.sessions = history.sessions
+        self._session_state.ids = history.ids
+        self._session_state.display = history.display
+        self._session_state.labels = history.labels
+        self._session_state.timestamps = history.timestamps
+        self._session_state.model_snapshots = history.model_snapshots
+        self._session_state.data_snapshots = history.data_snapshots
+        self._session_state.artifacts = history.artifacts
         OPLIDE._prune_session_snapshots(self)
-        self._current_output_session_id = session.get("current_output_session_id") or self._current_output_session_id
-        self._viewing_output_session_id = session.get("viewing_output_session_id") or self._viewing_output_session_id
+        self._session_state.current_id = history.current_id
+        self._session_state.viewing_id = history.viewing_id
 
-        for sid in self._output_session_ids:
-            display = self._output_session_display.get(sid, sid)
-            timestamp = self._output_session_timestamp.setdefault(sid, OPLIDE._session_timestamp(display))
-            self._output_session_label.setdefault(sid, OPLIDE._session_label(display, timestamp))
+        for sid in self._session_state.ids:
+            display = self._session_state.display.get(sid, sid)
+            timestamp = self._session_state.timestamps.setdefault(sid, OPLIDE._session_timestamp(display))
+            self._session_state.labels.setdefault(sid, OPLIDE._session_label(display, timestamp))
 
         OPLIDE._restore_session_history_widgets(self)
 
     def _restore_fold_view_states(self, session: dict[str, Any]) -> None:
-        raw_states = session.get("fold_view_states", {}) or {}
-        states: dict[str, dict[str, Any]] = {}
-        for path, state in raw_states.items():
-            if not isinstance(path, str) or not isinstance(state, dict):
-                continue
-            raw_lines = state.get("folded_lines", [])
-            if not isinstance(raw_lines, list):
-                continue
-            lines = sorted({line for line in raw_lines if isinstance(line, int) and line > 0})
-            states[OPLIDE._fold_state_key(path)] = {
-                "folded_lines": lines,
-                "edited_at": str(state.get("edited_at") or ""),
-            }
-        self._fold_view_states = dict(
-            sorted(states.items(), key=lambda item: (item[1]["edited_at"], item[0]), reverse=True)[:MAX_FOLD_VIEW_STATES]
-        )
+        self._session_state.fold_view_states = _OutputSessionState.normalize_fold_view_states(session.get("fold_view_states"))
 
     @staticmethod
     def _session_timestamp(display: Any) -> str:
@@ -6588,12 +6441,12 @@ class OPLIDE(TkinterDnD.Tk):
         if hasattr(self, "request_listbox"):
             try:
                 self.request_listbox.delete(0, tk.END)
-                for sid in self._output_session_ids:
-                    self.request_listbox.insert(tk.END, self._output_session_display.get(sid, sid))
-                selected_id = self._viewing_output_session_id
-                if selected_id and selected_id in self._output_session_ids:
-                    index = self._output_session_ids.index(selected_id)
-                elif self._output_session_ids:
+                for sid in self._session_state.ids:
+                    self.request_listbox.insert(tk.END, self._session_state.display.get(sid, sid))
+                selected_id = self._session_state.viewing_id
+                if selected_id and selected_id in self._session_state.ids:
+                    index = self._session_state.ids.index(selected_id)
+                elif self._session_state.ids:
                     index = 0
                 else:
                     index = None
@@ -6606,15 +6459,14 @@ class OPLIDE(TkinterDnD.Tk):
 
         if hasattr(self, "output_text") and self.output_text.winfo_exists():
             try:
-                session_id: Optional[str] = self._viewing_output_session_id or (
-                    self._output_session_ids[0] if self._output_session_ids else None
+                session_id: Optional[str] = self._session_state.viewing_id or (
+                    self._session_state.ids[0] if self._session_state.ids else None
                 )
                 if session_id:
-                    self._current_output_session_id = self._current_output_session_id or session_id
-                    self._viewing_output_session_id = session_id
+                    self._session_state.select(session_id)
                     self.output_text.config(state="normal")
                     self.output_text.delete("1.0", tk.END)
-                    self.output_text.insert(tk.END, self._output_sessions.get(session_id, ""))
+                    self.output_text.insert(tk.END, self._session_state.sessions.get(session_id, ""))
                     self.output_text.see(tk.END)
                     self.output_text.config(state="disabled")
             except Exception:
@@ -6622,40 +6474,46 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _restore_session_files(self, session: dict[str, Any]) -> None:
         try:
-            OPLIDE._restore_session_file(self, session.get("model_file"), "model_file", self.model_text)
-            OPLIDE._restore_session_file(self, session.get("data_file"), "data_file", self.data_text)
+            OPLIDE._restore_session_file(self, session.get("model_file"), self._model_editor_state, self.model_text)
+            OPLIDE._restore_session_file(self, session.get("data_file"), self._data_editor_state, self.data_text)
             for path, gutter in (
-                (self.model_file, getattr(self, "model_gutter", None)),
-                (self.data_file, getattr(self, "data_gutter", None)),
+                (self._model_editor_state.path, getattr(self, "model_gutter", None)),
+                (self._data_editor_state.path, getattr(self, "data_gutter", None)),
             ):
                 if gutter is not None:
                     gutter.refresh()
                 OPLIDE._restore_fold_state(self, path, gutter)
             if hasattr(self, "editor_notebook"):
                 try:
-                    model_label = f"Model: {os.path.basename(self.model_file)}" if self.model_file else "Model"
+                    model_label = (
+                        f"Model: {os.path.basename(self._model_editor_state.path)}"
+                        if self._model_editor_state.path
+                        else "Model"
+                    )
                     self.editor_notebook.tab(self.model_frame, text=model_label)
                 except Exception:
                     pass
                 try:
-                    data_label = f"Data: {os.path.basename(self.data_file)}" if self.data_file else "Data"
+                    data_label = (
+                        f"Data: {os.path.basename(self._data_editor_state.path)}" if self._data_editor_state.path else "Data"
+                    )
                     self.editor_notebook.tab(self.data_frame, text=data_label)
                 except Exception:
                     pass
         except Exception:
             pass
 
-    def _restore_session_file(self, path: Optional[str], attribute: str, text_widget: Any) -> None:
+    def _restore_session_file(self, path: Optional[str], editor: _EditorBufferState, text_widget: Any) -> None:
         if not path:
             return
-        setattr(self, attribute, path)
+        editor.path = path
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = f.read()
             text_widget.delete("1.0", tk.END)
             text_widget.insert(tk.END, content)
         except Exception:
-            setattr(self, attribute, None)
+            editor.path = None
 
     def _ensure_model_data_saved(
         self, model_target: Optional[str] = None, data_target: Optional[str] = None
@@ -6663,17 +6521,17 @@ class OPLIDE(TkinterDnD.Tk):
         """Ensure current editor buffers are saved to disk.
 
         Returns (model_path, data_path) or (None, None) on error.
-        Does not change `self.model_file`/`self.data_file` — caller may choose to.
+        Does not change `self._model_editor_state.path`/`self._data_editor_state.path` — caller may choose to.
         """
         try:
             tmp_dir = os.path.join(os.getcwd(), "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
-            model_path = model_target or getattr(self, "model_file", None) or os.path.join(tmp_dir, "temp_model.mod")
-            data_path = data_target or getattr(self, "data_file", None) or os.path.join(tmp_dir, "temp_data.dat")
+            model_path = model_target or self._model_editor_state.path or os.path.join(tmp_dir, "temp_model.mod")
+            data_path = data_target or self._data_editor_state.path or os.path.join(tmp_dir, "temp_data.dat")
             with open(model_path, "w", encoding="utf-8") as f:
-                f.write(self.model_text.get(1.0, tk.END).rstrip("\n"))
+                f.write(self.model_text.get("1.0", "end-1c"))
             with open(data_path, "w", encoding="utf-8") as f:
-                f.write(self.data_text.get(1.0, tk.END).rstrip("\n"))
+                f.write(self.data_text.get("1.0", "end-1c"))
             return model_path, data_path
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to write temp files: {e}")
@@ -6686,10 +6544,10 @@ class OPLIDE(TkinterDnD.Tk):
             if not sel:
                 return
             index = int(sel[0])
-            if index < 0 or index >= len(self._output_session_ids):
+            if index < 0 or index >= len(self._session_state.ids):
                 return
-            sid = self._output_session_ids[index]
-            self._viewing_output_session_id = sid
+            sid = self._session_state.ids[index]
+            self._session_state.select(sid)
             self._show_output_session(sid)
         except Exception:
             pass
@@ -6945,27 +6803,80 @@ class OPLIDE(TkinterDnD.Tk):
         """Open the docked GenAI composer in generation mode."""
         self._open_genai_panel("generate")
 
+    def _prepare_genai_generation(self) -> bool:
+        """Preserve or discard editor edits before Generate replaces the buffers."""
+        return OPLIDE._resolve_editor_replacement(self, "Generate", model=True, data=True)
+
+    def _save_editor_changes(
+        self, action: str, *, model: bool, data: bool, cancelled: Optional[Callable[[], bool]] = None
+    ) -> bool:
+        saves = []
+        for editor, widget, frame, extension, label in (
+            (self._model_editor_state, self.model_text, self.model_frame, ".mod", "Model"),
+            (self._data_editor_state, self.data_text, self.data_frame, ".dat", "Data"),
+        ):
+            if not (model if widget is self.model_text else data):
+                continue
+            content = self._get_editor_text(widget)
+            if content == editor.saved_text:
+                continue
+            path = editor.path or filedialog.asksaveasfilename(
+                parent=self,
+                defaultextension=extension,
+                filetypes=[(f"{label} files", f"*{extension}"), ("All files", "*.*")],
+            )
+            if not path:
+                return False
+            saves.append((editor, frame, path, content, label))
+
+        for editor, frame, path, content, label in saves:
+            if cancelled is not None and cancelled():
+                return False
+            try:
+                with open(path, "w", encoding="utf-8") as saved_file:
+                    saved_file.write(content)
+            except (OSError, UnicodeError) as exc:
+                logging.getLogger(__name__).exception("Failed to save editor changes before %s", action)
+                messagebox.showerror(action, f"Could not save {label.lower()} changes:\n{exc}", parent=self)
+                return False
+            editor.path = path
+            editor.saved_text = content
+            self.editor_notebook.tab(frame, text=f"{label}: {os.path.basename(path)}")
+            self._save_session()
+        return True
+
     def _run_genai_generate(self, prompt_input: _PromptInput) -> None:
         """Generate model and data from the docked GenAI composer input."""
-        if not self.genai_provider or not self.genai_model:
+        provider, model_name = self.genai_provider, self.genai_model
+        if not provider or not model_name:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
-        # Resolve selected generator module
-        gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
+        try:
+            gen_module = self._import_selected_genai_module()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to load GenAI method")
+            self.status_var.set("GenAI: error")
+            messagebox.showerror("GenAI Error", _concise_genai_error(exc))
+            return
+
+        if not self._prepare_genai_generation():
+            return
 
         operation = self._start_foreground_operation(
             kind="genai-generate",
             label="Generate Model & Data",
             header="GenAI: Generating model and data...",
             status=(
-                f"GenAI: generating with {self.genai_provider} • {self.genai_model} • "
+                f"GenAI: generating with {provider} • {model_name} • "
                 f"method={self._label_for_method(self.genai_method_var.get())} ..."
             ),
         )
         if operation is None:
             return
+        runner = _GenAIRequestRunner(
+            operation, provider, model_name, gen_module, bool(self.verbose_llm_var.get()), self.after, self._append_output
+        )
         self._append_output(
             self._format_prompt_for_output("Prompt", prompt_input),
             operation.session_id,
@@ -6973,35 +6884,11 @@ class OPLIDE(TkinterDnD.Tk):
         self._clear_pending_genai_revisions()
 
         # Use the visible request timestamp for filenames
-        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._session_state.timestamps.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         def run():
             try:
-                # Progress hook -> Output panel
-                def progress(msg: str) -> None:
-                    if operation.cancel_requested:
-                        return
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
-
-                # Bridge module logger to progress (optional)
-                class _ProgressLogHandler(logging.Handler):
-                    def emit(self, record: logging.LogRecord) -> None:
-                        try:
-                            text = self.format(record)
-                        except Exception:
-                            text = record.getMessage()
-                        progress(text)
-
-                log = logging.getLogger(module_logger_name)
-                handler = None
-                old_level = log.level
-                if self.verbose_llm_var.get():
-                    handler = _ProgressLogHandler()
-                    handler.setLevel(logging.DEBUG)
-                    log.addHandler(handler)
-                    log.setLevel(logging.DEBUG)
-
                 tmp_dir = os.path.join(os.getcwd(), "tmp")
                 os.makedirs(tmp_dir, exist_ok=True)
                 # Unique filenames per request
@@ -7009,23 +6896,7 @@ class OPLIDE(TkinterDnD.Tk):
                 model_path = str(model_target)
                 data_path = str(data_target)
 
-                try:
-                    # Dispatch to selected generation method (PromptInput supports images)
-                    assessment = gen_module.generative_solve(
-                        prompt_input,
-                        model_path,
-                        data_path,
-                        model_name=self.genai_model,
-                        llm_provider=self.genai_provider,
-                        progress=progress,
-                    )
-                finally:
-                    if handler is not None:
-                        try:
-                            log.removeHandler(handler)
-                            log.setLevel(old_level)
-                        except Exception:
-                            pass
+                assessment = runner.generate(prompt_input, model_path, data_path)
 
                 with open(model_path, "r", encoding="utf-8") as f:
                     model_code = f.read()
@@ -7045,8 +6916,8 @@ class OPLIDE(TkinterDnD.Tk):
                     self.data_text.delete("1.0", tk.END)
                     self.data_text.insert(tk.END, data_code)
                     # Update file paths and tabs
-                    self.model_file = model_path
-                    self.data_file = data_path
+                    self._model_editor_state.path = model_path
+                    self._data_editor_state.path = data_path
                     self._record_output_session_artifacts(operation.session_id, model_text=model_code, data_text=data_code)
                     self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(model_path)}")
                     self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(data_path)}")
@@ -7079,29 +6950,119 @@ class OPLIDE(TkinterDnD.Tk):
 
                 self.after(0, on_error, e)
 
-        threading.Thread(target=run, daemon=True).start()
+        runner.start(run)
 
     def genai_feedback(self) -> None:
         """Open the docked GenAI composer in Ask mode."""
         self._open_genai_panel("ask")
 
+    def _prompt_unsaved_editor_changes(self, action: str) -> Optional[bool]:
+        return messagebox.askyesnocancel(
+            "Unsaved Changes",
+            "The editors have unsaved changes.\n\n"
+            f"Yes: Save changes and {action}.\n"
+            f"No: Discard changes and {action}.\n"
+            "Cancel: Leave the editors unchanged.",
+            parent=self,
+        )
+
+    def _resolve_editor_replacement(
+        self,
+        action: str,
+        *,
+        model: bool,
+        data: bool,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        if cancelled is not None and cancelled():
+            return False
+        model_dirty = model and self._get_editor_text(self.model_text) != self._model_editor_state.saved_text
+        data_dirty = data and self._get_editor_text(self.data_text) != self._data_editor_state.saved_text
+        if not model_dirty and not data_dirty:
+            return True
+        keep = OPLIDE._prompt_unsaved_editor_changes(self, action)
+        if keep is None or (cancelled is not None and cancelled()):
+            return False
+        if keep:
+            return OPLIDE._save_editor_changes(self, action, model=model_dirty, data=data_dirty, cancelled=cancelled)
+        return OPLIDE._discard_unsaved_editor_changes(self, action, model=model_dirty, data=data_dirty, cancelled=cancelled)
+
+    def _discard_unsaved_editor_changes(
+        self,
+        action: str,
+        *,
+        model: bool = True,
+        data: bool = True,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> bool:
+        replacements = []
+        try:
+            for editor, widget in (
+                (self._model_editor_state, self.model_text),
+                (self._data_editor_state, self.data_text),
+            ):
+                if not (model if widget is self.model_text else data):
+                    continue
+                if self._get_editor_text(widget) == editor.saved_text:
+                    continue
+                if editor.path:
+                    with open(editor.path, "r", encoding="utf-8") as saved_file:
+                        content = saved_file.read()
+                else:
+                    content = editor.saved_text
+                replacements.append((editor, widget, content))
+        except (OSError, UnicodeError) as exc:
+            logging.getLogger(__name__).exception("Failed to discard editor changes before %s", action)
+            messagebox.showerror(action, f"Could not restore the saved files:\n{exc}", parent=self)
+            return False
+        if cancelled is not None and cancelled():
+            return False
+        for editor, widget, content in replacements:
+            self._replace_editor_buffer(widget, content, is_data=widget is self.data_text)
+            editor.saved_text = self._get_editor_text(widget)
+        return True
+
+    def _prepare_genai_feedback_files(self) -> tuple[Optional[str], Optional[str]]:
+        """Resolve unsaved edits before writing the files used by Ask."""
+        if self._has_unsaved_editor_changes():
+            keep = OPLIDE._prompt_unsaved_editor_changes(self, "Ask")
+            if keep is None:
+                return None, None
+            if not keep and not OPLIDE._discard_unsaved_editor_changes(self, "Ask"):
+                return None, None
+
+        model_path, data_path = self._ensure_model_data_saved()
+        if model_path:
+            for editor, widget in (
+                (self._model_editor_state, self.model_text),
+                (self._data_editor_state, self.data_text),
+            ):
+                if editor.path:
+                    editor.saved_text = self._get_editor_text(widget)
+                    self._update_editor_tab(widget)
+        return model_path, data_path
+
     def _run_genai_feedback(self, prompt_input: _PromptInput) -> None:
         """Request GenAI feedback from the docked composer input."""
-        if not self.genai_provider or not self.genai_model:
+        provider, model_name = self.genai_provider, self.genai_model
+        if not provider or not model_name:
             messagebox.showwarning("GenAI", "No GenAI model selected.")
             return
 
         # Track if a data file actually existed before this request
-        had_data_file = bool(self.data_file and os.path.exists(self.data_file))
+        had_data_file = bool(self._data_editor_state.path and os.path.exists(self._data_editor_state.path))
 
-        # Ensure model/data are saved and get paths
-        model_path, data_path = self._ensure_model_data_saved()
+        model_path, data_path = self._prepare_genai_feedback_files()
         if not model_path:
             return
 
-        # Resolve selected generator module
-        gen_module = self._import_selected_genai_module()
-        module_logger_name = getattr(gen_module, "__name__", "pyopl.genai.pyopl_generative")
+        try:
+            gen_module = self._import_selected_genai_module()
+        except Exception as exc:
+            logging.getLogger(__name__).exception("Failed to load GenAI method")
+            self.status_var.set("GenAI: error")
+            messagebox.showerror("GenAI Error", _concise_genai_error(exc))
+            return
 
         operation = self._start_foreground_operation(
             kind="genai-feedback",
@@ -7113,6 +7074,9 @@ class OPLIDE(TkinterDnD.Tk):
         )
         if operation is None:
             return
+        runner = _GenAIRequestRunner(
+            operation, provider, model_name, gen_module, bool(self.verbose_llm_var.get()), self.after, self._append_output
+        )
         self._append_output(
             self._format_prompt_for_output("Question", prompt_input),
             operation.session_id,
@@ -7120,7 +7084,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._clear_pending_genai_revisions()
 
         # Use visible request timestamp for filenames
-        display_ts = self._output_session_timestamp.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        display_ts = self._session_state.timestamps.get(operation.session_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         safe_ts = display_ts.replace(":", "-").replace(" ", "_")
 
         # Ensure a temp directory exists for any timestamped revised files
@@ -7129,51 +7093,11 @@ class OPLIDE(TkinterDnD.Tk):
 
         def run():
             try:
-                # Progress hook -> Output panel
-                def progress(msg: str) -> None:
-                    if operation.cancel_requested:
-                        return
-                    self.after(0, self._append_output, (msg if msg.endswith("\n") else msg + "\n"), operation.session_id)
-
-                # Bridge module logger to progress (optional)
-                class _ProgressLogHandler(logging.Handler):
-                    def emit(self, record: logging.LogRecord) -> None:
-                        try:
-                            text = self.format(record)
-                        except Exception:
-                            text = record.getMessage()
-                        progress(text)
-
-                log = logging.getLogger(module_logger_name)
-                handler = None
-                old_level = log.level
-                if self.verbose_llm_var.get():
-                    handler = _ProgressLogHandler()
-                    handler.setLevel(logging.DEBUG)
-                    log.addHandler(handler)
-                    log.setLevel(logging.DEBUG)
-
-                try:
-                    # PromptInput supports images (same shape as Generate)
-                    result = gen_module.generative_feedback(
-                        prompt_input,
-                        model_path,
-                        data_path,
-                        model_name=self.genai_model,
-                        llm_provider=self.genai_provider,
-                        progress=progress,
-                    )
-                finally:
-                    if handler is not None:
-                        try:
-                            log.removeHandler(handler)
-                            log.setLevel(old_level)
-                        except Exception:
-                            pass
+                result = runner.feedback(prompt_input, model_path, data_path)
 
                 feedback = result.get("feedback", "No feedback returned.")
-                revised_model = result.get("revised_model", "")
-                revised_data = result.get("revised_data", "")
+                revised_model = str(result.get("revised_model") or "")
+                revised_data = str(result.get("revised_data") or "")
 
                 if operation.cancel_requested:
                     return
@@ -7185,17 +7109,17 @@ class OPLIDE(TkinterDnD.Tk):
                     self._append_output(f"\nFeedback:\n{feedback}\n", operation.session_id)
                     if revised_model or revised_data:
                         self._set_pending_genai_revisions(
-                            {
-                                "revised_model": revised_model,
-                                "revised_data": revised_data,
-                                "current_model": self.model_text.get("1.0", tk.END),
-                                "current_data": self.data_text.get("1.0", tk.END),
-                                "model_path": model_path,
-                                "data_path": data_path,
-                                "safe_ts": safe_ts,
-                                "had_data_file": had_data_file,
-                                "session_id": operation.session_id,
-                            }
+                            _PendingGenAIRevision(
+                                revised_model=revised_model,
+                                revised_data=revised_data,
+                                current_model=self.model_text.get("1.0", tk.END),
+                                current_data=self.data_text.get("1.0", tk.END),
+                                model_path=model_path,
+                                data_path=data_path or "",
+                                safe_ts=safe_ts,
+                                had_data_file=had_data_file,
+                                session_id=operation.session_id,
+                            )
                         )
                     self._clear_genai_composer()
 
@@ -7218,7 +7142,7 @@ class OPLIDE(TkinterDnD.Tk):
 
                 self.after(0, on_error, e)
 
-        threading.Thread(target=run, daemon=True).start()
+        runner.start(run)
 
     def _genai_solve_and_explain(self) -> None:
         """Solve the current model/data and ask GenAI to explain the solution in lay terms."""
@@ -7229,11 +7153,15 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Ensure run_model uses these exact files and update tabs/highlighting
         try:
-            self.model_file = model_path
-            self.data_file = data_path
+            self._model_editor_state.path = model_path
+            self._data_editor_state.path = data_path
             try:
-                self.editor_notebook.tab(self.model_frame, text=f"Model: {os.path.basename(self.model_file or '')}")
-                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self.data_file or '')}")
+                self.editor_notebook.tab(
+                    self.model_frame, text=f"Model: {os.path.basename(self._model_editor_state.path or '')}"
+                )
+                self.editor_notebook.tab(self.data_frame, text=f"Data: {os.path.basename(self._data_editor_state.path or '')}")
+                self._update_editor_tab(self.model_text)
+                self._update_editor_tab(self.data_text)
             except Exception:
                 pass
             try:
@@ -7657,8 +7585,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Load settings from disk."""
         try:
             if hasattr(self, "_config_path") and self._config_path.exists():
-                with open(self._config_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                return _read_ide_settings(self._config_path)
         except Exception as e:
             print(f"Warning: failed to load settings: {e}")
         return {}
@@ -7683,8 +7610,7 @@ class OPLIDE(TkinterDnD.Tk):
                 ),
                 "genai-method": self.genai_method_var.get() if hasattr(self, "genai_method_var") else "pyopl_generative",
             }
-            with open(self._config_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=4)
+            _write_ide_settings(self._config_path, payload)
         except Exception as e:
             print(f"Warning: failed to save settings: {e}")
 
@@ -7695,23 +7621,23 @@ class OPLIDE(TkinterDnD.Tk):
     def _mark_editor_baselines_saved(self) -> None:
         """Record the current model/data editor contents as the clean close baseline."""
         try:
-            self._model_saved_text = self._get_editor_text(self.model_text)
+            self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
         except Exception:
-            self._model_saved_text = ""
+            self._model_editor_state.saved_text = ""
         try:
-            self._data_saved_text = self._get_editor_text(self.data_text)
+            self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
         except Exception:
-            self._data_saved_text = ""
+            self._data_editor_state.saved_text = ""
 
     def _has_unsaved_editor_changes(self) -> bool:
         """Return True when either model or data editor differs from its saved baseline."""
         try:
-            if self._get_editor_text(self.model_text) != self._model_saved_text:
+            if self._get_editor_text(self.model_text) != self._model_editor_state.saved_text:
                 return True
         except Exception:
             pass
         try:
-            if self._get_editor_text(self.data_text) != self._data_saved_text:
+            if self._get_editor_text(self.data_text) != self._data_editor_state.saved_text:
                 return True
         except Exception:
             pass
@@ -7732,6 +7658,8 @@ class OPLIDE(TkinterDnD.Tk):
         if self._has_unsaved_editor_changes() and not self._confirm_quit_with_unsaved_changes():
             return
         setattr(self, "_shutting_down", True)
+        self._exemplar_save_state.closed = True
+        OPLIDE._cancel_editor_highlights(self)
         exemplar_search_cleanup = getattr(self, "_exemplar_search_cleanup", None)
         if callable(exemplar_search_cleanup):
             exemplar_search_cleanup()
@@ -7748,7 +7676,7 @@ class OPLIDE(TkinterDnD.Tk):
             self._save_session()
         except Exception:
             pass
-        self._cleanup_genai_pdf_temp_dir()
+        self._genai_attachments.cleanup()
         try:
             self.destroy()
         finally:
@@ -7823,7 +7751,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _run_model_shortcut(self, event: Optional[tk.Event] = None) -> str:
         # While running, do not repurpose this shortcut for Stop (Stop has no shortcut).
-        if self._solver_process and self._solver_process.is_alive():
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
             return "break"
         self.run_model()
         return "break"
@@ -8076,14 +8004,17 @@ class OPLIDE(TkinterDnD.Tk):
         import importlib
 
         key = self.genai_method_var.get() or "pyopl_generative"
+        if key not in (method_key for _, method_key in GENAI_METHODS):
+            key = "pyopl_generative"
+            self.genai_method_var.set(key)
+        module_name = f"pyopl.genai.{key}"
         try:
-            return importlib.import_module(f"pyopl.genai.{key}")
-        except Exception as e:
+            return importlib.import_module(module_name)
+        except ModuleNotFoundError as e:
+            if e.name != module_name or key == "pyopl_generative":
+                raise
             logging.getLogger(__name__).warning(f"Falling back to pyopl_generative due to import error: {e}")
-            try:
-                self.genai_method_var.set("pyopl_generative")
-            except Exception:
-                pass
+            self.genai_method_var.set("pyopl_generative")
             return importlib.import_module("pyopl.genai.pyopl_generative")
 
     def _label_for_method(self, key: str) -> str:
@@ -8138,6 +8069,713 @@ class OPLIDE(TkinterDnD.Tk):
             pass
         self._refresh_genai_panel_state()
         self._save_settings()
+
+
+def _find_previous_match(
+    text: str, pattern: str, boundary_off: int, use_regex: bool, case_sensitive: bool
+) -> Optional[tuple[int, int]]:
+    matches: list[tuple[int, int]] = []
+    if use_regex:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        matches = [(match.start(), match.end()) for match in re.finditer(pattern, text, flags)]
+    elif case_sensitive:
+        start_pos = 0
+        while True:
+            index = text.find(pattern, start_pos)
+            if index == -1:
+                break
+            matches.append((index, index + len(pattern)))
+            start_pos = index + max(1, len(pattern))
+    else:
+        escaped_pattern = re.escape(pattern)
+        matches = [(match.start(), match.end()) for match in re.finditer(escaped_pattern, text, re.IGNORECASE)]
+
+    previous_match: Optional[tuple[int, int]] = None
+    for start, end in matches:
+        if start < boundary_off:
+            previous_match = (start, end)
+        else:
+            break
+    return previous_match or (matches[-1] if matches else None)
+
+
+class _FindReplaceDialog:
+    def __init__(self, host: OPLIDE) -> None:
+        self.parent = host
+        self.data_text = host.data_text
+        self._undo = host._undo
+        self._redo = host._redo
+        self._get_active_editor = host._get_active_editor
+        self._on_text_change = host._on_text_change
+        self.dialog: Optional[tk.Toplevel] = None
+
+    def close(self) -> None:
+        if self.dialog is not None and self.dialog.winfo_exists():
+            self.dialog.destroy()
+
+    def open(self) -> None:
+        dlg = tk.Toplevel(self.parent)
+        self.dialog = dlg
+        dlg.title("Find and Replace")
+        dlg.transient(self.parent)
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        # Allow undo/redo while the dialog is active by binding the
+        # common shortcuts to the IDE handlers on the dialog. These
+        # bindings run when focus is inside entry widgets.
+        def _dlg_undo(ev: Optional[tk.Event] = None) -> str:
+            self._undo()
+            return "break"
+
+        def _dlg_redo(ev: Optional[tk.Event] = None) -> str:
+            self._redo()
+            return "break"
+
+        dlg.bind("<Control-z>", _dlg_undo)
+        dlg.bind("<Control-Z>", _dlg_undo)
+        dlg.bind("<Control-Shift-Z>", _dlg_redo)
+        dlg.bind("<Control-y>", _dlg_redo)
+        # macOS Command variants
+        if sys.platform == "darwin":
+            dlg.bind("<Command-z>", _dlg_undo)
+            dlg.bind("<Command-Z>", _dlg_undo)
+            dlg.bind("<Command-Shift-Z>", _dlg_redo)
+            dlg.bind("<Command-y>", _dlg_redo)
+
+        fg_var = tk.StringVar()
+        rp_var = tk.StringVar()
+        regex_var = tk.BooleanVar(value=False)
+        case_var = tk.BooleanVar(value=False)
+
+        ttk.Label(dlg, text="Find:").grid(row=0, column=0, sticky="w", padx=6, pady=(8, 2))
+        find_entry = ttk.Entry(dlg, textvariable=fg_var, width=40)
+        find_entry.grid(row=0, column=1, columnspan=3, padx=6, pady=(8, 2))
+
+        ttk.Label(dlg, text="Replace:").grid(row=1, column=0, sticky="w", padx=6, pady=2)
+        replace_entry = ttk.Entry(dlg, textvariable=rp_var, width=40)
+        replace_entry.grid(row=1, column=1, columnspan=3, padx=6, pady=2)
+
+        regex_cb = ttk.Checkbutton(dlg, text="Regex", variable=regex_var)
+        regex_cb.grid(row=2, column=1, sticky="w", padx=6)
+        case_cb = ttk.Checkbutton(dlg, text="Case sensitive", variable=case_var)
+        case_cb.grid(row=2, column=2, sticky="w", padx=6)
+
+        # Buttons
+        def _highlight_match(start_idx: str, end_idx: str) -> None:
+            w = self._get_active_editor()
+            # Clear previous highlights and selection, then mark this match
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            w.tag_add("find_match", start_idx, end_idx)
+            w.tag_add("sel", start_idx, end_idx)
+            w.tag_configure("find_match", background="#ffe58f")
+            w.mark_set("insert", end_idx)
+            w.see(start_idx)
+
+        def _find_next(ev: Optional[tk.Event] = None) -> str:
+            pattern = find_entry.get()
+            if not pattern:
+                return "break"
+            w = self._get_active_editor()
+            text = w.get("1.0", "end-1c")
+            # Choose a sensible start index: after current highlighted match,
+            # or the widget's insert if it has focus, otherwise start of buffer.
+            if w.tag_ranges("find_match"):
+                start = w.index(w.tag_ranges("find_match")[1])
+            elif w.focus_get() is w:
+                start = w.index("insert")
+            else:
+                start = "1.0"
+            # Convert start to integer offset (chars from 1.0)
+            if regex_var.get():
+                flags = 0 if case_var.get() else re.IGNORECASE
+                try:
+                    for m in re.finditer(pattern, text, flags):
+                        s_off = m.start()
+                        cnt = w.count("1.0", start, "chars")
+                        if s_off >= (cnt[0] if cnt else 0):
+                            # compute indices
+                            s = w.index(f"1.0 + {m.start()} chars")
+                            e = w.index(f"1.0 + {m.end()} chars")
+                            _highlight_match(s, e)
+                            return "break"
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return "break"
+            else:
+                # use Tk text search
+                if case_var.get():
+                    res = w.search(pattern, start, tk.END)
+                    if not res:
+                        res = w.search(pattern, "1.0", start)
+                else:
+                    res = w.search(pattern, start, tk.END, nocase=True)
+                    if not res:
+                        res = w.search(pattern, "1.0", start, nocase=True)
+                if res:
+                    end = f"{res}+{len(pattern)}c"
+                    _highlight_match(res, end)
+            return "break"
+
+        def _find_prev(ev: Optional[tk.Event] = None) -> str:
+            pattern = find_entry.get()
+            if not pattern:
+                return "break"
+            w = self._get_active_editor()
+            text = w.get("1.0", "end-1c")
+            ranges = w.tag_ranges("find_match")
+            if ranges:
+                start_idx = str(ranges[0])
+            else:
+                if w.tag_ranges("sel"):
+                    start_idx = str(w.index("sel.first"))
+                elif w.focus_get() is w:
+                    start_idx = str(w.index("insert"))
+                else:
+                    start_idx = "1.0"
+            sc = w.count("1.0", start_idx, "chars")
+            boundary_off = sc[0] if sc else 0
+            try:
+                prev_match = _find_previous_match(text, pattern, boundary_off, regex_var.get(), case_var.get())
+            except re.error:
+                messagebox.showerror("Regex error", "Invalid regular expression")
+                return "break"
+
+            if prev_match:
+                s_idx = w.index(f"1.0 + {prev_match[0]} chars")
+                e_idx = w.index(f"1.0 + {prev_match[1]} chars")
+                _highlight_match(s_idx, e_idx)
+            return "break"
+
+        def _replace_one() -> None:
+            w = self._get_active_editor()
+            try:
+                sel_start = w.index("sel.first")
+                sel_end = w.index("sel.last")
+            except Exception:
+                # if nothing selected, find next and then replace
+                _find_next()
+                try:
+                    sel_start = w.index("sel.first")
+                    sel_end = w.index("sel.last")
+                except Exception:
+                    # Fallback: use the currently highlighted match if present
+                    ranges = w.tag_ranges("find_match")
+                    if ranges:
+                        sel_start = str(ranges[0])
+                        sel_end = str(ranges[1])
+                    else:
+                        return
+            replacement = replace_entry.get()
+            if regex_var.get():
+                # compute absolute offsets
+                # Replace only the selected region using Text.replace so undo groups correctly
+                segment = w.get(sel_start, sel_end)
+                try:
+                    new_segment = re.sub(find_entry.get(), replacement, segment, count=1)
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return
+                w.replace(sel_start, sel_end, new_segment)
+            else:
+                # Use Text.replace to make this a single undoable action
+                w.replace(sel_start, sel_end, replacement)
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            # Notify change so UI state (dirty flag) updates
+            try:
+                self._on_text_change(w, is_data=(w is self.data_text))
+            except Exception:
+                pass
+            w.tag_remove("sel", "1.0", tk.END)
+
+        def _replace_all() -> None:
+            w = self._get_active_editor()
+            full = w.get("1.0", "end-1c")
+            if regex_var.get():
+                try:
+                    flags = 0 if case_var.get() else re.IGNORECASE
+                    new = re.sub(find_entry.get(), replace_entry.get(), full, flags=flags)
+                except re.error:
+                    messagebox.showerror("Regex error", "Invalid regular expression")
+                    return
+            else:
+                if case_var.get():
+                    new = full.replace(find_entry.get(), replace_entry.get())
+                else:
+                    # case-insensitive replace: do manual loop
+                    pat = find_entry.get()
+                    if not pat:
+                        return
+                    new = re.sub(re.escape(pat), lambda m: replace_entry.get(), full, flags=re.IGNORECASE)
+            # Replace entire buffer in one operation so undo/redo works as expected
+            w.replace("1.0", "end-1c", new)
+            w.tag_remove("find_match", "1.0", tk.END)
+            w.tag_remove("sel", "1.0", tk.END)
+            try:
+                self._on_text_change(w, is_data=(w is self.data_text))
+            except Exception:
+                pass
+            w.tag_remove("sel", "1.0", tk.END)
+
+        btn_frame = ttk.Frame(dlg)
+        btn_frame.grid(row=3, column=0, columnspan=4, pady=8)
+        ttk.Button(btn_frame, text="Prev", command=_find_prev).grid(row=0, column=0, padx=4)
+        ttk.Button(btn_frame, text="Next", command=_find_next).grid(row=0, column=1, padx=4)
+        ttk.Button(btn_frame, text="Replace", command=_replace_one).grid(row=0, column=2, padx=4)
+        ttk.Button(btn_frame, text="Replace All", command=_replace_all).grid(row=0, column=3, padx=4)
+        ttk.Button(btn_frame, text="Close", command=self.close).grid(row=0, column=4, padx=4)
+
+        # Keyboard bindings inside dialog
+        dlg.bind("<Return>", _find_next)
+        dlg.bind("<Shift-Return>", _find_prev)
+        dlg.protocol("WM_DELETE_WINDOW", self.close)
+        find_entry.focus_set()
+
+
+class _ComparisonDialog:
+    def __init__(self, host: OPLIDE) -> None:
+        self.parent = host
+        self.model_file = host._model_editor_state.path
+        self.data_file = host._data_editor_state.path
+        self._selected_genai_model = lambda: (host.genai_provider, host.genai_model)
+        self._active_operation = lambda: host._active_operation
+        self._start_operation = host._start_foreground_operation
+        self._finish_operation = host._finish_foreground_operation
+        self._interrupt_operation = host.interrupt_active_operation
+        self._append_output = host._append_output
+        self._set_status = host.status_var.set
+        self._after = host.after
+        self.process_state = _ComparisonProcessState()
+        self.dialog: Optional[tk.Toplevel] = None
+        self._poll_after_id: Optional[str] = None
+        self._active_request: Optional[_ComparisonRequest] = None
+
+    def _cancel_poll(self) -> None:
+        after_id = self._poll_after_id
+        self._poll_after_id = None
+        if after_id is not None and self.dialog is not None:
+            try:
+                self.dialog.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def close(self) -> None:
+        self._cancel_poll()
+        self.process_state.interrupt()
+        self._active_request = None
+        active = self._active_operation()
+        if active is not None and active.kind == "genai-observable-mapping":
+            self._interrupt_operation()
+        if self.dialog is not None and self.dialog.winfo_exists():
+            self.dialog.destroy()
+
+    def open(self) -> None:
+        dialog = tk.Toplevel(self.parent)
+        self.dialog = dialog
+        dialog.title("Compare models")
+        dialog.transient(self.parent)
+        dialog.geometry("760x600")
+        dialog.minsize(680, 500)
+
+        root = ttk.Frame(dialog, padding=12)
+        root.pack(fill=tk.BOTH, expand=True)
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(2, weight=1)
+
+        strategy_frame = ttk.Frame(root)
+        strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
+        strategy_frame.columnconfigure(1, uniform="comparison-strategy")
+        strategy_frame.columnconfigure(2, minsize=4)
+        strategy_frame.columnconfigure(3, uniform="comparison-strategy")
+        strategy_var = tk.StringVar(value="abstract")
+
+        def set_strategy(strategy: str) -> None:
+            strategy_var.set(strategy)
+            abstract_button.configure(style=("GenaiModeActive.TButton" if strategy == "abstract" else "GenaiMode.TButton"))
+            concrete_button.configure(style=("GenaiModeActive.TButton" if strategy == "concrete" else "GenaiMode.TButton"))
+
+        strategy_button_width = max(len("Abstract"), len("Concrete"))
+        abstract_button = ttk.Button(
+            strategy_frame,
+            text="Abstract",
+            style="GenaiModeActive.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("abstract"),
+        )
+        abstract_button.grid(row=0, column=1, sticky="ew")
+        concrete_button = ttk.Button(
+            strategy_frame,
+            text="Concrete",
+            style="GenaiMode.TButton",
+            width=strategy_button_width,
+            command=lambda: set_strategy("concrete"),
+        )
+        concrete_button.grid(row=0, column=3, sticky="ew")
+
+        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
+        path_frame.grid(row=1, column=0, sticky="ew")
+        path_frame.columnconfigure(1, weight=1)
+        path_frame.columnconfigure(3, minsize=90)
+
+        left_model_var = tk.StringVar(value=self.model_file or "")
+        left_data_var = tk.StringVar(value=self.data_file or "")
+        right_model_var = tk.StringVar()
+        right_data_var = tk.StringVar()
+        observable_mapping_var = tk.StringVar()
+
+        def comparison_request() -> _ComparisonRequest:
+            return _ComparisonRequest(
+                left_model_var.get().strip(),
+                left_data_var.get().strip(),
+                right_model_var.get().strip(),
+                right_data_var.get().strip(),
+                strategy_var.get(),
+                observable_mapping_var.get().strip(),
+            )
+
+        def validate_request(request: _ComparisonRequest, *, include_mapping: bool = False) -> bool:
+            try:
+                request.validate_paths(include_mapping=include_mapping)
+            except _ComparisonInputError as exc:
+                show_error = messagebox.showwarning if exc.warning else messagebox.showerror
+                show_error("Compare models", str(exc), parent=dialog)
+                return False
+            return True
+
+        def browse_model(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select model file",
+                filetypes=[("Model files", "*.mod"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def browse_data(target: tk.StringVar) -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select data file",
+                filetypes=[("Data files", "*.dat"), ("All files", "*.*")],
+            )
+            if fname:
+                target.set(fname)
+
+        def browse_observable_mapping() -> None:
+            fname = filedialog.askopenfilename(
+                parent=dialog,
+                title="Select observable mapping JSON",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            )
+            if fname:
+                observable_mapping_var.set(fname)
+
+        browse_buttons: list[ttk.Button] = []
+
+        def add_path_row(
+            row: int,
+            label: str,
+            var: tk.StringVar,
+            browse_command: Callable[[], None],
+        ) -> None:
+            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            entry = ttk.Entry(path_frame, textvariable=var)
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
+            browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
+            browse_buttons.append(browse_button)
+
+        add_path_row(0, "Left model", left_model_var, lambda: browse_model(left_model_var))
+        add_path_row(1, "Left data", left_data_var, lambda: browse_data(left_data_var))
+        add_path_row(2, "Right model", right_model_var, lambda: browse_model(right_model_var))
+        add_path_row(3, "Right data", right_data_var, lambda: browse_data(right_data_var))
+        add_path_row(4, "Observable mapping", observable_mapping_var, browse_observable_mapping)
+        mapping_generate_button = ttk.Button(path_frame, text="Generate")
+        mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
+
+        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
+        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+
+        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
+        result_text.grid(row=0, column=0, sticky="nsew")
+        result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
+        result_text.config(state="disabled")
+
+        button_frame = ttk.Frame(root)
+        button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        button_frame.columnconfigure(0, weight=1)
+        compare_button = ttk.Button(button_frame, text="Compare")
+        compare_button.grid(row=0, column=1, padx=(0, 8))
+        close_button = ttk.Button(button_frame, text="Close", command=self.close)
+        close_button.grid(row=0, column=2)
+
+        def set_compare_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            mapping_generate_button.config(state=state)
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
+            close_button.config(state=state)
+            compare_button.config(
+                text=("Interrupt" if running else "Compare"),
+                command=(interrupt_compare if running else do_compare),
+                state="normal",
+            )
+
+        def set_mapping_running(running: bool) -> None:
+            state = "disabled" if running else "normal"
+            for control in browse_buttons:
+                control.config(state=state)
+            abstract_button.config(state=state)
+            concrete_button.config(state=state)
+            compare_button.config(state=state)
+            close_button.config(state=state)
+            mapping_generate_button.config(
+                text=("Interrupt" if running else "Generate"),
+                command=(interrupt_mapping if running else generate_observable_mapping),
+                state="normal",
+            )
+
+        def set_result(text: str) -> None:
+            result_text.config(state="normal")
+            result_text.delete("1.0", tk.END)
+            result_text.insert(tk.END, text)
+            result_text.config(state="disabled")
+
+        def interrupt_mapping() -> None:
+            active = self._active_operation()
+            if active is None or active.kind != "genai-observable-mapping":
+                return
+            self._interrupt_operation()
+            set_mapping_running(False)
+            set_result("Observable mapping generation interrupted.\n")
+
+        def generate_observable_mapping() -> None:
+            request = comparison_request()
+            if not validate_request(request):
+                return
+            left_model, right_model = request.left_model, request.right_model
+            left_data, right_data = request.left_data, request.right_data
+            selected_genai_provider, selected_genai_model = self._selected_genai_model()
+            if not selected_genai_provider or not selected_genai_model:
+                messagebox.showwarning(
+                    "Compare models", "Select a GenAI provider and model before generating a mapping.", parent=dialog
+                )
+                return
+
+            operation = self._start_operation(
+                kind="genai-observable-mapping",
+                label="Generate Observable Mapping",
+                header="GenAI: Generating observable mapping...",
+                status=f"GenAI: generating observable mapping with {selected_genai_provider} - {selected_genai_model} ...",
+                model_file=left_model,
+                data_file=left_data,
+            )
+            if operation is None:
+                return
+            set_mapping_running(True)
+            self._append_output(
+                f"Generating an observable mapping for:\n{left_model}\n{right_model}\n",
+                operation.session_id,
+            )
+
+            def progress(message: str) -> None:
+                if not operation.cancel_requested:
+                    self._after(
+                        0,
+                        self._append_output,
+                        (message if message.endswith("\n") else message + "\n"),
+                        operation.session_id,
+                    )
+
+            def finish_cancelled() -> None:
+                if dialog.winfo_exists():
+                    set_mapping_running(False)
+                self._finish_operation(operation)
+
+            def run() -> None:
+                try:
+                    mapping_text = _generate_dialog_mapping_text(
+                        left_model,
+                        right_model,
+                        left_data,
+                        right_data,
+                        request.strategy,
+                        selected_genai_model,
+                        selected_genai_provider,
+                        progress,
+                    )
+                    if operation.cancel_requested:
+                        self._after(0, finish_cancelled)
+                        return
+
+                    tmp_dir = Path.cwd() / "tmp"
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    descriptor, mapping_path = tempfile.mkstemp(
+                        prefix="observable_mapping_",
+                        suffix=".json",
+                        dir=str(tmp_dir),
+                        text=True,
+                    )
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as file_obj:
+                        file_obj.write(mapping_text)
+
+                    def apply_mapping() -> None:
+                        if operation.cancel_requested or not dialog.winfo_exists():
+                            try:
+                                os.unlink(mapping_path)
+                            except OSError:
+                                pass
+                            finish_cancelled()
+                            return
+                        observable_mapping_var.set(mapping_path)
+                        set_mapping_running(False)
+                        self._finish_operation(operation)
+                        set_result(f"Generated observable mapping:\n{mapping_path}\n\n{mapping_text}")
+                        self._set_status("GenAI: observable mapping generated")
+
+                    self._after(0, apply_mapping)
+                except Exception as exc:
+
+                    def on_error(error: Exception) -> None:
+                        self._finish_operation(operation)
+                        if operation.cancel_requested or not dialog.winfo_exists():
+                            return
+                        set_mapping_running(False)
+                        detail = _concise_genai_error(error)
+                        set_result(f"Observable mapping generation failed.\n\n{detail}\n")
+                        messagebox.showerror("GenAI Error", detail, parent=dialog)
+                        self._set_status("GenAI: observable mapping error")
+
+                    self._after(0, on_error, exc)
+
+            threading.Thread(target=run, daemon=True).start()
+
+        def interrupt_compare() -> None:
+            self._cancel_poll()
+            self.process_state.interrupt()
+            self._active_request = None
+            set_compare_running(False)
+            set_result("Comparison interrupted by user.\n")
+            self._set_status("Compare models interrupted.")
+
+        def poll_compare(request: _ComparisonRequest) -> None:
+            if request is not self._active_request:
+                return
+            self._poll_after_id = None
+            p = self.process_state.process
+            if p is None or self.process_state.result_queue is None:
+                return
+
+            try:
+                kind, payload = self.process_state.read_nowait()
+            except queue.Empty:
+                if p.is_alive():
+                    self._poll_after_id = dialog.after(100, poll_compare, request)
+                    return
+                self.process_state.cleanup(cancel_queue_thread=True)
+                self._active_request = None
+                set_compare_running(False)
+                set_result("Comparison failed.\n\nComparison process terminated unexpectedly.\n")
+                self._set_status("Compare models failed: process terminated unexpectedly.")
+                messagebox.showerror(
+                    "Compare models",
+                    "Comparison process terminated unexpectedly.",
+                    parent=dialog,
+                )
+                return
+            except ValueError as exc:
+                kind, payload = "error", str(exc)
+
+            self.process_state.finish()
+            self._active_request = None
+            set_compare_running(False)
+
+            if kind == "success" and hasattr(payload, "status") and hasattr(payload, "proof_steps"):
+                set_result(
+                    _format_equivalence_result(
+                        payload,
+                        request.left_model,
+                        request.right_model,
+                        request.left_data,
+                        request.right_data,
+                        request.strategy,
+                    )
+                )
+                self._set_status(f"Compare models: {payload.status}")
+                return
+
+            if kind == "validation_error":
+                detail = str(payload)
+                set_result(_format_comparison_validation_error(detail))
+                self._set_status("Compare models: model validation issue")
+                return
+
+            detail = str(payload)
+            logging.getLogger(__name__).error("Compare models failed: %s", detail)
+            set_result(f"Comparison failed.\n\n{detail}\n")
+            messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
+
+        def do_compare() -> None:
+            request = comparison_request()
+            if not validate_request(request, include_mapping=True):
+                return
+
+            try:
+                self.process_state.start(request)
+                self._active_request = request
+                set_compare_running(True)
+                set_result(f"Comparing models with the {request.strategy} strategy...\n")
+                self._set_status("Compare models running...")
+                self._poll_after_id = dialog.after(100, poll_compare, request)
+            except Exception as exc:
+                logging.getLogger(__name__).exception("Compare models failed")
+                self._cancel_poll()
+                self.process_state.interrupt()
+                self._active_request = None
+                set_compare_running(False)
+                detail = f"{type(exc).__name__}: {exc}"
+                set_result(f"Comparison failed.\n\n{detail}\n")
+                messagebox.showerror("Compare models", f"Comparison failed:\n{detail}", parent=dialog)
+
+        compare_button.config(command=do_compare)
+        mapping_generate_button.config(command=generate_observable_mapping)
+
+        def mapping_is_running() -> bool:
+            active = self._active_operation()
+            return active is not None and active.kind == "genai-observable-mapping"
+
+        dialog.bind(
+            "<Return>",
+            lambda _event: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else do_compare()
+            ),
+        )
+        dialog.bind(
+            "<Escape>",
+            lambda _event: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else self.close()
+            ),
+        )
+        dialog.protocol(
+            "WM_DELETE_WINDOW",
+            lambda: (
+                interrupt_compare()
+                if self.process_state.process is not None
+                else interrupt_mapping() if mapping_is_running() else self.close()
+            ),
+        )
+        dialog.grab_set()
+        dialog.focus_set()
 
 
 if __name__ == "__main__":

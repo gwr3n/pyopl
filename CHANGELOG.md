@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Mark model and data tabs with a bullet when their editor has unsaved changes.
 - Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.
 - Add focused coverage for projected observable mappings, indexed expressions,
   parameter contracts, grounding, and input validation.
@@ -24,15 +25,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve trailing newlines on model/data Save As and regular Data Save; keep the previous file path and clean baseline if saving fails.
+- Protect editor replacements (new model/session, file open/drop, exemplar and session restore, revision apply, and MCP writes) with a scoped Save / Discard / Cancel prompt; time out remote editor updates after 30 seconds without applying a late update.
+- Warn before Generate replaces unsaved editor changes, offering Save, Discard, or Cancel; Save As preserves untitled work.
+- Report failed Ask revision application while keeping the pending revision available for retry.
+- Ask now prompts to save, discard, or cancel when the model or data editor has unsaved changes.
+- Preserve unsaved data edits when applying a model-only GenAI revision.
+- Show GenAI method import errors in the IDE for Generate and Ask requests.
+- Ground concrete observable-mapping prompts with compiled column names for
+  supplied model data, including tuple-indexed variables.
+- Report SciPy/HiGHS MIP dual bounds in the model's objective sense, including
+  any constant objective offset.
+- Ignore invalid saved or runtime GenAI method keys (including Ask mode)
+  rather than importing them as generator modules, and surface missing dependencies.
 - Pass the OpenAI input content using the shared strategy helper's current
   parameter name.
 - Remove temporary output files even when an atomic rename fails.
 
 ### Changed
 
+- Separate IDE exemplar search timers, generations and worker cleanup from the Tk dialog, and snapshot Save preparation inputs behind an explicit pending lifecycle.
+- Make retrieved exemplar copies exclusive and clean up incomplete pairs without overwriting existing files; report search and copy failures in the dialog.
+- Keep IDE GenAI revisions in typed pending state until explicit Apply, preserving the preview and cleaning up partial revision files on write failure.
+- Share Generate and Ask request progress, provider/model snapshots, cancellation checks, and optional logger bridging while retaining their distinct results.
 - Align GraphChain type stubs with multimodal prompt support in the implementation.
+- Separate IDE settings parsing and persistence from Tk preference application while preserving the settings format.
+- Centralize output-session creation and append mutations without changing session storage or UI behavior.
+- Group IDE output-session history, snapshots, and fold state behind one in-file state object.
+- Centralize session-list rename and viewing-selection updates without changing persisted metadata.
+- Build and parse existing session-history JSON through the state owner while keeping disk I/O in the IDE.
+- Route session snapshot and fold-state updates through state helpers, normalizing folds before restoring editor widgets.
+- Move history create, append, remove, rename, select, and reset operations onto the in-file session-state object.
+- Centralize IDE solver process and result-queue lifecycle in an in-file owner, including failed-start cleanup and stale-poll isolation.
+- Validate solver worker message envelopes and success payloads before routing them to the IDE.
+- Separate solver input preparation, queue-event routing, and Tk progress/log presentation.
+- Separate comparison request validation and result formatting from IDE dialog widgets.
+- Move model-comparison dialog state, process/queue cleanup, and cancellation into an in-file dialog owner.
+- Group model/data editor paths, saved baselines, syntax errors, and highlight timers into independent in-file state records.
+- Separate editor highlight ranges from Tk rendering and give find/replace its own in-file dialog owner.
+- Route IDE bridge reads and writes through editor operations while validating both fields before mutation.
+- Centralize GenAI visual attachments and rendered PDF cleanup in an in-file owner, preserving prompt snapshots.
 
 ### Removed
+
+- Remove forwarding `OPLIDE` properties for editor, session, and solver state; callers now use the owning state objects.
 
 ## [v2.6.3] - 2026-11-08
 
