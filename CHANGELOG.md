@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh README code-complexity statistics from Lizard for the `pyopl` package, excluding `pyopl/genai`.
 - Separate GenAI composer submit-button state updates from the panel refresh without changing interrupt behavior.
 - Populate all highspy 1.16.0 option fields in `highs.json` with their default
   values, encoding infinite defaults as strings for conversion before passing
