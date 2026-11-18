@@ -1,4 +1,5 @@
 import json
+import math
 import unittest
 from collections import defaultdict
 from contextlib import redirect_stdout
@@ -6,6 +7,8 @@ from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+
+import highspy
 
 from pyopl.gurobi_codegen import EPS, GurobiCodeGenerator
 from pyopl.highs_codegen import HighsCodeGenerator
@@ -192,16 +195,31 @@ class TestCoreHelperCoverage(unittest.TestCase):
     def test_shipped_highs_settings_solve_with_native_options(self):
         settings_path = Path(__file__).resolve().parents[1] / "highs.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        defaults = highspy.Highs().getOptions()
+        option_fields = {name for name in dir(defaults) if not name.startswith("_")}
+        self.assertTrue(option_fields <= settings.keys(), option_fields - settings.keys())
+        self.assertTrue(all(value is not None for value in settings.values()))
+        for name in option_fields:
+            default = getattr(defaults, name)
+            expected = (
+                ("-Infinity" if default < 0 else "Infinity") if isinstance(default, float) and math.isinf(default) else default
+            )
+            self.assertEqual(settings[name], expected, name)
         settings["output_flag"] = False
+        settings["mip_abs_gap"] = 0.25
         model = "dvar int+ x; maximize x; subject to { x <= 4; }"
         _, code, _ = OPLCompiler().compile_model(model, solver="highs")
         results_container = {}
+        scope = {"results_container": results_container, "_pyopl_solver_settings": settings}
 
         with redirect_stdout(StringIO()):
-            exec(code, {"results_container": results_container, "_pyopl_solver_settings": settings})
+            exec(code, scope)
 
         self.assertEqual(results_container["highs_output"]["status"], "OPTIMAL")
         self.assertEqual(results_container["highs_output"]["objective_value"], 4.0)
+        self.assertEqual(scope["highs"].getOptionValue("mip_abs_gap"), (highspy.HighsStatus.kOk, 0.25))
+        self.assertEqual(scope["highs"].getOptionValue("objective_bound"), (highspy.HighsStatus.kOk, math.inf))
+        self.assertEqual(scope["highs"].getOptionValue("objective_target"), (highspy.HighsStatus.kOk, -math.inf))
 
     def test_highs_reports_mip_progress_in_objective_sense(self):
         for objective, expected in (("maximize", 41.0), ("minimize -", -27.0)):

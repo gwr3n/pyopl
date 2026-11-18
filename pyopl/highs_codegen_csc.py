@@ -2884,6 +2884,13 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line("highs = highspy.Highs()")
         self._add_code_line("for option_name, option_value in solver_options.items():")
         self.indent_level += 1
+        self._add_code_line(
+            "if option_name in ('objective_bound', 'objective_target', 'time_limit') "
+            "and isinstance(option_value, str) and option_value in ('Infinity', '-Infinity'):"
+        )
+        self.indent_level += 1
+        self._add_code_line("option_value = float(option_value)")
+        self.indent_level -= 1
         self._add_code_line("option_status = highs.setOptionValue(option_name, option_value)")
         self._add_code_line("if option_status == highspy.HighsStatus.kError:")
         self.indent_level += 1

@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Populate all highspy 1.16.0 option fields in `highs.json` with their default
+  values, encoding infinite defaults as strings for conversion before passing
+  options to HiGHS; require highspy 1.16
+  so every populated option is supported.
 - Display HiGHS MIP progress in the existing IDE bound chart using native
   solver callbacks, including objective-sense-aware bounds and node counts.
 - Generate HiGHS solver code with highspy directly; rename the backend selector,
