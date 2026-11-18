@@ -841,7 +841,7 @@ minimize x;
             label="Solve Model",
             header="Header",
             status="Running",
-            solver_choice="scipy",
+            solver_choice="highs",
         )
 
         self.assertIsInstance(operation, _ForegroundOperation)

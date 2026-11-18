@@ -12,9 +12,9 @@ from .affine_bounds import affine_interval, combine_intervals, scale_interval
 # === Local imports ===
 from .boolean_lowering import lower_implication
 from .comparison_policy import comparison_policy
+from .highs_codegen_base import HighsCodeGeneratorBase
 from .linear_problem import LinearProblem, ObjectiveSense
 from .numerical_policy import LINEAR_ZERO_TOLERANCE, SOLVER_FEASIBILITY_TOLERANCE, STRICT_COMPARISON_EPSILON
-from .scipy_codegen_base import SciPyCodeGeneratorBase
 from .semantic_error import SemanticError
 from .tuple_set_helper import TupleSetHelper
 
@@ -22,7 +22,7 @@ from .tuple_set_helper import TupleSetHelper
 # (none)
 
 
-SCIPY_FEASIBILITY_TOLERANCE = SOLVER_FEASIBILITY_TOLERANCE
+HIGHS_FEASIBILITY_TOLERANCE = SOLVER_FEASIBILITY_TOLERANCE
 BOOL_EPS = STRICT_COMPARISON_EPSILON
 
 
@@ -92,7 +92,7 @@ class ExpressionEvaluator:
 
         return {}, tuple(to_tuple_recursive(e) for e in expr["elements"])
 
-    def __init__(self, parent: "SciPyCSCCodeGenerator") -> None:
+    def __init__(self, parent: "HighsCSCCodeGenerator") -> None:
         self.parent = parent
 
     # NEW: minl/maxl
@@ -183,7 +183,7 @@ class ExpressionEvaluator:
             return self._eval_tuple_literal(expr, env)
         elif t == "string_literal":  # <-- return plain string literal
             return {}, expr["value"]
-        raise NotImplementedError(f"Expression type '{expr.get('type')}' is not supported by the SciPy code generator.")
+        raise NotImplementedError(f"Expression type '{expr.get('type')}' is not supported by the Highs code generator.")
 
     def _rewrite_implies(self, expr: Dict[str, Any]) -> Dict[str, Any]:
         """Rewrite an 'implies' node as (not left) or right."""
@@ -862,7 +862,7 @@ class ExpressionEvaluator:
         return {}, float(bool(left_const) or bool(right_const))
 
 
-class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
+class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
     _debug_ast: Dict[str, Any]
 
     def _resolve_tuple_field(self, tuple_type, field, tuple_val):
@@ -980,9 +980,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return SemanticError(f"Semantic Error: Unsupported operator in {context}: {op}")
 
     """
-    SciPyCSCCodeGenerator generates Python code for solving linear programming (LP)
-    models using SciPy's `linprog` function, with support for sparse constraint
-    matrices in compressed sparse column (CSC) format.
+    HighsCSCCodeGenerator generates Python code for solving LP/MILP models with
+    highspy directly, adding constraints from sparse coefficient rows.
 
     This class takes a semantically validated abstract syntax tree (AST)
     representing an OPL-style mathematical model and a data dictionary,
@@ -1497,7 +1496,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         """
         name = decl["name"]
         dims = decl["dimensions"]
-        logger.debug(f"[SciPyCSCCodeGenerator] _handle_indexed_variable_declaration: name={name}, dims={dims}")
+        logger.debug(f"[HighsCSCCodeGenerator] _handle_indexed_variable_declaration: name={name}, dims={dims}")
 
         if len(dims) == 1 and dims[0]["type"] == "named_set_dimension":
             self._expand_named_set_variable_declaration(decl, var_names, bounds, integrality)
@@ -1556,7 +1555,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             raise SemanticError(f"Named set '{set_name}' is not declared")
 
         iterator_names = [it.get("iterator") for it in decl.get("iterators", []) if isinstance(it, dict)]
-        logger.debug(f"[SciPyCSCCodeGenerator] Elements for {name} over {set_name}: {elements}")
+        logger.debug(f"[HighsCSCCodeGenerator] Elements for {name} over {set_name}: {elements}")
         for key in elements:
             if isinstance(key, tuple):
                 variable_name = f"{name}[{repr(key)}]"
@@ -1612,7 +1611,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
     def _emit_indexed_variable(self, decl, index_tuple, iterator_names, var_names, bounds, integrality):
         name = decl["name"]
         variable_name = name + "_" + "_".join(str(index) for index in index_tuple)
-        logger.debug(f"[SciPyCSCCodeGenerator] Adding range-indexed variable: {variable_name}")
+        logger.debug(f"[HighsCSCCodeGenerator] Adding range-indexed variable: {variable_name}")
         var_names.append(variable_name)
         self.var_indices[variable_name] = len(var_names) - 1
         env = {iterator_names[i]: value for i, value in enumerate(index_tuple) if i < len(iterator_names)}
@@ -1638,7 +1637,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         Return index as tuple if list/tuple, else unchanged. Recursively normalizes nested indices.
         """
         if isinstance(idx, (list, tuple)):
-            return tuple(SciPyCSCCodeGenerator.normalize_index(e) for e in idx)
+            return tuple(HighsCSCCodeGenerator.normalize_index(e) for e in idx)
         return idx
 
     # === Section: Private Helpers ===
@@ -1691,7 +1690,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if not default_zero_if_missing:
             import logging
 
-            logging.getLogger("pyopl.scipy_codegen_csc").error(
+            logging.getLogger("pyopl.highs_codegen_csc").error(
                 f"[resolve_param_value] SemanticError: Parameter or variable '{name}' with indices {indices} not found in environment."
             )
             raise SemanticError(f"Parameter or variable '{name}' with indices {indices} not found in environment.")
@@ -1707,7 +1706,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         Returns (True, varname, False) if found, else None.
         Handles symbolic index matching for variable names.
         """
-        logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        logger = logging.getLogger("pyopl.highs_codegen_csc")
         if indices is None:
             if name in self.var_indices:
                 logger.debug(f"[resolve_variable] Found scalar variable: {name}")
@@ -1772,7 +1771,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             return
 
         message = f"Index {indices} for '{name}' is out of declared domain ({'; '.join(details)})"
-        logging.getLogger("pyopl.scipy_codegen_csc").debug(f"[resolve_variable] {message}")
+        logging.getLogger("pyopl.highs_codegen_csc").debug(f"[resolve_variable] {message}")
         from .semantic_error import SemanticError
 
         raise SemanticError(message)
@@ -1946,7 +1945,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         Returns (False, value, False) if found, else None.
         """
 
-        logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        logger = logging.getLogger("pyopl.highs_codegen_csc")
         val = self.data_dict.get(f"{name}__map", self.data_dict.get(name))
         val = self._normalize_parameter_lookup_value(name, val, indices, logger)
         logger.debug(f"[resolve_parameter] Lookup param: {name}, indices={indices}, val={val}, env={env}")
@@ -2643,7 +2642,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if logger is not None:
             self.logger = logger
         else:
-            self.logger = logging.getLogger("SciPyCSCCodeGenerator")
+            self.logger = logging.getLogger("HighsCSCCodeGenerator")
             if not self.logger.hasHandlers():
                 handler = logging.StreamHandler()
                 formatter = logging.Formatter("[%(levelname)s] %(name)s: %(message)s")
@@ -2674,7 +2673,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         for decl in self.ast.get("declarations", []):
             if decl.get("type") == "parameter_inline" and decl["name"] not in self.data_dict:
                 self.data_dict[decl["name"]] = decl["value"]
-        self.scipy_code_lines = []
+        self.highs_code_lines = []
         self.indent_level = 0
         self.var_names = []  # List of variable names in order
         self.original_var_names: list[str] = []  # Variables declared in the PyOPL model
@@ -2714,7 +2713,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         return "    " * self.indent_level
 
     def _add_code_line(self, line: str) -> None:
-        self.scipy_code_lines.append(self._indent() + line)
+        self.highs_code_lines.append(self._indent() + line)
 
     def _apply_top_level_binary_assignments(self) -> None:
         for constr in self.ast.get("constraints", []):
@@ -2764,18 +2763,18 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         found_bounds = False
         found_integrality = False
         found_c = False
-        for i, line in enumerate(self.scipy_code_lines):
+        for i, line in enumerate(self.highs_code_lines):
             if line.startswith("var_names = "):
-                self.scipy_code_lines[i] = f"var_names = {repr(self.var_names)}"
+                self.highs_code_lines[i] = f"var_names = {repr(self.var_names)}"
                 found_var_names = True
             elif line.startswith("bounds = "):
-                self.scipy_code_lines[i] = f"bounds = {bounds_py}"
+                self.highs_code_lines[i] = f"bounds = {bounds_py}"
                 found_bounds = True
             elif line.startswith("integrality = "):
-                self.scipy_code_lines[i] = f"integrality = {self.integrality}"
+                self.highs_code_lines[i] = f"integrality = {self.integrality}"
                 found_integrality = True
             elif line.startswith("c = "):
-                self.scipy_code_lines[i] = f"c = {self.c}"
+                self.highs_code_lines[i] = f"c = {self.c}"
                 found_c = True
         if not found_var_names:
             self._add_code_line(f"var_names = {repr(self.var_names)}")
@@ -2823,8 +2822,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("import numpy as np")
         self._add_code_line("import math")
         self._add_code_line("import time")
-        self._add_code_line("from scipy.optimize import linprog")
-        self._add_code_line("from scipy.sparse import csr_matrix")
+        self._add_code_line("import highspy")
         # Ensure results_container exists
         self._add_code_line("try:")
         self.indent_level += 1
@@ -2835,8 +2833,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("results_container = {}")
         self.indent_level -= 1
         self._add_code_line(
-            f"solver_options = {{'disp': True, 'primal_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}, "
-            f"'dual_feasibility_tolerance': {SCIPY_FEASIBILITY_TOLERANCE!r}}}"
+            f"solver_options = {{'output_flag': True, 'primal_feasibility_tolerance': {HIGHS_FEASIBILITY_TOLERANCE!r}, "
+            f"'dual_feasibility_tolerance': {HIGHS_FEASIBILITY_TOLERANCE!r}}}"
         )
         self._add_code_line(
             "solver_options.update({key: value for key, value in globals().get('_pyopl_solver_settings', {}).items() "
@@ -2861,9 +2859,9 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             except Exception:
                 obj_val = 0.0
 
-            # Preserve previously emitted data/headers; append short-circuit result without calling linprog
+            # Preserve previously emitted data/headers; append short-circuit result without starting HiGHS
             self._add_code_line("")
-            self._add_code_line("# No decision variables: short-circuit without linprog")
+            self._add_code_line("# No decision variables: short-circuit without starting HiGHS")
             self._add_code_line("results = {}")
             if feasible:
                 self._add_code_line("results['status'] = 'OPTIMAL'")
@@ -2872,8 +2870,8 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
                 self._add_code_line("results['status'] = 'INFEASIBLE'")
                 self._add_code_line("results['objective_value'] = None")
             self._add_code_line("results['solution'] = {}")
-            self._add_code_line("results_container['scipy_output'] = results")
-            return "\n".join(self.scipy_code_lines)
+            self._add_code_line("results_container['highs_output'] = results")
+            return "\n".join(self.highs_code_lines)
         # <<< END NEW >>>
         self._add_code_line("")
         self._add_code_line(f"{self.results_varname} = {{}}")
@@ -2881,49 +2879,110 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("start_time = time.time()")
         self._add_code_line(
-            "print(f'PyOPL/SciPy-HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')"
+            "print(f'PyOPL/HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')"
         )
-        # Only include integrality if needed
-        if any(self.integrality):
-            self._add_code_line(
-                "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
-                "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs', integrality=integrality, "
-                "options=solver_options)"
-            )
-        else:
-            self._add_code_line(
-                "res = linprog(c, A_ub=A_ub, b_ub=b_ub if b_ub else None, "
-                "A_eq=A_eq, b_eq=b_eq if b_eq else None, "
-                "bounds=bounds, method='highs', "
-                "options=solver_options)"
-            )
-        self._add_code_line("end_time = time.time()")
-        self._add_code_line(
-            "print(f'PyOPL/SciPy-HiGHS: status={res.status}, success={res.success}, iterations={getattr(res, \"nit\", None)}, time={end_time - start_time:.3f}s')"
-        )
-        self._add_code_line("status_map = {0: 'OPTIMAL', 1: 'ITERATION_LIMIT', 2: 'INFEASIBLE', 3: 'UNBOUNDED'}")
-        self._add_code_line("status_str = status_map.get(res.status, 'ERROR')")
-        self._add_code_line("if res.status == 1 and 'time limit' in str(res.message).lower():")
+        self._add_code_line("highs = highspy.Highs()")
+        self._add_code_line("for option_name, option_value in solver_options.items():")
         self.indent_level += 1
-        self._add_code_line("status_str = 'TIME_LIMIT'")
+        self._add_code_line("option_status = highs.setOptionValue(option_name, option_value)")
+        self._add_code_line("if option_status == highspy.HighsStatus.kError:")
+        self.indent_level += 1
+        self._add_code_line("raise ValueError(f'Invalid HiGHS option {option_name!r}: {option_value!r}')")
         self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("infinity = highs.getInfinity()")
+        self._add_code_line("lower_bounds = [(-infinity if lower is None else float(lower)) for lower, _ in bounds]")
+        self._add_code_line("upper_bounds = [(infinity if upper is None else float(upper)) for _, upper in bounds]")
+        self._add_code_line(
+            "costs = ([-float(value) for value in c] if sense == 'maximize' else [float(value) for value in c])"
+        )
+        self._add_code_line("def require_highs_ok(status, action):")
+        self.indent_level += 1
+        self._add_code_line("if status not in (highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning):")
+        self.indent_level += 1
+        self._add_code_line("raise RuntimeError(f'HiGHS failed to {action}: {status}')")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line(
+            "require_highs_ok(highs.addCols(len(var_names), np.asarray(costs, dtype=np.float64), "
+            "np.asarray(lower_bounds, dtype=np.float64), np.asarray(upper_bounds, dtype=np.float64), "
+            "0, np.zeros(len(var_names) + 1, dtype=np.int32), np.asarray([], dtype=np.int32), "
+            "np.asarray([], dtype=np.float64)), 'add columns')"
+        )
+        self._add_code_line("for col_idx, is_integer in enumerate(integrality):")
+        self.indent_level += 1
+        self._add_code_line("if is_integer:")
+        self.indent_level += 1
+        self._add_code_line(
+            "require_highs_ok(highs.changeColIntegrality(col_idx, highspy.HighsVarType.kInteger), "
+            "f'set integrality for column {col_idx}')"
+        )
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("def add_highs_rows(rows, cols, values, rhs_values, equality):")
+        self.indent_level += 1
+        self._add_code_line("row_entries = [[] for _ in rhs_values]")
+        self._add_code_line("for row_idx, col_idx, value in zip(rows, cols, values):")
+        self.indent_level += 1
+        self._add_code_line("row_entries[row_idx].append((col_idx, value))")
+        self.indent_level -= 1
+        self._add_code_line("for rhs, entries in zip(rhs_values, row_entries):")
+        self.indent_level += 1
+        self._add_code_line("lower = float(rhs) if equality else -infinity")
+        self._add_code_line("upper = float(rhs)")
+        self._add_code_line(
+            "require_highs_ok(highs.addRow(lower, upper, len(entries), "
+            "np.asarray([col for col, _ in entries], dtype=np.int32), "
+            "np.asarray([value for _, value in entries], dtype=np.float64)), 'add constraint row')"
+        )
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("add_highs_rows(A_eq_rows, A_eq_cols, A_eq_data, b_eq, True)")
+        self._add_code_line("add_highs_rows(A_ub_rows, A_ub_cols, A_ub_data, b_ub, False)")
+        self._add_code_line(
+            "objective_sense = highspy.ObjSense.kMaximize if sense == 'maximize' else highspy.ObjSense.kMinimize"
+        )
+        self._add_code_line("require_highs_ok(highs.changeObjectiveSense(objective_sense), 'set objective sense')")
+        self._add_code_line("require_highs_ok(highs.run(), 'run optimization')")
+        self._add_code_line("model_status = highs.getModelStatus()")
+        self._add_code_line("status_message = highs.modelStatusToString(model_status)")
+        self._add_code_line("end_time = time.time()")
+        self._add_code_line("print(f'PyOPL/HiGHS: status={status_message}, time={end_time - start_time:.3f}s')")
+        self._add_code_line("status_map = {")
+        self.indent_level += 1
+        self._add_code_line("highspy.HighsModelStatus.kOptimal: 'OPTIMAL',")
+        self._add_code_line("highspy.HighsModelStatus.kTimeLimit: 'TIME_LIMIT',")
+        self._add_code_line("highspy.HighsModelStatus.kIterationLimit: 'ITERATION_LIMIT',")
+        self._add_code_line("highspy.HighsModelStatus.kInfeasible: 'INFEASIBLE',")
+        self._add_code_line("highspy.HighsModelStatus.kUnbounded: 'UNBOUNDED',")
+        self._add_code_line("highspy.HighsModelStatus.kUnboundedOrInfeasible: 'INFEASIBLE_OR_UNBOUNDED',")
+        self.indent_level -= 1
+        self._add_code_line("}")
+        self._add_code_line("status_str = status_map.get(model_status, 'ERROR')")
+        self._add_code_line("info = highs.getInfo()")
+        self._add_code_line("solution_values = highs.getSolution()")
+        self._add_code_line("has_incumbent = solution_values.value_valid")
         self._add_code_line("stats = {}")
-        self._add_code_line("stats['status'] = res.status")
-        self._add_code_line("stats['message'] = res.message")
-        self._add_code_line("stats['nit'] = getattr(res, 'nit', None)")
-        self._add_code_line("stats['crossover_nit'] = getattr(res, 'crossover_nit', None)")
-        self._add_code_line("stats['mip_node_count'] = getattr(res, 'mip_node_count', None)")
-        self._add_code_line("dual_bound = getattr(res, 'mip_dual_bound', None)")
+        self._add_code_line("stats['status'] = str(model_status)")
+        self._add_code_line("stats['message'] = status_message")
+        self._add_code_line("stats['nit'] = info.simplex_iteration_count if info.simplex_iteration_count >= 0 else None")
+        self._add_code_line(
+            "stats['crossover_nit'] = info.crossover_iteration_count if info.crossover_iteration_count >= 0 else None"
+        )
+        self._add_code_line(
+            "stats['mip_node_count'] = info.mip_node_count if any(integrality) and info.mip_node_count >= 0 else None"
+        )
+        self._add_code_line(
+            "dual_bound = info.mip_dual_bound if any(integrality) and math.isfinite(info.mip_dual_bound) else None"
+        )
         self._add_code_line("if dual_bound is not None:")
         self.indent_level += 1
-        self._add_code_line("dual_bound = (-dual_bound if sense == 'maximize' else dual_bound) + objective_offset")
+        self._add_code_line("dual_bound += objective_offset")
         self.indent_level -= 1
         self._add_code_line("stats['mip_dual_bound'] = dual_bound")
-        self._add_code_line("stats['mip_gap'] = getattr(res, 'mip_gap', None)")
+        self._add_code_line("stats['mip_gap'] = info.mip_gap if any(integrality) and math.isfinite(info.mip_gap) else None")
         self._add_code_line("stats['time'] = end_time - start_time")
-        self._add_code_line("has_incumbent = res.x is not None and res.fun is not None")
-        self._add_code_line("if (res.success and res.status == 0) or (status_str == 'TIME_LIMIT' and has_incumbent):")
+        self._add_code_line("if status_str == 'OPTIMAL' or (status_str == 'TIME_LIMIT' and has_incumbent):")
         self.indent_level += 1
         self._add_code_line("if status_str == 'TIME_LIMIT':")
         self.indent_level += 1
@@ -2937,19 +2996,13 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line("for name in original_var_names:")
         self.indent_level += 1
         self._add_code_line("i = var_names.index(name)")
-        self._add_code_line("solution[name] = res.x[i]")
-        self._add_code_line("if abs(res.x[i]) > 1e-8:")
+        self._add_code_line("solution[name] = solution_values.col_value[i]")
+        self._add_code_line("if abs(solution_values.col_value[i]) > 1e-8:")
         self.indent_level += 1
-        self._add_code_line("print(f'{name}: {res.x[i]}')")
+        self._add_code_line("print(f'{name}: {solution_values.col_value[i]}')")
         self.indent_level -= 1
         self.indent_level -= 1
-        # Patch: Fix objective sign for maximization
-        self._add_code_line("# Patch: Fix objective sign for maximization")
-        self._add_code_line("objective_value = res.fun")
-        self._add_code_line("if sense == 'maximize':")
-        self.indent_level += 1
-        self._add_code_line("objective_value = -objective_value")
-        self.indent_level -= 1
+        self._add_code_line("objective_value = highs.getObjectiveValue()")
         self._add_code_line("objective_value += objective_offset")
         # Print objective value (parity with Gurobi output)
         self._add_code_line("print(f'Objective value: {objective_value}')")
@@ -2959,14 +3012,14 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
         self._add_code_line("if status_str == 'TIME_LIMIT':")
         self.indent_level += 1
-        self._add_code_line(f"{self.results_varname}['message'] = res.message")
+        self._add_code_line(f"{self.results_varname}['message'] = status_message")
         self.indent_level -= 1
         self.indent_level -= 1  # Dedent here so else is at the same level as if
         self._add_code_line("else:")
         self.indent_level += 1
-        self._add_code_line("print('Optimization failed: ' + res.message)")
+        self._add_code_line("print('Optimization failed: ' + status_message)")
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
-        self._add_code_line(f"{self.results_varname}['message'] = res.message")
+        self._add_code_line(f"{self.results_varname}['message'] = status_message")
         self._add_code_line(f"{self.results_varname}['objective_value'] = None")
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
         self.indent_level -= 1
@@ -2976,16 +3029,17 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['status'] = 'ERROR'")
         self._add_code_line(f"{self.results_varname}['message'] = str(e)")
         self._add_code_line(f"{self.results_varname}['objective_value'] = None")
+        self._add_code_line(f"{self.results_varname}['stats'] = {{}}")
         self.indent_level -= 1
-        self._add_code_line(f"results_container['scipy_output'] = {self.results_varname}")
+        self._add_code_line(f"results_container['highs_output'] = {self.results_varname}")
 
-        # Dump the generated Scipy model for debugging/comparison
-        # print("\n===== Scipy Model Dump =====")
-        # for line in self.scipy_code_lines:
+        # Dump the generated HiGHS model for debugging/comparison
+        # print("\n===== HiGHS Model Dump =====")
+        # for line in self.highs_code_lines:
         #     print(line)
-        # print("===== End Scipy Model Dump =====\n")
+        # print("===== End HiGHS Model Dump =====\n")
 
-        return "\n".join(self.scipy_code_lines)
+        return "\n".join(self.highs_code_lines)
 
     def _eval_data_bound(self, expr, data_dict):
         if not isinstance(expr, dict):
@@ -3945,7 +3999,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
             self.A_ub = []
         self.b_ub = state.b_ub
 
-        self._add_code_line("from scipy.sparse import csr_matrix")
         self._add_code_line(f"A_eq_rows = {state.A_eq_rows}")
         self._add_code_line(f"A_eq_cols = {state.A_eq_cols}")
         self._add_code_line(f"A_eq_data = {state.A_eq_data}")
@@ -3954,12 +4007,6 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         self._add_code_line(f"A_ub_cols = {state.A_ub_cols}")
         self._add_code_line(f"A_ub_data = {state.A_ub_data}")
         self._add_code_line(f"b_ub = {state.b_ub}")
-        self._add_code_line(
-            f"A_eq = csr_matrix((A_eq_data, (A_eq_rows, A_eq_cols)), shape=({len(state.b_eq)}, {n_vars})) if len(b_eq) > 0 else None"
-        )
-        self._add_code_line(
-            f"A_ub = csr_matrix((A_ub_data, (A_ub_rows, A_ub_cols)), shape=({len(state.b_ub)}, {n_vars})) if len(b_ub) > 0 else None"
-        )
 
     def _comparison_key(self, node, env):
         def _bound_key(part):
@@ -4971,19 +5018,19 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         right = constr["right"]
         lhs_dict, lhs_const = self._accumulate_sum_to_dict(left, env, sign=1)
         rhs_dict, rhs_const = self._accumulate_sum_to_dict(right, env, sign=1)
-        logger.debug(f"[SciPyCSCCodeGenerator] lhs_dict: {lhs_dict}, lhs_const: {lhs_const}")
-        logger.debug(f"[SciPyCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
+        logger.debug(f"[HighsCSCCodeGenerator] lhs_dict: {lhs_dict}, lhs_const: {lhs_const}")
+        logger.debug(f"[HighsCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
         row = [0.0] * len(self.var_names)
         for vname, coef in lhs_dict.items():
             idx = self._resolve_coefficient_index(vname)
-            logger.debug(f"[SciPyCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
+            logger.debug(f"[HighsCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
             row[idx] += coef
         for vname, coef in rhs_dict.items():
             idx = self._resolve_coefficient_index(vname)
-            logger.debug(f"[SciPyCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
+            logger.debug(f"[HighsCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
             row[idx] -= coef
         rhs_value = rhs_const - lhs_const
-        logger.debug(f"[SciPyCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
+        logger.debug(f"[HighsCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
         if constr["op"] == "==":
             append_eq_row(row, rhs_value)
         elif constr["op"] == "<=":
@@ -5848,7 +5895,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _resolve_atomic_boolean_literal(self, atom, env):
         if not (isinstance(atom, dict) and atom.get("type") == "constraint" and atom.get("op") == "=="):
-            raise SemanticError("Unsupported atomic boolean term for SciPy AND/OR linearization")
+            raise SemanticError("Unsupported atomic boolean term for Highs AND/OR linearization")
         left = atom.get("left")
         right = atom.get("right")
         if self._is_var_reference_node(left) and self._is_number_01_node(right):
@@ -6287,7 +6334,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
         if self._try_enforce_bool_tree_literal_constraint(constr, env, bool_expr_var, append_eq_row):
             return
 
-        logger.debug(f"[SciPyCSCCodeGenerator] handle_constraint: {constr}")
+        logger.debug(f"[HighsCSCCodeGenerator] handle_constraint: {constr}")
         self._collect_passive_constraint_bounds(constr, env, bool_expr_var)
         if self._try_enforce_reified_implication_literal(constr, env, bool_expr_var, append_eq_row):
             return
@@ -6341,7 +6388,7 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
     def _build_constraints(self):
         self._add_code_line("# Constraints (sparse)")
-        logger.debug("[SciPyCSCCodeGenerator] Entering _build_constraints")
+        logger.debug("[HighsCSCCodeGenerator] Entering _build_constraints")
         # Enable symbolic boolean evaluation during constraint build
         prev_sym = getattr(self, "_allow_symbolic_bool", False)
         self._allow_symbolic_bool = True
@@ -6391,21 +6438,21 @@ class SciPyCSCCodeGenerator(SciPyCodeGeneratorBase):
 
         self._finalize_constraint_state(state)
         # Always reconcile metadata (objective c, var_names, bounds, integrality) in case
-        for i, line in enumerate(self.scipy_code_lines):
+        for i, line in enumerate(self.highs_code_lines):
             if line.startswith("var_names = "):
-                self.scipy_code_lines[i] = f"var_names = {repr(self.var_names)}"
+                self.highs_code_lines[i] = f"var_names = {repr(self.var_names)}"
             elif line.startswith("bounds = "):
                 bounds_py = "[" + ", ".join(f'[{b[0]}, {b[1] if b[1] is not None else "None"}]' for b in self.bounds) + "]"
-                self.scipy_code_lines[i] = f"bounds = {bounds_py}"
+                self.highs_code_lines[i] = f"bounds = {bounds_py}"
             elif line.startswith("integrality = "):
-                self.scipy_code_lines[i] = f"integrality = {self.integrality}"
+                self.highs_code_lines[i] = f"integrality = {self.integrality}"
             elif line.startswith("c = "):
                 if hasattr(self, "c"):
                     if len(self.c) < len(self.var_names):
                         self.c.extend([0.0] * (len(self.var_names) - len(self.c)))
                     elif len(self.c) > len(self.var_names):
                         self.c = self.c[: len(self.var_names)]
-                    self.scipy_code_lines[i] = f"c = {self.c}"
+                    self.highs_code_lines[i] = f"c = {self.c}"
 
     def _merge_accumulated_expression(self, target, values, sign, const_ref):
         coef_dict, const_value = values

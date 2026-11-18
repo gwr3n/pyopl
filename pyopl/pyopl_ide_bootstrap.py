@@ -149,7 +149,7 @@ def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool
     return _IDEPreferences(
         font_size=saved_font_size,
         theme=theme if isinstance(theme, str) and theme in ("flatly", "darkly") else None,
-        solver=solver if solver in ("gurobi", "scipy") else None,
+        solver=solver if solver in ("gurobi", "highs") else None,
         verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
         display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
         genai_method=(
@@ -1861,7 +1861,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
         self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
         self.interface_button_font = "TkDefaultFont"
-        self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
+        self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'highs'
         self.theme_var = tk.StringVar(value="flatly")
         self.show_genai_panel_var = tk.BooleanVar(value=True)
 
@@ -2240,9 +2240,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         solver_menu = tk.Menu(runmenu, tearoff=0)
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._on_solver_selected)
-        solver_menu.add_radiobutton(
-            label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._on_solver_selected
-        )
+        solver_menu.add_radiobutton(label="HiGHS", variable=self.solver, value="highs", command=self._on_solver_selected)
         solver_menu.add_separator()
         solver_menu.add_checkbutton(
             label="Display Solver Progress",
@@ -3403,7 +3401,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _refresh_status_context(self) -> None:
         """Refresh footer context segments that derive from current IDE state."""
-        solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "SciPy"
+        solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "HiGHS"
         self.status_solver_var.set(f"Solver: {solver_name}")
         provider = getattr(self, "genai_provider", None)
         model = getattr(self, "genai_model", None)
@@ -3416,7 +3414,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _on_solver_selected(self) -> None:
         """Persist solver menu selection and refresh dependent status UI."""
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
-        if solver_choice in ("gurobi", "scipy"):
+        if solver_choice in ("gurobi", "highs"):
             self._current_solver_choice = solver_choice
         self._refresh_status_context()
         self._save_settings()
@@ -5397,7 +5395,7 @@ class OPLIDE(TkinterDnD.Tk):
             self._hide_solver_progress_window()
             return
         if not self._solver_tracks_progress():
-            self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "scipy"))
+            self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "highs"))
         if isinstance(results, dict):
             sample: dict[str, Any] = {}
             objective = results.get("objective_value")
@@ -5921,10 +5919,10 @@ class OPLIDE(TkinterDnD.Tk):
 
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
-            default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
+            default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_highs.py"
             if self._model_editor_state.path:
                 base = os.path.splitext(os.path.basename(self._model_editor_state.path or ""))[0]
-                default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
+                default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'highs'}.py"
 
             dest_path = filedialog.asksaveasfilename(
                 defaultextension=".py",
@@ -7597,7 +7595,7 @@ class OPLIDE(TkinterDnD.Tk):
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
                 "solver": (
-                    self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "scipy") else "gurobi"
+                    self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "highs") else "gurobi"
                 ),
                 "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else False,
                 "display-solver-progress": (

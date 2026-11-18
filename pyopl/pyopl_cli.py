@@ -77,7 +77,7 @@ def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> 
 def _export_lp_mps(model_path: Path, data_path: Optional[Path], out_file: Path) -> Path:
     model_code = _read_text(model_path)
     data_code = _read_text(data_path) if data_path else None
-    return export_model(model_code, data_code, "scipy", out_file)
+    return export_model(model_code, data_code, "highs", out_file)
 
 
 def _compare_models(
@@ -330,7 +330,7 @@ def _handle_solve(args: argparse.Namespace) -> int:
     if data_path and not _validate_input_file(data_path, "data"):
         return 2
 
-    solver_key = "gurobi" if args.solver == "gurobi" else "scipy"
+    solver_key = "gurobi" if args.solver == "gurobi" else "highs"
     try:
         solver_settings = _load_solver_settings(args.solver_settings)
         if args.out == "json":
@@ -631,7 +631,7 @@ def _handle_genai_insight(args: argparse.Namespace) -> int:
         print(f"Error during generation: {exc}", file=sys.stderr)
         return 4
 
-    solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "scipy"
+    solver_key = "gurobi" if getattr(args, "solver", "highs") == "gurobi" else "highs"
     try:
         with redirect_stdout(sys.stderr):
             results = _run_solve(model_path, data_path, solver_key)

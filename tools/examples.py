@@ -15,7 +15,7 @@ def run_knapsack(solver):
     """Run the classic Knapsack problem using the selected solver."""
     model = _model_path("knapsack/knapsack.mod")
     data = _model_path("knapsack/knapsack.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -24,7 +24,7 @@ def run_multi_knapsack(solver):
     """Run the Knapsack problem variant using the selected solver."""
     model = _model_path("multi_knapsack/multi_knapsack.mod")
     data = _model_path("multi_knapsack/multi_knapsack.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -33,7 +33,7 @@ def run_lot_sizing(solver):
     """Run the Lot Sizing problem (single item) using the selected solver."""
     model = _model_path("lot_sizing/lot_sizing.mod")
     data = _model_path("lot_sizing/lot_sizing.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -42,7 +42,7 @@ def run_tsp(solver):
     """Run the Traveling Salesman Problem (TSP) using the selected solver."""
     model = _model_path("tsp/tsp.mod")
     data = _model_path("tsp/tsp.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -51,7 +51,7 @@ def run_vehicle_routing(solver):
     """Run the Vehicle Routing Problem (single vehicle) using the selected solver."""
     model = _model_path("vehicle_routing/vehicle_routing.mod")
     data = _model_path("vehicle_routing/vehicle_routing.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -60,7 +60,7 @@ def run_set_covering(solver):
     """Run the Set Covering Problem using the selected solver."""
     model = _model_path("set_covering/set_covering.mod")
     data = _model_path("set_covering/set_covering.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -70,7 +70,7 @@ def run_assignment(solver):
     """Run the Assignment Problem using the selected solver."""
     model = _model_path("assignment/assignment.mod")
     data = _model_path("assignment/assignment.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -79,7 +79,7 @@ def run_transportation(solver):
     """Run the Transportation Problem using the selected solver."""
     model = _model_path("transportation/transportation.mod")
     data = _model_path("transportation/transportation.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -88,7 +88,7 @@ def run_production(solver):
     """Run the Production Planning Problem using the selected solver."""
     model = _model_path("production/production.mod")
     data = _model_path("production/production.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -97,7 +97,7 @@ def run_plant_location(solver):
     """Run the Plant Location Problem using the selected solver."""
     model = _model_path("plant_location/plant_location.mod")
     data = _model_path("plant_location/plant_location.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -106,7 +106,7 @@ def run_crew_scheduling(solver):
     """Run the Crew Scheduling Problem using the selected solver."""
     model = _model_path("crew_scheduling/crew_scheduling.mod")
     data = _model_path("crew_scheduling/crew_scheduling.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -115,7 +115,7 @@ def run_graph_coloring(solver):
     """Run the Graph Coloring Problem using the selected solver."""
     model = _model_path("graph_coloring/graph_coloring.mod")
     data = _model_path("graph_coloring/graph_coloring.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -124,7 +124,7 @@ def run_set_partitioning(solver):
     """Run the Set Partitioning Problem using the selected solver."""
     model = _model_path("set_partitioning/set_partitioning.mod")
     data = _model_path("set_partitioning/set_partitioning.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -133,7 +133,7 @@ def run_warehouse_location(solver):
     """Run the Warehouse Location Problem using the selected solver."""
     model = _model_path("warehouse_location/warehouse_location.mod")
     data = _model_path("warehouse_location/warehouse_location.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -142,7 +142,7 @@ def run_jobshop(solver):
     """Run the Job Shop Scheduling Problem using the selected solver."""
     model = _model_path("jobshop/jobshop.mod")
     data = _model_path("jobshop/jobshop.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -151,7 +151,7 @@ def run_crew_pairing(solver):
     """Run the Crew Pairing Problem using the selected solver."""
     model = _model_path("crew_pairing/crew_pairing.mod")
     data = _model_path("crew_pairing/crew_pairing.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -160,7 +160,7 @@ def run_covering(solver):
     """Run the Set Covering Problem (variant) using the selected solver."""
     model = _model_path("covering/covering.mod")
     data = _model_path("covering/covering.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -169,7 +169,7 @@ def run_workforce_planning(solver):
     """Run the Workforce Planning Problem using the selected solver."""
     model = _model_path("workforce_planning/workforce_planning.mod")
     data = _model_path("workforce_planning/workforce_planning.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -178,7 +178,7 @@ def run_inventory_routing(solver):
     """Run the Inventory Routing Problem using the selected solver."""
     model = _model_path("inventory_routing/inventory_routing.mod")
     data = _model_path("inventory_routing/inventory_routing.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -189,7 +189,7 @@ def run_sparse_example(solver):
     from tools._sparse_example import run_sparse_example
 
     logging.basicConfig(level=logging.ERROR, format="[%(levelname)s] %(name)s: %(message)s")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     run_sparse_example(solver_name)
 
 
@@ -197,7 +197,7 @@ def run_p_dispersion(solver):
     """Run the P-Dispersion Problem using the selected solver."""
     model = _model_path("p-dispersion/p-dispersion.mod")
     data = _model_path("p-dispersion/p-dispersion.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -206,7 +206,7 @@ def run_on_off_outsourcing(solver):
     """Run the On-Off Outsourcing Problem using the selected solver."""
     model = _model_path("on_off_outsourcing/on_off_outsourcing.mod")
     data = _model_path("on_off_outsourcing/on_off_outsourcing.dat")
-    solver_name = "scipy" if solver == Solver.SCIPY else "gurobi"
+    solver_name = "highs" if solver == Solver.HIGHS else "gurobi"
     result = solve(model, data, solver=solver_name)
     print(result)
 
@@ -270,7 +270,7 @@ EXAMPLES = {
 
 # Enum for solvers
 class Solver(Enum):
-    SCIPY = auto()
+    HIGHS = auto()
     GUROBI = auto()
 
 
@@ -278,7 +278,7 @@ class Solver(Enum):
 EXAMPLE_SELECTOR = Example.LOT_SIZING  # e.g. Example.LOT_SIZING, Example.TSP, etc.
 
 # Selector: set this to one of the Solver enum values
-SOLVER_SELECTOR = Solver.GUROBI  # e.g. Solver.SCIPY, Solver.GUROBI
+SOLVER_SELECTOR = Solver.GUROBI  # e.g. Solver.HIGHS, Solver.GUROBI
 
 # Run the selected example
 if __name__ == "__main__":

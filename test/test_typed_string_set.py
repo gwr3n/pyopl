@@ -2,7 +2,7 @@ import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
 from pyopl.pyopl_core import parse_model
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 MODEL = '{string} Gasolines = { "R92", "R95" };\n minimize 0;\n subject to { }'
 
@@ -20,8 +20,8 @@ class TestTypedStringSet(unittest.TestCase):
         # Gurobi code generation should emit Python list Gasolines = ['R92','R95']
         code = GurobiCodeGenerator(ast).generate_code()
         self.assertIn("Gasolines = ['R92', 'R95']", code.replace('"', "'").replace('"', ""))
-        # SciPy generator should ignore during variable build without error
-        gen = SciPyCSCCodeGenerator(ast)
+        # Highs generator should ignore during variable build without error
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()

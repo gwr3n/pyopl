@@ -4,7 +4,7 @@ from contextlib import redirect_stdout
 from typing import Any
 
 from pyopl.pyopl_core import OPLCompiler
-from pyopl.scipy_codegen_csc import BOOL_EPS, SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import BOOL_EPS, HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 try:
@@ -115,7 +115,7 @@ class TestGurobiImplicationGaps(unittest.TestCase):
         self.assertNotIn("implication_flag_", code)
 
 
-class TestSciPyImplicationGaps(unittest.TestCase):
+class TestHighsImplicationGaps(unittest.TestCase):
     def test_unsupported_continuous_comparison_truth_is_rejected(self):
         model = """
         dvar float x;
@@ -127,7 +127,7 @@ class TestSciPyImplicationGaps(unittest.TestCase):
         """
 
         with self.assertRaisesRegex(SemanticError, "cannot be represented exactly"):
-            OPLCompiler().compile_model(model, solver="scipy")
+            OPLCompiler().compile_model(model, solver="highs")
 
     def test_strict_positive_antecedent_allows_small_value_when_binary_is_one(self):
         result = _solve_generated_model(
@@ -143,7 +143,7 @@ class TestSciPyImplicationGaps(unittest.TestCase):
                 (x > 0) => (y == 1);
             }}
             """,
-            "scipy",
+            "highs",
         )
 
         self.assertEqual(result["status"], "OPTIMAL")
@@ -160,8 +160,8 @@ class TestSciPyImplicationGaps(unittest.TestCase):
         }
         """
 
-        ast, _code, _data = OPLCompiler().compile_model(model, solver="scipy")
-        generator = SciPyCSCCodeGenerator(ast)
+        ast, _code, _data = OPLCompiler().compile_model(model, solver="highs")
+        generator = HighsCSCCodeGenerator(ast)
         generator.generate_code()
         x_index = generator.var_indices["x"]
         y_index = generator.var_indices["y"]
@@ -186,14 +186,14 @@ class TestImplicationParserGaps(unittest.TestCase):
         }
         """
 
-        ast, _code, _data = OPLCompiler().compile_model(model, solver="scipy")
+        ast, _code, _data = OPLCompiler().compile_model(model, solver="highs")
         outer = ast["constraints"][0]
 
         self.assertEqual(outer["type"], "implication_constraint")
         nested = outer["consequent"]
         self.assertEqual(nested["type"], "implies")
 
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             _ast, code, _data = OPLCompiler().compile_model(model, solver=solver)
             self.assertTrue(code)
 
@@ -209,7 +209,7 @@ class TestImplicationBackendParity(unittest.TestCase):
         )
 
         for implication, x_value, y_value, expected_status in cases:
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with self.subTest(implication=implication, x=x_value, y=y_value, solver=solver):
                     result = _solve_generated_model(
                         f"""
@@ -252,12 +252,12 @@ class TestImplicationBackendParity(unittest.TestCase):
                         b == {b_value};
                     }}
                     """
-                    scipy_result = _solve_generated_model(model, "scipy")
+                    highs_result = _solve_generated_model(model, "highs")
                     gurobi_result = _solve_generated_model(model, "gurobi")
 
-                    self.assertEqual(scipy_result["status"], gurobi_result["status"])
+                    self.assertEqual(highs_result["status"], gurobi_result["status"])
                     self.assertAlmostEqual(
-                        scipy_result["solution"]["c"],
+                        highs_result["solution"]["c"],
                         gurobi_result["solution"]["c"],
                         places=7,
                     )
@@ -286,12 +286,12 @@ class TestImplicationBackendParity(unittest.TestCase):
                         y == {y_value};
                     }}
                     """
-                    scipy_result = _solve_generated_model(model, "scipy")
+                    highs_result = _solve_generated_model(model, "highs")
                     gurobi_result = _solve_generated_model(model, "gurobi")
 
-                    self.assertEqual(scipy_result["status"], "OPTIMAL")
+                    self.assertEqual(highs_result["status"], "OPTIMAL")
                     self.assertEqual(gurobi_result["status"], "OPTIMAL")
-                    self.assertAlmostEqual(scipy_result["solution"]["c"], expected_c, places=7)
+                    self.assertAlmostEqual(highs_result["solution"]["c"], expected_c, places=7)
                     self.assertAlmostEqual(gurobi_result["solution"]["c"], expected_c, places=7)
 
 

@@ -50,7 +50,7 @@ def build_highs_model(
 ) -> "highspy.Highs":
     """Build a highspy.Highs model from a LinearProblem.
 
-    Current SciPy-derived LinearProblem instances store ``c`` in minimization form,
+    Current Highs-derived LinearProblem instances store ``c`` in minimization form,
     so maximization objectives have already been negated. Leave
     ``objective_is_minimization_form`` as True for those instances.
     """

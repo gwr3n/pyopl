@@ -155,23 +155,23 @@ This table lists the distinct compile-time `SemanticError` message templates cur
 | Gurobi codegen | `gurobi_codegen.py:2130` | `Parameter '{name}' declared in .mod but not found in .dat file. Add '= ...;' to explicitly declare it as external if intended.` | A parameter is missing from data even though it was not declared external. |
 | Gurobi codegen | `gurobi_codegen.py:2144` | `Parameter '{name}' declared with '= ...' in .mod but not found in .dat file.` | An explicitly external parameter has no data supplied. |
 | Gurobi codegen | `gurobi_codegen.py:3416` | `Range '{name}' not found in declarations.` | Code generation needs a range declaration that was never created. |
-| SciPy codegen | `scipy_codegen_csc.py:85` | `minl() requires at least one argument` | `minl` is evaluated with zero arguments in SciPy compilation. |
-| SciPy codegen | `scipy_codegen_csc.py:106` | `maxl() requires at least one argument` | `maxl` is evaluated with zero arguments in SciPy compilation. |
-| SciPy codegen | `scipy_codegen_csc.py:171` | `ExpressionEvaluator.eval: handler for type '{t}' returned non-tuple result: {result}` | A SciPy expression handler returns an unexpected value shape. |
-| SciPy codegen | `scipy_codegen_csc.py:228` | `_eval_field_access: base expression '{base}' could not be evaluated (unknown type or error)` | Field access evaluation fails in the SciPy expression evaluator. |
-| SciPy codegen | `scipy_codegen_csc.py:600` | `_handle_binop_add: left or right is None: left={l_result}, right={r_result}` | Addition evaluation receives a missing operand result. |
-| SciPy codegen | `scipy_codegen_csc.py:602` | `_handle_binop_add: left or right did not return a tuple: left={l_result}, right={r_result}` | Addition evaluation receives an operand result in an unexpected format. |
-| SciPy codegen | `scipy_codegen_csc.py:618` | `_handle_binop_sub: left or right is None: left={l_result}, right={r_result}` | Subtraction evaluation receives a missing operand result. |
-| SciPy codegen | `scipy_codegen_csc.py:620` | `_handle_binop_sub: left or right did not return a tuple: left={l_result}, right={r_result}` | Subtraction evaluation receives an operand result in an unexpected format. |
-| SciPy codegen | `scipy_codegen_csc.py:637` | `_handle_binop_mul: left or right is None: left={l_result}, right={r_result}` | Multiplication evaluation receives a missing operand result. |
-| SciPy codegen | `scipy_codegen_csc.py:639` | `_handle_binop_mul: left or right did not return a tuple: left={l_result}, right={r_result}` | Multiplication evaluation receives an operand result in an unexpected format. |
-| SciPy codegen | `scipy_codegen_csc.py:669` | `_handle_binop_div: left or right is None: left={l_result}, right={r_result}` | Division evaluation receives a missing operand result. |
-| SciPy codegen | `scipy_codegen_csc.py:671` | `_handle_binop_div: left or right did not return a tuple: left={l_result}, right={r_result}` | Division evaluation receives an operand result in an unexpected format. |
-| SciPy codegen | `scipy_codegen_csc.py:690` | `Division by zero` | Constant evaluation encounters division by zero. |
-| SciPy codegen | `scipy_codegen_csc.py:1376,1733,1984` | `Parameter or variable '{name}' with indices {indices} not found in environment.` | SciPy expression evaluation cannot resolve an indexed parameter or variable. |
-| SciPy codegen | `scipy_codegen_csc.py:2103` | `AST parameter '{name}' with indices {indices} not found.` | An indexed AST parameter reference cannot be resolved. |
-| SciPy codegen | `scipy_codegen_csc.py:3846` | `Unsupported atomic boolean literal` | Boolean linearization encounters an unsupported literal form. |
-| SciPy codegen | `scipy_codegen_csc.py:4706` | `Unsupported or non-resolvable boolean expression node type: {t} ({repr(node)})` | Boolean linearization encounters an unsupported or unresolved AST node type. |
+| HiGHS codegen | `highs_codegen_csc.py:85` | `minl() requires at least one argument` | `minl` is evaluated with zero arguments in HiGHS compilation. |
+| HiGHS codegen | `highs_codegen_csc.py:106` | `maxl() requires at least one argument` | `maxl` is evaluated with zero arguments in HiGHS compilation. |
+| HiGHS codegen | `highs_codegen_csc.py:171` | `ExpressionEvaluator.eval: handler for type '{t}' returned non-tuple result: {result}` | A HiGHS expression handler returns an unexpected value shape. |
+| HiGHS codegen | `highs_codegen_csc.py:228` | `_eval_field_access: base expression '{base}' could not be evaluated (unknown type or error)` | Field access evaluation fails in the HiGHS expression evaluator. |
+| HiGHS codegen | `highs_codegen_csc.py:600` | `_handle_binop_add: left or right is None: left={l_result}, right={r_result}` | Addition evaluation receives a missing operand result. |
+| HiGHS codegen | `highs_codegen_csc.py:602` | `_handle_binop_add: left or right did not return a tuple: left={l_result}, right={r_result}` | Addition evaluation receives an operand result in an unexpected format. |
+| HiGHS codegen | `highs_codegen_csc.py:618` | `_handle_binop_sub: left or right is None: left={l_result}, right={r_result}` | Subtraction evaluation receives a missing operand result. |
+| HiGHS codegen | `highs_codegen_csc.py:620` | `_handle_binop_sub: left or right did not return a tuple: left={l_result}, right={r_result}` | Subtraction evaluation receives an operand result in an unexpected format. |
+| HiGHS codegen | `highs_codegen_csc.py:637` | `_handle_binop_mul: left or right is None: left={l_result}, right={r_result}` | Multiplication evaluation receives a missing operand result. |
+| HiGHS codegen | `highs_codegen_csc.py:639` | `_handle_binop_mul: left or right did not return a tuple: left={l_result}, right={r_result}` | Multiplication evaluation receives an operand result in an unexpected format. |
+| HiGHS codegen | `highs_codegen_csc.py:669` | `_handle_binop_div: left or right is None: left={l_result}, right={r_result}` | Division evaluation receives a missing operand result. |
+| HiGHS codegen | `highs_codegen_csc.py:671` | `_handle_binop_div: left or right did not return a tuple: left={l_result}, right={r_result}` | Division evaluation receives an operand result in an unexpected format. |
+| HiGHS codegen | `highs_codegen_csc.py:690` | `Division by zero` | Constant evaluation encounters division by zero. |
+| HiGHS codegen | `highs_codegen_csc.py:1376,1733,1984` | `Parameter or variable '{name}' with indices {indices} not found in environment.` | HiGHS expression evaluation cannot resolve an indexed parameter or variable. |
+| HiGHS codegen | `highs_codegen_csc.py:2103` | `AST parameter '{name}' with indices {indices} not found.` | An indexed AST parameter reference cannot be resolved. |
+| HiGHS codegen | `highs_codegen_csc.py:3846` | `Unsupported atomic boolean literal` | Boolean linearization encounters an unsupported literal form. |
+| HiGHS codegen | `highs_codegen_csc.py:4706` | `Unsupported or non-resolvable boolean expression node type: {t} ({repr(node)})` | Boolean linearization encounters an unsupported or unresolved AST node type. |
 
 ## Pass-through rethrows
 

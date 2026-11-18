@@ -2,7 +2,7 @@
 
 **GenAI-assisted Integrated Modelling Environment for Mixed-Integer Linear Programming**
 
-Rhetor is an Integrated Modelling Environment for modelling and solving mixed-integer linear programming problems. Rhetor supports a subset of the Optimisation Programming Language (OPL) syntax and it is built on [``pyopl``](https://github.com/gwr3n/pyopl), a Python library for parsing and solving OPL-like mathematical programming models using Gurobi or Scipy (Highs). Rhetor integrates GenAI features to support and automate the modelling process.
+Rhetor is an Integrated Modelling Environment for modelling and solving mixed-integer linear programming problems. Rhetor supports a subset of the Optimisation Programming Language (OPL) syntax and it is built on [``pyopl``](https://github.com/gwr3n/pyopl), a Python library for parsing and solving OPL-like mathematical programming models using Gurobi or HiGHS. Rhetor integrates GenAI features to support and automate the modelling process.
 
 ![Demo](https://github.com/gwr3n/rhetor/raw/main/sudoku.gif)
 

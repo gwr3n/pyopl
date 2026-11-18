@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 from scipy.optimize import Bounds, LinearConstraint, milp
 
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
@@ -40,7 +40,7 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
                 }
             ],
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -70,7 +70,7 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
                 self._constraint(self._name("b"), "==", self._num(1)),
             ],
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         problem = gen.build_problem()
         constraints = [LinearConstraint(problem.A_ub, -float("inf"), problem.b_ub)]
         if problem.A_eq:
@@ -103,7 +103,7 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
                 },
             ],
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         problem = gen.build_problem()
         constraints = []
         if problem.A_ub is not None:
@@ -146,7 +146,7 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(SemanticError, "integer-valued|lattice|coefficient"):
-            gen = SciPyCSCCodeGenerator(ast)
+            gen = HighsCSCCodeGenerator(ast)
             gen._build_variables()
             gen._build_objective()
             gen._build_constraints()
@@ -174,7 +174,7 @@ class TestImplicationEqualityAntecedent(unittest.TestCase):
                 },
             ],
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         problem = gen.build_problem()
 
         self.assertTrue(

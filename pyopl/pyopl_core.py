@@ -32,10 +32,10 @@ except Exception:  # pragma: no cover
 # === Local imports ===
 from ._index_safety import find_index_safety_issue
 from .gurobi_codegen import GurobiCodeGenerator
+from .highs_codegen import HighsCodeGenerator, HighsCodeGeneratorBase
+from .highs_codegen_csc import HighsCSCCodeGenerator
 from .linear_problem import LinearProblem
 from .linear_problem_highs import export_linear_problem
-from .scipy_codegen import SciPyCodeGenerator, SciPyCodeGeneratorBase
-from .scipy_codegen_csc import SciPyCSCCodeGenerator
 from .semantic_error import SemanticError
 
 
@@ -5125,7 +5125,7 @@ class OPLCompiler:
         Args:
             model_code (str): The OPL model code string.
             data_code (str, optional): The OPL data code string.
-            solver (str, optional): The solver to use ('gurobi' or 'scipy'). Defaults to 'gurobi'.
+            solver (str, optional): The solver to use ('gurobi' or 'highs'). Defaults to 'gurobi'.
 
         Returns:
             tuple: (ast, code_str, data_dict) if successful.
@@ -5215,8 +5215,8 @@ class OPLCompiler:
             raise SemanticError(index_issue.reason)
         if solver == "gurobi":
             return GurobiCodeGenerator(codegen_ast, codegen_data).generate_code()
-        if solver == "scipy":
-            return cast(SciPyCodeGeneratorBase, SciPyCodeGenerator(codegen_ast, codegen_data)).generate_code()
+        if solver == "highs":
+            return cast(HighsCodeGeneratorBase, HighsCodeGenerator(codegen_ast, codegen_data)).generate_code()
         raise ValueError(f"Unsupported solver: {solver}")
 
     @staticmethod
@@ -6048,10 +6048,10 @@ def resolve_named_range(model_code: str, data_code: Optional[str], range_name: s
 def linear_problem_from_opl(model_code: str, data_code: Optional[str] = None) -> LinearProblem:
     """Compile an OPL model string into PyOPL's canonical linear-problem form."""
     compiler = OPLCompiler()
-    ast, _code, data_dict = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
-    generator = SciPyCodeGenerator(ast, data_dict)
-    if not isinstance(generator, SciPyCSCCodeGenerator):
-        raise AssertionError(f"Expected SciPyCSCCodeGenerator, got {type(generator).__name__}")
+    ast, _code, data_dict = compiler.compile_model(model_code, data_code=data_code, solver="highs")
+    generator = HighsCodeGenerator(ast, data_dict)
+    if not isinstance(generator, HighsCSCCodeGenerator):
+        raise AssertionError(f"Expected HighsCSCCodeGenerator, got {type(generator).__name__}")
     return generator.build_problem()
 
 
@@ -6090,9 +6090,9 @@ def export_model(
     ast, _generated_code, data_dict = compiler.compile_model(
         model_code,
         effective_data_code,
-        solver="scipy",
+        solver="highs",
     )
-    problem = SciPyCSCCodeGenerator(ast, data_dict).build_problem()
+    problem = HighsCSCCodeGenerator(ast, data_dict).build_problem()
     return export_linear_problem(problem, path)
 
 
@@ -6105,7 +6105,7 @@ def load_opl_model(model_file_name, data_file_name=None, solver="gurobi", *, rai
     Args:
         model_file_name (str): Path to the .mod or .opl model file.
         data_file_name (str, optional): Path to the .dat data file.
-        solver (str, optional): The solver to use ('gurobi' or 'scipy'). Defaults to 'gurobi'.
+        solver (str, optional): The solver to use ('gurobi' or 'highs'). Defaults to 'gurobi'.
 
     Returns:
         tuple: (ast, code_str, data_dict) if successful, (None, None, None) otherwise.
@@ -6159,7 +6159,7 @@ def solve(
     Args:
         model_file (str): Path to the .mod or .opl model file.
         data_file (str, optional): Path to the .dat data file.
-        solver (str): The solver to use ('gurobi' or 'scipy').
+        solver (str): The solver to use ('gurobi' or 'highs').
         solver_settings (dict, optional): Backend-native solver parameter values.
 
     Returns:
@@ -6175,8 +6175,8 @@ def solve(
             progress_callback=progress_callback,
             solver_settings=solver_settings,
         )
-    elif solver == "scipy":
-        return solve_with_scipy(model_file, data_file, solver_settings=solver_settings)
+    elif solver == "highs":
+        return solve_with_highs(model_file, data_file, solver_settings=solver_settings)
     else:
         raise ValueError(f"Unsupported solver: {solver}")
 
@@ -6307,11 +6307,11 @@ def solve_with_gurobi(
     return results
 
 
-def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[str, Any]] = None):
+def solve_with_highs(model_file, data_file=None, solver_settings: Optional[dict[str, Any]] = None):
     """
     Loads an OPL model and optional data from disk,
-    generates SciPy linprog code, and executes it to solve the model.
-    Prints the SciPy linprog model output.
+    generates direct HiGHS code with highspy, and executes it to solve the model.
+    Prints the HiGHS model output.
 
     Returns:
         dict: A dictionary containing the optimization results if successful,
@@ -6334,52 +6334,51 @@ def solve_with_scipy(model_file, data_file=None, solver_settings: Optional[dict[
         logger.error(results["message"])
         return results
 
-    logger.info(f"\n--- Solving OPL Model with SciPy: {model_file} ---")
+    logger.info(f"\n--- Solving OPL Model with HiGHS: {model_file} ---")
     if data_file:
         logger.info(f"--- Using Data File: {data_file} ---")
 
     print("PyOPL: compiling model...")
     try:
-        loaded_ast, loaded_scipy_code, loaded_data_dict = load_opl_model(
-            model_file, data_file, solver="scipy", raise_semantic_errors=True
+        loaded_ast, loaded_highs_code, loaded_data_dict = load_opl_model(
+            model_file, data_file, solver="highs", raise_semantic_errors=True
         )
     except SemanticError as exc:
         results["status"] = "MODEL_ERROR"
         results["message"] = exc.message
         return results
 
-    if loaded_ast and loaded_scipy_code:
+    if loaded_ast and loaded_highs_code:
         logger.info("\n--- Loaded AST from file ---")
         logger.info(json.dumps(_json_safe(loaded_ast), indent=2))
         if loaded_data_dict:
             logger.info("\n--- Loaded Data Dictionary from file ---")
             logger.info(json.dumps(_json_safe(loaded_data_dict), indent=2))
-        logger.info("\n--- Generated SciPy linprog Code ---")
-        logger.info(loaded_scipy_code)
+        logger.info("\n--- Generated HiGHS Code ---")
+        logger.info(loaded_highs_code)
 
-        print("PyOPL: compilation complete; starting SciPy/HiGHS optimization.")
-        logger.info("\n--- SciPy linprog Model Output ---")
+        print("PyOPL: compilation complete; starting HiGHS optimization.")
+        logger.info("\n--- HiGHS Model Output ---")
         old_stdout = sys.stdout
         redirected_output = sys.stdout = _TeeStdout(old_stdout)
         try:
-            exec_globals = {
+            exec_globals: dict[str, Any] = {
                 "json": json,
                 "np": __import__("numpy"),
-                "linprog": __import__("scipy.optimize", fromlist=["linprog"]).linprog,
                 "results_container": {},
                 "_pyopl_solver_settings": dict(solver_settings or {}),
             }
-            exec(loaded_scipy_code, exec_globals)  # nosec B102
-            if "scipy_output" in exec_globals["results_container"]:
-                results = exec_globals["results_container"]["scipy_output"]
+            exec(loaded_highs_code, exec_globals)  # nosec B102
+            if "highs_output" in exec_globals["results_container"]:
+                results = exec_globals["results_container"]["highs_output"]
                 # Do not override status to COMPLETED; keep solver's status
             else:
                 results["status"] = "EXECUTION_NO_OUTPUT"
-                results["message"] = "SciPy code executed, but no results captured."
+                results["message"] = "HiGHS code executed, but no results captured."
                 logger.warning(results["message"])
         except Exception as e:
             results["status"] = "EXECUTION_ERROR"
-            results["message"] = _execution_error_with_hint(e, "SciPy")
+            results["message"] = _execution_error_with_hint(e, "HiGHS")
             logger.error(results["message"])
             traceback.print_exc(file=sys.stdout)
         finally:

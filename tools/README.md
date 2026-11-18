@@ -18,7 +18,7 @@ python -m tools.<module_name>
 
 Runs one of the packaged OPL example models in `pyopl/opl_models` with a selected
 solver. The file contains an `Example` enum for model selection and a `Solver` enum
-for choosing between the SciPy/HiGHS and Gurobi backends.
+for choosing between the HiGHS and Gurobi backends.
 
 Edit these selectors near the bottom of the file before running it:
 
@@ -112,7 +112,7 @@ Important options include:
 	the selected strategy.
 - `--provider` and `--gpt`: LLM provider and model name.
 - `--iterations`: maximum generation iterations.
-- `--solver`: `scipy` or `gurobi` for solving generated models.
+- `--solver`: `highs` or `gurobi` for solving generated models.
 - `--tolerance`: absolute tolerance for objective comparison or MILP equivalence.
 - `--no-few-shot`, `--no-alignment-check`, and `--syntax-error-reporting`: SyntAGM
 	ablation and syntax-reporting controls.

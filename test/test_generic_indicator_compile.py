@@ -120,7 +120,7 @@ indicatorSense = ["L", "G"];
 
 class TestGenericIndicatorCompile(unittest.TestCase):
     def test_nested_indexed_indicator_model_compiles_for_both_backends(self):
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with self.subTest(solver=solver):
                 compiler = OPLCompiler(syntax_error_reporting="full")
                 _ast, code, _data = compiler.compile_model(MODEL_CODE, DATA_CODE, solver=solver)

@@ -33,7 +33,7 @@ class TestTupleKeyParam(unittest.TestCase):
                     ];
                     """
 
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with (

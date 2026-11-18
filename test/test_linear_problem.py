@@ -2,13 +2,13 @@ import unittest
 
 from pyopl.linear_problem import LinearProblem
 from pyopl.pyopl_core import parse_model
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 class TestLinearProblem(unittest.TestCase):
-    def test_scipy_generator_builds_linear_problem_snapshot(self):
+    def test_highs_generator_builds_linear_problem_snapshot(self):
         ast = parse_model("dvar float+ x; minimize 2 * x + 3; subject to { x >= 1; x <= 4; }")
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
 
         problem = gen.build_problem()
 
@@ -28,7 +28,7 @@ class TestLinearProblem(unittest.TestCase):
     def test_maximization_snapshot_uses_minimization_form_for_full_objective(self):
         ast = parse_model("dvar float+ x; maximize 2*x+5; subject to { x <= 4; }")
 
-        problem = SciPyCSCCodeGenerator(ast).build_problem()
+        problem = HighsCSCCodeGenerator(ast).build_problem()
 
         self.assertEqual(problem.sense, "maximize")
         self.assertEqual(problem.c, [-2.0])

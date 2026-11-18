@@ -138,21 +138,14 @@ def write_ide_editors_tool(
 def _normalize_solver(solver: Optional[str]) -> str:
     """Normalize solver names for compiler/backend compatibility."""
     if not solver:
-        return "scipy"
+        return "highs"
 
-    normalized = solver.strip().lower()
-
-    solver_aliases = {
-        "highs": "scipy",
-        "scipy": "scipy",
-        "gurobi": "gurobi",
-    }
-    return solver_aliases.get(normalized, normalized)
+    return solver.strip().lower()
 
 
 def _solve_backend(solver: Optional[str]) -> str:
     """Normalize solver names for solve() backend selection."""
-    return "gurobi" if _normalize_solver(solver) == "gurobi" else "scipy"
+    return _normalize_solver(solver)
 
 
 def _normalize_provider(provider: Optional[str]) -> str:

@@ -2,7 +2,7 @@ import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
 from pyopl.pyopl_core import OPLCompiler, SemanticError, parse_model
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 def num(value):
@@ -480,7 +480,7 @@ class TestCompilerDataValidation(unittest.TestCase):
             self.compiler._expand_maxmin_constraint({"type": "constraint", "op": ">=", "left": maximum, "right": num(5)})
 
 
-class TestScipyDomainAndShapeValidation(unittest.TestCase):
+class TestHighsDomainAndShapeValidation(unittest.TestCase):
     def setUp(self):
         ast = {
             "declarations": [
@@ -491,7 +491,7 @@ class TestScipyDomainAndShapeValidation(unittest.TestCase):
             "objective": {"type": "minimize", "expression": num(0)},
             "constraints": [],
         }
-        self.gen = SciPyCSCCodeGenerator(ast, {"groups": {"A": [2, 3]}, "bound": 4})
+        self.gen = HighsCSCCodeGenerator(ast, {"groups": {"A": [2, 3]}, "bound": 4})
 
     def test_static_and_dynamic_bounds_reject_unsupported_values(self):
         self.assertEqual(self.gen._eval_bound(op(name("bound"), "*", num(2))), 8)
@@ -541,7 +541,7 @@ class TestScipyDomainAndShapeValidation(unittest.TestCase):
             evaluate(op(num(1), "/", num(2)), {})
 
     def test_sum_accumulation_combines_constants_and_variable_coefficients(self):
-        generator = SciPyCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
+        generator = HighsCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
         generator._build_variables()
         sum_node = {"type": "sum", "iterators": [{"iterator": "i", "range": rng(1, 3)}], "expression": name("x")}
         coefficients, constant = generator._accumulate_sum_to_dict(op(sum_node, "-", num(2)), {})
@@ -575,7 +575,7 @@ class TestScipyDomainAndShapeValidation(unittest.TestCase):
             self.gen._resolve_parameter("p", ["wrong"], {})
 
     def test_sum_accumulation_of_two_sums_and_unsupported_operator(self):
-        generator = SciPyCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
+        generator = HighsCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
         generator._build_variables()
         left = {"type": "sum", "iterators": [{"iterator": "i", "range": rng(1, 3)}], "expression": name("x")}
         right = {"type": "sum", "iterators": [{"iterator": "j", "range": rng(1, 2)}], "expression": num(2)}
@@ -586,7 +586,7 @@ class TestScipyDomainAndShapeValidation(unittest.TestCase):
             generator._accumulate_sum_to_dict(op(left, "*", right), {})
 
     def test_linear_expression_evaluation_rejects_nonlinear_and_zero_division(self):
-        generator = SciPyCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
+        generator = HighsCSCCodeGenerator(parse_model("dvar float x; minimize 0; subject to {}"))
         generator._build_variables()
         self.assertEqual(generator._eval_expr(op(name("x"), "*", num(3)), {}), ({"x": 3.0}, 0.0))
         self.assertEqual(generator._eval_expr(op(name("x"), "/", num(2)), {}), ({"x": 0.5}, 0.0))

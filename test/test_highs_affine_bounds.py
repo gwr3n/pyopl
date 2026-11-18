@@ -4,11 +4,11 @@ import unittest
 from unittest import mock
 
 from pyopl.affine_bounds import affine_interval, combine_intervals, scale_interval
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
-class TestSciPyAffineBounds(unittest.TestCase):
+class TestHighsAffineBounds(unittest.TestCase):
     def test_shared_interval_operations(self):
         self.assertEqual(combine_intervals((2.0, 5.0), (-3.0, 4.0), "+"), (-1.0, 9.0))
         self.assertEqual(combine_intervals((2.0, 5.0), (-3.0, 4.0), "-"), (-2.0, 8.0))
@@ -26,7 +26,7 @@ class TestSciPyAffineBounds(unittest.TestCase):
 
         self.assertEqual(generator._infer_var_bounds("x"), (2.0, 5.0))
 
-    def _generator(self) -> SciPyCSCCodeGenerator:
+    def _generator(self) -> HighsCSCCodeGenerator:
         ast = {
             "declarations": [
                 {"type": "dvar", "name": "x", "var_type": "float"},
@@ -35,7 +35,7 @@ class TestSciPyAffineBounds(unittest.TestCase):
             "constraints": [],
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
-        generator = SciPyCSCCodeGenerator(ast)
+        generator = HighsCSCCodeGenerator(ast)
         generator.var_names = ["x", "y"]
         generator.var_indices = {"x": 0, "y": 1}
         generator.bounds = [[2.0, 5.0], [-3.0, 4.0]]
@@ -106,7 +106,7 @@ class TestSciPyAffineBounds(unittest.TestCase):
             "constraints": [],
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
-        generator = SciPyCSCCodeGenerator(ast)
+        generator = HighsCSCCodeGenerator(ast)
         generator.var_names = ["x_1", "x_2"]
         generator.var_indices = {"x_1": 0, "x_2": 1}
         generator.bounds = [[None, None], [None, None]]

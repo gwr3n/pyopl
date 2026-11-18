@@ -1,6 +1,6 @@
 # PyOPL Grammar (Aligned with implementation)
 
-This document specifies the grammar implemented in `pyopl/pyopl_core.py`. The backends (`gurobi_codegen.py`, `scipy_codegen*.py`) support overlapping but not identical subsets of the parsed AST, so some constructs may parse successfully but be unsupported by a particular solver.
+This document specifies the grammar implemented in `pyopl/pyopl_core.py`. The backends (`gurobi_codegen.py`, `highs_codegen*.py`) support overlapping but not identical subsets of the parsed AST, so some constructs may parse successfully but be unsupported by a particular solver.
 
 Reference: `pyopl/pyopl_core.py`
 
@@ -565,7 +565,7 @@ From lowest to highest binding power:
   - Mix of int, float, and boolean is allowed (booleans treated numerically where needed).
   - Chained relational comparisons like `a < b < c` are rejected (use explicit conjunctions such as `(a < b) && (b < c)`).
   - `%` (modulo) is supported in expressions for data and parameter evaluation (including inline/externally loaded parameters and .dat computations). In general objectives/constraints it is not supported by the current backends and may fail code generation or runtime execution.
-  - `sqrt` is supported for ground computations that are evaluated during compilation (notably computed parameters). `sqrt` may parse in general expressions, but it is not supported by the SciPy backend and is not reliably supported for decision-variable expressions in the generated Gurobi code.
+  - `sqrt` is supported for ground computations that are evaluated during compilation (notably computed parameters). `sqrt` may parse in general expressions, but it is not supported by the HiGHS backend and is not reliably supported for decision-variable expressions in the generated Gurobi code.
 
 - Boolean expressions:
   - `==`/`!=` are allowed on booleans and numbers/strings; boolean equality to `true` is used to normalize.
@@ -587,7 +587,7 @@ From lowest to highest binding power:
 - Indexing:
   - Range index form `[lo..hi]` requires integer-valued bounds.
   - General index expressions (names, number literals, string literals, arithmetic, parenthesized, or tuple field access with int type) are supported.
-  - Backend note: SciPy index-expression evaluation supports only `+`, `-`, `*` for arithmetic; `/` and `%` in index expressions may parse but are not supported by the SciPy code generator.
+  - Backend note: HiGHS index-expression evaluation supports only `+`, `-`, `*` for arithmetic; `/` and `%` in index expressions may parse but are not supported by the HiGHS code generator.
   - For set dimensions:
     - If the set is a set of tuples, the index must be of that tuple type (or a tuple literal).
     - If the set is a typed scalar set, the index must match its base type.
@@ -685,4 +685,4 @@ c = [
 ## References
 
 - Source: `pyopl/pyopl_core.py`
-- Codegen: `pyopl/gurobi_codegen.py`, `pyopl/scipy_codegen*.py`
+- Codegen: `pyopl/gurobi_codegen.py`, `pyopl/highs_codegen*.py`

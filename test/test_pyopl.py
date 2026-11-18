@@ -14,12 +14,12 @@ from pyopl.pyopl_core import (
     OPLDataParser,
     OPLLexer,
     OPLParser,
-    SciPyCodeGenerator,
+    HighsCodeGenerator,
     SemanticError,
     load_opl_model,
     solve,
 )
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 def setUpModule():
@@ -38,15 +38,15 @@ class TestPyOPL(unittest.TestCase):
         self.assertIsInstance(ast, dict)
         self.assertIsInstance(gurobi_code, str)
 
-    def run_test_case_scipy(self, opl_code):
+    def run_test_case_highs(self, opl_code):
 
         lexer = OPLLexer()
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(opl_code))
-        generator = SciPyCodeGenerator(ast)
-        scipy_code = generator.generate_code()
+        generator = HighsCodeGenerator(ast)
+        highs_code = generator.generate_code()
         self.assertIsInstance(ast, dict)
-        self.assertIsInstance(scipy_code, str)
+        self.assertIsInstance(highs_code, str)
 
     @staticmethod
     def write_model_and_data(model_str, data_str=None):
@@ -70,15 +70,15 @@ class TestPyOPL(unittest.TestCase):
     def run_both_solvers(cls, model_str, data_str=None):
         with cls.write_model_and_data(model_str, data_str) as (mod_path, dat_path):
             gurobi = solve(mod_path, dat_path, solver="gurobi")
-            scipy = solve(mod_path, dat_path, solver="scipy")
-        return gurobi, scipy
+            highs = solve(mod_path, dat_path, solver="highs")
+        return gurobi, highs
 
-    def assert_status_match(self, gurobi, scipy):
-        self.assertEqual(gurobi["status"], scipy["status"])
+    def assert_status_match(self, gurobi, highs):
+        self.assertEqual(gurobi["status"], highs["status"])
 
-    def assert_objective_close(self, gurobi, scipy, tol=1e-6):
+    def assert_objective_close(self, gurobi, highs, tol=1e-6):
         if gurobi["status"] == "OPTIMAL":
-            self.assertAlmostEqual(gurobi["objective_value"], scipy["objective_value"], delta=tol)
+            self.assertAlmostEqual(gurobi["objective_value"], highs["objective_value"], delta=tol)
 
     def test_gurobi_codegen_accepts_optional_progress_callback(self):
         model = """
@@ -124,7 +124,7 @@ class TestPyOPLLexer(TestPyOPL):
         compiler = OPLCompiler(syntax_error_reporting="line")
 
         with self.assertRaises(SyntaxError) as exc:
-            compiler.compile_model(model_code, solver="scipy")
+            compiler.compile_model(model_code, solver="highs")
 
         self.assertEqual(str(exc.exception), "Syntax error on line 4")
 
@@ -138,7 +138,7 @@ class TestPyOPLLexer(TestPyOPL):
         compiler = OPLCompiler(syntax_error_reporting="masked")
 
         with self.assertRaises(SyntaxError) as exc:
-            compiler.compile_model(model_code, solver="scipy")
+            compiler.compile_model(model_code, solver="highs")
 
         self.assertEqual(str(exc.exception), "Syntax error")
 
@@ -152,7 +152,7 @@ class TestPyOPLLexer(TestPyOPL):
         compiler = OPLCompiler(syntax_error_reporting="full")
 
         with self.assertRaises(SyntaxError) as exc:
-            compiler.compile_model(model_code, solver="scipy", syntax_error_reporting="masked")
+            compiler.compile_model(model_code, solver="highs", syntax_error_reporting="masked")
 
         self.assertEqual(str(exc.exception), "Syntax error")
 
@@ -166,7 +166,7 @@ class TestPyOPLLexer(TestPyOPL):
         compiler = OPLCompiler(syntax_error_reporting="masked")
 
         with self.assertRaises(SyntaxError) as exc:
-            compiler.compile_model(model_code, solver="scipy", syntax_error_reporting="line")
+            compiler.compile_model(model_code, solver="highs", syntax_error_reporting="line")
 
         self.assertEqual(str(exc.exception), "Syntax error on line 4")
 
@@ -180,7 +180,7 @@ class TestPyOPLLexer(TestPyOPL):
         compiler = OPLCompiler()
 
         with self.assertRaises(SemanticError) as exc:
-            compiler.compile_model(model_code, solver="scipy")
+            compiler.compile_model(model_code, solver="highs")
 
         self.assertIn("Undeclared symbol 'z'", str(exc.exception))
 
@@ -629,9 +629,9 @@ class TestPyOPLParser(TestPyOPL):
         self.assertNotIn("zip(Elements", full_gurobi_code)
         self.assertIn("_or_bool_", full_gurobi_code)
         self.assertIn("_or_link", full_gurobi_code)
-        _, full_scipy_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="scipy")
-        self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_scipy_code)
-        self.assertNotIn("zip(Elements", full_scipy_code)
+        _, full_highs_code, _ = OPLCompiler().compile_model(opl_code, data_code, solver="highs")
+        self.assertIn("matrix = {1: {'c': 1, 'v': 1, 'val': 1.0}}", full_highs_code)
+        self.assertNotIn("zip(Elements", full_highs_code)
 
         string_indexed_model = """
         tuple Rec { int demand; float price; };
@@ -664,13 +664,13 @@ class TestPyOPLParser(TestPyOPL):
         code = GurobiCodeGenerator(codegen_ast, data).generate_code()
         self.assertIn("model.Params.LogToConsole = 1", code)
         self.assertIn("x = model.addVars(range(1, Vars + 1), vtype=GRB.CONTINUOUS, name='x', lb=lb, ub=ub)", code)
-        scipy_code = SciPyCSCCodeGenerator(
+        highs_code = HighsCSCCodeGenerator(
             codegen_ast,
             {"numVars": 2, "objCoef": {1: 1.0, 2: 2.0}, "lb": {1: 0.0, 2: 1.0}, "ub": {1: 3.0, 2: 4.0}},
         ).generate_code()
-        self.assertIn("'primal_feasibility_tolerance': 1e-06", scipy_code)
-        self.assertIn("'dual_feasibility_tolerance': 1e-06", scipy_code)
-        self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", scipy_code)
+        self.assertIn("'primal_feasibility_tolerance': 1e-06", highs_code)
+        self.assertIn("'dual_feasibility_tolerance': 1e-06", highs_code)
+        self.assertIn("bounds = [[0.0, 3.0], [1.0, 4.0]]", highs_code)
 
     def test_typed_scalar_set_comprehension_split_variables_parse(self):
         model_code = """
@@ -710,10 +710,10 @@ class TestPyOPLParser(TestPyOPL):
             "xContinuous = model.addVars(ContinuousVars, vtype=GRB.CONTINUOUS, name='xContinuous', lb=lb, ub=ub)", gurobi_code
         )
 
-        _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
-        self.assertIn("var_names = ['xBinary_1', 'xBinary_3', 'xContinuous_2']", scipy_code)
-        self.assertIn("bounds = [[0, 1], [0, 1], [0.0, 10.0]]", scipy_code)
-        self.assertIn("integrality = [1, 1, 0]", scipy_code)
+        _, highs_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="highs")
+        self.assertIn("var_names = ['xBinary_1', 'xBinary_3', 'xContinuous_2']", highs_code)
+        self.assertIn("bounds = [[0, 1], [0, 1], [0.0, 10.0]]", highs_code)
+        self.assertIn("integrality = [1, 1, 0]", highs_code)
 
     def test_indexed_tuple_set_array_iterator_domain(self):
         model_code = """
@@ -778,12 +778,12 @@ class TestPyOPLParser(TestPyOPL):
         self.assertIn("matrix = {1: [(1, 1.0), (2, 2.0)]}", gurobi_code)
         self.assertIn("for e in (matrix[c] if isinstance(matrix, dict) else matrix[((c) - (1))])", gurobi_code)
 
-        _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
-        self.assertIn("matrix = [[(1, 1.0), (2, 2.0)]]", scipy_code)
+        _, highs_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="highs")
+        self.assertIn("matrix = [[(1, 1.0), (2, 2.0)]]", highs_code)
         self.assertTrue(
-            ("A_eq_data = [-1.0, -2.0]" in scipy_code and "b_eq = [-5.0]" in scipy_code)
-            or ("A_eq_data = [1.0, 2.0]" in scipy_code and "b_eq = [5.0]" in scipy_code),
-            scipy_code,
+            ("A_eq_data = [-1.0, -2.0]" in highs_code and "b_eq = [-5.0]" in highs_code)
+            or ("A_eq_data = [1.0, 2.0]" in highs_code and "b_eq = [5.0]" in highs_code),
+            highs_code,
         )
 
     def test_indexed_tuple_set_array_allows_empty_rows(self):
@@ -853,8 +853,8 @@ class TestPyOPLParser(TestPyOPL):
         self.assertEqual(data["matrix"], [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]])
         self.assertIn("matrix = {1: [(1, 1.0), (2, 2.0)], 2: [], 3: [(1, -1.0)]}", gurobi_code)
 
-        _, scipy_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="scipy")
-        self.assertIn("matrix = [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]]", scipy_code)
+        _, highs_code, _ = OPLCompiler().compile_model(model_code, data_code, solver="highs")
+        self.assertIn("matrix = [[(1, 1.0), (2, 2.0)], [], [(1, -1.0)]]", highs_code)
 
     def test_comparison_expression_in_index_constraint(self):
         """Test that comparison expressions (LE, GE, etc.) are accepted in index constraints (not followed by semicolon)."""
@@ -1002,9 +1002,9 @@ class TestPyOPLParser(TestPyOPL):
             if os.path.exists(dummy_data_file):
                 os.remove(dummy_data_file)
 
-    def test_file_loading_and_scipy_codegen_and_solution(self):
-        """Test loading a model/data file, SciPy codegen, and solution extraction."""
-        from pyopl.pyopl_core import load_opl_model, solve_with_scipy
+    def test_file_loading_and_highs_codegen_and_solution(self):
+        """Test loading a model/data file, Highs codegen, and solution extraction."""
+        from pyopl.pyopl_core import load_opl_model, solve_with_highs
 
         dummy_model_file = "test_model.mod"
         dummy_data_file = "test_data.dat"
@@ -1032,12 +1032,12 @@ class TestPyOPLParser(TestPyOPL):
                 my_array = [10, 20];
                 my_2d_array = [[1, 2], [3, 4]];
                 """)
-            ast, scipy_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file, solver="scipy")
+            ast, highs_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file, solver="highs")
             self.assertIsInstance(ast, dict)
-            self.assertIsInstance(scipy_code, str)
+            self.assertIsInstance(highs_code, str)
             self.assertIsInstance(data_dict, dict)
-            # Also test solve_with_scipy
-            result = solve_with_scipy(dummy_model_file, dummy_data_file)
+            # Also test solve_with_highs
+            result = solve_with_highs(dummy_model_file, dummy_data_file)
             self.assertIsInstance(result, dict)
             self.assertIn("status", result)
         finally:
@@ -1057,10 +1057,10 @@ class TestPyOPLParser(TestPyOPL):
         }
         """
 
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
 
         self.assertEqual(set(gurobi["solution"]), {"a", "b", "y"})
-        self.assertEqual(set(scipy["solution"]), {"a", "b", "y"})
+        self.assertEqual(set(highs["solution"]), {"a", "b", "y"})
 
     def test_parse_simple_param(self):
         """Test parsing a simple model with a parameter 'int initial_value = 2;'"""
@@ -1193,8 +1193,8 @@ class TestPyOPLCompiler(TestPyOPL):
         for a, b in zip(data_g["mod_demand"], expected_mod):
             self.assertEqual(int(a), int(b))
 
-        # SciPy backend compile
-        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
+        # Highs backend compile
+        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="highs")
         self.assertIn("sqrt_half", data_s)
         self.assertIn("mod_demand", data_s)
         self.assertEqual(len(data_s["sqrt_half"]), 6)
@@ -1204,7 +1204,7 @@ class TestPyOPLCompiler(TestPyOPL):
         for a, b in zip(data_s["mod_demand"], expected_mod):
             self.assertEqual(int(a), int(b))
 
-    def test_computed_param_sqrt_inline_gurobi_and_scipy(self):
+    def test_computed_param_sqrt_inline_gurobi_and_highs(self):
         model_code = """
             range T = 1..6;
             dvar float+ x[T];
@@ -1240,8 +1240,8 @@ class TestPyOPLCompiler(TestPyOPL):
         for a, b in zip(data_g["sqrt_demand"], expected):
             assert abs(a - b) < 1e-9
 
-        # SciPy backend compile (ensures cross-backend works too)
-        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="scipy")
+        # Highs backend compile (ensures cross-backend works too)
+        ast_s, code_s, data_s = compiler.compile_model(model_code, data_code=data_code, solver="highs")
         assert "sqrt_demand" in data_s
         assert isinstance(data_s["sqrt_demand"], list)
         assert len(data_s["sqrt_demand"]) == 6
@@ -1272,7 +1272,7 @@ class TestPyOPLCompiler(TestPyOPL):
 
         from pyopl.pyopl_core import solve
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -1307,9 +1307,9 @@ class TestPyOPLCompiler(TestPyOPL):
             forall(i in I) x[i] >= 0;
         }}
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_mixed_types_and_tight_bounds(self):
         """
@@ -1328,9 +1328,9 @@ class TestPyOPLCompiler(TestPyOPL):
             b == true;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_redundant_and_contradictory_constraints(self):
         """
@@ -1348,10 +1348,10 @@ class TestPyOPLCompiler(TestPyOPL):
             x == 6;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         # Both should report infeasible or inf_or_unbd
         self.assertIn(gurobi["status"], ("INFEASIBLE", "INF_OR_UNBD"))
-        self.assertIn(scipy["status"], ("INFEASIBLE", "INF_OR_UNBD"))
+        self.assertIn(highs["status"], ("INFEASIBLE", "INF_OR_UNBD"))
 
     def test_sum_on_lhs_of_constraint_in_forall(self):
         """Test that a sum expression can be used as the left-hand side of a constraint inside a forall loop."""
@@ -1365,39 +1365,39 @@ class TestPyOPLCompiler(TestPyOPL):
                 sum(i in I) x[i][j] >= 6;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         # For each j, sum over i of x[i][j] should be 6 (tight constraint), all x[i][j] >= 0
         for j in range(1, 3):
             gurobi_sum = sum(gurobi["solution"].get(f"x[{i},{j}]", 0) for i in range(1, 4))
-            scipy_sum = sum(scipy["solution"].get(f"x_{i}_{j}", 0) for i in range(1, 4))
+            highs_sum = sum(highs["solution"].get(f"x_{i}_{j}", 0) for i in range(1, 4))
             self.assertAlmostEqual(gurobi_sum, 6)
-            self.assertAlmostEqual(scipy_sum, 6)
+            self.assertAlmostEqual(highs_sum, 6)
         for v in gurobi["solution"].values():
             self.assertGreaterEqual(v, 0)
-        for v in scipy["solution"].values():
+        for v in highs["solution"].values():
             self.assertGreaterEqual(v, 0)
 
-    def test_missing_model_and_data_file_scipy(self):
-        """Test error handling for missing model and data files in solve_with_scipy (covers lines 1235-1241, 1318-1324)."""
+    def test_missing_model_and_data_file_highs(self):
+        """Test error handling for missing model and data files in solve_with_highs (covers lines 1235-1241, 1318-1324)."""
         import os
         import tempfile
 
-        from pyopl.pyopl_core import solve_with_scipy
+        from pyopl.pyopl_core import solve_with_highs
 
         # Create a temp file and then delete it to ensure it does not exist
         with tempfile.TemporaryDirectory() as tmpdir:
             missing_model = os.path.join(tmpdir, "missing_model.mod")
             missing_data = os.path.join(tmpdir, "missing_data.dat")
             # Model file missing
-            result = solve_with_scipy(missing_model)
+            result = solve_with_highs(missing_model)
             self.assertIn("Error: Model file", result.get("message", ""))
             self.assertIn(result.get("status", "").upper(), ["FAILED", "ERROR"])
             # Model exists, data file missing
             with open(missing_model, "w") as f:
                 f.write("dvar float x; minimize x; subject to { x >= 1; }")
-            result2 = solve_with_scipy(missing_model, missing_data)
+            result2 = solve_with_highs(missing_model, missing_data)
             self.assertIn("Error: Data file", result2.get("message", ""))
             self.assertIn(result2.get("status", "").upper(), ["FAILED", "ERROR"])
 
@@ -1416,7 +1416,7 @@ class TestPyOPLCompiler(TestPyOPL):
         }
         """
         self.run_test_case_gurobi(opl_code)
-        self.run_test_case_scipy(opl_code)
+        self.run_test_case_highs(opl_code)
 
         # Indexed float+ and int+
         opl_code2 = """
@@ -1432,7 +1432,7 @@ class TestPyOPLCompiler(TestPyOPL):
         }
         """
         self.run_test_case_gurobi(opl_code2)
-        self.run_test_case_scipy(opl_code2)
+        self.run_test_case_highs(opl_code2)
 
     def test_sum_on_lhs_of_constraint(self):
         """Test that a sum expression can be used as the left-hand side of a constraint."""
@@ -1444,15 +1444,15 @@ class TestPyOPLCompiler(TestPyOPL):
             sum(i in I) x[i] >= 6;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         # The sum of x[i] should be 6 (tight constraint), all x[i] >= 0
         self.assertAlmostEqual(sum(gurobi["solution"].values()), 6)
-        self.assertAlmostEqual(sum(scipy["solution"].values()), 6)
+        self.assertAlmostEqual(sum(highs["solution"].values()), 6)
         for v in gurobi["solution"].values():
             self.assertGreaterEqual(v, 0)
-        for v in scipy["solution"].values():
+        for v in highs["solution"].values():
             self.assertGreaterEqual(v, 0)
 
     def test_sum_on_lhs_of_constraint_with_index_neq(self):
@@ -1465,15 +1465,15 @@ class TestPyOPLCompiler(TestPyOPL):
             sum(i in I : i != 2) x[i] >= 6;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         # The sum of x[i] should be 6 (tight constraint), all x[i] >= 0
         self.assertAlmostEqual(sum(gurobi["solution"].values()), 6)
-        self.assertAlmostEqual(sum(scipy["solution"].values()), 6)
+        self.assertAlmostEqual(sum(highs["solution"].values()), 6)
         for v in gurobi["solution"].values():
             self.assertGreaterEqual(v, 0)
-        for v in scipy["solution"].values():
+        for v in highs["solution"].values():
             self.assertGreaterEqual(v, 0)
 
     def test_sum_on_lhs_of_constraint_with_index_eq(self):
@@ -1486,23 +1486,23 @@ class TestPyOPLCompiler(TestPyOPL):
             sum(i in I : i == 2) x[i] >= 6;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         # The sum of x[i] should be 6 (tight constraint), all x[i] >= 0
         self.assertAlmostEqual(sum(gurobi["solution"].values()), 6)
-        self.assertAlmostEqual(sum(scipy["solution"].values()), 6)
+        self.assertAlmostEqual(sum(highs["solution"].values()), 6)
         for v in gurobi["solution"].values():
             self.assertGreaterEqual(v, 0)
-        for v in scipy["solution"].values():
+        for v in highs["solution"].values():
             self.assertGreaterEqual(v, 0)
 
     def test_empty_model(self):
         """Test an empty model (should return error status)."""
         model = """"""
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_invalid_operator(self):
         """Test model with an invalid operator in constraint (should return error status)."""
@@ -1513,9 +1513,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x <> 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_parameter_not_found(self):
         """Test model referencing a parameter not in data (should return error status)."""
@@ -1525,9 +1525,9 @@ class TestPyOPLCompiler(TestPyOPL):
         minimize x + a;
         subject to { x >= 1; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_range_start_greater_than_end(self):
         """Test range with start > end (should return error status)."""
@@ -1537,9 +1537,9 @@ class TestPyOPLCompiler(TestPyOPL):
         maximize x;
         subject to { x <= 1; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_constraint_with_symbolic_rhs(self):
         """Test constraint with symbolic right-hand side (should return error status)."""
@@ -1550,9 +1550,9 @@ class TestPyOPLCompiler(TestPyOPL):
         subject to { x >= a; }
         """
         # No data for 'a', should error
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_parenthesized_expression(self):
         """Test parenthesized expressions in objective and constraints."""
@@ -1562,9 +1562,9 @@ class TestPyOPLCompiler(TestPyOPL):
         minimize (x + (y));
         subject to { (x) + (y) >= 2; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_sum_with_index_constraint(self):
         """Test sum with index constraint (sum(i in 1..3: i != 2))."""
@@ -1574,9 +1574,9 @@ class TestPyOPLCompiler(TestPyOPL):
         minimize sum(i in I: i != 2) x[i];
         subject to { forall(i in I) x[i] >= 1; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_forall_with_index_constraint(self):
         """Test forall with index constraint (forall(i in 1..3: i != 2))."""
@@ -1586,9 +1586,9 @@ class TestPyOPLCompiler(TestPyOPL):
         minimize sum(i in I) x[i];
         subject to { forall(i in I: i != 2) x[i] >= 5; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_boolean_arithmetic(self):
         """Test arithmetic with boolean variables in objective and constraints."""
@@ -1598,9 +1598,9 @@ class TestPyOPLCompiler(TestPyOPL):
         maximize b * 2 + x;
         subject to { b + x <= 2; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_indexed_parameter(self):
         """Test model with indexed parameter (should error if data missing)."""
@@ -1610,9 +1610,9 @@ class TestPyOPLCompiler(TestPyOPL):
         minimize x + a[1];
         subject to { x >= 1; }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
-        self.assertIn(scipy.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
+        self.assertIn(highs.get("status", "").upper(), ["ERROR", "FAILED", "MODEL_ERROR"])
 
     def test_infeasible_model_compare_solvers(self):
         """Test that infeasible models are detected by both solvers."""
@@ -1624,9 +1624,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x <= 1;
         }
         """
-        result_gurobi, result_scipy = self.run_both_solvers(model)
+        result_gurobi, result_highs = self.run_both_solvers(model)
         self.assertIn(result_gurobi.get("status", "").upper(), ["INFEASIBLE", "INF_OR_UNBD", "FAILED"])
-        self.assertIn(result_scipy.get("status", "").upper(), ["INFEASIBLE", "INF_OR_UNBD", "FAILED"])
+        self.assertIn(result_highs.get("status", "").upper(), ["INFEASIBLE", "INF_OR_UNBD", "FAILED"])
 
     def test_unbounded_model_compare_solvers(self):
         """Test that unbounded models are detected by both solvers."""
@@ -1637,9 +1637,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 0;
         }
         """
-        result_gurobi, result_scipy = self.run_both_solvers(model)
+        result_gurobi, result_highs = self.run_both_solvers(model)
         self.assertIn(result_gurobi.get("status", "").upper(), ["UNBOUNDED", "INF_OR_UNBD", "FAILED"])
-        self.assertIn(result_scipy.get("status", "").upper(), ["UNBOUNDED", "INF_OR_UNBD", "FAILED"])
+        self.assertIn(result_highs.get("status", "").upper(), ["UNBOUNDED", "INF_OR_UNBD", "FAILED"])
 
     def test_floatplus_and_intplus_edge(self):
         """Test float+ and int+ variables with negative lower bounds (should clamp to 0)."""
@@ -1655,13 +1655,13 @@ class TestPyOPLCompiler(TestPyOPL):
             y <= 3;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
         # Both x and y should be at their lowest allowed (0)
         self.assertAlmostEqual(gurobi["solution"]["x"], 0)
         self.assertAlmostEqual(gurobi["solution"]["y"], 0)
-        self.assertAlmostEqual(scipy["solution"]["x"], 0)
-        self.assertAlmostEqual(scipy["solution"]["y"], 0)
+        self.assertAlmostEqual(highs["solution"]["x"], 0)
+        self.assertAlmostEqual(highs["solution"]["y"], 0)
 
     def test_all_variables_fixed(self):
         """Test that all variables fixed by constraints yield correct solution."""
@@ -1674,9 +1674,9 @@ class TestPyOPLCompiler(TestPyOPL):
             y == 2.5;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 1)
         self.assertAlmostEqual(gurobi["solution"]["y"], 2.5)
 
@@ -1692,9 +1692,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x <= 5;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 1)
 
     def test_mixed_variable_types(self):
@@ -1710,9 +1710,9 @@ class TestPyOPLCompiler(TestPyOPL):
             f >= 0;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
 
     def test_degenerate_solution(self):
         """Test degenerate models with multiple optimal solutions."""
@@ -1726,12 +1726,12 @@ class TestPyOPLCompiler(TestPyOPL):
             y >= 0;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
         self.assertAlmostEqual(gurobi["objective_value"], 0)
-        self.assertAlmostEqual(scipy["objective_value"], 0)
+        self.assertAlmostEqual(highs["objective_value"], 0)
         self.assertAlmostEqual(gurobi["solution"]["x"] + gurobi["solution"]["y"], 1)
-        self.assertAlmostEqual(scipy["solution"]["x"] + scipy["solution"]["y"], 1)
+        self.assertAlmostEqual(highs["solution"]["x"] + highs["solution"]["y"], 1)
 
     def test_large_scale(self):
         """Test large-scale models for solver consistency and performance."""
@@ -1744,9 +1744,9 @@ class TestPyOPLCompiler(TestPyOPL):
             forall(i in I) x[i] >= {N};
         }}
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy, tol=1e-4)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs, tol=1e-4)
         for v in gurobi["solution"].values():
             self.assertAlmostEqual(v, N)
 
@@ -1760,9 +1760,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x <= 2;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 2)
 
     def test_no_constraints(self):
@@ -1774,9 +1774,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 0;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi["status"], ("UNBOUNDED", "INF_OR_UNBD"))
-        self.assertIn(scipy["status"], ("UNBOUNDED", "INF_OR_UNBD"))
+        self.assertIn(highs["status"], ("UNBOUNDED", "INF_OR_UNBD"))
 
     def test_infeasible_bounds(self):
         """Test models with infeasible variable bounds."""
@@ -1788,9 +1788,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x <= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertEqual(gurobi["status"], "INFEASIBLE")
-        self.assertEqual(scipy["status"], "INFEASIBLE")
+        self.assertEqual(highs["status"], "INFEASIBLE")
 
     def test_all_zero_objective(self):
         """Test models with zero objective coefficients."""
@@ -1802,10 +1802,10 @@ class TestPyOPLCompiler(TestPyOPL):
             x + y >= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
         self.assertAlmostEqual(gurobi["objective_value"], 0)
-        self.assertAlmostEqual(scipy["objective_value"], 0)
+        self.assertAlmostEqual(highs["objective_value"], 0)
 
     def test_variable_not_in_constraints(self):
         """Test models where some variables are not constrained."""
@@ -1817,12 +1817,12 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 1)
         self.assertAlmostEqual(gurobi["solution"].get("y", 0), 0)
-        self.assertAlmostEqual(scipy["solution"].get("y", 0), 0)
+        self.assertAlmostEqual(highs["solution"].get("y", 0), 0)
 
     def test_single_variable_single_constraint(self):
         """Test models with a single variable and a single constraint."""
@@ -1833,9 +1833,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 3;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 3)
 
     def test_all_variables_unbounded(self):
@@ -1848,9 +1848,9 @@ class TestPyOPLCompiler(TestPyOPL):
             0 <= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
+        gurobi, highs = self.run_both_solvers(model)
         self.assertIn(gurobi["status"], ("UNBOUNDED", "INF_OR_UNBD"))
-        self.assertIn(scipy["status"], ("UNBOUNDED", "INF_OR_UNBD"))
+        self.assertIn(highs["status"], ("UNBOUNDED", "INF_OR_UNBD"))
 
     def test_redundant_variables(self):
         """Test models with redundant variables (not affecting the objective)."""
@@ -1863,14 +1863,14 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 1)
         self.assertAlmostEqual(gurobi["solution"].get("y", 0), 0)
         self.assertAlmostEqual(gurobi["solution"].get("z", 0), 0)
-        self.assertAlmostEqual(scipy["solution"].get("y", 0), 0)
-        self.assertAlmostEqual(scipy["solution"].get("z", 0), 0)
+        self.assertAlmostEqual(highs["solution"].get("y", 0), 0)
+        self.assertAlmostEqual(highs["solution"].get("z", 0), 0)
 
     def test_tight_equality_constraint(self):
         """Test models with tight equality constraints between variables."""
@@ -1884,17 +1884,17 @@ class TestPyOPLCompiler(TestPyOPL):
             y >= 2;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"] + gurobi["solution"]["y"], 5)
         self.assertGreaterEqual(gurobi["solution"]["x"], 2)
         self.assertGreaterEqual(gurobi["solution"]["y"], 2)
         self.assertAlmostEqual(gurobi["objective_value"], 5)
-        self.assertAlmostEqual(scipy["solution"]["x"] + scipy["solution"]["y"], 5)
-        self.assertGreaterEqual(scipy["solution"]["x"], 2)
-        self.assertGreaterEqual(scipy["solution"]["y"], 2)
-        self.assertAlmostEqual(scipy["objective_value"], 5)
+        self.assertAlmostEqual(highs["solution"]["x"] + highs["solution"]["y"], 5)
+        self.assertGreaterEqual(highs["solution"]["x"], 2)
+        self.assertGreaterEqual(highs["solution"]["y"], 2)
+        self.assertAlmostEqual(highs["objective_value"], 5)
 
     def test_all_zero_constraints(self):
         """Test models with constraints that are always satisfied (zero coefficients)."""
@@ -1906,16 +1906,16 @@ class TestPyOPLCompiler(TestPyOPL):
             0*x + 0*y >= 0;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
         self.assertEqual(gurobi["status"], "OPTIMAL")
-        self.assertEqual(scipy["status"], "OPTIMAL")
+        self.assertEqual(highs["status"], "OPTIMAL")
         self.assertAlmostEqual(gurobi["solution"]["x"], 0)
         self.assertAlmostEqual(gurobi["solution"]["y"], 0)
         self.assertAlmostEqual(gurobi["objective_value"], 0)
-        self.assertAlmostEqual(scipy["solution"]["x"], 0)
-        self.assertAlmostEqual(scipy["solution"]["y"], 0)
-        self.assertAlmostEqual(scipy["objective_value"], 0)
+        self.assertAlmostEqual(highs["solution"]["x"], 0)
+        self.assertAlmostEqual(highs["solution"]["y"], 0)
+        self.assertAlmostEqual(highs["objective_value"], 0)
 
     def test_variable_only_in_objective(self):
         """Test models where a variable appears only in the objective."""
@@ -1927,11 +1927,11 @@ class TestPyOPLCompiler(TestPyOPL):
             y >= 1;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertGreaterEqual(gurobi["solution"]["y"], 1)
-        self.assertGreaterEqual(scipy["solution"]["y"], 1)
+        self.assertGreaterEqual(highs["solution"]["y"], 1)
 
     def test_constraint_always_satisfied(self):
         """Test models with constraints that are always satisfied (e.g., 0 <= 1)."""
@@ -1943,9 +1943,9 @@ class TestPyOPLCompiler(TestPyOPL):
             x >= 2;
         }
         """
-        gurobi, scipy = self.run_both_solvers(model)
-        self.assert_status_match(gurobi, scipy)
-        self.assert_objective_close(gurobi, scipy)
+        gurobi, highs = self.run_both_solvers(model)
+        self.assert_status_match(gurobi, highs)
+        self.assert_objective_close(gurobi, highs)
         self.assertAlmostEqual(gurobi["solution"]["x"], 2)
 
     def test_nested_array_parsing(self):
@@ -2302,19 +2302,19 @@ class TestPyOPLCompiler(TestPyOPL):
             also_contains=["X", "Y", "P", "Q", "T"],
         )
 
-    def test_scipy_codegen_multi_dimensional_arrays(self):
-        """Test SciPy codegen for 2D and 3D decision variables and parameters (mirrors Gurobi test)."""
+    def test_highs_codegen_multi_dimensional_arrays(self):
+        """Test Highs codegen for 2D and 3D decision variables and parameters (mirrors Gurobi test)."""
         import re
 
         from pyopl.pyopl_core import OPLLexer, OPLParser
-        from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+        from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
         def nospace(s: str) -> str:
             return re.sub(r"\s+", "", s)
 
-        def assert_has_var_decl_scipy(code: str):
-            # SciPy code declares variables via 'var_names = [...]'
-            self.assertIn("var_names =", code, "Expected 'var_names =' in generated SciPy code.")
+        def assert_has_var_decl_highs(code: str):
+            # Highs code declares variables via 'var_names = [...]'
+            self.assertIn("var_names =", code, "Expected 'var_names =' in generated Highs code.")
 
         def assert_has_array_repr(
             code: str,
@@ -2345,7 +2345,7 @@ class TestPyOPLCompiler(TestPyOPL):
                     ok = True
             self.assertTrue(
                 ok,
-                f"Expected '{name}' to be represented as dict(flat) or nested list in generated SciPy code.",
+                f"Expected '{name}' to be represented as dict(flat) or nested list in generated Highs code.",
             )
 
         lexer = OPLLexer()
@@ -2363,11 +2363,11 @@ class TestPyOPLCompiler(TestPyOPL):
         }
         """
         ast_2d = parser.parse(lexer.tokenize(opl_code_2d))
-        gen_2d = SciPyCSCCodeGenerator(ast_2d, {"arr": [[1, 2, 3], [4, 5, 6]], "I": 2, "J": 3})
-        scipy_code_2d = gen_2d.generate_code()
-        assert_has_var_decl_scipy(scipy_code_2d)
+        gen_2d = HighsCSCCodeGenerator(ast_2d, {"arr": [[1, 2, 3], [4, 5, 6]], "I": 2, "J": 3})
+        highs_code_2d = gen_2d.generate_code()
+        assert_has_var_decl_highs(highs_code_2d)
         assert_has_array_repr(
-            scipy_code_2d,
+            highs_code_2d,
             "arr",
             tuple_keys=["(1,1)", "(2,3)"],
             nested_literal="arr = [[1, 2, 3], [4, 5, 6]]",
@@ -2387,14 +2387,14 @@ class TestPyOPLCompiler(TestPyOPL):
         }
         """
         ast_3d = parser.parse(lexer.tokenize(opl_code_3d))
-        gen_3d = SciPyCSCCodeGenerator(
+        gen_3d = HighsCSCCodeGenerator(
             ast_3d,
             {"cube": [[[1, 2], [3, 4]], [[5, 6], [7, 8]]], "I": 2, "J": 2, "K": 2},
         )
-        scipy_code_3d = gen_3d.generate_code()
-        assert_has_var_decl_scipy(scipy_code_3d)
+        highs_code_3d = gen_3d.generate_code()
+        assert_has_var_decl_highs(highs_code_3d)
         assert_has_array_repr(
-            scipy_code_3d,
+            highs_code_3d,
             "cube",
             tuple_keys=["(1,1,1)", "(2,2,2)"],
             nested_literal="cube = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
@@ -2410,10 +2410,10 @@ class TestPyOPLCompiler(TestPyOPL):
             subject to { }
         """
         ast = parser.parse(lexer.tokenize(opl_code))
-        gen = SciPyCSCCodeGenerator(ast)
-        scipy_code = gen.generate_code()
+        gen = HighsCSCCodeGenerator(ast)
+        highs_code = gen.generate_code()
         assert_has_array_repr(
-            scipy_code,
+            highs_code,
             "arr",
             tuple_keys=["(1,1)", "(1,2)", "(1,3)", "(2,1)", "(2,2)", "(2,3)"],
             nested_literal="arr = [[1, 2, 3], [4, 5, 6]]",
@@ -2430,10 +2430,10 @@ class TestPyOPLCompiler(TestPyOPL):
             subject to { }
         """
         ast3d = parser.parse(lexer.tokenize(opl_code_3d_arr))
-        gen3d = SciPyCSCCodeGenerator(ast3d)
-        scipy_code3d = gen3d.generate_code()
+        gen3d = HighsCSCCodeGenerator(ast3d)
+        highs_code3d = gen3d.generate_code()
         assert_has_array_repr(
-            scipy_code3d,
+            highs_code3d,
             "arr3d",
             tuple_keys=["(1,1,1)", "(2,2,2)"],
             nested_literal="arr3d = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
@@ -2449,10 +2449,10 @@ class TestPyOPLCompiler(TestPyOPL):
             subject to { }
         """
         ast_set_range = parser.parse(lexer.tokenize(opl_code_set_range))
-        gen_set_range = SciPyCSCCodeGenerator(ast_set_range)
-        scipy_code_set_range = gen_set_range.generate_code()
+        gen_set_range = HighsCSCCodeGenerator(ast_set_range)
+        highs_code_set_range = gen_set_range.generate_code()
         assert_has_array_repr(
-            scipy_code_set_range,
+            highs_code_set_range,
             "Demand",
             tuple_keys=["('A',1)", "('A',2)", "('B',1)", "('B',2)"],
             nested_literal="Demand = [[1, 2], [3, 4]]",
@@ -2468,10 +2468,10 @@ class TestPyOPLCompiler(TestPyOPL):
             subject to { }
         """
         ast_set_set = parser.parse(lexer.tokenize(opl_code_set_set))
-        gen_set_set = SciPyCSCCodeGenerator(ast_set_set)
-        scipy_code_set_set = gen_set_set.generate_code()
+        gen_set_set = HighsCSCCodeGenerator(ast_set_set)
+        highs_code_set_set = gen_set_set.generate_code()
         assert_has_array_repr(
-            scipy_code_set_set,
+            highs_code_set_set,
             "arrSetSet",
             tuple_keys=["('X','P')", "('X','Q')", "('Y','P')", "('Y','Q')"],
             nested_literal="arrSetSet = [[10, 20], [30, 40]]",
@@ -2491,10 +2491,10 @@ class TestPyOPLCompiler(TestPyOPL):
             subject to { }
         """
         ast_srs = parser.parse(lexer.tokenize(opl_code_set_range_set))
-        gen_srs = SciPyCSCCodeGenerator(ast_srs)
-        scipy_code_srs = gen_srs.generate_code()
+        gen_srs = HighsCSCCodeGenerator(ast_srs)
+        highs_code_srs = gen_srs.generate_code()
         assert_has_array_repr(
-            scipy_code_srs,
+            highs_code_srs,
             "arrSRS",
             tuple_keys=["('X',1,'P')", "('Y',2,'Q')"],
             nested_literal="arrSRS = [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",

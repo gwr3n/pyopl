@@ -3,9 +3,9 @@ import unittest
 
 import numpy as np
 
-import pyopl.scipy_codegen_csc as scipy_codegen_csc
+import pyopl.highs_codegen_csc as highs_codegen_csc
 from pyopl.pyopl_core import OPLLexer, OPLParser
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
@@ -36,7 +36,7 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
         }
 
     def _build(self, ast, data=None):
-        return SciPyCSCCodeGenerator(ast, data).build_problem()
+        return HighsCSCCodeGenerator(ast, data).build_problem()
 
     def _assignment_has_auxiliary_extension(self, problem, fixed_values):
         auxiliary_names = [name for name in problem.var_names if name not in fixed_values]
@@ -238,7 +238,7 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
             self._build(ast)
 
     def test_unresolved_coefficient_is_never_dropped(self):
-        generator = SciPyCSCCodeGenerator(self._ast([self._decl("x", "float")], []))
+        generator = HighsCSCCodeGenerator(self._ast([self._decl("x", "float")], []))
         generator._build_variables()
         vector = [0.0]
 
@@ -249,15 +249,15 @@ class TestResidualSemanticShortcuts(unittest.TestCase):
 
     def test_strict_comparison_exceeds_solver_feasibility_tolerance(self):
         self.assertTrue(
-            hasattr(scipy_codegen_csc, "SCIPY_FEASIBILITY_TOLERANCE"),
+            hasattr(highs_codegen_csc, "HIGHS_FEASIBILITY_TOLERANCE"),
             "Strict inequalities need one named tolerance shared with the HiGHS solver options",
         )
-        tolerance = scipy_codegen_csc.SCIPY_FEASIBILITY_TOLERANCE
-        self.assertGreater(scipy_codegen_csc.BOOL_EPS, tolerance)
-        self.assertEqual(scipy_codegen_csc.LINEAR_ZERO_TOLERANCE, 1e-12)
+        tolerance = highs_codegen_csc.HIGHS_FEASIBILITY_TOLERANCE
+        self.assertGreater(highs_codegen_csc.BOOL_EPS, tolerance)
+        self.assertEqual(highs_codegen_csc.LINEAR_ZERO_TOLERANCE, 1e-12)
 
         ast = self._ast([self._decl("x", "float")], [self._constraint(self._name("x"), "<", self._number(1))])
-        code = SciPyCSCCodeGenerator(ast).generate_code()
+        code = HighsCSCCodeGenerator(ast).generate_code()
         self.assertIn(f"'primal_feasibility_tolerance': {tolerance!r}", code)
         self.assertIn(f"'dual_feasibility_tolerance': {tolerance!r}", code)
 

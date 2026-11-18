@@ -1,13 +1,13 @@
-class SciPyCodeGeneratorBase:
+class HighsCodeGeneratorBase:
     """
-    Abstract base class for SciPy code generators.
+    Abstract base class for Highs code generators.
     Subclasses must implement the required methods.
     """
 
     def __init__(self, ast, data_dict=None):
         self.ast = ast
         self.data_dict = data_dict or {}
-        self.scipy_code_lines = []
+        self.highs_code_lines = []
         self.indent_level = 0
         self.var_names = []
         self.var_indices = {}

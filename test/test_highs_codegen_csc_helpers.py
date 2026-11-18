@@ -2,19 +2,19 @@ import logging
 import unittest
 from unittest import mock
 
+from pyopl.highs_codegen_csc import ExpressionEvaluator, HighsCSCCodeGenerator
 from pyopl.pyopl_core import OPLCompiler, OPLLexer, OPLParser
-from pyopl.scipy_codegen_csc import ExpressionEvaluator, SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
-def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> SciPyCSCCodeGenerator:
+def make_generator(src: str = "dvar float x; minimize 0; subject to { }") -> HighsCSCCodeGenerator:
     lexer = OPLLexer()
     parser = OPLParser()
     ast = parser.parse(lexer.tokenize(src))
-    return SciPyCSCCodeGenerator(ast)
+    return HighsCSCCodeGenerator(ast)
 
 
-class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
+class TestHighsCSCExpressionEvaluatorHelpers(unittest.TestCase):
     def test_safe_index_arithmetic_uses_constant_numeric_values(self) -> None:
         generator = make_generator()
 
@@ -137,7 +137,7 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         self.assertEqual(generator._unroll_named_iterator("DataSet"), ["from-data"])
         self.assertEqual(generator._unroll_named_iterator("FallbackSet"), ["declared"])
         self.assertEqual(generator._unroll_named_iterator("TypedSet"), ["typed"])
-        with mock.patch("pyopl.scipy_codegen_csc.TupleSetHelper.get_tuple_set", return_value=[(1, "A")]) as get_tuple_set:
+        with mock.patch("pyopl.highs_codegen_csc.TupleSetHelper.get_tuple_set", return_value=[(1, "A")]) as get_tuple_set:
             self.assertEqual(generator._unroll_named_iterator("Arcs"), [(1, "A")])
         get_tuple_set.assert_called_once_with("Arcs", generator.ast, generator.data_dict)
         with self.assertRaisesRegex(SemanticError, "External set 'ExternalSet' has no data provided"):
@@ -616,8 +616,8 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         ];
         """
 
-        ast, _code, data_dict = OPLCompiler().compile_model(model, data, solver="scipy")
-        logger = logging.getLogger("pyopl.scipy_codegen_csc")
+        ast, _code, data_dict = OPLCompiler().compile_model(model, data, solver="highs")
+        logger = logging.getLogger("pyopl.highs_codegen_csc")
         messages: list[str] = []
 
         class CaptureHandler(logging.Handler):
@@ -627,7 +627,7 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         handler = CaptureHandler(level=logging.ERROR)
         logger.addHandler(handler)
         try:
-            SciPyCSCCodeGenerator(ast, data_dict).generate_code()
+            HighsCSCCodeGenerator(ast, data_dict).generate_code()
         finally:
             logger.removeHandler(handler)
 
@@ -809,7 +809,7 @@ class TestScipyCSCExpressionEvaluatorHelpers(unittest.TestCase):
         self.assertIsNone(evaluator._find_tuple_type_for_iterator("missing"))
 
 
-class TestScipyCSCGeneratorHelpers(unittest.TestCase):
+class TestHighsCSCGeneratorHelpers(unittest.TestCase):
     def test_aux_binary_and_flat_kv_helpers(self) -> None:
         gen = make_generator()
 
@@ -873,7 +873,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         problem = gen._snapshot_linear_problem()
 
         self.assertEqual(problem.var_names, [])
-        self.assertIn("# No decision variables: short-circuit without linprog", code)
+        self.assertIn("# No decision variables: short-circuit without starting HiGHS", code)
         self.assertIn("results['objective_value'] = 5.0", code)
 
         gen2 = make_generator()
@@ -881,7 +881,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         gen2.bounds = [[0, 1]]
         gen2.integrality = []
         gen2.c = [3.0, 4.0, 5.0]
-        gen2.scipy_code_lines = ["var_names = []", "bounds = []", "integrality = []", "c = []"]
+        gen2.highs_code_lines = ["var_names = []", "bounds = []", "integrality = []", "c = []"]
 
         gen2._reconcile_problem_metadata()
         gen2._refresh_problem_metadata_code_lines()
@@ -889,8 +889,8 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         self.assertEqual(gen2.bounds, [[0, 1], [0, 1]])
         self.assertEqual(gen2.integrality, [1, 1])
         self.assertEqual(gen2.c, [3.0, 4.0])
-        self.assertIn("var_names = ['x', 'y']", gen2.scipy_code_lines)
-        self.assertIn("integrality = [1, 1]", gen2.scipy_code_lines)
+        self.assertIn("var_names = ['x', 'y']", gen2.highs_code_lines)
+        self.assertIn("integrality = [1, 1]", gen2.highs_code_lines)
 
     def test_build_problem_and_top_level_binary_assignment(self) -> None:
         gen = make_generator("dvar boolean b; minimize 0; subject to { b == 1; }")
@@ -923,7 +923,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
             "constraints": [],
         }
-        gen = SciPyCSCCodeGenerator(ast, {"r": ["a", 1, "b", 2]})
+        gen = HighsCSCCodeGenerator(ast, {"r": ["a", 1, "b", 2]})
         gen.var_indices = {"x_1": 0, "x_2": 1, "x_3": 2}
 
         self.assertEqual(gen._lookup_var_or_param("x", [1]), (True, "x_1", False))
@@ -932,7 +932,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
         self.assertEqual(gen._lookup_var_or_param("q", [2]), (False, 20.0, False))
         self.assertEqual(gen._lookup_var_or_param("missing", ["i"], default_zero_if_missing=True), (False, 0.0, False))
         self.assertEqual(gen._eval_index("N + 2", {"N": 3}), 5)
-        self.assertEqual(SciPyCSCCodeGenerator.normalize_index([["a", 1], 2]), (("a", 1), 2))
+        self.assertEqual(HighsCSCCodeGenerator.normalize_index([["a", 1], 2]), (("a", 1), 2))
 
         with self.assertRaisesRegex(SemanticError, "out of declared domain"):
             gen._lookup_var_or_param("x", [9])
@@ -971,13 +971,13 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
             ]
         }
         data = {"demand": {"P1": [1, 2], "P2": [3, 4]}, "grid": {"P1": [5, 6], "P2": [7, 8]}}
-        gen = SciPyCSCCodeGenerator(ast, data)
+        gen = HighsCSCCodeGenerator(ast, data)
 
         gen._generate_data_declarations(data)
 
         self.assertEqual(data["demand"], {"P1": {2: 1.0, 3: 2.0}, "P2": {2: 3.0, 3: 4.0}})
         self.assertEqual(data["grid"], {"P1": {"P1": 5.0, "P2": 6.0}, "P2": {"P1": 7.0, "P2": 8.0}})
-        self.assertIn("Products = ['P1', 'P2']", gen.scipy_code_lines)
+        self.assertIn("Products = ['P1', 'P2']", gen.highs_code_lines)
 
     def test_tuple_data_declarations_and_inline_tuple_parameter(self) -> None:
         ast = {
@@ -1012,10 +1012,10 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
             ]
         }
         data = {"cap": [[1, 2], [3, 4]]}
-        gen = SciPyCSCCodeGenerator(ast, data)
+        gen = HighsCSCCodeGenerator(ast, data)
 
         gen._generate_data_declarations(data)
-        code = "\n".join(gen.scipy_code_lines)
+        code = "\n".join(gen.highs_code_lines)
 
         self.assertIn("cost = {('A', 'B'): 5", code)
         self.assertEqual(data["cap"], {("A", "B"): {1: 1.0, 2: 2.0}, ("B", "C"): {1: 3.0, 2: 4.0}})
@@ -1028,7 +1028,7 @@ class TestScipyCSCGeneratorHelpers(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
             "constraints": [],
         }
-        gen = SciPyCSCCodeGenerator(
+        gen = HighsCSCCodeGenerator(
             ast,
             {
                 "tuple_param": {("RoleA", "CoreSite"): "chosen"},

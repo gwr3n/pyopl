@@ -616,7 +616,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     with mock.patch.object(
                         pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process
                     ) as process_cls:
-                        started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+                        started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "highs", operation)
             finally:
                 os.chdir(old_cwd)
 
@@ -624,7 +624,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy._solver_ipc.session_id, operation.session_id)
         process_cls.assert_called_once_with(
             target=pyopl_ide_bootstrap._solve_wrapper,
-            args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
+            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
         )
         process.start.assert_called_once_with()
         dummy._append_output.assert_called_once_with(
@@ -650,7 +650,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
             mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process),
         ):
-            started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+            started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "highs", operation)
 
         self.assertFalse(started)
         self.assertIsNone(dummy._solver_ipc.handles())
@@ -1302,7 +1302,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
-    def test_run_model_does_not_open_live_progress_window_for_scipy(self):
+    def test_run_model_does_not_open_live_progress_window_for_highs(self):
         class DummyText:
             def __init__(self, value):
                 self.value = value
@@ -1337,13 +1337,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 kind="solve",
                 label="Solve Model",
                 session_id="session-1",
-                solver_choice="scipy",
+                solver_choice="highs",
             )
             dummy = SimpleNamespace(
                 _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
                 model_text=DummyText("dvar float+ x;\nminimize x;\nsubject to { x >= 1; }"),
                 data_text=DummyText(""),
-                solver=DummyVar("scipy"),
+                solver=DummyVar("highs"),
                 _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 status_var=DummyVar(),
@@ -1375,7 +1375,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
             model_text=SimpleNamespace(get=lambda *_args: "int required = ...;"),
             data_text=SimpleNamespace(get=lambda *_args: ""),
-            solver=SimpleNamespace(get=lambda: "scipy"),
+            solver=SimpleNamespace(get=lambda: "highs"),
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             status_var=mock.Mock(),
             _start_foreground_operation=mock.Mock(return_value=operation),
@@ -1452,7 +1452,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             kind="solve",
             label="Solve Model",
             session_id="session-1",
-            solver_choice="scipy",
+            solver_choice="highs",
         )
         dummy = SimpleNamespace(
             _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(DummyProcess(), DummyQueue()),
@@ -1473,7 +1473,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         dummy._append_solver_log_text.assert_called_once_with("first line\n")
         dummy._display_solve_results.assert_called_once_with(
-            {"status": "OPTIMAL"}, session_id="session-1", solver_choice="scipy"
+            {"status": "OPTIMAL"}, session_id="session-1", solver_choice="highs"
         )
         dummy._restore_output_textbox.assert_called_once()
 
@@ -1653,7 +1653,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(output_text.state, "disabled")
         self.assertTrue(output_text.seen)
 
-    def test_finish_solver_progress_for_scipy_opens_summary_without_chart(self):
+    def test_finish_solver_progress_for_highs_opens_summary_without_chart(self):
         class DummyWindow:
             def __init__(self):
                 self.geometry_values = []
@@ -1707,7 +1707,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         canvas = DummyCanvas()
         status_var = DummyVar()
         dummy = SimpleNamespace(
-            _current_solver_choice="scipy",
+            _current_solver_choice="highs",
             _solver_progress_update_after_id=None,
             _solver_progress_samples=[],
             _solver_progress_pending_sample=None,
@@ -1726,7 +1726,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._set_solver_progress_status = lambda text: OPLIDE._set_solver_progress_status(dummy, text)
         dummy._reset_solver_progress_window = lambda solver_choice: OPLIDE._reset_solver_progress_window(dummy, solver_choice)
 
-        scipy_stats = OPLIDE._solver_progress_stats(
+        highs_stats = OPLIDE._solver_progress_stats(
             dummy,
             {
                 "objective_value": 3.0,
@@ -1739,7 +1739,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             },
         )
         self.assertEqual(
-            [label for label, _value in scipy_stats],
+            [label for label, _value in highs_stats],
             ["Objective", "Dual Bound", "Gap", "Nodes", "Runtime", "Iterations"],
         )
 
@@ -1883,7 +1883,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             dummy = SimpleNamespace(
                 _config_path=config_path,
                 theme_var=DummyVar("flatly"),
-                solver=DummyVar("scipy"),
+                solver=DummyVar("highs"),
                 current_font_size=12,
                 verbose_llm_var=DummyVar(False),
                 display_solver_progress_var=DummyVar(False),
@@ -1898,7 +1898,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             loaded = OPLIDE._load_settings(dummy)
 
         self.assertFalse(payload["display-solver-progress"])
-        self.assertEqual(payload["solver"], "scipy")
+        self.assertEqual(payload["solver"], "highs")
         self.assertEqual(loaded, payload)
 
     def test_initialize_preferences_keeps_valid_values_with_invalid_font_size(self):
@@ -1915,7 +1915,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         saved = {
             "font-size": "not a number",
             "theme": "darkly",
-            "solver": "scipy",
+            "solver": "highs",
             "verbose-llm-logs": True,
             "display-solver-progress": False,
             "genai-method": "pyopl_standard",
@@ -1941,7 +1941,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIs(loaded, saved)
         self.assertEqual(theme, "darkly")
         self.assertEqual(dummy.current_font_size, 12)
-        self.assertEqual(dummy.solver.get(), "scipy")
+        self.assertEqual(dummy.solver.get(), "highs")
         self.assertFalse(dummy.display_solver_progress_var.get())
         self.assertTrue(dummy.verbose_llm_var.get())
         self.assertEqual(dummy.genai_method_var.get(), "pyopl_standard")
@@ -2016,7 +2016,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 return self.value
 
         dummy = SimpleNamespace(
-            solver=DummyVar("scipy"),
+            solver=DummyVar("highs"),
             _current_solver_choice="gurobi",
             _refresh_status_context=mock.Mock(),
             _save_settings=mock.Mock(),
@@ -2024,7 +2024,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         OPLIDE._on_solver_selected(dummy)
 
-        self.assertEqual(dummy._current_solver_choice, "scipy")
+        self.assertEqual(dummy._current_solver_choice, "highs")
         dummy._refresh_status_context.assert_called_once()
         dummy._save_settings.assert_called_once()
 

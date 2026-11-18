@@ -316,7 +316,7 @@ def main() -> int:
     parser.add_argument("--provider", default="openai", help="Provider for the GPT model.")
     parser.add_argument("--gpt", default="gpt-4.1", help="GPT model to use for generation.")
     parser.add_argument("--grammar", default="bnf", help="Grammar to use for generation (none, code, bnf).")
-    parser.add_argument("--solver", default="gurobi", choices=["scipy", "gurobi"], help="Solver to use for pyopl.solve.")
+    parser.add_argument("--solver", default="gurobi", choices=["highs", "gurobi"], help="Solver to use for pyopl.solve.")
     parser.add_argument("--tolerance", type=float, default=1e-6, help="Absolute tolerance for equality check.")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--all", action="store_true", help="Solve all problems in the dataset and save results.")

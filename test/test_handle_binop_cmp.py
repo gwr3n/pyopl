@@ -1,13 +1,13 @@
 import unittest
 
-from pyopl.scipy_codegen_csc import ExpressionEvaluator, SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import ExpressionEvaluator, HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
 class TestHandleBinopCmp(unittest.TestCase):
     def setUp(self):
         # Minimal generator with empty AST/data and a usable evaluator
-        self.gen = SciPyCSCCodeGenerator(
+        self.gen = HighsCSCCodeGenerator(
             ast={
                 "declarations": [],
                 "constraints": [],
