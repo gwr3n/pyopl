@@ -383,6 +383,18 @@ def _format_iis(iis: dict) -> list[str]:
     return lines
 
 
+def _format_solution(results: dict, stats: Any) -> list[str]:
+    solution = results.get("solution")
+    if solution:
+        heading = "Best solution found (not proven optimal):\n" if results.get("status") == "INTERRUPTED" else "Solution:\n"
+        return [heading, *(f"  {key}: {value}\n" for key, value in solution.items())]
+    if results.get("status") != "INTERRUPTED":
+        return []
+    if isinstance(stats, dict) and stats.get("solutions", stats.get("SolCount", 0)):
+        return ["Incumbent variable values unavailable.\n"]
+    return ["No incumbent solution found before interruption.\n"]
+
+
 def _format_solve_results(results: dict, solver_choice: str) -> str:
     lines = [f"\nSolver: {solver_choice}\n", "\nStatus: " + results.get("status", "UNKNOWN") + "\n"]
     if results.get("status") == "MODEL_ERROR":
@@ -396,18 +408,7 @@ def _format_solve_results(results: dict, solver_choice: str) -> str:
     if "objective_value" in results and results["objective_value"] is not None:
         lines.append(f"Objective: {results['objective_value']}\n")
     stats = results.get("stats")
-    solution = results.get("solution")
-    if solution:
-        lines.append(
-            "Best solution found (not proven optimal):\n" if results.get("status") == "INTERRUPTED" else "Solution:\n"
-        )
-        for key, value in solution.items():
-            lines.append(f"  {key}: {value}\n")
-    elif results.get("status") == "INTERRUPTED":
-        if isinstance(stats, dict) and stats.get("solutions", stats.get("SolCount", 0)):
-            lines.append("Incumbent variable values unavailable.\n")
-        else:
-            lines.append("No incumbent solution found before interruption.\n")
+    lines.extend(_format_solution(results, stats))
     iis = results.get("iis")
     if isinstance(iis, dict):
         lines.extend(_format_iis(iis))
@@ -5757,6 +5758,29 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _collect_stopped_solver_result(self, session_id: Optional[str]) -> Optional[dict[str, Any]]:
         self._solver_ipc.request_stop()
+        result = OPLIDE._drain_stopped_solver_queue(self, session_id)
+        self._solver_ipc.join(timeout=0.1)
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
+            self._solver_ipc.stop()
+
+        if result is not None:
+            return result
+        latest = self._solver_progress_pending_sample or (
+            self._solver_progress_samples[-1] if self._solver_progress_samples else None
+        )
+        if latest:
+            return {
+                "status": "INTERRUPTED",
+                "stats": {
+                    key: latest[key]
+                    for key in ("lower_bound", "upper_bound", "gap", "nodes", "solutions", "runtime")
+                    if key in latest
+                },
+                "message": "Solver did not return a final result; statistics are from the last progress update.",
+            }
+        return None
+
+    def _drain_stopped_solver_queue(self, session_id: Optional[str]) -> Optional[dict[str, Any]]:
         result: Optional[dict[str, Any]] = None
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
@@ -5778,26 +5802,6 @@ class OPLIDE(TkinterDnD.Tk):
             elif kind == "error":
                 self._append_output(f"\nError during stop: {payload}\n", session_id)
                 break
-
-        self._solver_ipc.join(timeout=0.1)
-        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
-            self._solver_ipc.stop()
-
-        if result is None:
-            latest = self._solver_progress_pending_sample or (
-                self._solver_progress_samples[-1] if self._solver_progress_samples else None
-            )
-            if latest:
-                result = {
-                    "status": "INTERRUPTED",
-                    "stats": {
-                        key: latest[key]
-                        for key in ("lower_bound", "upper_bound", "gap", "nodes", "solutions", "runtime")
-                        if key in latest
-                    },
-                    "message": "Solver did not return a final result; statistics are from the last progress update.",
-                }
-
         return result
 
     def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
