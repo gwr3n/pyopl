@@ -3253,9 +3253,6 @@ class OPLIDE(TkinterDnD.Tk):
         composer.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
         composer.columnconfigure(0, weight=1)
         composer_panel.rowconfigure(3, weight=1)
-        ttk.Label(composer, textvariable=self.genai_prompt_title_var, style="SidebarSection.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, 4)
-        )
         self.genai_prompt_text = scrolledtext.ScrolledText(
             composer,
             wrap=tk.WORD,
@@ -3265,7 +3262,15 @@ class OPLIDE(TkinterDnD.Tk):
             bd=0,
         )
         self._replace_scrolled_text_vbar(self.genai_prompt_text)
-        self.genai_prompt_text.grid(row=1, column=0, sticky="nsew")
+        self.genai_prompt_text.grid(row=0, column=0, sticky="nsew")
+        self._genai_prompt_placeholder_active = False
+        self._refresh_genai_prompt_placeholder()
+        self.genai_prompt_text.edit_modified(False)
+        self.genai_prompt_text.bind("<KeyPress>", self._on_genai_prompt_key)
+        self.genai_prompt_text.bind("<Button-1>", self._on_genai_prompt_click)
+        self.genai_prompt_text.bind("<<Paste>>", self._clear_genai_prompt_placeholder)
+        self.genai_prompt_text.bind("<<Cut>>", self._clear_genai_prompt_placeholder)
+        self.genai_prompt_text.bind("<<Modified>>", self._on_genai_prompt_modified)
         self._bind_autohide_vertical_scrollbar(
             self.genai_prompt_text,
             getattr(self.genai_prompt_text, "vbar", None),
@@ -3274,7 +3279,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_prompt_text.bind("<Control-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Command-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Configure>", self._on_genai_prompt_configure, add="+")
-        composer.rowconfigure(1, weight=1)
+        composer.rowconfigure(0, weight=1)
 
         self.genai_attach_output_check = ttk.Checkbutton(
             composer,
@@ -3456,6 +3461,39 @@ class OPLIDE(TkinterDnD.Tk):
         """Update composer copy when the GenAI panel mode changes."""
         self._refresh_genai_panel_state()
 
+    def _refresh_genai_prompt_placeholder(self) -> None:
+        hint = self.genai_prompt_title_var.get()
+        if self._genai_prompt_placeholder_active:
+            if self.genai_prompt_text.get("1.0", "end-1c") == hint:
+                return
+            self._clear_genai_prompt_placeholder()
+        if not self.genai_prompt_text.get("1.0", "end-1c"):
+            self.genai_prompt_text.insert("1.0", hint, ("genai_placeholder",))
+            self.genai_prompt_text.mark_set(tk.INSERT, "1.0")
+            self._genai_prompt_placeholder_active = True
+
+    def _clear_genai_prompt_placeholder(self, _event: Optional[tk.Event] = None) -> None:
+        if self._genai_prompt_placeholder_active:
+            self._genai_prompt_placeholder_active = False
+            self.genai_prompt_text.delete("1.0", tk.END)
+
+    def _on_genai_prompt_key(self, event: tk.Event) -> None:
+        if event.char or event.keysym in ("BackSpace", "Delete"):
+            self._clear_genai_prompt_placeholder()
+
+    def _on_genai_prompt_click(self, _event: tk.Event) -> Optional[str]:
+        if self._genai_prompt_placeholder_active:
+            self.genai_prompt_text.focus_set()
+            self.genai_prompt_text.mark_set(tk.INSERT, "1.0")
+            return "break"
+        return None
+
+    def _on_genai_prompt_modified(self, _event: tk.Event) -> None:
+        if self.genai_prompt_text.edit_modified():
+            if not self._genai_prompt_placeholder_active:
+                self._refresh_genai_prompt_placeholder()
+            self.genai_prompt_text.edit_modified(False)
+
     def _set_genai_panel_mode(self, mode: str) -> None:
         """Switch the GenAI composer mode from the segmented control."""
         if mode not in ("generate", "ask"):
@@ -3483,6 +3521,8 @@ class OPLIDE(TkinterDnD.Tk):
         else:
             self.genai_prompt_title_var.set("Describe the optimization problem")
             self.genai_submit_label_var.set("Generate")
+        if getattr(self, "_genai_prompt_placeholder_active", False):
+            OPLIDE._refresh_genai_prompt_placeholder(self)
 
         if hasattr(self, "genai_attach_output_check"):
             if mode == "ask":
@@ -3535,6 +3575,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_panel_mode_var.set(mode)
         self._refresh_genai_panel_state()
         if initial_text and hasattr(self, "genai_prompt_text"):
+            self._clear_genai_prompt_placeholder()
             self.genai_prompt_text.delete("1.0", tk.END)
             self.genai_prompt_text.insert("1.0", initial_text)
         if hasattr(self, "genai_prompt_text"):
@@ -3544,6 +3585,8 @@ class OPLIDE(TkinterDnD.Tk):
         """Clear the docked GenAI composer state."""
         if hasattr(self, "genai_prompt_text"):
             self.genai_prompt_text.delete("1.0", tk.END)
+            self._genai_prompt_placeholder_active = False
+            self._refresh_genai_prompt_placeholder()
         self._genai_attachments.clear()
         self._refresh_genai_attachment_list()
 
@@ -3632,7 +3675,11 @@ class OPLIDE(TkinterDnD.Tk):
         """Build PromptInput from the docked composer."""
         if not hasattr(self, "genai_prompt_text"):
             return None
-        text_val = self.genai_prompt_text.get("1.0", tk.END).rstrip()
+        text_val = (
+            ""
+            if getattr(self, "_genai_prompt_placeholder_active", False)
+            else self.genai_prompt_text.get("1.0", tk.END).rstrip()
+        )
         prompt_input: Optional[_PromptInput]
         attachment_paths = self._genai_attachments.snapshot()
         if attachment_paths:
@@ -4380,10 +4427,42 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.rowconfigure(2, weight=1)
         dialog.columnconfigure(0, weight=1)
 
-        ttk.Label(dialog, text="Search exemplars").grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
         search_var = tk.StringVar()
         search_entry = ttk.Entry(dialog, textvariable=search_var)
-        search_entry.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
+        search_entry.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
+        hint = "Search exemplars"
+        hint_active = False
+        self.style.configure(
+            "ExemplarSearchHint.TEntry", foreground=self._theme_palette(self.theme_var.get())["sidebar_muted"]
+        )
+
+        def show_search_hint() -> None:
+            nonlocal hint_active
+            if not hint_active and not search_var.get():
+                hint_active = True
+                search_entry.configure(style="ExemplarSearchHint.TEntry")
+                search_var.set(hint)
+                search_entry.icursor(0)
+
+        def clear_search_hint(_event: Any = None) -> None:
+            nonlocal hint_active
+            if hint_active:
+                hint_active = False
+                search_var.set("")
+                search_entry.configure(style="TEntry")
+
+        def on_search_key(event: tk.Event) -> None:
+            if event.char or event.keysym in ("BackSpace", "Delete"):
+                clear_search_hint()
+
+        def on_search_click(_event: tk.Event) -> Optional[str]:
+            if hint_active:
+                search_entry.focus_set()
+                search_entry.icursor(0)
+                return "break"
+            return None
+
+        show_search_hint()
 
         content_frame = ttk.Frame(dialog)
         content_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
@@ -4475,7 +4554,7 @@ class OPLIDE(TkinterDnD.Tk):
         def run_search() -> None:
             if search.closed:
                 return
-            query = search_var.get()
+            query = "" if hint_active else search_var.get()
             try:
                 searching = search.start_search(query)
             except RuntimeError as exc:
@@ -4487,7 +4566,18 @@ class OPLIDE(TkinterDnD.Tk):
             empty_var.set("Searching...")
 
         def schedule_search(_event: Any = None) -> None:
+            show_search_hint()
             search.schedule_search(dialog, run_search)
+
+        def on_search_paste(_event: tk.Event) -> None:
+            clear_search_hint()
+            dialog.after_idle(schedule_search)
+
+        def on_search_cut(_event: tk.Event) -> Optional[str]:
+            if hint_active:
+                return "break"
+            dialog.after_idle(schedule_search)
+            return None
 
         def retrieve(_event: Any = None) -> None:
             selection = exemplar_list.curselection()
@@ -4525,7 +4615,11 @@ class OPLIDE(TkinterDnD.Tk):
         actions.grid(row=4, column=0, sticky="e", padx=12, pady=(4, 12))
         ttk.Button(actions, text="Retrieve", command=retrieve).grid(row=0, column=0)
         ttk.Button(actions, text="Cancel", command=close_dialog).grid(row=0, column=1, padx=(8, 0))
+        search_entry.bind("<KeyPress>", on_search_key)
+        search_entry.bind("<Button-1>", on_search_click)
         search_entry.bind("<KeyRelease>", schedule_search)
+        search_entry.bind("<<Paste>>", on_search_paste)
+        search_entry.bind("<<Cut>>", on_search_cut)
         exemplar_list.bind("<<ListboxSelect>>", update_description)
         exemplar_list.bind("<Double-Button-1>", retrieve)
         dialog.bind("<Return>", retrieve)
@@ -7637,6 +7731,7 @@ class OPLIDE(TkinterDnD.Tk):
         prompt = getattr(self, "genai_prompt_text", None)
         if prompt is not None:
             prompt.config(**editor_config)
+            prompt.tag_configure("genai_placeholder", foreground=colors["sidebar_muted"])
 
     @staticmethod
     def _apply_theme_lists_and_surface(self: Any, colors: dict[str, str]) -> None:

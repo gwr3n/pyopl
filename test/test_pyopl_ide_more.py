@@ -651,6 +651,52 @@ minimize x;
 
         self.assertEqual(dummy.genai_submit_button.state, "disabled")
 
+    def test_genai_prompt_placeholder_follows_text_edits(self):
+        tk = pyopl_ide_bootstrap.tk
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        prompt = tk.Text(root)
+        host = SimpleNamespace(
+            genai_prompt_text=prompt,
+            genai_prompt_title_var=tk.StringVar(value="Describe the optimization problem"),
+            genai_panel_mode_var=tk.StringVar(value="generate"),
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
+            _genai_prompt_placeholder_active=False,
+        )
+        host._clear_genai_prompt_placeholder = lambda: OPLIDE._clear_genai_prompt_placeholder(host)
+        host._refresh_genai_prompt_placeholder = lambda: OPLIDE._refresh_genai_prompt_placeholder(host)
+        prompt.bind("<Button-1>", lambda event: OPLIDE._on_genai_prompt_click(host, event))
+        host._refresh_genai_prompt_placeholder()
+        self.assertEqual(prompt.get("1.0", "end-1c"), host.genai_prompt_title_var.get())
+        self.assertTrue(prompt.tag_ranges("genai_placeholder"))
+        self.assertIsNone(OPLIDE._collect_genai_prompt_input(host))
+
+        prompt.mark_set(tk.INSERT, "end-1c")
+        prompt.event_generate("<Button-1>", x=200, y=5)
+        self.assertEqual(prompt.index(tk.INSERT), "1.0")
+
+        OPLIDE._on_genai_prompt_key(host, SimpleNamespace(char="x", keysym="x"))
+        prompt.insert("insert", "x")
+        OPLIDE._on_genai_prompt_modified(host, None)
+        self.assertEqual(prompt.get("1.0", "end-1c"), "x")
+        self.assertFalse(prompt.tag_ranges("genai_placeholder"))
+        self.assertEqual(OPLIDE._collect_genai_prompt_input(host), "x")
+        self.assertIsNone(OPLIDE._on_genai_prompt_click(host, None))
+
+        prompt.delete("1.0", tk.END)
+        OPLIDE._on_genai_prompt_modified(host, None)
+        host.genai_prompt_title_var.set("Ask about the current model and data")
+        host._refresh_genai_prompt_placeholder()
+        self.assertEqual(prompt.get("1.0", "end-1c"), host.genai_prompt_title_var.get())
+        host._clear_genai_prompt_placeholder()
+        prompt.insert("1.0", "pasted text")
+        OPLIDE._on_genai_prompt_modified(host, None)
+        self.assertEqual(prompt.get("1.0", "end-1c"), "pasted text")
+
     def test_editor_drop_routes_model_and_data_paths(self):
         dummy = SimpleNamespace(
             _ensure_no_active_operation=lambda _label: True,

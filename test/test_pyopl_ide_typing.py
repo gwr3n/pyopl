@@ -510,6 +510,66 @@ class TestPyOPLIDETyping(unittest.TestCase):
             search.start_search("query")
         worker.submit.assert_not_called()
 
+    def test_retrieve_exemplar_search_hint_is_not_a_query(self):
+        host = SimpleNamespace(
+            _ensure_no_active_operation=lambda _action: True,
+            _available_exemplars=lambda _dirs: [],
+            _exemplar_search_cleanup=None,
+            style=mock.Mock(),
+            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            _theme_palette=OPLIDE._theme_palette,
+        )
+        value = [""]
+        search_var = mock.Mock()
+        search_var.get.side_effect = lambda: value[0]
+        search_var.set.side_effect = lambda text: value.__setitem__(0, text)
+        dialog = mock.Mock()
+        entry = mock.Mock()
+        exemplar_list = mock.Mock()
+        exemplar_list.curselection.return_value = ()
+        search = mock.Mock()
+        search.closed = False
+        search.start_search.return_value = True
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.GenAIStrategyBase, "default_models_dirs", return_value=[]),
+            mock.patch.object(pyopl_ide_bootstrap, "ExemplarRankingWorker", return_value=search.worker),
+            mock.patch.object(pyopl_ide_bootstrap, "_ExemplarSearchState", return_value=search),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", side_effect=[search_var, mock.Mock()]),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Listbox", return_value=exemplar_list),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Text"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=entry),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Scrollbar"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button"),
+        ):
+            OPLIDE.retrieve_exemplar(host)
+            bindings = {call.args[0]: call.args[1] for call in entry.bind.call_args_list}
+            self.assertEqual(value[0], "Search exemplars")
+            self.assertEqual(entry.configure.call_args, mock.call(style="ExemplarSearchHint.TEntry"))
+            host.style.configure.assert_called_once_with(
+                "ExemplarSearchHint.TEntry", foreground=OPLIDE._theme_palette("flatly")["sidebar_muted"]
+            )
+            self.assertEqual(bindings["<Button-1>"](None), "break")
+            entry.icursor.assert_called_with(0)
+            bindings["<KeyRelease>"](None)
+            search.schedule_search.call_args.args[1]()
+            search.start_search.assert_called_with("")
+
+            bindings["<KeyPress>"](SimpleNamespace(char="f", keysym="f"))
+            search_var.set("fleet")
+            bindings["<KeyRelease>"](None)
+            self.assertEqual(value[0], "fleet")
+            entry.configure.assert_called_with(style="TEntry")
+            search.schedule_search.call_args.args[1]()
+            search.start_search.assert_called_with("fleet")
+
+            search_var.set("")
+            bindings["<KeyRelease>"](None)
+            self.assertEqual(value[0], "Search exemplars")
+            host._exemplar_search_cleanup()
+
     def test_retrieve_copy_failure_keeps_dialog_and_editors_unchanged(self):
         exemplar = {
             "name": "fleet",
@@ -521,6 +581,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
         host = SimpleNamespace(
             _ensure_no_active_operation=lambda action: True,
             _exemplar_search_cleanup=previous_cleanup,
+            style=mock.Mock(),
+            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            _theme_palette=OPLIDE._theme_palette,
             _available_exemplars=lambda roots: [exemplar],
             _copy_exemplar_to_tmp=mock.Mock(side_effect=OSError("copy failed")),
             _resolve_editor_replacement=mock.Mock(return_value=True),
