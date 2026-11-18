@@ -1,3 +1,8 @@
+---
+name: PyOPL Modeller
+description: Generate and review PyOPL mathematical optimization models and data.
+---
+
 # PyOPL Agent Guidelines
 
 ## Purpose

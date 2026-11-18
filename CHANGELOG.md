@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Move the PyOPL modeling guidance from repository-wide Copilot instructions into the PyOPL Modeller agent profile.
+
 ### Removed
 
 ## [v2.8.0] - 2026-11-18
