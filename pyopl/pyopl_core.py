@@ -6176,7 +6176,7 @@ def solve(
             solver_settings=solver_settings,
         )
     elif solver == "highs":
-        return solve_with_highs(model_file, data_file, solver_settings=solver_settings)
+        return solve_with_highs(model_file, data_file, progress_callback=progress_callback, solver_settings=solver_settings)
     else:
         raise ValueError(f"Unsupported solver: {solver}")
 
@@ -6307,7 +6307,12 @@ def solve_with_gurobi(
     return results
 
 
-def solve_with_highs(model_file, data_file=None, solver_settings: Optional[dict[str, Any]] = None):
+def solve_with_highs(
+    model_file,
+    data_file=None,
+    solver_settings: Optional[dict[str, Any]] = None,
+    progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+):
     """
     Loads an OPL model and optional data from disk,
     generates direct HiGHS code with highspy, and executes it to solve the model.
@@ -6366,6 +6371,7 @@ def solve_with_highs(model_file, data_file=None, solver_settings: Optional[dict[
                 "json": json,
                 "np": __import__("numpy"),
                 "results_container": {},
+                "_pyopl_progress_callback": progress_callback,
                 "_pyopl_solver_settings": dict(solver_settings or {}),
             }
             exec(loaded_highs_code, exec_globals)  # nosec B102

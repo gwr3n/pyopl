@@ -2943,6 +2943,32 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             "objective_sense = highspy.ObjSense.kMaximize if sense == 'maximize' else highspy.ObjSense.kMinimize"
         )
         self._add_code_line("require_highs_ok(highs.changeObjectiveSense(objective_sense), 'set objective sense')")
+        self._add_code_line("progress_callback = globals().get('_pyopl_progress_callback')")
+        self._add_code_line("if progress_callback is not None and any(integrality):")
+        self.indent_level += 1
+        self._add_code_line("def on_highs_progress(callback_type, message, output, callback_input, user_data):")
+        self.indent_level += 1
+        self._add_code_line("primal = output.mip_primal_bound + objective_offset")
+        self._add_code_line("dual = output.mip_dual_bound + objective_offset")
+        self._add_code_line("lower, upper = (primal, dual) if sense == 'maximize' else (dual, primal)")
+        self._add_code_line("progress_callback({")
+        self.indent_level += 1
+        self._add_code_line("'solver': 'highs', 'event': 'mip', 'time': time.time(),")
+        self._add_code_line("'runtime': output.running_time, 'lower_bound': lower, 'upper_bound': upper,")
+        self._add_code_line("'nodes': output.mip_node_count,")
+        self.indent_level -= 1
+        self._add_code_line("})")
+        self.indent_level -= 1
+        self._add_code_line("require_highs_ok(highs.setCallback(on_highs_progress, None), 'set progress callback')")
+        self._add_code_line("for callback_type in (")
+        self.indent_level += 1
+        self._add_code_line("highspy.cb.HighsCallbackType.kCallbackMipLogging,")
+        self._add_code_line("highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution,")
+        self.indent_level -= 1
+        self._add_code_line("):")
+        self.indent_level += 1
+        self._add_code_line("require_highs_ok(highs.startCallback(callback_type), f'start {callback_type} callback')")
+        self.indent_level -= 2
         self._add_code_line("require_highs_ok(highs.run(), 'run optimization')")
         self._add_code_line("model_status = highs.getModelStatus()")
         self._add_code_line("status_message = highs.modelStatusToString(model_status)")

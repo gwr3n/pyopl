@@ -1622,6 +1622,11 @@ minimize x;
         self.assertEqual(OPLIDE._format_progress_value(dummy, None), "-")
         self.assertEqual(OPLIDE._format_progress_value(dummy, 1_200_000), "1.2e+06")
 
+    def test_highs_uses_solver_progress_chart(self):
+        dummy = SimpleNamespace(_current_solver_choice="highs")
+        self.assertTrue(OPLIDE._solver_tracks_progress(dummy))
+        self.assertTrue(OPLIDE._solver_tracks_progress(dummy, "gurobi"))
+
     def test_redraw_solver_progress_chart_waiting_line_and_points(self):
         """Progress chart rendering covers the waiting state and LB/UB line drawing path."""
 

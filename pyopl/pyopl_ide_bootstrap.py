@@ -5143,7 +5143,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _solver_tracks_progress(self, solver_choice: Optional[str] = None) -> bool:
         solver_name = solver_choice or getattr(self, "_current_solver_choice", "gurobi")
-        return str(solver_name).lower() == "gurobi"
+        return str(solver_name).lower() in ("gurobi", "highs")
 
     def _display_solver_progress_enabled(self) -> bool:
         progress_var = getattr(self, "display_solver_progress_var", None)

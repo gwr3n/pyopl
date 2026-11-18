@@ -1302,7 +1302,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
-    def test_run_model_does_not_open_live_progress_window_for_highs(self):
+    def test_run_model_opens_live_progress_window_for_highs(self):
         class DummyText:
             def __init__(self, value):
                 self.value = value
@@ -1364,7 +1364,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", DummyProcess):
                     OPLIDE.run_model(dummy, model_file_override=model_path, data_file_override=data_path)
 
-        dummy._reset_solver_progress_window.assert_not_called()
+        dummy._reset_solver_progress_window.assert_called_once_with("highs")
         dummy._show_solver_log_textbox.assert_called_once()
         dummy._start_run_timer.assert_called_once_with("Solving model...")
         dummy.after.assert_called_once()
@@ -1653,7 +1653,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(output_text.state, "disabled")
         self.assertTrue(output_text.seen)
 
-    def test_finish_solver_progress_for_highs_opens_summary_without_chart(self):
+    def test_finish_solver_progress_for_highs_keeps_live_chart(self):
         class DummyWindow:
             def __init__(self):
                 self.geometry_values = []
@@ -1738,10 +1738,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 "solutions": 2,
             },
         )
-        self.assertEqual(
-            [label for label, _value in highs_stats],
-            ["Objective", "Dual Bound", "Gap", "Nodes", "Runtime", "Iterations"],
-        )
+        self.assertEqual([label for label, _value in highs_stats], ["LB", "UB", "Gap", "Nodes", "Solutions", "Runtime"])
+
+        OPLIDE._configure_solver_progress_display(dummy, True)
 
         OPLIDE._finish_solver_progress(
             dummy,
@@ -1763,14 +1762,12 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(summary["gap"], 0.1)
         self.assertEqual(summary["nodes"], 9)
 
-        self.assertEqual(window.geometry_values[-1], "520x220")
-        self.assertTrue(canvas.removed)
+        self.assertEqual(window.geometry_values[-1], "760x460")
+        self.assertFalse(canvas.removed)
         self.assertFalse(canvas.deleted)
-        self.assertTrue(window.deiconified)
+        self.assertFalse(window.deiconified)
         self.assertEqual(status_var.value, "Solve complete.")
-
-        OPLIDE._redraw_solver_progress_chart(dummy)
-        self.assertFalse(canvas.deleted)
+        dummy._append_solver_progress_sample.assert_called_once()
 
     def test_solver_progress_display_can_be_disabled(self):
         class DummyWindow:

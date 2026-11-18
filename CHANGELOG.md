@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Display HiGHS MIP progress in the existing IDE bound chart using native
+  solver callbacks, including objective-sense-aware bounds and node counts.
 - Generate HiGHS solver code with highspy directly; rename the backend selector,
   generated result key, and code generator modules/classes from SciPy to HiGHS.
   Use native HiGHS settings (`output_flag`, `simplex_iteration_limit`,

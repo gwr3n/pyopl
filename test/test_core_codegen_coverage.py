@@ -30,6 +30,7 @@ from pyopl.pyopl_core import (
     _string_label_value_pair,
     _unquote_string_literal,
     export_model,
+    solve,
     solve_with_gurobi,
     solve_with_highs,
 )
@@ -201,6 +202,37 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
         self.assertEqual(results_container["highs_output"]["status"], "OPTIMAL")
         self.assertEqual(results_container["highs_output"]["objective_value"], 4.0)
+
+    def test_highs_reports_mip_progress_in_objective_sense(self):
+        for objective, expected in (("maximize", 41.0), ("minimize -", -27.0)):
+            with self.subTest(objective=objective), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "progress.mod"
+                model_path.write_text(
+                    f"range I = 1..10; dvar boolean x[I]; {objective} sum(i in I) i * x[i] + 7; "
+                    "subject to { sum(i in I) x[i] <= 4.5; }",
+                    encoding="utf-8",
+                )
+                events = []
+                with redirect_stdout(StringIO()):
+                    result = solve(
+                        model_path,
+                        solver="highs",
+                        progress_callback=events.append,
+                        solver_settings={"presolve": "off"},
+                    )
+
+                self.assertEqual(result["status"], "OPTIMAL")
+                self.assertEqual(result["objective_value"], expected)
+                self.assertTrue(events)
+                self.assertTrue(all(event["solver"] == "highs" and event["event"] == "mip" for event in events))
+                self.assertTrue(any(event["nodes"] >= 0 and event["runtime"] >= 0 for event in events))
+                self.assertTrue(
+                    any(
+                        event["lower_bound"] <= expected <= event["upper_bound"]
+                        for event in events
+                        if event["lower_bound"] != float("-inf") and event["upper_bound"] != float("inf")
+                    )
+                )
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
