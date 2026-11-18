@@ -6502,7 +6502,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
     def run_test_case_highs(self, opl_code, data_dict=None):
         """Helper: Check Highs code generation for a given OPL model string."""
-        from pyopl.pyopl_core import OPLLexer, OPLParser, HighsCodeGenerator
+        from pyopl.pyopl_core import HighsCodeGenerator, OPLLexer, OPLParser
 
         lexer = OPLLexer()
         parser = OPLParser()

@@ -1,8 +1,8 @@
 import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
-from pyopl.pyopl_core import OPLCompiler, SemanticError, parse_model
 from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+from pyopl.pyopl_core import OPLCompiler, SemanticError, parse_model
 
 
 def num(value):

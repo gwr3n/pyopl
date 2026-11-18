@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem_highs import build_highs_model, export_linear_problem
 from pyopl.pyopl_core import parse_model
-from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 class TestLinearProblemHighs(unittest.TestCase):

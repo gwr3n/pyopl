@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
-from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.highs_codegen_csc import BOOL_EPS, HighsCSCCodeGenerator
+from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.semantic_error import SemanticError
 
 

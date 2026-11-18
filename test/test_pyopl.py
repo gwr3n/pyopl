@@ -7,19 +7,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.pyopl_core import (
     GurobiCodeGenerator,
+    HighsCodeGenerator,
     OPLCompiler,
     OPLDataLexer,
     OPLDataParser,
     OPLLexer,
     OPLParser,
-    HighsCodeGenerator,
     SemanticError,
     load_opl_model,
     solve,
 )
-from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 def setUpModule():
@@ -2306,8 +2306,8 @@ class TestPyOPLCompiler(TestPyOPL):
         """Test Highs codegen for 2D and 3D decision variables and parameters (mirrors Gurobi test)."""
         import re
 
-        from pyopl.pyopl_core import OPLLexer, OPLParser
         from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+        from pyopl.pyopl_core import OPLLexer, OPLParser
 
         def nospace(s: str) -> str:
             return re.sub(r"\s+", "", s)

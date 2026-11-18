@@ -3,8 +3,8 @@ import unittest
 from contextlib import redirect_stdout
 from typing import Any
 
-from pyopl.pyopl_core import OPLCompiler
 from pyopl.highs_codegen_csc import BOOL_EPS, HighsCSCCodeGenerator
+from pyopl.pyopl_core import OPLCompiler
 from pyopl.semantic_error import SemanticError
 
 try:

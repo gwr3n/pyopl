@@ -4,8 +4,8 @@ import unittest
 import numpy as np
 
 import pyopl.highs_codegen_csc as highs_codegen_csc
-from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.semantic_error import SemanticError
 
 

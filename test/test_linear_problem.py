@@ -1,8 +1,8 @@
 import unittest
 
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem import LinearProblem
 from pyopl.pyopl_core import parse_model
-from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 class TestLinearProblem(unittest.TestCase):

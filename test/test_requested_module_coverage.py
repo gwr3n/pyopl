@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 from pyopl._index_safety import find_index_safety_issue
 from pyopl.gurobi_codegen import GurobiCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem import LinearProblem
 from pyopl.linear_problem_highs import _import_highspy, build_highs_model, export_linear_problem
 from pyopl.pyopl_core import OPLDataLexer, OPLDataParser, SemanticError
-from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 def number(value):

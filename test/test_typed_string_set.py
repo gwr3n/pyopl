@@ -1,8 +1,8 @@
 import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
-from pyopl.pyopl_core import parse_model
 from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+from pyopl.pyopl_core import parse_model
 
 MODEL = '{string} Gasolines = { "R92", "R95" };\n minimize 0;\n subject to { }'
 

@@ -1,7 +1,7 @@
 import unittest
 
-from pyopl.pyopl_core import OPLLexer, OPLParser
 from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+from pyopl.pyopl_core import OPLLexer, OPLParser
 
 
 class TestBoolEqualityAuxReuse(unittest.TestCase):

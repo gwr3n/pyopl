@@ -1,7 +1,7 @@
 import unittest
 
-from pyopl.pyopl_core import GurobiCodeGenerator, OPLLexer, OPLParser
 from pyopl.highs_codegen import HighsCodeGenerator, SemanticError
+from pyopl.pyopl_core import GurobiCodeGenerator, OPLLexer, OPLParser
 
 
 def setUpModule():
