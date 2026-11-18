@@ -1177,7 +1177,6 @@ class TestPyOPLIDETyping(unittest.TestCase):
             genai_panel_mode_var=SimpleNamespace(get=lambda: "generate"),
             genai_prompt_title_var=mock.Mock(),
             genai_submit_label_var=mock.Mock(),
-            genai_attachment_summary_var=mock.Mock(),
             genai_submit_button=mock.Mock(),
             _submit_genai_request=mock.Mock(),
             _review_exemplar_draft=mock.Mock(),

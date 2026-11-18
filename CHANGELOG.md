@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replace the GenAI attachment count label with a paperclip icon centered over the empty attachment list.
 - Show the GenAI prompt guidance as muted placeholder text inside the empty composer instead of a label above it, keeping the caret before the hint when clicked.
 - Show "Search exemplars" as muted placeholder text inside the exemplar search field instead of a label above it.
 - Move the PyOPL modeling guidance from repository-wide Copilot instructions into the PyOPL Modeller agent profile.

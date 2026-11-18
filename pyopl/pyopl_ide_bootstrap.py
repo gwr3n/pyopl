@@ -23,6 +23,7 @@ import traceback
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from importlib.resources import files
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -1930,7 +1931,6 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_prompt_title_var = tk.StringVar(value="Describe the optimization problem")
         self.genai_submit_label_var = tk.StringVar(value="Generate")
         self.genai_context_var = tk.StringVar(value="No GenAI model selected")
-        self.genai_attachment_summary_var = tk.StringVar(value="No visual attachments")
         self.genai_pending_var = tk.StringVar(value="")
         self._genai_attachments = _GenAIAttachments()
         self._genai_revisions = _GenAIRevisionState()
@@ -3292,11 +3292,13 @@ class OPLIDE(TkinterDnD.Tk):
         attachments = ttk.Frame(composer, style="Sidebar.TFrame")
         attachments.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         attachments.columnconfigure(0, weight=1)
-        ttk.Label(attachments, textvariable=self.genai_attachment_summary_var, style="SidebarSubtle.TLabel").grid(
-            row=0, column=0, sticky="w"
-        )
         self.genai_attachment_listbox = tk.Listbox(attachments, height=4, exportselection=False, activestyle="none")
-        self.genai_attachment_listbox.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.genai_attachment_listbox.grid(row=0, column=0, sticky="ew")
+        with files("pyopl.icon").joinpath("attachments.png").open("rb") as icon_file:
+            self._genai_attachment_image = tk.PhotoImage(data=icon_file.read()).subsample(10)
+        self.genai_attachment_empty_icon = tk.Label(
+            self.genai_attachment_listbox, image=self._genai_attachment_image, bd=0, highlightthickness=0
+        )
         self.genai_attachment_menu = tk.Menu(self, tearoff=0)
         self.genai_attachment_menu.add_command(label="Attach images or short PDFs...", command=self._genai_add_images)
         self.genai_attachment_menu.add_command(label="Remove selected", command=self._genai_remove_selected_image)
@@ -3304,9 +3306,13 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_attachment_menu.add_command(label="Clear all", command=self._genai_clear_images)
         self.genai_attachment_listbox.bind("<Button-3>", self._on_genai_attachment_right_click)
         self.genai_attachment_listbox.bind("<Double-Button-1>", lambda _event: self._genai_add_images())
+        self.genai_attachment_empty_icon.bind("<Double-Button-1>", lambda _event: self._genai_add_images())
+        self.genai_attachment_empty_icon.bind("<Button-3>", self._on_genai_attachment_right_click)
         if sys.platform == "darwin":
             self.genai_attachment_listbox.bind("<Button-2>", self._on_genai_attachment_right_click)
             self.genai_attachment_listbox.bind("<Control-Button-1>", self._on_genai_attachment_right_click)
+            self.genai_attachment_empty_icon.bind("<Button-2>", self._on_genai_attachment_right_click)
+            self.genai_attachment_empty_icon.bind("<Control-Button-1>", self._on_genai_attachment_right_click)
 
         pending = ttk.Frame(composer_panel, style="Sidebar.TFrame")
         pending.grid(row=4, column=0, sticky="ew", pady=(10, 0))
@@ -3530,13 +3536,12 @@ class OPLIDE(TkinterDnD.Tk):
             else:
                 self.genai_attach_output_check.grid_remove()
 
-        attachment_count = len(self._genai_attachments.paths)
-        if attachment_count == 0:
-            self.genai_attachment_summary_var.set("No visual attachments")
-        elif attachment_count == 1:
-            self.genai_attachment_summary_var.set("1 visual attachment")
-        else:
-            self.genai_attachment_summary_var.set(f"{attachment_count} visual attachments")
+        empty_icon = getattr(self, "genai_attachment_empty_icon", None)
+        if empty_icon is not None:
+            if self._genai_attachments.paths:
+                empty_icon.place_forget()
+            else:
+                empty_icon.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
 
         active = getattr(self, "_active_operation", None)
         composer_state = "normal" if active is None else "disabled"
@@ -4755,6 +4760,9 @@ class OPLIDE(TkinterDnD.Tk):
         attachment_drop_target = cast(_DropTargetWidget, self.genai_attachment_listbox)
         attachment_drop_target.drop_target_register(DND_FILES)
         attachment_drop_target.dnd_bind("<<Drop>>", self._on_attachment_files_dropped)
+        empty_icon_drop_target = cast(_DropTargetWidget, self.genai_attachment_empty_icon)
+        empty_icon_drop_target.drop_target_register(DND_FILES)
+        empty_icon_drop_target.dnd_bind("<<Drop>>", self._on_attachment_files_dropped)
 
     def _dropped_paths(self, event: Any) -> list[str]:
         """Parse a platform-native Tk drop payload into filesystem paths."""
@@ -7735,6 +7743,9 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _apply_theme_lists_and_surface(self: Any, colors: dict[str, str]) -> None:
+        empty_icon = getattr(self, "genai_attachment_empty_icon", None)
+        if empty_icon is not None:
+            empty_icon.config(bg=colors["editor_bg"])
         for widget_name in ("genai_attachment_listbox", "request_listbox"):
             widget = getattr(self, widget_name, None)
             if widget is not None:

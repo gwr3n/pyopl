@@ -602,6 +602,7 @@ minimize x;
         class Widget:
             def __init__(self):
                 self.state = "normal"
+                self.items = []
 
             def configure(self, **kwargs):
                 if "state" in kwargs:
@@ -613,6 +614,12 @@ minimize x;
             def grid_remove(self):
                 pass
 
+            def delete(self, *_args):
+                self.items.clear()
+
+            def insert(self, _index, item):
+                self.items.append(item)
+
         widgets = [Widget() for _ in range(6)]
         dummy = SimpleNamespace(
             _active_operation=SimpleNamespace(kind="genai-generate"),
@@ -621,7 +628,7 @@ minimize x;
             genai_panel_mode_var=DummyVar("generate"),
             genai_prompt_title_var=DummyVar(),
             genai_submit_label_var=DummyVar(),
-            genai_attachment_summary_var=DummyVar(),
+            genai_attachment_empty_icon=mock.Mock(),
             genai_prompt_text=widgets[0],
             genai_attach_output_check=widgets[1],
             genai_generate_mode_button=widgets[2],
@@ -633,12 +640,26 @@ minimize x;
         )
         dummy._refresh_genai_mode_buttons = lambda: OPLIDE._refresh_genai_mode_buttons(dummy)
         dummy._refresh_genai_submit_button = lambda active: OPLIDE._refresh_genai_submit_button(dummy, active)
+        dummy._refresh_genai_panel_state = lambda: OPLIDE._refresh_genai_panel_state(dummy)
 
         OPLIDE._refresh_genai_panel_state(dummy)
 
         self.assertEqual([widget.state for widget in widgets[:5]], ["disabled"] * 5)
         self.assertEqual(dummy.genai_submit_label_var.value, "Interrupt")
         self.assertEqual(dummy.genai_submit_button.state, "normal")
+        dummy.genai_attachment_empty_icon.place.assert_called_once_with(
+            relx=0.5, rely=0.5, anchor=pyopl_ide_bootstrap.tk.CENTER
+        )
+
+        dummy._genai_attachments.paths.append("/tmp/example.png")
+        OPLIDE._refresh_genai_attachment_list(dummy)
+        self.assertEqual(dummy.genai_attachment_listbox.items, ["example.png"])
+        dummy.genai_attachment_empty_icon.place_forget.assert_called_once_with()
+
+        dummy._genai_attachments.paths.clear()
+        OPLIDE._refresh_genai_attachment_list(dummy)
+        self.assertEqual(dummy.genai_attachment_listbox.items, [])
+        self.assertEqual(dummy.genai_attachment_empty_icon.place.call_count, 2)
 
         dummy._active_operation = None
         OPLIDE._refresh_genai_panel_state(dummy)
