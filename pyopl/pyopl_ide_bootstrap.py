@@ -14,6 +14,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 
 # --- Third-Party Imports ---
 import tkinter as tk
@@ -22,6 +23,7 @@ import traceback
 import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Any, Callable, Literal, Optional, Protocol, cast
@@ -393,15 +395,22 @@ def _format_solve_results(results: dict, solver_choice: str) -> str:
         return "".join(lines)
     if "objective_value" in results and results["objective_value"] is not None:
         lines.append(f"Objective: {results['objective_value']}\n")
+    stats = results.get("stats")
     solution = results.get("solution")
     if solution:
-        lines.append("Solution:\n")
+        lines.append(
+            "Best solution found (not proven optimal):\n" if results.get("status") == "INTERRUPTED" else "Solution:\n"
+        )
         for key, value in solution.items():
             lines.append(f"  {key}: {value}\n")
+    elif results.get("status") == "INTERRUPTED":
+        if isinstance(stats, dict) and stats.get("solutions", stats.get("SolCount", 0)):
+            lines.append("Incumbent variable values unavailable.\n")
+        else:
+            lines.append("No incumbent solution found before interruption.\n")
     iis = results.get("iis")
     if isinstance(iis, dict):
         lines.extend(_format_iis(iis))
-    stats = results.get("stats")
     if stats:
         lines.append("\nSolver Statistics (from 'stats' field):\n")
         if isinstance(stats, dict):
@@ -693,6 +702,7 @@ def _solve_wrapper(
     solver_choice: str,
     solver_settings: Optional[dict[str, Any]],
     q: multiprocessing.Queue,
+    stop_event: Optional[ProcessEvent] = None,
 ) -> None:
     """Wrapper to run solve in a separate process."""
     old_stdout = sys.stdout
@@ -719,6 +729,7 @@ def _solve_wrapper(
                 solver=solver_choice,
                 progress_callback=_progress,
                 solver_settings=solver_settings,
+                stop_requested=stop_event.is_set if stop_event is not None else None,
             )
         log_writer.flush()
         q.put(("success", results))
@@ -1065,6 +1076,7 @@ class _SolverProcessState:
     process: Optional[multiprocessing.Process] = None
     result_queue: Optional[multiprocessing.Queue] = None
     session_id: Optional[str] = None
+    stop_event: Optional[ProcessEvent] = None
 
     def start(
         self, model_file: str, data_file: str, solver_choice: str, solver_settings: Optional[dict[str, Any]], session_id: str
@@ -1072,10 +1084,11 @@ class _SolverProcessState:
         if self.process is not None or self.result_queue is not None:
             raise RuntimeError("Solver process resources are already in use")
         self.result_queue = multiprocessing.Queue()
+        self.stop_event = multiprocessing.Event()
         try:
             self.process = multiprocessing.Process(
                 target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, solver_settings, self.result_queue),
+                args=(model_file, data_file, solver_choice, solver_settings, self.result_queue, self.stop_event),
             )
             self.process.start()
             self.session_id = session_id
@@ -1107,6 +1120,10 @@ class _SolverProcessState:
             return "error", payload
         raise ValueError(f"unknown solver message kind: {kind!r}")
 
+    def request_stop(self) -> None:
+        if self.stop_event is not None:
+            self.stop_event.set()
+
     def stop(self) -> None:
         process = self.process
         if process is None or not process.is_alive():
@@ -1133,6 +1150,7 @@ class _SolverProcessState:
         self.process = None
         self.result_queue = None
         self.session_id = None
+        self.stop_event = None
         if result_queue is None:
             return
         try:
@@ -5412,21 +5430,26 @@ class OPLIDE(TkinterDnD.Tk):
         if not self._solver_tracks_progress():
             self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "highs"))
         if isinstance(results, dict):
-            sample: dict[str, Any] = {}
+            latest = self._solver_progress_pending_sample or (
+                self._solver_progress_samples[-1] if self._solver_progress_samples else {}
+            )
+            sample: dict[str, Any] = dict(latest) if results.get("status") == "INTERRUPTED" else {}
             objective = results.get("objective_value")
             if objective is not None:
                 sample["objective_value"] = objective
-                sample["upper_bound"] = objective
-                sample["lower_bound"] = objective
-                sample["gap"] = 0.0
+                if results.get("status") == "OPTIMAL":
+                    sample["upper_bound"] = objective
+                    sample["lower_bound"] = objective
+                    sample["gap"] = 0.0
             stats = results.get("stats")
             if isinstance(stats, dict):
                 sample.update(
                     {
                         "dual_bound": stats.get("ObjBound", stats.get("mip_dual_bound")),
                         "gap": stats.get("MIPGap", stats.get("mip_gap", sample.get("gap"))),
-                        "runtime": stats.get("Runtime", stats.get("time")),
-                        "nodes": stats.get("NodeCount", stats.get("mip_node_count")),
+                        "runtime": stats.get("Runtime", stats.get("time", sample.get("runtime"))),
+                        "nodes": stats.get("NodeCount", stats.get("mip_node_count", sample.get("nodes"))),
+                        "solutions": stats.get("SolCount", stats.get("solutions", sample.get("solutions"))),
                         "iterations": stats.get("IterCount", stats.get("nit")),
                     }
                 )
@@ -5703,6 +5726,9 @@ class OPLIDE(TkinterDnD.Tk):
         active = getattr(self, "_active_operation", None)
 
         if not (p and p.is_alive()):
+            if p is not None:
+                OPLIDE._poll_solver(self, active)
+                return
             self._cleanup_solver_ipc(cancel_queue_thread=True)
             self._stop_run_timer()
             self._restore_output_textbox()
@@ -5711,19 +5737,68 @@ class OPLIDE(TkinterDnD.Tk):
                 self._finish_foreground_operation(active)
             return
 
-        self._solver_ipc.stop()
-
+        result = OPLIDE._collect_stopped_solver_result(self, active.session_id if active else None)
         self._cleanup_solver_ipc(cancel_queue_thread=True)
-
-        # Stop timer updates
         self._stop_run_timer()
-
         self._restore_output_textbox()
-        self._append_output("\nExecution stopped by user.\n", active.session_id if active is not None else None)
-        self.status_var.set("Execution stopped.")
-        self._finish_solver_progress(status="stopped")
+        if result is not None:
+            self._display_solve_results(
+                result, active.session_id if active else None, active.solver_choice if active else None
+            )
+        else:
+            self._append_output(
+                "\nExecution stopped by user. No final solver result available.\n", active.session_id if active else None
+            )
+        completed = result is not None and result.get("status") != "INTERRUPTED"
+        self.status_var.set("Solve complete." if completed else "Execution stopped.")
+        self._finish_solver_progress(result, status="complete" if completed else "stopped")
         self._set_run_menu_running(False)
         self._finish_foreground_operation(active)
+
+    def _collect_stopped_solver_result(self, session_id: Optional[str]) -> Optional[dict[str, Any]]:
+        self._solver_ipc.request_stop()
+        result: Optional[dict[str, Any]] = None
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                kind, payload = self._solver_ipc.read_nowait()
+            except queue.Empty:
+                if not self._solver_ipc.process or not self._solver_ipc.process.is_alive():
+                    break
+                time.sleep(0.02)
+                continue
+            except ValueError as exc:
+                logging.getLogger(__name__).error("Invalid solver message during stop: %s", exc)
+                break
+            if kind == "success":
+                result = payload
+                break
+            elif kind in ("progress", "log"):
+                OPLIDE._present_solver_stream_event(self, kind, payload)
+            elif kind == "error":
+                self._append_output(f"\nError during stop: {payload}\n", session_id)
+                break
+
+        self._solver_ipc.join(timeout=0.1)
+        if self._solver_ipc.process and self._solver_ipc.process.is_alive():
+            self._solver_ipc.stop()
+
+        if result is None:
+            latest = self._solver_progress_pending_sample or (
+                self._solver_progress_samples[-1] if self._solver_progress_samples else None
+            )
+            if latest:
+                result = {
+                    "status": "INTERRUPTED",
+                    "stats": {
+                        key: latest[key]
+                        for key in ("lower_bound", "upper_bound", "gap", "nodes", "solutions", "runtime")
+                        if key in latest
+                    },
+                    "message": "Solver did not return a final result; statistics are from the last progress update.",
+                }
+
+        return result
 
     def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
         """Release solver process/queue resources to avoid multiprocessing tracker leaks."""

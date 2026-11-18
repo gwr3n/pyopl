@@ -354,6 +354,16 @@ class TestIDEUtilitiesMore(unittest.TestCase):
         self.assertIn("j < N", output)
         self.assertNotIn("No detailed solver statistics", output)
 
+    def test_format_interrupted_result_distinguishes_incumbent_from_optimum(self):
+        output = _format_solve_results(
+            {"status": "INTERRUPTED", "objective_value": 4, "solution": {"x": 4}, "stats": {"NodeCount": 3}},
+            "gurobi",
+        )
+        self.assertIn("Best solution found (not proven optimal):\n  x: 4", output)
+        self.assertIn("NodeCount: 3", output)
+        no_solution = _format_solve_results({"status": "INTERRUPTED", "stats": {"mip_node_count": 1}}, "highs")
+        self.assertIn("No incumbent solution found before interruption.", no_solution)
+
     def test_find_fold_regions_uses_explicit_section_markers(self):
         text = """// ordinary comment
 // § Variables

@@ -6152,6 +6152,7 @@ def solve(
     solver: str = "gurobi",
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     solver_settings: Optional[dict[str, Any]] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """
     Solves an OPL model using the specified solver.
@@ -6161,6 +6162,7 @@ def solve(
         data_file (str, optional): Path to the .dat data file.
         solver (str): The solver to use ('gurobi' or 'highs').
         solver_settings (dict, optional): Backend-native solver parameter values.
+        stop_requested (callable, optional): Return true to interrupt the running solver and retain its result.
 
     Returns:
         dict: A dictionary containing the optimization results if successful,
@@ -6174,9 +6176,16 @@ def solve(
             data_file,
             progress_callback=progress_callback,
             solver_settings=solver_settings,
+            stop_requested=stop_requested,
         )
     elif solver == "highs":
-        return solve_with_highs(model_file, data_file, progress_callback=progress_callback, solver_settings=solver_settings)
+        return solve_with_highs(
+            model_file,
+            data_file,
+            progress_callback=progress_callback,
+            solver_settings=solver_settings,
+            stop_requested=stop_requested,
+        )
     else:
         raise ValueError(f"Unsupported solver: {solver}")
 
@@ -6186,6 +6195,7 @@ def solve_with_gurobi(
     data_file=None,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
     solver_settings: Optional[dict[str, Any]] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ):
     """
     Loads an OPL model and optional data from disk,
@@ -6239,6 +6249,9 @@ def solve_with_gurobi(
         redirected_output = sys.stdout = _TeeStdout(old_stdout)
 
         def _pyopl_progress_callback(model, where):
+            if stop_requested is not None and stop_requested():
+                model.terminate()
+                return
             if progress_callback is None:
                 return
             try:
@@ -6312,6 +6325,7 @@ def solve_with_highs(
     data_file=None,
     solver_settings: Optional[dict[str, Any]] = None,
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
+    stop_requested: Optional[Callable[[], bool]] = None,
 ):
     """
     Loads an OPL model and optional data from disk,
@@ -6372,6 +6386,7 @@ def solve_with_highs(
                 "np": __import__("numpy"),
                 "results_container": {},
                 "_pyopl_progress_callback": progress_callback,
+                "_pyopl_stop_requested": stop_requested,
                 "_pyopl_solver_settings": dict(solver_settings or {}),
             }
             exec(loaded_highs_code, exec_globals)  # nosec B102

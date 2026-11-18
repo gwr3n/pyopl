@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+- Drain the solver result queue before joining or force-stopping its worker so large interrupted solutions are not lost.
+- Return solver statistics and the best incumbent on IDE Stop for HiGHS and Gurobi, falling back to a forced stop if the solver does not respond.
+- Report the number of improving HiGHS MIP solutions in the live solve progress window and final summary.
+
+### Changed
+
+### Removed
+
+## [v2.8.0] - 2026-11-18
+
+### Added
+
 - Show Interrupt in the main GenAI button while generating an exemplar description; cancelling discards the pending result without blocking the UI.
 - Mark model and data tabs with a bullet when their editor has unsaved changes.
 - Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.

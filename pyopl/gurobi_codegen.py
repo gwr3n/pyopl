@@ -166,6 +166,15 @@ class GurobiCodeGenerator:
         self._add_code_line("stats['Runtime'] = model.Runtime")
         self._add_code_line("stats['NodeCount'] = model.NodeCount")
         self._add_code_line("stats['IterCount'] = model.IterCount")
+        self._add_code_line("stats['SolCount'] = model.SolCount")
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("stats['ObjBound'] = model.ObjBound")
+        self.indent_level -= 1
+        self._add_code_line("except (AttributeError, gp.GurobiError):")
+        self.indent_level += 1
+        self._add_code_line("stats['ObjBound'] = None")
+        self.indent_level -= 1
         self._add_code_line("results['stats'] = stats")
         self._add_code_line("if model.status == GRB.OPTIMAL:")
         self.indent_level += 1
@@ -184,11 +193,12 @@ class GurobiCodeGenerator:
         self._add_code_line("results['objective_value'] = model.ObjVal")
         self._add_code_line("results['status'] = 'OPTIMAL'")
         self.indent_level -= 1
-        self._add_code_line("elif model.status == GRB.TIME_LIMIT:")
+        self._add_code_line("elif model.status in (GRB.TIME_LIMIT, GRB.INTERRUPTED):")
         self.indent_level += 1
-        self._add_code_line("print('Time limit reached')")
-        self._add_code_line("results['status'] = 'TIME_LIMIT'")
-        self._add_code_line("results['message'] = 'Time limit reached.'")
+        self._add_code_line("interrupted = model.status == GRB.INTERRUPTED")
+        self._add_code_line("print('Optimization interrupted' if interrupted else 'Time limit reached')")
+        self._add_code_line("results['status'] = 'INTERRUPTED' if interrupted else 'TIME_LIMIT'")
+        self._add_code_line("results['message'] = 'Execution stopped by user.' if interrupted else 'Time limit reached.'")
         self._add_code_line("if model.SolCount > 0:")
         self.indent_level += 1
         self._add_code_line("print('Incumbent solution found:')")

@@ -244,6 +244,11 @@ class TestCoreHelperCoverage(unittest.TestCase):
                 self.assertTrue(events)
                 self.assertTrue(all(event["solver"] == "highs" and event["event"] == "mip" for event in events))
                 self.assertTrue(any(event["nodes"] >= 0 and event["runtime"] >= 0 for event in events))
+                counts = [event["solutions"] for event in events]
+                self.assertTrue(all(isinstance(count, int) and count >= 0 for count in counts))
+                self.assertEqual(counts, sorted(counts))
+                self.assertGreater(counts[-1], 0)
+                self.assertEqual(result["stats"]["solutions"], counts[-1])
                 self.assertTrue(
                     any(
                         event["lower_bound"] <= expected <= event["upper_bound"]
@@ -251,6 +256,39 @@ class TestCoreHelperCoverage(unittest.TestCase):
                         if event["lower_bound"] != float("-inf") and event["upper_bound"] != float("inf")
                     )
                 )
+
+    def test_solver_interruption_returns_stats_without_incumbent(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "interrupt.mod"
+            model_path.write_text("dvar boolean x; maximize x; subject to { x <= 1; }", encoding="utf-8")
+            for backend, settings in (("highs", {"presolve": "off", "output_flag": False}), ("gurobi", {"OutputFlag": 0})):
+                with self.subTest(backend=backend), redirect_stdout(StringIO()):
+                    result = solve(model_path, solver=backend, solver_settings=settings, stop_requested=lambda: True)
+                self.assertEqual(result["status"], "INTERRUPTED")
+                self.assertIsNone(result.get("objective_value"))
+                self.assertFalse(result.get("solution"))
+                self.assertTrue(result["stats"])
+
+    def test_gurobi_interruption_returns_best_incumbent(self):
+        with TemporaryDirectory() as tmpdir:
+            model_path = Path(tmpdir) / "interrupt.mod"
+            model_path.write_text(
+                "range I = 1..15; dvar boolean x[I]; maximize sum(i in I) i*x[i]; " "subject to { sum(i in I) x[i] <= 7.5; }",
+                encoding="utf-8",
+            )
+            events = []
+            with redirect_stdout(StringIO()):
+                result = solve(
+                    model_path,
+                    solver="gurobi",
+                    solver_settings={"OutputFlag": 0, "Presolve": 0},
+                    progress_callback=events.append,
+                    stop_requested=lambda: any(event["solutions"] > 0 for event in events),
+                )
+            self.assertEqual(result["status"], "INTERRUPTED")
+            self.assertGreater(result["stats"]["SolCount"], 0)
+            self.assertIsNotNone(result["objective_value"])
+            self.assertEqual(len(result["solution"]), 15)
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
@@ -410,9 +448,11 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
 
         self.assertIn("globals().get('_pyopl_solver_settings', {})", gurobi_code)
         self.assertIn("model.setParam(_param_name, _param_value)", gurobi_code)
-        self.assertIn("elif model.status == GRB.TIME_LIMIT:", gurobi_code)
-        self.assertIn("results['status'] = 'TIME_LIMIT'", gurobi_code)
-        self.assertIn("results['message'] = 'Time limit reached.'", gurobi_code)
+        self.assertIn("elif model.status in (GRB.TIME_LIMIT, GRB.INTERRUPTED):", gurobi_code)
+        self.assertIn("results['status'] = 'INTERRUPTED' if interrupted else 'TIME_LIMIT'", gurobi_code)
+        self.assertIn(
+            "results['message'] = 'Execution stopped by user.' if interrupted else 'Time limit reached.'", gurobi_code
+        )
         self.assertIn("if model.SolCount > 0:", gurobi_code)
         self.assertIn("print('Incumbent solution found:')", gurobi_code)
         self.assertLess(gurobi_code.index("results['stats'] = stats"), gurobi_code.index("if model.status == GRB.OPTIMAL:"))
@@ -429,7 +469,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("highs.setOptionValue(option_name, option_value)", highs_code)
         self.assertIn("HighsModelStatus.kTimeLimit: 'TIME_LIMIT'", highs_code)
         self.assertIn("has_incumbent = solution_values.value_valid", highs_code)
-        self.assertIn("status_str == 'TIME_LIMIT' and has_incumbent", highs_code)
+        self.assertIn("status_str in ('TIME_LIMIT', 'INTERRUPTED') and has_incumbent", highs_code)
         self.assertIn("print('Incumbent solution found:')", highs_code)
         self.assertIn("results['stats'] = stats", highs_code)
         self.assertIn("stats['mip_node_count']", highs_code)

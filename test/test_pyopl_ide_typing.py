@@ -661,8 +661,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy._solver_ipc.session_id, operation.session_id)
         process_cls.assert_called_once_with(
             target=pyopl_ide_bootstrap._solve_wrapper,
-            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
+            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue, mock.ANY),
         )
+        self.assertIsNotNone(dummy._solver_ipc.stop_event)
         process.start.assert_called_once_with()
         dummy._append_output.assert_called_once_with(
             f"\nSolver settings: loaded {settings_path}.\n",
@@ -709,10 +710,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
     def test_solver_process_stop_terminates_and_kills_unresponsive_worker(self):
         process = mock.Mock()
         process.is_alive.side_effect = [True, True]
-        owner = pyopl_ide_bootstrap._SolverProcessState(process=process)
+        stop_event = mock.Mock()
+        owner = pyopl_ide_bootstrap._SolverProcessState(process=process, stop_event=stop_event)
 
+        owner.request_stop()
         owner.stop()
 
+        stop_event.set.assert_called_once_with()
         process.terminate.assert_called_once_with()
         process.kill.assert_called_once_with()
         self.assertEqual(process.join.call_args_list, [mock.call(timeout=1.0), mock.call(timeout=1.0)])
@@ -1835,11 +1839,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
         OPLIDE._finish_solver_progress(
             dummy,
             {
+                "status": "OPTIMAL",
                 "objective_value": 3.0,
                 "stats": {
                     "mip_dual_bound": 2.5,
                     "mip_gap": 0.1,
                     "mip_node_count": 9,
+                    "solutions": 2,
                     "time": 1.2,
                     "nit": 4,
                 },
@@ -1851,6 +1857,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(summary["dual_bound"], 2.5)
         self.assertEqual(summary["gap"], 0.1)
         self.assertEqual(summary["nodes"], 9)
+        self.assertEqual(summary["solutions"], 2)
 
         self.assertEqual(window.geometry_values[-1], "760x460")
         self.assertFalse(canvas.removed)
@@ -1858,6 +1865,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertFalse(window.deiconified)
         self.assertEqual(status_var.value, "Solve complete.")
         dummy._append_solver_progress_sample.assert_called_once()
+
+        dummy._append_solver_progress_sample.reset_mock()
+        OPLIDE._finish_solver_progress(
+            dummy, {"status": "INTERRUPTED", "objective_value": 3.0, "stats": {"mip_gap": 0.2}}, status="stopped"
+        )
+        interrupted = dummy._update_solver_progress_stats.call_args.args[0]
+        self.assertNotIn("lower_bound", interrupted)
+        self.assertNotIn("upper_bound", interrupted)
+        self.assertEqual(interrupted["gap"], 0.2)
+        dummy._append_solver_progress_sample.assert_not_called()
 
     def test_solver_progress_display_can_be_disabled(self):
         class DummyWindow:
@@ -1928,15 +1945,22 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
     def test_stop_model_releases_queue_and_ignores_late_poll(self):
         process = mock.Mock()
-        process.is_alive.side_effect = [True, True, False]
+        process.is_alive.side_effect = [True, False]
         result_queue = mock.Mock()
+        solution = {f"x_{index}": float(index) for index in range(5000)}
+        result_queue.get_nowait.side_effect = [
+            ("success", {"status": "INTERRUPTED", "objective_value": 4.0, "solution": solution, "stats": {"NodeCount": 3}}),
+        ]
+        process.join.side_effect = lambda timeout: self.assertTrue(result_queue.get_nowait.called)
+        stop_event = mock.Mock()
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1")
         dummy = SimpleNamespace(
-            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(process, result_queue),
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(process, result_queue, stop_event=stop_event),
             _active_operation=operation,
             _stop_run_timer=mock.Mock(),
             _restore_output_textbox=mock.Mock(),
             _append_output=mock.Mock(),
+            _display_solve_results=mock.Mock(),
             status_var=mock.Mock(),
             _finish_solver_progress=mock.Mock(),
             _set_run_menu_running=mock.Mock(),
@@ -1949,13 +1973,58 @@ class TestPyOPLIDETyping(unittest.TestCase):
         OPLIDE.stop_model(dummy)
         OPLIDE._poll_solver(dummy, operation)
 
-        process.terminate.assert_called_once_with()
+        stop_event.set.assert_called_once_with()
+        process.terminate.assert_not_called()
         process.kill.assert_not_called()
         result_queue.cancel_join_thread.assert_called_once_with()
-        result_queue.get_nowait.assert_not_called()
-        dummy._append_output.assert_called_once_with("\nExecution stopped by user.\n", "session-1")
-        dummy._finish_solver_progress.assert_called_once_with(status="stopped")
+        self.assertEqual(result_queue.get_nowait.call_count, 1)
+        dummy._display_solve_results.assert_called_once_with(
+            {"status": "INTERRUPTED", "objective_value": 4.0, "solution": solution, "stats": {"NodeCount": 3}},
+            "session-1",
+            None,
+        )
+        dummy._finish_solver_progress.assert_called_once_with(
+            {"status": "INTERRUPTED", "objective_value": 4.0, "solution": solution, "stats": {"NodeCount": 3}},
+            status="stopped",
+        )
         dummy._finish_foreground_operation.assert_called_once_with(operation)
+
+    def test_stop_model_reports_last_progress_when_worker_does_not_return(self):
+        process = mock.Mock()
+        process.is_alive.side_effect = [True, True, True, True, False]
+        result_queue = mock.Mock()
+        result_queue.get_nowait.side_effect = queue.Empty()
+        operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve", "session-1", solver_choice="highs")
+        dummy = SimpleNamespace(
+            _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(process, result_queue, stop_event=mock.Mock()),
+            _active_operation=operation,
+            _solver_progress_pending_sample={"nodes": 5, "solutions": 1, "lower_bound": 3.0, "upper_bound": 8.0},
+            _solver_progress_samples=[],
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _append_output=mock.Mock(),
+            status_var=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+        dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
+            dummy, cancel_queue_thread=cancel_queue_thread
+        )
+
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.time, "monotonic", side_effect=[0, 0, 4]),
+            mock.patch.object(pyopl_ide_bootstrap.time, "sleep"),
+        ):
+            OPLIDE.stop_model(dummy)
+
+        process.terminate.assert_called_once_with()
+        result = dummy._display_solve_results.call_args.args[0]
+        self.assertEqual(result["stats"]["nodes"], 5)
+        self.assertEqual(result["stats"]["solutions"], 1)
+        self.assertIn("last progress update", result["message"])
+        dummy._finish_solver_progress.assert_called_once_with(result, status="stopped")
 
     def test_save_settings_persists_display_solver_progress(self):
         class DummyVar:

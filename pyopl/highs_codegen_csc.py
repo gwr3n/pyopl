@@ -2951,10 +2951,28 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         )
         self._add_code_line("require_highs_ok(highs.changeObjectiveSense(objective_sense), 'set objective sense')")
         self._add_code_line("progress_callback = globals().get('_pyopl_progress_callback')")
-        self._add_code_line("if progress_callback is not None and any(integrality):")
+        self._add_code_line("stop_requested = globals().get('_pyopl_stop_requested')")
+        self._add_code_line("solutions_found = [0]")
+        self._add_code_line("if (progress_callback is not None and any(integrality)) or stop_requested is not None:")
         self.indent_level += 1
         self._add_code_line("def on_highs_progress(callback_type, message, output, callback_input, user_data):")
         self.indent_level += 1
+        self._add_code_line("if callback_type in (highspy.cb.kCallbackMipInterrupt, highspy.cb.kCallbackSimplexInterrupt):")
+        self.indent_level += 1
+        self._add_code_line("if stop_requested is not None and stop_requested():")
+        self.indent_level += 1
+        self._add_code_line("callback_input.user_interrupt = True")
+        self.indent_level -= 1
+        self._add_code_line("return")
+        self.indent_level -= 1
+        self._add_code_line("if progress_callback is None:")
+        self.indent_level += 1
+        self._add_code_line("return")
+        self.indent_level -= 1
+        self._add_code_line("if callback_type == highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution:")
+        self.indent_level += 1
+        self._add_code_line("solutions_found[0] += 1")
+        self.indent_level -= 1
         self._add_code_line("primal = output.mip_primal_bound + objective_offset")
         self._add_code_line("dual = output.mip_dual_bound + objective_offset")
         self._add_code_line("lower, upper = (primal, dual) if sense == 'maximize' else (dual, primal)")
@@ -2962,17 +2980,23 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("'solver': 'highs', 'event': 'mip', 'time': time.time(),")
         self._add_code_line("'runtime': output.running_time, 'lower_bound': lower, 'upper_bound': upper,")
-        self._add_code_line("'nodes': output.mip_node_count,")
+        self._add_code_line("'nodes': output.mip_node_count, 'solutions': solutions_found[0],")
         self.indent_level -= 1
         self._add_code_line("})")
         self.indent_level -= 1
         self._add_code_line("require_highs_ok(highs.setCallback(on_highs_progress, None), 'set progress callback')")
-        self._add_code_line("for callback_type in (")
+        self._add_code_line("callback_types = []")
+        self._add_code_line("if progress_callback is not None and any(integrality):")
         self.indent_level += 1
-        self._add_code_line("highspy.cb.HighsCallbackType.kCallbackMipLogging,")
-        self._add_code_line("highspy.cb.HighsCallbackType.kCallbackMipImprovingSolution,")
+        self._add_code_line(
+            "callback_types.extend((highspy.cb.kCallbackMipLogging, highspy.cb.kCallbackMipImprovingSolution))"
+        )
         self.indent_level -= 1
-        self._add_code_line("):")
+        self._add_code_line("if stop_requested is not None:")
+        self.indent_level += 1
+        self._add_code_line("callback_types.extend((highspy.cb.kCallbackMipInterrupt, highspy.cb.kCallbackSimplexInterrupt))")
+        self.indent_level -= 1
+        self._add_code_line("for callback_type in callback_types:")
         self.indent_level += 1
         self._add_code_line("require_highs_ok(highs.startCallback(callback_type), f'start {callback_type} callback')")
         self.indent_level -= 2
@@ -2985,6 +3009,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("highspy.HighsModelStatus.kOptimal: 'OPTIMAL',")
         self._add_code_line("highspy.HighsModelStatus.kTimeLimit: 'TIME_LIMIT',")
+        self._add_code_line("highspy.HighsModelStatus.kInterrupt: 'INTERRUPTED',")
         self._add_code_line("highspy.HighsModelStatus.kIterationLimit: 'ITERATION_LIMIT',")
         self._add_code_line("highspy.HighsModelStatus.kInfeasible: 'INFEASIBLE',")
         self._add_code_line("highspy.HighsModelStatus.kUnbounded: 'UNBOUNDED',")
@@ -3006,6 +3031,9 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             "stats['mip_node_count'] = info.mip_node_count if any(integrality) and info.mip_node_count >= 0 else None"
         )
         self._add_code_line(
+            "stats['solutions'] = solutions_found[0] if progress_callback is not None and any(integrality) else None"
+        )
+        self._add_code_line(
             "dual_bound = info.mip_dual_bound if any(integrality) and math.isfinite(info.mip_dual_bound) else None"
         )
         self._add_code_line("if dual_bound is not None:")
@@ -3015,9 +3043,9 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line("stats['mip_dual_bound'] = dual_bound")
         self._add_code_line("stats['mip_gap'] = info.mip_gap if any(integrality) and math.isfinite(info.mip_gap) else None")
         self._add_code_line("stats['time'] = end_time - start_time")
-        self._add_code_line("if status_str == 'OPTIMAL' or (status_str == 'TIME_LIMIT' and has_incumbent):")
+        self._add_code_line("if status_str == 'OPTIMAL' or (status_str in ('TIME_LIMIT', 'INTERRUPTED') and has_incumbent):")
         self.indent_level += 1
-        self._add_code_line("if status_str == 'TIME_LIMIT':")
+        self._add_code_line("if status_str in ('TIME_LIMIT', 'INTERRUPTED'):")
         self.indent_level += 1
         self._add_code_line("print('Incumbent solution found:')")
         self.indent_level -= 1
@@ -3043,14 +3071,16 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['objective_value'] = objective_value")
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
-        self._add_code_line("if status_str == 'TIME_LIMIT':")
+        self._add_code_line("if status_str in ('TIME_LIMIT', 'INTERRUPTED'):")
         self.indent_level += 1
         self._add_code_line(f"{self.results_varname}['message'] = status_message")
         self.indent_level -= 1
         self.indent_level -= 1  # Dedent here so else is at the same level as if
         self._add_code_line("else:")
         self.indent_level += 1
-        self._add_code_line("print('Optimization failed: ' + status_message)")
+        self._add_code_line(
+            "print(('Optimization interrupted: ' if status_str == 'INTERRUPTED' else 'Optimization failed: ') + status_message)"
+        )
         self._add_code_line(f"{self.results_varname}['status'] = status_str")
         self._add_code_line(f"{self.results_varname}['message'] = status_message")
         self._add_code_line(f"{self.results_varname}['objective_value'] = None")
