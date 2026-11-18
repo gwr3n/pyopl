@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show Interrupt in the main GenAI button while generating an exemplar description; cancelling discards the pending result without blocking the UI.
 - Mark model and data tabs with a bullet when their editor has unsaved changes.
 - Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.
 - Add focused coverage for projected observable mappings, indexed expressions,
@@ -25,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow syntax highlighting in the read-only exemplar review previews without treating them as the main model/data editors.
+- Open the exemplar name dialog after the macOS File menu action returns, avoiding a modal wait inside menu tracking; focus its field after it is visible.
 - Preserve trailing newlines on model/data Save As and regular Data Save; keep the previous file path and clean baseline if saving fails.
 - Protect editor replacements (new model/session, file open/drop, exemplar and session restore, revision apply, and MCP writes) with a scoped Save / Discard / Cancel prompt; time out remote editor updates after 30 seconds without applying a late update.
 - Warn before Generate replaces unsaved editor changes, offering Save, Discard, or Cancel; Save As preserves untitled work.

@@ -26,6 +26,35 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_short_text_dialog_waits_until_visible_before_grabbing_input(self):
+        dialog = mock.Mock()
+        dialog.wait_visibility.side_effect = lambda: setattr(dialog, "visible", True)
+        entry = mock.Mock()
+
+        def grab_set():
+            self.assertTrue(getattr(dialog, "visible", False))
+
+        dialog.grab_set.side_effect = grab_set
+
+        def focus_set():
+            self.assertTrue(getattr(dialog, "visible", False))
+            dialog.grab_set.assert_called_once_with()
+
+        entry.focus_set.side_effect = focus_set
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=entry),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button"),
+        ):
+            self.assertIsNone(OPLIDE._ask_short_text(mock.Mock(), "Save Exemplar", "Exemplar name:"))
+
+        dialog.wait_visibility.assert_called_once_with()
+        dialog.grab_set.assert_called_once_with()
+        entry.focus_set.assert_called_once_with()
+
     def test_data_paths_must_be_paired(self):
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("", ""))
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", "right.dat"))
@@ -404,6 +433,14 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(file_labels[open_index + 1], "Retrieve Exemplar...")
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
+        exemplar_command = next(
+            entry[1]["command"]
+            for entry in FakeMenu.instances[1].entries
+            if entry[0] == "command" and entry[1]["label"] == "Save Exemplar..."
+        )
+        exemplar_command()
+        dummy.after_idle.assert_called_once_with(dummy.save_exemplar)
+        dummy.save_exemplar.assert_not_called()
 
     def test_classify_exemplar_search_result_handles_worker_messages(self):
         low = {"name": "low", "description_path": Path("/tmp/low.md")}
@@ -771,6 +808,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     )
                 ),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -822,6 +860,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
                 _review_exemplar_draft=mock.Mock(side_effect=lambda draft, _root: draft),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -860,6 +899,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="cancelled"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -909,6 +949,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="failed"),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -950,6 +991,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="race"),
                 _review_exemplar_draft=mock.Mock(side_effect=create_competing_destination),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -980,8 +1022,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _ask_short_text=mock.Mock(return_value="async"),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
             )
             thread = mock.Mock()
             thread.start = worker
@@ -997,6 +1041,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
             distill.assert_not_called()
             self.assertTrue(dummy._exemplar_save_state.pending)
             self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+            OPLIDE._interrupt_exemplar_preparation(dummy)
+            thread_cls.call_args.kwargs["target"]()
+            distill.assert_not_called()
+            self.assertFalse(dummy._exemplar_save_state.pending)
 
     def test_save_exemplar_snapshots_inputs_and_blocks_duplicate_preparation(self):
         with TemporaryDirectory() as tmpdir:
@@ -1013,6 +1061,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="fleet"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="first-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -1049,6 +1098,46 @@ class TestPyOPLIDETyping(unittest.TestCase):
         with mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", side_effect=RuntimeError("cannot start")):
             with self.assertRaisesRegex(RuntimeError, "cannot start"):
                 state.start(mock.Mock())
+        self.assertFalse(state.pending)
+
+    def test_exemplar_interrupt_restores_generate_button_and_discards_late_result(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True)
+        host = SimpleNamespace(
+            _exemplar_save_state=state,
+            _active_operation=None,
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
+            _refresh_genai_mode_buttons=mock.Mock(),
+            genai_panel_mode_var=SimpleNamespace(get=lambda: "generate"),
+            genai_prompt_title_var=mock.Mock(),
+            genai_submit_label_var=mock.Mock(),
+            genai_attachment_summary_var=mock.Mock(),
+            genai_submit_button=mock.Mock(),
+            _submit_genai_request=mock.Mock(),
+            _review_exemplar_draft=mock.Mock(),
+            status_var=mock.Mock(),
+        )
+        host._interrupt_exemplar_preparation = lambda: OPLIDE._interrupt_exemplar_preparation(host)
+        host._refresh_genai_panel_state = lambda: OPLIDE._refresh_genai_panel_state(host)
+
+        host._refresh_genai_panel_state()
+        host.genai_submit_label_var.set.assert_called_with("Interrupt")
+        interrupt = host.genai_submit_button.configure.call_args.kwargs["command"]
+        interrupt()
+
+        self.assertTrue(state.cancel_requested)
+        host.genai_submit_label_var.set.assert_called_with("Generate")
+        host.genai_submit_button.configure.assert_called_with(command=host._submit_genai_request, state="normal")
+        draft = pyopl_ide_bootstrap.ExemplarDraft("name", "model", "data", "description", "session")
+        OPLIDE._finish_exemplar_preparation(host, draft, Path("/tmp/opl_models"))
+        host._review_exemplar_draft.assert_not_called()
+        self.assertFalse(state.pending)
+
+    def test_exemplar_interrupt_discards_late_failure(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True, cancel_requested=True)
+        host = SimpleNamespace(_exemplar_save_state=state, _refresh_genai_panel_state=mock.Mock())
+        with mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror:
+            OPLIDE._finish_exemplar_preparation_error(host, RuntimeError("late failure"))
+        showerror.assert_not_called()
         self.assertFalse(state.pending)
 
     def test_exemplar_preparation_completion_after_shutdown_skips_review(self):
@@ -2061,6 +2150,33 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertFalse(any(tag == "ERROR" for tag, _start, _end in text.tags))
         self.assertIsNone(dummy._model_editor_state.syntax_error)
+
+    def test_highlight_review_preview_does_not_use_main_editor_state(self):
+        host = SimpleNamespace(
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            model_gutter=mock.Mock(),
+            data_gutter=mock.Mock(),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="existing error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="existing data error"),
+            _text_too_large_for_highlight=lambda widget: OPLIDE._text_too_large_for_highlight(host, widget),
+            _clear_highlight_tags=lambda widget: OPLIDE._clear_highlight_tags(host, widget),
+            _disable_highlight_for_large_text=lambda widget: OPLIDE._disable_highlight_for_large_text(host, widget),
+            _set_highlight_error=lambda widget, prefix, exc: OPLIDE._set_highlight_error(host, widget, prefix, exc),
+            _is_transient_live_parse_error=OPLIDE._is_transient_live_parse_error,
+        )
+
+        for source, is_data in (("invalid model", False), ("invalid data", True), ("x" * 10001, False)):
+            with self.subTest(source=source[:20], is_data=is_data):
+                preview = mock.Mock()
+                preview.get.return_value = source
+                preview.count.return_value = (len(source),)
+                OPLIDE.highlight(host, preview, is_data=is_data)
+
+        host.model_gutter.refresh.assert_not_called()
+        host.data_gutter.refresh.assert_not_called()
+        self.assertEqual(host._model_editor_state.syntax_error, "existing error")
+        self.assertEqual(host._data_editor_state.syntax_error, "existing data error")
 
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:
