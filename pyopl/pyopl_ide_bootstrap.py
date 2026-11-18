@@ -4173,7 +4173,7 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
 
-    def _ask_short_text(self, title: str, prompt: str, initial_text: str = "") -> Optional[str]:
+    def _ask_short_text(self, title: str, prompt: str, initial_text: str = "", *, placeholder: bool = False) -> Optional[str]:
         """Show a themed short-text dialog and return the entered text or None."""
         dlg = tk.Toplevel(self)
         dlg.title(title)
@@ -4186,18 +4186,62 @@ class OPLIDE(TkinterDnD.Tk):
         dlg.rowconfigure(0, weight=1)
         frm.columnconfigure(0, weight=1)
 
-        ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        if not placeholder:
+            ttk.Label(frm, text=prompt, anchor="w", style="TLabel").grid(row=0, column=0, sticky="ew", pady=(0, 6))
 
         text_var = tk.StringVar(value=initial_text)
         entry = ttk.Entry(frm, textvariable=text_var, width=48)
-        entry.grid(row=1, column=0, sticky="ew")
+        entry.grid(row=0 if placeholder else 1, column=0, sticky="ew")
+
+        hint_active = False
+        if placeholder:
+            self.style.configure("ShortTextHint.TEntry", foreground=self._theme_palette(self.theme_var.get())["sidebar_muted"])
+
+            def show_hint(_event: Any = None) -> None:
+                nonlocal hint_active
+                if not hint_active and not text_var.get():
+                    hint_active = True
+                    entry.configure(style="ShortTextHint.TEntry")
+                    text_var.set(prompt)
+                    entry.icursor(0)
+
+            def clear_hint(_event: Any = None) -> None:
+                nonlocal hint_active
+                if hint_active:
+                    hint_active = False
+                    text_var.set("")
+                    entry.configure(style="TEntry")
+
+            def on_key(event: tk.Event) -> None:
+                if event.char or event.keysym in ("BackSpace", "Delete"):
+                    clear_hint()
+
+            def on_click(_event: tk.Event) -> Optional[str]:
+                if hint_active:
+                    entry.focus_set()
+                    entry.icursor(0)
+                    return "break"
+                return None
+
+            def on_cut(_event: tk.Event) -> Optional[str]:
+                if hint_active:
+                    return "break"
+                dlg.after_idle(show_hint)
+                return None
+
+            entry.bind("<KeyPress>", on_key)
+            entry.bind("<KeyRelease>", show_hint)
+            entry.bind("<Button-1>", on_click)
+            entry.bind("<<Paste>>", clear_hint)
+            entry.bind("<<Cut>>", on_cut)
+            show_hint()
 
         btns = ttk.Frame(frm)
-        btns.grid(row=2, column=0, sticky="e", pady=(10, 0))
+        btns.grid(row=1 if placeholder else 2, column=0, sticky="e", pady=(10, 0))
         result: dict[str, Optional[str]] = {"value": None}
 
         def on_ok(event: Optional[tk.Event] = None) -> None:
-            result["value"] = text_var.get()
+            result["value"] = "" if hint_active else text_var.get()
             dlg.destroy()
 
         def on_cancel(event: Optional[tk.Event] = None) -> None:
@@ -4214,7 +4258,8 @@ class OPLIDE(TkinterDnD.Tk):
         dlg.wait_visibility()
         dlg.grab_set()
         entry.focus_set()
-        entry.selection_range(0, tk.END)
+        if not hint_active:
+            entry.selection_range(0, tk.END)
         dlg.wait_window()
         return result["value"]
 
@@ -6313,7 +6358,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         models_root = Path.cwd() / "opl_models"
         while True:
-            name = self._ask_short_text("Save Exemplar", "Exemplar name:")
+            name = self._ask_short_text("Save Exemplar", "Exemplar name", placeholder=True)
             if name is None:
                 return
             try:

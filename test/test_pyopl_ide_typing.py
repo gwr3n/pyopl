@@ -54,6 +54,66 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dialog.wait_visibility.assert_called_once_with()
         dialog.grab_set.assert_called_once_with()
         entry.focus_set.assert_called_once_with()
+        entry.selection_range.assert_called_once_with(0, pyopl_ide_bootstrap.tk.END)
+
+    def test_short_text_placeholder_is_not_submitted_and_tracks_edits(self):
+        for edit, expected in (("untouched", ""), ("typed", "fleet"), ("deleted", ""), ("pasted", "fleet")):
+            with self.subTest(edit=edit):
+                dialog = mock.Mock()
+                entry = mock.Mock()
+                bindings = {}
+                entry.bind.side_effect = lambda event, callback: bindings.update({event: callback})
+                text_var = mock.Mock()
+                text_var.value = ""
+                text_var.get.side_effect = lambda: text_var.value
+                text_var.set.side_effect = lambda value: setattr(text_var, "value", value)
+                buttons = {}
+
+                def make_button(_parent, **kwargs):
+                    buttons[kwargs["text"]] = kwargs["command"]
+                    return mock.Mock()
+
+                def submit():
+                    self.assertEqual(text_var.value, "Exemplar name")
+                    entry.configure.assert_any_call(style="ShortTextHint.TEntry")
+                    self.assertEqual(bindings["<Button-1>"](None), "break")
+                    entry.icursor.assert_called_with(0)
+                    self.assertEqual(bindings["<<Cut>>"](None), "break")
+                    if edit == "typed":
+                        bindings["<KeyPress>"](SimpleNamespace(char="f", keysym="f"))
+                        text_var.set("fleet")
+                        bindings["<KeyRelease>"](None)
+                    elif edit == "deleted":
+                        bindings["<KeyPress>"](SimpleNamespace(char="f", keysym="f"))
+                        text_var.set("fleet")
+                        text_var.set("")
+                        bindings["<KeyRelease>"](None)
+                        self.assertEqual(text_var.value, "Exemplar name")
+                    elif edit == "pasted":
+                        bindings["<<Paste>>"](None)
+                        text_var.set("fleet")
+                    buttons["OK"]()
+
+                dialog.wait_window.side_effect = submit
+                host = SimpleNamespace(
+                    style=mock.Mock(),
+                    theme_var=mock.Mock(get=lambda: "dark"),
+                    _theme_palette=lambda _theme: {"sidebar_muted": "#888888"},
+                )
+                with (
+                    mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+                    mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", return_value=text_var),
+                    mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame"),
+                    mock.patch.object(pyopl_ide_bootstrap.ttk, "Label") as label,
+                    mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=entry),
+                    mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
+                ):
+                    value = OPLIDE._ask_short_text(host, "Save Exemplar", "Exemplar name", placeholder=True)
+
+                self.assertEqual(value, expected)
+                entry.selection_range.assert_not_called()
+                label.assert_not_called()
+                host.style.configure.assert_called_once_with("ShortTextHint.TEntry", foreground="#888888")
 
     def test_data_paths_must_be_paired(self):
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("", ""))
@@ -905,7 +965,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 model_name="test-model",
             )
             showerror.assert_not_called()
-            dummy._ask_short_text.assert_called_once_with("Save Exemplar", "Exemplar name:")
+            dummy._ask_short_text.assert_called_once_with("Save Exemplar", "Exemplar name", placeholder=True)
             self.assertEqual(dummy.status_var.set.call_args_list[-1], mock.call(f"Saved exemplar to {exemplar.resolve()}"))
 
     def test_save_exemplar_reprompts_for_existing_folder(self):
