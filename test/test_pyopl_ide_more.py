@@ -606,6 +606,7 @@ minimize x;
         widgets = [Widget() for _ in range(6)]
         dummy = SimpleNamespace(
             _active_operation=SimpleNamespace(kind="genai-generate"),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
             _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
             genai_panel_mode_var=DummyVar("generate"),
             genai_prompt_title_var=DummyVar(),
@@ -621,6 +622,7 @@ minimize x;
             _submit_genai_request=mock.Mock(),
         )
         dummy._refresh_genai_mode_buttons = lambda: OPLIDE._refresh_genai_mode_buttons(dummy)
+        dummy._refresh_genai_submit_button = lambda active: OPLIDE._refresh_genai_submit_button(dummy, active)
 
         OPLIDE._refresh_genai_panel_state(dummy)
 
@@ -633,6 +635,11 @@ minimize x;
 
         self.assertEqual([widget.state for widget in widgets], ["normal"] * 6)
         self.assertEqual(dummy.genai_submit_label_var.value, "Generate")
+
+        dummy._active_operation = SimpleNamespace(kind="solve")
+        OPLIDE._refresh_genai_panel_state(dummy)
+
+        self.assertEqual(dummy.genai_submit_button.state, "disabled")
 
     def test_editor_drop_routes_model_and_data_paths(self):
         dummy = SimpleNamespace(

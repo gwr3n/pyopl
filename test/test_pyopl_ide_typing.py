@@ -1117,6 +1117,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             status_var=mock.Mock(),
         )
         host._interrupt_exemplar_preparation = lambda: OPLIDE._interrupt_exemplar_preparation(host)
+        host._refresh_genai_submit_button = lambda active: OPLIDE._refresh_genai_submit_button(host, active)
         host._refresh_genai_panel_state = lambda: OPLIDE._refresh_genai_panel_state(host)
 
         host._refresh_genai_panel_state()

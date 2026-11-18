@@ -3492,18 +3492,21 @@ class OPLIDE(TkinterDnD.Tk):
             if widget is not None:
                 widget.configure(state=composer_state)
         if hasattr(self, "genai_submit_button"):
-            if active is not None and active.kind.startswith("genai"):
-                self.genai_submit_label_var.set("Interrupt")
-                self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
-            elif active is None and self._exemplar_save_state.pending and not self._exemplar_save_state.cancel_requested:
-                self.genai_submit_label_var.set("Interrupt")
-                self.genai_submit_button.configure(command=self._interrupt_exemplar_preparation, state="normal")
-            else:
-                self.genai_submit_button.configure(
-                    command=self._submit_genai_request, state=("normal" if active is None else "disabled")
-                )
+            self._refresh_genai_submit_button(active)
         if hasattr(self, "status_genai_var"):
             self._refresh_status_context()
+
+    def _refresh_genai_submit_button(self, active: Optional[_ForegroundOperation]) -> None:
+        if active is not None and active.kind.startswith("genai"):
+            self.genai_submit_label_var.set("Interrupt")
+            self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
+        elif active is None and self._exemplar_save_state.pending and not self._exemplar_save_state.cancel_requested:
+            self.genai_submit_label_var.set("Interrupt")
+            self.genai_submit_button.configure(command=self._interrupt_exemplar_preparation, state="normal")
+        else:
+            self.genai_submit_button.configure(
+                command=self._submit_genai_request, state=("normal" if active is None else "disabled")
+            )
 
     def _open_genai_panel(self, mode: str, initial_text: str = "") -> None:
         """Focus the docked GenAI composer and set its mode."""
