@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+### Changed
+
+### Removed
+
+## [v2.8.2] - 2026-11-18
+
+### Added
+
+### Fixed
+
 - Drain the solver result queue before joining or force-stopping its worker so large interrupted solutions are not lost.
 - Return solver statistics and the best incumbent on IDE Stop for HiGHS and Gurobi, falling back to a forced stop if the solver does not respond.
 - Report the number of improving HiGHS MIP solutions in the live solve progress window and final summary.
