@@ -263,6 +263,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _finish_foreground_operation=mock.Mock(),
             interrupt_active_operation=mock.Mock(),
             _append_output=mock.Mock(),
+            _replace_scrolled_text_vbar=mock.Mock(),
+            _overlay_scrollbar=mock.Mock(),
             status_var=mock.Mock(),
             after=mock.Mock(),
         )
@@ -578,6 +580,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             style=mock.Mock(),
             theme_var=SimpleNamespace(get=lambda: "flatly"),
             _theme_palette=OPLIDE._theme_palette,
+            _overlay_scrollbar=mock.Mock(),
         )
         value = [""]
         search_var = mock.Mock()
@@ -644,6 +647,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             style=mock.Mock(),
             theme_var=SimpleNamespace(get=lambda: "flatly"),
             _theme_palette=OPLIDE._theme_palette,
+            _overlay_scrollbar=mock.Mock(),
             _available_exemplars=lambda roots: [exemplar],
             _copy_exemplar_to_tmp=mock.Mock(side_effect=OSError("copy failed")),
             _resolve_editor_replacement=mock.Mock(return_value=True),
@@ -2370,42 +2374,54 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(host._model_editor_state.syntax_error, "existing error")
         self.assertEqual(host._data_editor_state.syntax_error, "existing data error")
 
-    def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
-        class DummyWidget:
-            def __init__(self):
-                self.yscrollcommand = None
+    def test_overlay_scrollbar_floats_and_hides_without_resizing_content(self):
+        for orient, option, view_name in (
+            (pyopl_ide_bootstrap.tk.VERTICAL, "yscrollcommand", "yview"),
+            (pyopl_ide_bootstrap.tk.HORIZONTAL, "xscrollcommand", "xview"),
+        ):
+            with self.subTest(orient=orient):
+                widget = mock.Mock()
+                scrollbar = mock.Mock()
+                callbacks = {}
+                jobs = {}
+                widget.bind.side_effect = lambda name, callback, **_kwargs: callbacks.update({name: callback})
+                scrollbar.bind.side_effect = lambda name, callback, **_kwargs: callbacks.update({"bar" + name: callback})
+                getattr(widget, view_name).return_value = (0.0, 0.5)
 
-            def configure(self, **kwargs):
-                self.yscrollcommand = kwargs["yscrollcommand"]
+                def schedule(delay, callback):
+                    jobs["hide"] = callback
+                    return "hide"
 
-            def yview(self):
-                return (0.0, 1.0)
+                host = SimpleNamespace(
+                    after_idle=lambda callback: callback(),
+                    after=schedule,
+                    after_cancel=lambda job: jobs.pop(job, None),
+                )
+                redraw = mock.Mock()
+                OPLIDE._overlay_scrollbar(host, widget, scrollbar, orient=orient, on_scroll=redraw)
 
-        class DummyScrollbar:
-            def __init__(self):
-                self.set_calls = []
-                self.removed = False
-
-            def winfo_manager(self):
-                return "grid"
-
-            def set(self, first, last):
-                self.set_calls.append((first, last))
-
-            def grid(self):
-                self.removed = False
-
-            def grid_remove(self):
-                self.removed = True
-
-        widget = DummyWidget()
-        scrollbar = DummyScrollbar()
-        dummy = SimpleNamespace(after_idle=lambda callback: callback())
-
-        OPLIDE._bind_autohide_vertical_scrollbar(dummy, widget, scrollbar)
-
-        self.assertEqual(scrollbar.set_calls, [("0.0", "1.0")])
-        self.assertTrue(scrollbar.removed)
+                update = widget.configure.call_args.kwargs[option]
+                scrollbar.set.assert_called_once_with(0.0, 0.5)
+                scrollbar.place.assert_not_called()
+                update("0.0", "0.4")
+                scrollbar.place.assert_not_called()
+                update("0.25", "0.75")
+                self.assertIs(scrollbar.place.call_args.kwargs["in_"], widget)
+                self.assertIn(
+                    "relheight" if orient == pyopl_ide_bootstrap.tk.VERTICAL else "relwidth", scrollbar.place.call_args.kwargs
+                )
+                update("0.25", "0.6")
+                scrollbar.place.assert_called_once()
+                jobs["hide"]()
+                scrollbar.place_forget.assert_called_once()
+                update("0.25", "0.6")
+                scrollbar.place.assert_called_once()
+                update("0.5", "0.75")
+                self.assertEqual(scrollbar.place.call_count, 2)
+                update("0.0", "1.0")
+                self.assertEqual(scrollbar.place_forget.call_count, 2)
+                self.assertEqual(redraw.call_count, 7)
+                self.assertEqual(list(callbacks), ["<Destroy>"])
 
     def test_apply_theme_colors_keeps_genai_button_font_independent_of_editor_font_size(self):
         class DummyVar:

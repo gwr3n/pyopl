@@ -2759,18 +2759,14 @@ class OPLIDE(TkinterDnD.Tk):
         self.after_idle(self._sync_genai_mode_width)
 
     def _sync_genai_mode_width(self) -> None:
-        """Match the segmented control width to the prompt text area excluding the scrollbar."""
+        """Match the segmented control width to the prompt text area."""
         if not hasattr(self, "genai_mode_frame") or not hasattr(self, "genai_prompt_text"):
             return
         try:
             prompt_width = int(self.genai_prompt_text.winfo_width())
-            scrollbar = getattr(self.genai_prompt_text, "vbar", None)
-            scrollbar_width = 0
-            if scrollbar is not None:
-                scrollbar_width = max(int(scrollbar.winfo_width()), int(scrollbar.winfo_reqwidth()))
             gap_width = 4 + (1 if (prompt_width - 4) % 2 else 0)
             self.genai_mode_frame.columnconfigure(1, minsize=gap_width)
-            self.genai_mode_frame.grid_configure(padx=(0, scrollbar_width))
+            self.genai_mode_frame.grid_configure(padx=0)
         except Exception:
             pass
 
@@ -3007,6 +3003,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._replace_scrolled_text_vbar(self.model_text)
         self.model_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
         self.model_gutter = _EditorGutter(self, self.model_text, model_gutter_canvas)
+        self._overlay_scrollbar(self.model_text, self.model_text.vbar, on_scroll=self.model_gutter.schedule_redraw)
 
         def _on_model_changed(event: tk.Event) -> None:
             self._on_text_change(self.model_text, False)
@@ -3040,6 +3037,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._replace_scrolled_text_vbar(self.data_text)
         self.data_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=1)
         self.data_gutter = _EditorGutter(self, self.data_text, data_gutter_canvas)
+        self._overlay_scrollbar(self.data_text, self.data_text.vbar, on_scroll=self.data_gutter.schedule_redraw)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
         self.data_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.data_text))
@@ -3069,7 +3067,6 @@ class OPLIDE(TkinterDnD.Tk):
             (self.model_text, self.model_gutter),
             (self.data_text, self.data_gutter),
         ):
-            text_widget.configure(yscrollcommand=gutter.sync_scroll)
             text_widget.bind("<Configure>", gutter.schedule_redraw, add="+")
             gutter.refresh()
 
@@ -3103,6 +3100,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         self._replace_scrolled_text_vbar(self.output_text)
         self.output_text.pack(fill=tk.BOTH, expand=1)
+        self._overlay_scrollbar(self.output_text, self.output_text.vbar)
 
         parent.add(output_frame, minsize=150)
 
@@ -3140,6 +3138,7 @@ class OPLIDE(TkinterDnD.Tk):
             )
             self._replace_scrolled_text_vbar(log_text)
             log_text.pack(fill=tk.BOTH, expand=1)
+            self._overlay_scrollbar(log_text, log_text.vbar)
             self._solver_log_text = log_text
             self._apply_theme_colors()
         except Exception:
@@ -3263,6 +3262,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         self._replace_scrolled_text_vbar(self.genai_prompt_text)
         self.genai_prompt_text.grid(row=0, column=0, sticky="nsew")
+        self._overlay_scrollbar(self.genai_prompt_text, self.genai_prompt_text.vbar)
         self._genai_prompt_placeholder_active = False
         self._refresh_genai_prompt_placeholder()
         self.genai_prompt_text.edit_modified(False)
@@ -3271,11 +3271,6 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_prompt_text.bind("<<Paste>>", self._clear_genai_prompt_placeholder)
         self.genai_prompt_text.bind("<<Cut>>", self._clear_genai_prompt_placeholder)
         self.genai_prompt_text.bind("<<Modified>>", self._on_genai_prompt_modified)
-        self._bind_autohide_vertical_scrollbar(
-            self.genai_prompt_text,
-            getattr(self.genai_prompt_text, "vbar", None),
-            on_toggle=self._sync_genai_mode_width,
-        )
         self.genai_prompt_text.bind("<Control-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Command-Return>", self._submit_genai_from_event)
         self.genai_prompt_text.bind("<Configure>", self._on_genai_prompt_configure, add="+")
@@ -3356,8 +3351,7 @@ class OPLIDE(TkinterDnD.Tk):
         request_scroll = ttk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
-        request_scroll.grid(row=0, column=1, sticky="ns")
-        self._bind_autohide_vertical_scrollbar(self.request_listbox, request_scroll)
+        self._overlay_scrollbar(self.request_listbox, request_scroll)
 
         self.request_listbox.bind("<<ListboxSelect>>", self._on_request_select)
 
@@ -3828,8 +3822,8 @@ class OPLIDE(TkinterDnD.Tk):
         x_scroll = ttk.Scrollbar(container, orient=tk.HORIZONTAL, command=text_widget.xview)
         text_widget.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
         text_widget.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
+        self._overlay_scrollbar(text_widget, y_scroll)
+        self._overlay_scrollbar(text_widget, x_scroll, orient=tk.HORIZONTAL)
         return text_widget
 
     @staticmethod
@@ -4527,8 +4521,8 @@ class OPLIDE(TkinterDnD.Tk):
         exemplar_list = tk.Listbox(list_frame, exportselection=False)
         exemplar_list.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=exemplar_list.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
         exemplar_list.configure(yscrollcommand=scrollbar.set)
+        self._overlay_scrollbar(exemplar_list, scrollbar)
 
         description_frame = ttk.Frame(content_frame)
         description_frame.grid(row=0, column=1, sticky="nsew")
@@ -4541,8 +4535,8 @@ class OPLIDE(TkinterDnD.Tk):
             orient="vertical",
             command=description_text.yview,
         )
-        description_scrollbar.grid(row=0, column=1, sticky="ns")
         description_text.configure(yscrollcommand=description_scrollbar.set)
+        self._overlay_scrollbar(description_text, description_scrollbar)
         empty_var = tk.StringVar()
         ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
 
@@ -6282,7 +6276,9 @@ class OPLIDE(TkinterDnD.Tk):
             frame.rowconfigure(0, weight=1)
             frame.columnconfigure(0, weight=1)
             editor = scrolledtext.ScrolledText(frame, wrap="word" if label == "Description" else "none", undo=True)
+            self._replace_scrolled_text_vbar(editor)
             editor.grid(row=0, column=0, sticky="nsew")
+            self._overlay_scrollbar(editor, editor.vbar)
             editor.insert("1.0", value)
             if label != "Description":
                 for token, color in TOKEN_COLORS.items():
@@ -6846,6 +6842,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         self._replace_scrolled_text_vbar(txt)
         txt.grid(row=1, column=0, sticky="nsew")
+        self._overlay_scrollbar(txt, txt.vbar)
         if initial_text:
             txt.insert("1.0", initial_text)
         txt.focus_set()
@@ -6917,6 +6914,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         self._replace_scrolled_text_vbar(txt)
         txt.grid(row=1, column=0, sticky="nsew")
+        self._overlay_scrollbar(txt, txt.vbar)
         if initial_text:
             txt.insert("1.0", initial_text)
         txt.focus_set()
@@ -6932,7 +6930,7 @@ class OPLIDE(TkinterDnD.Tk):
         file_list.grid(row=0, column=0, sticky="ew")
         yscroll = ttk.Scrollbar(attachments, orient=tk.VERTICAL, command=file_list.yview)
         file_list.configure(yscrollcommand=yscroll.set)
-        yscroll.grid(row=0, column=1, sticky="ns")
+        self._overlay_scrollbar(file_list, yscroll)
 
         selected_paths: list[str] = []
         _last_popup_index: Optional[int] = None
@@ -7513,73 +7511,65 @@ class OPLIDE(TkinterDnD.Tk):
             parent = getattr(text_widget, "frame", text_widget.master)
             current_vbar.destroy()
             replacement_vbar = ttk.Scrollbar(parent, orient=tk.VERTICAL, command=text_widget.yview)
-            replacement_vbar.pack(side=tk.RIGHT, fill=tk.Y)
             text_widget.configure(yscrollcommand=replacement_vbar.set)
             text_widget.vbar = replacement_vbar
         except Exception:
             pass
 
-    def _bind_autohide_vertical_scrollbar(
+    def _overlay_scrollbar(
         self,
-        widget: Any,
-        scrollbar: Any,
+        widget: tk.Text | tk.Listbox,
+        scrollbar: tk.Scrollbar | ttk.Scrollbar,
         *,
-        on_toggle: Optional[Callable[[], None]] = None,
+        orient: str = tk.VERTICAL,
+        on_scroll: Optional[Callable[[], None]] = None,
     ) -> None:
-        """Hide a vertical scrollbar when the full content is already visible."""
-        try:
-            if widget is None or scrollbar is None:
-                return
-            manager = str(scrollbar.winfo_manager())
-            pack_restore_kwargs = None
-            if manager == "pack":
-                try:
-                    pack_info = scrollbar.pack_info()
-                    pack_restore_kwargs = {
-                        "side": pack_info.get("side", tk.RIGHT),
-                        "fill": pack_info.get("fill", tk.Y),
-                    }
-                except Exception:
-                    pack_restore_kwargs = {"side": tk.RIGHT, "fill": tk.Y}
-            is_visible = {"value": True}
+        """Float a transient scrollbar above its scrollable widget."""
+        view = widget.xview if orient == tk.HORIZONTAL else widget.yview
+        hide_job: Optional[str] = None
+        previous_first: Optional[float] = None
 
-            def _set_visibility(first: str, last: str) -> None:
-                try:
-                    scrollbar.set(first, last)
-                except Exception:
-                    pass
+        def hide() -> None:
+            nonlocal hide_job
+            hide_job = None
+            scrollbar.place_forget()
 
-                try:
-                    first_value = float(first)
-                    last_value = float(last)
-                except Exception:
-                    first_value = 0.0
-                    last_value = 1.0
-                should_show = not (first_value <= 0.0 and last_value >= 1.0)
-                if should_show == is_visible["value"]:
-                    return
+        def show() -> None:
+            nonlocal hide_job
+            if hide_job is not None:
+                self.after_cancel(hide_job)
+            if orient == tk.HORIZONTAL:
+                scrollbar.place(in_=widget, relx=0, rely=1, relwidth=1, anchor="sw")
+            else:
+                scrollbar.place(in_=widget, relx=1, rely=0, relheight=1, anchor="ne")
+            scrollbar.lift()
+            hide_job = self.after(1200, hide)
 
-                if should_show:
-                    if manager == "grid":
-                        scrollbar.grid()
-                    elif manager == "pack" and pack_restore_kwargs is not None:
-                        scrollbar.pack(**pack_restore_kwargs)
-                else:
-                    if manager == "grid":
-                        scrollbar.grid_remove()
-                    elif manager == "pack":
-                        scrollbar.pack_forget()
-                is_visible["value"] = should_show
-                if on_toggle is not None:
-                    try:
-                        self.after_idle(on_toggle)
-                    except Exception:
-                        pass
+        def update(first: float, last: float) -> None:
+            nonlocal previous_first, hide_job
+            scrollbar.set(first, last)
+            position = float(first)
+            if previous_first is not None and position != previous_first and (position > 0 or float(last) < 1):
+                show()
+            elif position <= 0 and float(last) >= 1:
+                if hide_job is not None:
+                    self.after_cancel(hide_job)
+                    hide_job = None
+                scrollbar.place_forget()
+            previous_first = position
+            if on_scroll is not None:
+                on_scroll()
 
-            widget.configure(yscrollcommand=_set_visibility)
-            self.after_idle(lambda: _set_visibility(*(str(value) for value in widget.yview())))
-        except Exception:
-            pass
+        def destroy(event: tk.Event) -> None:
+            if event.widget == widget and hide_job is not None:
+                self.after_cancel(hide_job)
+
+        if orient == tk.HORIZONTAL:
+            widget.configure(xscrollcommand=update)
+        else:
+            widget.configure(yscrollcommand=update)
+        widget.bind("<Destroy>", destroy, add="+")
+        self.after_idle(lambda: update(*view()))
 
     def _apply_theme_colors(self) -> None:
         """Apply text widget colors based on theme."""
@@ -8765,7 +8755,9 @@ class _ComparisonDialog:
         result_frame.columnconfigure(0, weight=1)
 
         result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
+        self.parent._replace_scrolled_text_vbar(result_text)
         result_text.grid(row=0, column=0, sticky="nsew")
+        self.parent._overlay_scrollbar(result_text, result_text.vbar)
         result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
         result_text.config(state="disabled")
 
