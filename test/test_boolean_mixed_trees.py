@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import patch
 
+from pyopl.highs_codegen_csc import BOOL_EPS, HighsCSCCodeGenerator
 from pyopl.pyopl_core import OPLLexer, OPLParser
-from pyopl.scipy_codegen_csc import BOOL_EPS, SciPyCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
@@ -32,7 +32,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -79,7 +79,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -109,7 +109,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
         lexer = OPLLexer()
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(src))
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -161,7 +161,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -220,7 +220,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
 
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -270,7 +270,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
 
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         with patch.object(gen, "_bool_expr_var", side_effect=SemanticError("use specialized OR fallback")):
@@ -335,7 +335,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
 
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -395,7 +395,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
                     "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
                 }
 
-                gen = SciPyCSCCodeGenerator(ast)
+                gen = HighsCSCCodeGenerator(ast)
                 gen._build_variables()
                 gen._build_objective()
                 gen._build_constraints()
@@ -457,7 +457,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
         }
 
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
 
@@ -477,7 +477,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
     #     'constraints': constraints,
     #     'objective': {'type': 'minimize', 'expression': {'type': 'number', 'value': 0}}
     #   }
-    #   gen = SciPyCSCCodeGenerator(ast)
+    #   gen = HighsCSCCodeGenerator(ast)
     #   gen._build_variables()
     #   gen._build_objective()
     #   gen._build_constraints()
@@ -526,7 +526,7 @@ class TestBooleanMixedTrees(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()

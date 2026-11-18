@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show Interrupt in the main GenAI button while generating an exemplar description; cancelling discards the pending result without blocking the UI.
 - Mark model and data tabs with a bullet when their editor has unsaved changes.
 - Add unittest coverage for GenAI exemplar distillation and ranking-worker paths.
 - Add focused coverage for projected observable mappings, indexed expressions,
@@ -25,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Allow syntax highlighting in the read-only exemplar review previews without treating them as the main model/data editors.
+- Open the exemplar name dialog after the macOS File menu action returns, avoiding a modal wait inside menu tracking; focus its field after it is visible.
 - Preserve trailing newlines on model/data Save As and regular Data Save; keep the previous file path and clean baseline if saving fails.
 - Protect editor replacements (new model/session, file open/drop, exemplar and session restore, revision apply, and MCP writes) with a scoped Save / Discard / Cancel prompt; time out remote editor updates after 30 seconds without applying a late update.
 - Warn before Generate replaces unsaved editor changes, offering Save, Discard, or Cancel; Save As preserves untitled work.
@@ -44,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Separate GenAI composer submit-button state updates from the panel refresh without changing interrupt behavior.
+- Populate all highspy 1.16.0 option fields in `highs.json` with their default
+  values, encoding infinite defaults as strings for conversion before passing
+  options to HiGHS; require highspy 1.16
+  so every populated option is supported.
+- Display HiGHS MIP progress in the existing IDE bound chart using native
+  solver callbacks, including objective-sense-aware bounds and node counts.
+- Generate HiGHS solver code with highspy directly; rename the backend selector,
+  generated result key, and code generator modules/classes from SciPy to HiGHS.
+  Use native HiGHS settings (`output_flag`, `simplex_iteration_limit`,
+  `mip_max_nodes`) instead of the former SciPy option names.
 - Separate IDE exemplar search timers, generations and worker cleanup from the Tk dialog, and snapshot Save preparation inputs behind an explicit pending lifecycle.
 - Make retrieved exemplar copies exclusive and clean up incomplete pairs without overwriting existing files; report search and copy failures in the dialog.
 - Keep IDE GenAI revisions in typed pending state until explicit Apply, preserving the preview and cleaning up partial revision files on write failure.

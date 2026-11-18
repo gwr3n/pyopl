@@ -63,21 +63,14 @@ def _read_text(path: Path) -> str:
 def _normalize_solver(solver: Optional[str]) -> str:
     """Normalize solver names for compiler/backend compatibility."""
     if not solver:
-        return "scipy"
+        return "highs"
 
-    normalized = solver.strip().lower()
-
-    solver_aliases = {
-        "highs": "scipy",
-        "scipy": "scipy",
-        "gurobi": "gurobi",
-    }
-    return solver_aliases.get(normalized, normalized)
+    return solver.strip().lower()
 
 
 def _solve_backend(solver: Optional[str]) -> str:
     """Normalize solver names for solve() backend selection."""
-    return "gurobi" if _normalize_solver(solver) == "gurobi" else "scipy"
+    return _normalize_solver(solver)
 
 
 def _compile_to_python(
@@ -254,8 +247,7 @@ def solve_files_tool(
     Args:
         model_path: Path to the OPL model file.
         data_path: Optional path to the OPL data file.
-        solver: Solver name or alias. Supported values currently map to SciPy/HiGHS
-            or Gurobi depending on configuration.
+        solver: Solver name. Supported values are ``highs`` and ``gurobi``.
 
     Returns:
         A dictionary containing solver outputs (status, objective value, variable
@@ -307,7 +299,7 @@ def solve_strings_tool(
         model_text: OPL model source code as a string.
         data_text: Optional OPL data file contents as a string.
         solver: Solver name or alias. This maps to the internal solver
-            backends (for example, ``highs`` -> SciPy/HiGHS or ``gurobi``).
+            backends (``highs`` or ``gurobi``).
         solver_settings: Optional backend-native solver settings object.
 
     Returns:

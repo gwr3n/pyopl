@@ -1,7 +1,7 @@
 import unittest
 
 from pyopl.gurobi_codegen import GurobiCodeGenerator
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 class TestImplicationBigMTightness(unittest.TestCase):
@@ -87,9 +87,9 @@ class TestImplicationBigMTightness(unittest.TestCase):
         self.assertIn("_consequent", code)
         self.assertNotIn("1000000.0", code)
 
-    def test_scipy_bigM_tight(self):
+    def test_highs_bigM_tight(self):
         ast = self._ast()
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -101,7 +101,7 @@ class TestImplicationBigMTightness(unittest.TestCase):
             coef = row[flag_idx]
             if abs(coef) > max_coef:
                 max_coef = abs(coef)
-        self.assertGreater(max_coef, 0, "Expected non-zero big-M coefficient in SciPy inequalities")
+        self.assertGreater(max_coef, 0, "Expected non-zero big-M coefficient in Highs inequalities")
         self.assertLess(max_coef, 1000, f"Expected tightened M < 1000, got {max_coef}")
         self.assertLessEqual(max_coef, 10, f"Expected M <= 10 (span-based), got {max_coef}")
 

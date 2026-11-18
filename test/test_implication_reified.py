@@ -1,6 +1,6 @@
 import unittest
 
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
 
 class TestImplicationReified(unittest.TestCase):
@@ -31,7 +31,7 @@ class TestImplicationReified(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -83,7 +83,7 @@ class TestImplicationReified(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -125,7 +125,7 @@ class TestImplicationReified(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen1 = SciPyCSCCodeGenerator(ast1)
+        gen1 = HighsCSCCodeGenerator(ast1)
         gen1._build_variables()
         gen1._build_objective()
         gen1._build_constraints()
@@ -166,7 +166,7 @@ class TestImplicationReified(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen2 = SciPyCSCCodeGenerator(ast2)
+        gen2 = HighsCSCCodeGenerator(ast2)
         gen2._build_variables()
         gen2._build_objective()
         gen2._build_constraints()

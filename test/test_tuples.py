@@ -15,7 +15,7 @@ def setUpModule():
 class TestTupleParsing(unittest.TestCase):
 
     def assert_tuple_schema_error(self, model_code, message):
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 with self.assertRaisesRegex(SemanticError, message):
                     OPLCompiler().compile_model(model_code, solver=solver)
@@ -97,7 +97,7 @@ class TestTupleParsing(unittest.TestCase):
             SemanticError,
             r"Tuple type 'Point' cannot be used as a decision-variable type.*boolean, int, int\+, float, float\+",
         ):
-            OPLCompiler().compile_model(code, solver="scipy")
+            OPLCompiler().compile_model(code, solver="highs")
 
     def test_rejects_indexed_tuple_typed_decision_variable(self):
         code = """
@@ -124,7 +124,7 @@ class TestTupleParsing(unittest.TestCase):
         subject to { x >= 0; }
         """
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 ast, _, _ = OPLCompiler().compile_model(code, solver=solver)
                 items = next(decl for decl in ast["declarations"] if decl.get("name") == "Items")
@@ -143,7 +143,7 @@ class TestTupleParsing(unittest.TestCase):
         """
 
         expected = [(1, 2, 9), (2, 3, 19), (3, 4, 29)]
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 _, _, data = OPLCompiler().compile_model(code, solver=solver)
                 self.assertEqual(data["Rows"], expected)
@@ -166,7 +166,7 @@ class TestTupleParsing(unittest.TestCase):
             subject to {}
         """
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 _, _, data = OPLCompiler().compile_model(code, solver=solver)
                 self.assertEqual(data["ZeroRows"], [(0, 10), (1, 20), (2, 30)])
@@ -191,7 +191,7 @@ class TestTupleParsing(unittest.TestCase):
             subject to {}
         """
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 _, _, data = OPLCompiler().compile_model(code, solver=solver)
                 self.assertEqual(data["ZeroSelected__map"], {0: 10, 1: 20, 2: 30})
@@ -212,7 +212,7 @@ class TestTupleParsing(unittest.TestCase):
         """
 
         expected = {(1, 2): 20.0, (2, 3): 30.0}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 _, _, data = OPLCompiler().compile_model(code, solver=solver)
                 self.assertEqual(data["Selected__map"], expected)
@@ -234,7 +234,7 @@ class TestTupleParsing(unittest.TestCase):
         ];
         """
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with self.subTest(solver=solver):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as model_file,
@@ -265,7 +265,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize sum(a in arcs) a.cost * x[a];
         subject to {{ forall(a in arcs) x[a] >= a.from; }}
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             # Check that the set of tuples is parsed correctly
@@ -295,7 +295,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize x;
         subject to { forall(a in arcs, b in arcs2) a.from + b.to >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
 
@@ -338,7 +338,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize x;
         subject to { forall(a in arcs) a.from >= 1; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
 
@@ -372,7 +372,7 @@ class TestTupleParsing(unittest.TestCase):
         subject to { x >= 0; }
         """
         # Try compiling with both code generators
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
 
@@ -401,7 +401,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize sum(a in arcs) a.cost * x;
         subject to { x >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             # Find the sum node in the objective
@@ -437,7 +437,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize x;
         subject to { x >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             found = False
@@ -510,7 +510,7 @@ class TestTupleParsing(unittest.TestCase):
         minimize x;
         subject to { x >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             found = False
@@ -553,7 +553,7 @@ class TestTupleParsing(unittest.TestCase):
         import tempfile
 
         obj_values = {}
-        solvers = ("gurobi", "scipy")
+        solvers = ("gurobi", "highs")
         for solver in solvers:
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
@@ -638,7 +638,7 @@ class TestTupleParsing(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -658,16 +658,16 @@ class TestTupleParsing(unittest.TestCase):
                 os.remove(data_file)
 
         # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+        if results["highs"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
             return  # Test passes
 
         # Otherwise, require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -701,7 +701,7 @@ class TestTupleParsing(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -721,16 +721,16 @@ class TestTupleParsing(unittest.TestCase):
                 os.remove(data_file)
 
         # If both solvers are infeasible, test passes
-        if results["scipy"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
+        if results["highs"]["status"] == "INFEASIBLE" and results["gurobi"]["status"] == "INFEASIBLE":
             return  # Test passes
 
         # Otherwise, require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -766,7 +766,7 @@ class TestNestedTupleParsing(unittest.TestCase):
         }
         """
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(model_code)
                 tmp_mod.flush()
@@ -779,7 +779,7 @@ class TestNestedTupleParsing(unittest.TestCase):
                 obj_values[solver] = result["objective_value"]
             finally:
                 os.remove(model_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_nested_tuple_set_and_field_access(self):
         """
@@ -797,7 +797,7 @@ class TestNestedTupleParsing(unittest.TestCase):
                 x >= t.l2.l1.x + t.l2.y + t.z;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             # Find the set declaration
@@ -828,7 +828,7 @@ class TestNestedTupleParsing(unittest.TestCase):
         dat_code = """
         Tuples = { < <1,2>, 3 >, < <4,5>, 6 > };
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(model_code, dat_code, solver=solver)
             self.assertIn("Tuples", data_dict)
@@ -866,7 +866,7 @@ class TestNestedTupleParsing(unittest.TestCase):
         minimize x;
         subject to { x >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             set_decl = next((d for d in ast["declarations"] if d.get("name") == "S"), None)
@@ -888,7 +888,7 @@ class TestNestedTupleParsing(unittest.TestCase):
         minimize x;
         subject to { x >= 0; }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             compiler = OPLCompiler()
             ast, code_str, data_dict = compiler.compile_model(code, solver=solver)
             set_decl = next((d for d in ast["declarations"] if d.get("name") == "S"), None)

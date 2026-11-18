@@ -63,7 +63,7 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(out, "No output produced")
         self.assertTrue(out.startswith("{"), out[:200])
         self.assertNotIn("Running HiGHS", out)
-        self.assertNotIn("PyOPL/SciPy-HiGHS", out)
+        self.assertNotIn("PyOPL/Highs-HiGHS", out)
         payload = json.loads(out)
         self.assertTrue("status" in payload or "objective_value" in payload)
 
@@ -145,7 +145,7 @@ class TestCLI(unittest.TestCase):
                 ret = pyopl_cli.main(["solve", str(model), "--solver", "highs", "--solver-settings", str(settings)])
 
         self.assertEqual(ret, 0)
-        solve_mock.assert_called_once_with(model, None, "scipy", {"time_limit": 2.5})
+        solve_mock.assert_called_once_with(model, None, "highs", {"time_limit": 2.5})
 
     def test_cli_solver_settings_loader_rejects_missing_and_non_object_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -194,7 +194,7 @@ class TestCLI(unittest.TestCase):
     def test_run_solve_propagates_backend_errors(self):
         with patch("pyopl.pyopl_cli.solve", side_effect=RuntimeError("backend failed")):
             with self.assertRaisesRegex(RuntimeError, "backend failed"):
-                pyopl_cli._run_solve(Path("model.mod"), None, "scipy")
+                pyopl_cli._run_solve(Path("model.mod"), None, "highs")
 
     def test_cli_compare_models_json(self):
         result = {

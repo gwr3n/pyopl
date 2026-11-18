@@ -1,7 +1,7 @@
 import unittest
 
+from pyopl.highs_codegen import HighsCodeGenerator, SemanticError
 from pyopl.pyopl_core import GurobiCodeGenerator, OPLLexer, OPLParser
-from pyopl.scipy_codegen import SciPyCodeGenerator, SemanticError
 
 
 def setUpModule():
@@ -131,7 +131,7 @@ class TestModellingConstructs(unittest.TestCase):
         gcode = GurobiCodeGenerator(ast).generate_code()
         self.assertIn("A", gcode)
         self.assertIn("B", gcode)
-        scode = SciPyCodeGenerator(ast).generate_code()
+        scode = HighsCodeGenerator(ast).generate_code()
         self.assertIn("A", scode)
         self.assertIn("B", scode)
 
@@ -173,7 +173,7 @@ class TestModellingConstructs(unittest.TestCase):
           - Code generation succeeds (string-based), but the code shows i[0] together with the
             declaration over range(1, T + 1), making the mismatch explicit.
 
-        SciPy backend:
+        Highs backend:
           - Code generation should fail with a SemanticError because the indexed variable i_0
             does not exist in the constructed variable set (i_1..i_6).
         """
@@ -197,16 +197,16 @@ class TestModellingConstructs(unittest.TestCase):
         self.assertIn("range(1, T + 1)", code_g, "Expected i to be declared over range(1, T + 1)")
         self.assertIn("i[0]", code_g, "Expected out-of-range indexed reference i[0] in generated code")
 
-        # SciPy: should raise a SemanticError during code generation due to i_0 not existing.
+        # Highs: should raise a SemanticError during code generation due to i_0 not existing.
         with self.assertRaises(SemanticError):
-            SciPyCodeGenerator(ast).generate_code()
+            HighsCodeGenerator(ast).generate_code()
 
     def test_multi_indexed_var_name_and_format_varname(self):
         """
         Test _multi_indexed_var_name and _format_varname for tuple-indexed and range-indexed variables.
-        Covers lines 1219-1227 and 1588-1596 in scipy_codegen_csc.py.
+        Covers lines 1219-1227 and 1588-1596 in highs_codegen_csc.py.
         """
-        from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+        from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
         # Minimal AST and data_dict for tuple-indexed and range-indexed variables
         ast = {
@@ -238,7 +238,7 @@ class TestModellingConstructs(unittest.TestCase):
             ]
         }
         data_dict = {}
-        gen = SciPyCSCCodeGenerator(ast, data_dict)
+        gen = HighsCSCCodeGenerator(ast, data_dict)
         gen._build_variables()
         # Test tuple-indexed variable name
         expr_tuple = {
@@ -309,7 +309,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         # Construct an indexed_name with a tuple_literal as index
         expr = {
@@ -533,7 +533,7 @@ class TestModellingConstructs(unittest.TestCase):
         self.assertIn("or", code)
 
     def test_binop_with_sum_in_objective(self):
-        # Covers binop(sum, expr) and binop(expr, sum) in the objective for both SciPyCodeGenerator and GurobiCodeGenerator
+        # Covers binop(sum, expr) and binop(expr, sum) in the objective for both HighsCodeGenerator and GurobiCodeGenerator
         # Objective: sum(i in 1..2) x[i] + y
         ast1 = {
             "declarations": [
@@ -575,7 +575,7 @@ class TestModellingConstructs(unittest.TestCase):
                 },
             },
         }
-        codegen1 = SciPyCodeGenerator(ast1)
+        codegen1 = HighsCodeGenerator(ast1)
         codegen1._build_variables()
         codegen1._build_objective()
         # Should produce c vector with 1 for x_1, x_2, y
@@ -628,7 +628,7 @@ class TestModellingConstructs(unittest.TestCase):
                 },
             },
         }
-        codegen2 = SciPyCodeGenerator(ast2)
+        codegen2 = HighsCodeGenerator(ast2)
         codegen2._build_variables()
         codegen2._build_objective()
         idx_x1_2 = codegen2.var_indices["x_1"]
@@ -640,7 +640,7 @@ class TestModellingConstructs(unittest.TestCase):
         self.assertEqual(c2[idx_y_2], 1.0)
 
     def test_binop_with_sum_in_constraint(self):
-        # Covers binop(sum, expr) and binop(expr, sum) in constraint expressions for both SciPyCodeGenerator and GurobiCodeGenerator
+        # Covers binop(sum, expr) and binop(expr, sum) in constraint expressions for both HighsCodeGenerator and GurobiCodeGenerator
         # sum(i in 1..2) x[i] + y == 5
         ast1 = {
             "declarations": [
@@ -689,7 +689,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen1 = SciPyCodeGenerator(ast1)
+        codegen1 = HighsCodeGenerator(ast1)
         codegen1._build_variables()
         codegen1._build_constraints()
         # Should produce a constraint row with x_1, x_2, y
@@ -756,7 +756,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen2 = SciPyCodeGenerator(ast2)
+        codegen2 = HighsCodeGenerator(ast2)
         codegen2._build_variables()
         codegen2._build_constraints()
         varnames2 = set(codegen2.var_names)
@@ -834,14 +834,14 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         codegen._build_constraints()
         # Should not raise or overflow, and should emit constraints for all i, j
-        self.assertTrue(any("DEBUG" in line or "Constraint" in line for line in codegen.scipy_code_lines))
+        self.assertTrue(any("DEBUG" in line or "Constraint" in line for line in codegen.highs_code_lines))
 
     def test_forall_constraint_branches(self):
-        # Covers all branches in forall_constraint handling in SciPyCodeGenerator._build_constraints
+        # Covers all branches in forall_constraint handling in HighsCodeGenerator._build_constraints
         # 1. iterators is None (should raise)
         ast = {
             "declarations": [{"type": "dvar", "name": "x", "var_type": "float"}],
@@ -862,7 +862,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_constraints()
@@ -890,7 +890,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_constraints()
@@ -924,7 +924,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         codegen._build_constraints()
         # Should add a constraint row for each i in 1..2
@@ -966,7 +966,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         codegen._build_constraints()
         # Should add two constraints for each i in 1..2
@@ -992,7 +992,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_constraints()
@@ -1031,7 +1031,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_constraints()
@@ -1065,15 +1065,15 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_constraints()
 
     def test_constraint_implication_support(self):
         """
-        Test that constraint implications (A => B) are supported in both Gurobi and SciPy backends.
-        SciPy previously rejected implication constraints; now it should encode them as a single
+        Test that constraint implications (A => B) are supported in both Gurobi and Highs backends.
+        Highs previously rejected implication constraints; now it should encode them as a single
         inequality: -y + x <= 0 for (x == 1) => (y == 1).
         """
         ast = {
@@ -1109,9 +1109,9 @@ class TestModellingConstructs(unittest.TestCase):
             self.assertIn("if", code)  # At minimum, implication logic should be present
         except Exception as e:
             self.fail(f"GurobiCodeGenerator should support implications, but got error: {e}")
-        # SciPy should also accept and encode implication constraints now
+        # Highs should also accept and encode implication constraints now
         try:
-            sc = SciPyCodeGenerator(ast)
+            sc = HighsCodeGenerator(ast)
             sc._build_variables()
             sc._build_objective()
             sc._build_constraints()
@@ -1129,7 +1129,7 @@ class TestModellingConstructs(unittest.TestCase):
                 f"Did not find encoded implication row -y + x <= 0; A_ub={sc.A_ub}, b_ub={sc.b_ub}",
             )
         except Exception as e:
-            self.fail(f"SciPyCodeGenerator should support implications, but got error: {e}")
+            self.fail(f"HighsCodeGenerator should support implications, but got error: {e}")
 
     def test_linear_gt_implies_binary_eq1_uses_contra_indicator(self):
         """
@@ -1228,16 +1228,16 @@ class TestModellingConstructs(unittest.TestCase):
             },
         ]:
             ast = make_sum_obj(start_expr, {"type": "number", "value": 3})
-            codegen = SciPyCodeGenerator(ast)
+            codegen = HighsCodeGenerator(ast)
             codegen._build_variables()
             codegen._build_objective()
             # Should have a symbolic sum comment and c = [0.0]
-            self.assertTrue(any("Symbolic objective" in line for line in codegen.scipy_code_lines))
-            self.assertIn("c = [0.0]", codegen.scipy_code_lines)
+            self.assertTrue(any("Symbolic objective" in line for line in codegen.highs_code_lines))
+            self.assertIn("c = [0.0]", codegen.highs_code_lines)
 
         # unsupported expr
         ast = make_sum_obj({"type": "foo"}, {"type": "number", "value": 3})
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         with self.assertRaises(SemanticError):
             codegen._build_objective()
@@ -1315,7 +1315,7 @@ class TestModellingConstructs(unittest.TestCase):
             eval_bound(expr_unsupported)
 
     def setUp(self):
-        self.codegen = SciPyCodeGenerator(
+        self.codegen = HighsCodeGenerator(
             {
                 "declarations": [],
                 "constraints": [],
@@ -1580,11 +1580,11 @@ class TestModellingConstructs(unittest.TestCase):
             "s[(t - 1)]" in gurobi_code or "s[t-1]" in gurobi_code,
             f"Gurobi code should contain s[(t - 1)] or s[t-1], got: {gurobi_code}",
         )
-        scipy_code = SciPyCodeGenerator(ast).generate_code()
-        # Accept any s_1, s_2, ... s_5 as valid variable names for s[t-1] in SciPy code
+        highs_code = HighsCodeGenerator(ast).generate_code()
+        # Accept any s_1, s_2, ... s_5 as valid variable names for s[t-1] in Highs code
         self.assertTrue(
-            any(f"s_{i}" in scipy_code for i in range(1, 6)),
-            f"SciPy code should contain s_1..s_5, got: {scipy_code}",
+            any(f"s_{i}" in highs_code for i in range(1, 6)),
+            f"Highs code should contain s_1..s_5, got: {highs_code}",
         )
 
     def test_range_index_with_expression_bounds_and_sum(self):
@@ -1633,11 +1633,11 @@ class TestModellingConstructs(unittest.TestCase):
         gurobi_code = GurobiCodeGenerator(ast).generate_code()
         self.assertIn("range(1, T + 1)", gurobi_code)
         self.assertIn("range(2, T + 1)", gurobi_code)
-        scipy_code = SciPyCodeGenerator(ast).generate_code()
-        self.assertIn("range(1, T + 1)", scipy_code)
+        highs_code = HighsCodeGenerator(ast).generate_code()
+        self.assertIn("range(1, T + 1)", highs_code)
         self.assertTrue(
-            any(s.strip().startswith("# OPL:") or "Symbolic" in s for s in scipy_code.splitlines()),
-            "Expected OPL or symbolic comment for range(2, T + 1) not found in SciPy code",
+            any(s.strip().startswith("# OPL:") or "Symbolic" in s for s in highs_code.splitlines()),
+            "Expected OPL or symbolic comment for range(2, T + 1) not found in Highs code",
         )
 
     def test_gurobi_forall_constraint_accepts_numeric_literal_rhs(self):
@@ -1717,10 +1717,10 @@ class TestModellingConstructs(unittest.TestCase):
                 },
             },
         }
-        # SciPyCodeGenerator
-        from pyopl.scipy_codegen import SciPyCodeGenerator
+        # HighsCodeGenerator
+        from pyopl.highs_codegen import HighsCodeGenerator
 
-        codegen = SciPyCodeGenerator(ast)
+        codegen = HighsCodeGenerator(ast)
         codegen._build_variables()
         codegen._build_objective()
         # Should produce c vector with 1 for x, 0 for y (since p==1)
@@ -1841,7 +1841,7 @@ class TestModellingConstructs(unittest.TestCase):
                 "expression": {"type": "number", "value": 0},
             },
         }
-        gen = SciPyCodeGenerator(ast)
+        gen = HighsCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()
@@ -1892,9 +1892,9 @@ class TestModellingConstructs(unittest.TestCase):
     def test_logical_conjunction_disjunction_of_comparisons(self):
         """Verify parser + Gurobi codegen accept conjunction/disjunction of comparison expressions.
 
-        This test REQUIRES both Gurobi and SciPy code generators to support logical AND/OR of
+        This test REQUIRES both Gurobi and Highs code generators to support logical AND/OR of
         linear comparison expressions (possibly nested) so they can be combined arbitrarily.
-        If SciPy cannot yet linearize these (e.g. via auxiliary binaries / big-M), this test will
+        If Highs cannot yet linearize these (e.g. via auxiliary binaries / big-M), this test will
         FAIL and thereby signal the missing implementation.
         """
         model = """
@@ -1938,23 +1938,23 @@ class TestModellingConstructs(unittest.TestCase):
             self.fail(f"Gurobi codegen failed for logical combinations: {e}")
         self.assertIn("and", gcode)
         self.assertIn("or", gcode)
-        # SciPy MUST also succeed (full logical composition support expected)
-        from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+        # Highs MUST also succeed (full logical composition support expected)
+        from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
-        sc_gen = SciPyCSCCodeGenerator(ast, {})
+        sc_gen = HighsCSCCodeGenerator(ast, {})
         try:
             sc_code = sc_gen.generate_code()
         except Exception as e:
-            self.fail(f"SciPy codegen failed to handle logical AND/OR of linear comparisons: {e}")
+            self.fail(f"Highs codegen failed to handle logical AND/OR of linear comparisons: {e}")
         self.assertIn(
             "and",
             sc_code,
-            "Expected 'and' in SciPy generated code (or its transformed equivalent)",
+            "Expected 'and' in Highs generated code (or its transformed equivalent)",
         )
         self.assertIn(
             "or",
             sc_code,
-            "Expected 'or' in SciPy generated code (or its transformed equivalent)",
+            "Expected 'or' in Highs generated code (or its transformed equivalent)",
         )
 
     def test_logical_negation_and_not_equal(self):
@@ -2000,10 +2000,10 @@ class TestModellingConstructs(unittest.TestCase):
         # Gurobi code generation should succeed
         gcode = GurobiCodeGenerator(ast).generate_code()
         self.assertIn("!=", gcode, "Expected inequality to appear in Gurobi code")
-        # SciPy has no implicit tolerance policy for continuous disequality.
-        from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+        # Highs has no implicit tolerance policy for continuous disequality.
+        from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
-        sc_gen = SciPyCSCCodeGenerator(ast, {})
+        sc_gen = HighsCSCCodeGenerator(ast, {})
         with self.assertRaisesRegex(SemanticError, "integer variables|tolerance policy"):
             sc_gen.generate_code()
 
@@ -2018,7 +2018,7 @@ class TestModellingConstructs(unittest.TestCase):
         """
         from pyopl.pyopl_core import solve
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             result = solve(model_code, solver=solver)
             self.assertIn("objective_value", result)
 
@@ -2032,7 +2032,7 @@ class TestModellingConstructs(unittest.TestCase):
         """
         from pyopl.pyopl_core import solve
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             result = solve(model_code, solver=solver)
             self.assertIn("objective_value", result)
 
@@ -2052,7 +2052,7 @@ class TestModellingConstructs(unittest.TestCase):
 
     def test_codegen_raises_on_unhandled_expression(self):
         from pyopl.gurobi_codegen import GurobiCodeGenerator
-        from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+        from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 
         # AST with an unhandled expression type
         ast = {
@@ -2069,9 +2069,9 @@ class TestModellingConstructs(unittest.TestCase):
         msg1 = str(cm1.exception)
         self.assertIn("unknown_expr_type", msg1)
 
-        gen_scipy = SciPyCSCCodeGenerator(ast)
+        gen_highs = HighsCSCCodeGenerator(ast)
         with self.assertRaises(NotImplementedError) as cm2:
-            gen_scipy.generate_code()
+            gen_highs.generate_code()
         msg2 = str(cm2.exception)
         self.assertIn("unknown_expr_type", msg2)
 

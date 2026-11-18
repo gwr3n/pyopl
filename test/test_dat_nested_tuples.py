@@ -37,9 +37,9 @@ class TestDatNestedTuples(unittest.TestCase):
         """
 
         compiler = OPLCompiler(syntax_error_reporting="full")
-        # SciPy backend is sufficient to validate parsing/semantic merge/codegen.
+        # Highs backend is sufficient to validate parsing/semantic merge/codegen.
         # (No need for Gurobi license in tests.)
-        ast, code_str, data_dict = compiler.compile_model(model_code=model_code, data_code=data_code, solver="scipy")
+        ast, code_str, data_dict = compiler.compile_model(model_code=model_code, data_code=data_code, solver="highs")
         self.assertIn("items", data_dict)
         self.assertIn("empties", data_dict)
         self.assertIn("v", data_dict)

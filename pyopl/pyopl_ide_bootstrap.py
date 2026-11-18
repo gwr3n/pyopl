@@ -149,7 +149,7 @@ def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool
     return _IDEPreferences(
         font_size=saved_font_size,
         theme=theme if isinstance(theme, str) and theme in ("flatly", "darkly") else None,
-        solver=solver if solver in ("gurobi", "scipy") else None,
+        solver=solver if solver in ("gurobi", "highs") else None,
         verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
         display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
         genai_method=(
@@ -1430,9 +1430,11 @@ class _ExemplarPreparation:
 class _ExemplarSaveState:
     pending: bool = False
     closed: bool = False
+    cancel_requested: bool = False
 
     def start(self, prepare: Callable[[], None]) -> None:
         self.pending = True
+        self.cancel_requested = False
         try:
             threading.Thread(target=prepare, daemon=True).start()
         except Exception:
@@ -1441,6 +1443,7 @@ class _ExemplarSaveState:
 
     def finish(self) -> None:
         self.pending = False
+        self.cancel_requested = False
 
 
 class _GenAIProgressLogHandler(logging.Handler):
@@ -1861,7 +1864,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.editor_font_family = tkfont.nametofont("TkFixedFont").actual("family")
         self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
         self.interface_button_font = "TkDefaultFont"
-        self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'scipy'
+        self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'highs'
         self.theme_var = tk.StringVar(value="flatly")
         self.show_genai_panel_var = tk.BooleanVar(value=True)
 
@@ -2195,7 +2198,7 @@ class OPLIDE(TkinterDnD.Tk):
         filemenu.add_command(label="Save", command=self.save_current_buffer, accelerator=self._accel("S"))
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
         filemenu.add_command(label="Export Model...", command=self.export_model)
-        filemenu.add_command(label="Save Exemplar...", command=self.save_exemplar)
+        filemenu.add_command(label="Save Exemplar...", command=lambda: self.after_idle(self.save_exemplar))
         filemenu.add_separator()
         filemenu.add_command(label="Compare Models...", command=self.compare_models)
         filemenu.add_separator()
@@ -2240,9 +2243,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         solver_menu = tk.Menu(runmenu, tearoff=0)
         solver_menu.add_radiobutton(label="Gurobi", variable=self.solver, value="gurobi", command=self._on_solver_selected)
-        solver_menu.add_radiobutton(
-            label="Scipy (HiGHS)", variable=self.solver, value="scipy", command=self._on_solver_selected
-        )
+        solver_menu.add_radiobutton(label="HiGHS", variable=self.solver, value="highs", command=self._on_solver_selected)
         solver_menu.add_separator()
         solver_menu.add_checkbutton(
             label="Display Solver Progress",
@@ -3403,7 +3404,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _refresh_status_context(self) -> None:
         """Refresh footer context segments that derive from current IDE state."""
-        solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "SciPy"
+        solver_name = "Gurobi" if getattr(self, "solver", None) and self.solver.get() == "gurobi" else "HiGHS"
         self.status_solver_var.set(f"Solver: {solver_name}")
         provider = getattr(self, "genai_provider", None)
         model = getattr(self, "genai_model", None)
@@ -3416,7 +3417,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _on_solver_selected(self) -> None:
         """Persist solver menu selection and refresh dependent status UI."""
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
-        if solver_choice in ("gurobi", "scipy"):
+        if solver_choice in ("gurobi", "highs"):
             self._current_solver_choice = solver_choice
         self._refresh_status_context()
         self._save_settings()
@@ -3491,15 +3492,21 @@ class OPLIDE(TkinterDnD.Tk):
             if widget is not None:
                 widget.configure(state=composer_state)
         if hasattr(self, "genai_submit_button"):
-            if active is not None and active.kind.startswith("genai"):
-                self.genai_submit_label_var.set("Interrupt")
-                self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
-            else:
-                self.genai_submit_button.configure(
-                    command=self._submit_genai_request, state=("normal" if active is None else "disabled")
-                )
+            self._refresh_genai_submit_button(active)
         if hasattr(self, "status_genai_var"):
             self._refresh_status_context()
+
+    def _refresh_genai_submit_button(self, active: Optional[_ForegroundOperation]) -> None:
+        if active is not None and active.kind.startswith("genai"):
+            self.genai_submit_label_var.set("Interrupt")
+            self.genai_submit_button.configure(command=self.interrupt_active_operation, state="normal")
+        elif active is None and self._exemplar_save_state.pending and not self._exemplar_save_state.cancel_requested:
+            self.genai_submit_label_var.set("Interrupt")
+            self.genai_submit_button.configure(command=self._interrupt_exemplar_preparation, state="normal")
+        else:
+            self.genai_submit_button.configure(
+                command=self._submit_genai_request, state=("normal" if active is None else "disabled")
+            )
 
     def _open_genai_panel(self, mode: str, initial_text: str = "") -> None:
         """Focus the docked GenAI composer and set its mode."""
@@ -4100,7 +4107,6 @@ class OPLIDE(TkinterDnD.Tk):
         dlg = tk.Toplevel(self)
         dlg.title(title)
         dlg.transient(self)
-        dlg.grab_set()
         dlg.resizable(False, False)
 
         frm = ttk.Frame(dlg, padding=12)
@@ -4114,8 +4120,6 @@ class OPLIDE(TkinterDnD.Tk):
         text_var = tk.StringVar(value=initial_text)
         entry = ttk.Entry(frm, textvariable=text_var, width=48)
         entry.grid(row=1, column=0, sticky="ew")
-        entry.focus_set()
-        entry.selection_range(0, tk.END)
 
         btns = ttk.Frame(frm)
         btns.grid(row=2, column=0, sticky="e", pady=(10, 0))
@@ -4136,6 +4140,10 @@ class OPLIDE(TkinterDnD.Tk):
 
         dlg.bind("<Return>", on_ok)
         dlg.bind("<Escape>", on_cancel)
+        dlg.wait_visibility()
+        dlg.grab_set()
+        entry.focus_set()
+        entry.selection_range(0, tk.END)
         dlg.wait_window()
         return result["value"]
 
@@ -4210,6 +4218,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _disable_highlight_for_large_text(self, text_widget: tk.Text) -> None:
         self._clear_highlight_tags(text_widget)
+        if text_widget is not self.model_text and text_widget is not self.data_text:
+            return
         OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = None
         try:
             self.status_syntax_var.set("Syntax validation disabled for large text")
@@ -4744,7 +4754,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def highlight(self, text_widget: tk.Text, is_data: bool = False, validate: bool = True) -> None:
         """Apply syntax highlighting to the given text widget."""
-        gutter = getattr(self, "data_gutter" if is_data else "model_gutter", None)
+        is_main_editor = text_widget is getattr(self, "model_text", None) or text_widget is getattr(self, "data_text", None)
+        gutter = getattr(self, "data_gutter" if is_data else "model_gutter", None) if is_main_editor else None
         if gutter is not None:
             gutter.refresh()
         if (not is_data) and (not validate):
@@ -4761,7 +4772,8 @@ class OPLIDE(TkinterDnD.Tk):
         fast_index = _make_text_indexer(code)
 
         # Store the most recent error for status bar display (per widget)
-        OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = None
+        if is_main_editor:
+            OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = None
 
         if is_data:
             OPLIDE._highlight_data(self, text_widget, code, fast_index, validate)
@@ -4775,7 +4787,8 @@ class OPLIDE(TkinterDnD.Tk):
         error_message = str(exc).splitlines()[0] if str(exc) else "Unknown syntax error"
         text_widget.tag_add("ERROR", f"{lineno}.0", f"{lineno}.end")
         message = f"{prefix} on line {lineno}: {error_message}"
-        OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = message
+        if text_widget is getattr(self, "model_text", None) or text_widget is getattr(self, "data_text", None):
+            OPLIDE._editor_state_for_widget(self, text_widget).syntax_error = message
 
     def _highlight_model(self, text_widget: tk.Text, code: str, fast_index: Callable[[int], str]) -> None:
         lexer = OPLLexer()
@@ -5145,7 +5158,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _solver_tracks_progress(self, solver_choice: Optional[str] = None) -> bool:
         solver_name = solver_choice or getattr(self, "_current_solver_choice", "gurobi")
-        return str(solver_name).lower() == "gurobi"
+        return str(solver_name).lower() in ("gurobi", "highs")
 
     def _display_solver_progress_enabled(self) -> bool:
         progress_var = getattr(self, "display_solver_progress_var", None)
@@ -5397,7 +5410,7 @@ class OPLIDE(TkinterDnD.Tk):
             self._hide_solver_progress_window()
             return
         if not self._solver_tracks_progress():
-            self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "scipy"))
+            self._reset_solver_progress_window(getattr(self, "_current_solver_choice", "highs"))
         if isinstance(results, dict):
             sample: dict[str, Any] = {}
             objective = results.get("objective_value")
@@ -5921,10 +5934,10 @@ class OPLIDE(TkinterDnD.Tk):
 
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
-            default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_scipy.py"
+            default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_highs.py"
             if self._model_editor_state.path:
                 base = os.path.splitext(os.path.basename(self._model_editor_state.path or ""))[0]
-                default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'scipy'}.py"
+                default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'highs'}.py"
 
             dest_path = filedialog.asksaveasfilename(
                 defaultextension=".py",
@@ -6112,7 +6125,7 @@ class OPLIDE(TkinterDnD.Tk):
         if self._exemplar_save_state.pending:
             messagebox.showinfo(
                 "Save Exemplar",
-                "An exemplar description is already being generated.",
+                "The previous exemplar request is still running in the background.",
                 parent=self,
             )
             return
@@ -6166,6 +6179,9 @@ class OPLIDE(TkinterDnD.Tk):
             if self._exemplar_save_state.closed:
                 self._exemplar_save_state.finish()
                 return
+            if self._exemplar_save_state.cancel_requested:
+                self.after(0, OPLIDE._finish_exemplar_preparation_cancelled, self)
+                return
             try:
                 draft = request.prepare()
             except Exception as exc:
@@ -6181,12 +6197,29 @@ class OPLIDE(TkinterDnD.Tk):
 
         try:
             self._exemplar_save_state.start(prepare_draft)
+            self._refresh_genai_panel_state()
         except Exception as exc:
             OPLIDE._finish_exemplar_preparation_error(self, exc)
 
+    def _interrupt_exemplar_preparation(self) -> None:
+        if not self._exemplar_save_state.pending or self._exemplar_save_state.cancel_requested:
+            return
+        self._exemplar_save_state.cancel_requested = True
+        self.status_var.set("Exemplar description generation interrupted.")
+        self._refresh_genai_panel_state()
+
+    def _finish_exemplar_preparation_cancelled(self) -> None:
+        self._exemplar_save_state.finish()
+        if not self._exemplar_save_state.closed:
+            self._refresh_genai_panel_state()
+
     def _finish_exemplar_preparation_error(self, exc: Exception) -> None:
+        cancelled = self._exemplar_save_state.cancel_requested
         self._exemplar_save_state.finish()
         if self._exemplar_save_state.closed:
+            return
+        self._refresh_genai_panel_state()
+        if cancelled:
             return
         detail = f"{type(exc).__name__}: {exc}"
         logging.getLogger(__name__).error("Failed to prepare exemplar: %s", detail)
@@ -6194,8 +6227,12 @@ class OPLIDE(TkinterDnD.Tk):
         messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{_concise_genai_error(exc)}", parent=self)
 
     def _finish_exemplar_preparation(self, draft: ExemplarDraft, models_root: Path) -> None:
+        cancelled = self._exemplar_save_state.cancel_requested
+        self._exemplar_save_state.finish()
         if self._exemplar_save_state.closed:
-            self._exemplar_save_state.finish()
+            return
+        self._refresh_genai_panel_state()
+        if cancelled:
             return
         try:
             reviewed = self._review_exemplar_draft(draft, models_root)
@@ -6216,9 +6253,6 @@ class OPLIDE(TkinterDnD.Tk):
             self.status_var.set(f"Failed to save exemplar: {detail}")
             messagebox.showerror("Save Exemplar", f"Failed to save exemplar:\n{detail}", parent=self)
             return
-        finally:
-            self._exemplar_save_state.finish()
-
         self.status_var.set(f"Saved exemplar to {destination}")
 
     # --- GenAI actions ---
@@ -7597,7 +7631,7 @@ class OPLIDE(TkinterDnD.Tk):
                 "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
                 "font-size": int(getattr(self, "current_font_size", 12)),
                 "solver": (
-                    self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "scipy") else "gurobi"
+                    self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "highs") else "gurobi"
                 ),
                 "verbose-llm-logs": bool(self.verbose_llm_var.get()) if hasattr(self, "verbose_llm_var") else False,
                 "display-solver-progress": (

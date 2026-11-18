@@ -255,7 +255,7 @@ class CompareTests(unittest.TestCase):
                 self.assertEqual(result.status, expected)
                 self.assertEqual(result.budget_exhausted, expected == "unknown")
 
-    def test_compare_accepts_equivalent_opl_models_compiled_by_scipy_codegen(self):
+    def test_compare_accepts_equivalent_opl_models_compiled_by_highs_codegen(self):
         first = linear_problem_from_opl("""
             dvar float+ x;
 

@@ -123,7 +123,7 @@ To continue one model at a time:
 1. Select the next unchecked method in the inventory.
 2. Read that method in `test/test_problems.py` and copy its model/data strings
    into the dedicated cross-check module. Keep the source test unchanged.
-3. Run the original PyOPL model with both `scipy` and `gurobi`.
+3. Run the original PyOPL model with both `highs` and `gurobi`.
 4. Run the same OPL model through the native `oplrun` export and DOcplex/CPLEX
    path described above.
 5. Compare statuses and objective values with a tolerance of `1e-6` unless
@@ -623,10 +623,10 @@ The checkbox tracks the DOcplex cross-check, not the existing PyOPL test.
       solve the model or expose a result to compare with CPLEX.
    - The original focused test remains the regression coverage for this
       Gurobi code-generation contract.
-- [x] `test_basic_production_planning_scipy` (line 6406)
+- [x] `test_basic_production_planning_highs` (line 6406)
    - Applicability decision: not applicable to a DOcplex solver-result
       cross-check. The source test only parses the model and asserts that
-      `SciPyCodeGenerator.generate_code()` returns a string; it does not
+      `HighsCodeGenerator.generate_code()` returns a string; it does not
       solve the model or expose a result to compare with CPLEX.
    - The original focused test remains the regression coverage for this
       SciPy code-generation contract.
@@ -667,7 +667,7 @@ The checkbox tracks the DOcplex cross-check, not the existing PyOPL test.
       not solve the model or expose a result to compare with CPLEX.
    - The original focused test remains the regression coverage for this
       parsing and Gurobi code-generation contract.
-- [x] `test_tsp_model_parsing_and_codegen_scipy` (line 6542)
+- [x] `test_tsp_model_parsing_and_codegen_highs` (line 6542)
    - Applicability decision: not applicable to a DOcplex solver-result
       cross-check. The source test validates TSP AST index constraints,
       SciPy code-generation patterns, and generated Python syntax; it does
@@ -685,10 +685,10 @@ The checkbox tracks the DOcplex cross-check, not the existing PyOPL test.
       temporary DOcplex fixture inlines the same data because Studio reports a
       duplicate-data error when these external arrays are supplied through the
       generated `.dat` file.
-- [x] `test_knapsack_problem_scipy` (line 6637)
+- [x] `test_knapsack_problem_highs` (line 6637)
    - Applicability decision: not applicable as a separate DOcplex solver-result
       cross-check. The source test checks parser/code-generator return types
-      and only verifies that `solve_with_scipy` returns a result containing a
+      and only verifies that `solve_with_highs` returns a result containing a
       status; it does not assert an objective or compare a solution with CPLEX.
    - The exact generated knapsack formulation is covered by the dedicated
       `test_knapsack_problem_compare_solvers` cross-check above, while the

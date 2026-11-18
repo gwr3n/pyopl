@@ -9,8 +9,8 @@ class TestTypedStringSetIteration(unittest.TestCase):
     def test_sum_and_forall_gurobi(self):
         self._run_test("gurobi")
 
-    def test_sum_and_forall_scipy(self):
-        self._run_test("scipy")
+    def test_sum_and_forall_highs(self):
+        self._run_test("highs")
 
     def _run_test(self, solver):
         compiler = OPLCompiler()
@@ -21,8 +21,8 @@ class TestTypedStringSetIteration(unittest.TestCase):
             # Gurobi emits explicit loop and addVars with Fuels
             self.assertIn("for f in Fuels:", code)
             self.assertRegex(code, r"y = model.addVars\(Fuels")
-        else:  # scipy
-            # SciPy currently emits symbolic comment and expanded var_names list
+        else:  # highs
+            # Highs currently emits symbolic comment and expanded var_names list
             self.assertIn("# Symbolic objective: sum(y[f] for f in Fuels)", code)
             # Variables expanded into var_names list as y['G1'], etc.
             self.assertIn("y['G1']", code)

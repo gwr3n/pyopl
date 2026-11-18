@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.semantic_error import SemanticError
 
 
@@ -34,7 +34,7 @@ class TestBooleanSemanticSafety(unittest.TestCase):
         }
 
     def _build(self, ast):
-        return SciPyCSCCodeGenerator(ast).build_problem()
+        return HighsCSCCodeGenerator(ast).build_problem()
 
     def _assignment_has_auxiliary_extension(self, problem, fixed_values):
         auxiliary_names = [name for name in problem.var_names if name not in fixed_values]

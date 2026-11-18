@@ -1,8 +1,8 @@
 import os
 import unittest
 
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.pyopl_core import OPLLexer, OPLParser
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 class TestBoolCompositeAuxReuse(unittest.TestCase):
@@ -28,7 +28,7 @@ class TestBoolCompositeAuxReuse(unittest.TestCase):
         lexer = OPLLexer()
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(src))
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._build_variables()
         gen._build_objective()
         gen._build_constraints()

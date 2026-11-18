@@ -16,7 +16,7 @@ def setUpModule():
     import logging
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(name)s: %(message)s")
-    logging.getLogger("pyopl.scipy_codegen_csc").setLevel(logging.DEBUG)
+    logging.getLogger("pyopl.highs_codegen_csc").setLevel(logging.DEBUG)
     logging.getLogger("pyopl.gurobi_codegen").setLevel(logging.DEBUG)
 
 
@@ -93,7 +93,7 @@ class TestPyOPLProblems(unittest.TestCase):
         """
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -110,8 +110,8 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(model_file)
                 os.remove(data_file)
 
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
-        self.assertEqual(results["scipy"]["objective_value"], 0.0)
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["objective_value"], 0.0)
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
         self.assertAlmostEqual(results["gurobi"]["objective_value"], 0.0, places=6)
 
@@ -119,12 +119,12 @@ class TestPyOPLProblems(unittest.TestCase):
         """
         Test the stochastic economic lot scheduling problem with backorders and sequence-dependent setups, a complex MILP with 5 items, 4 periods, and 3 demand scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 /*
@@ -314,7 +314,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -334,29 +334,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_job_shop_scheduling_2(self):
         """
         Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // Stochastic Here-and-Now Job Shop Scheduling (3 jobs, 3 machines, 4 scenarios)
@@ -513,7 +513,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -533,29 +533,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_job_shop_scheduling(self):
         """
         Test the stochastic job shop scheduling problem with service-level constraint, a complex MILP with 3 jobs, 3 machines, and 4 processing-time scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // Stochastic Here-and-Now Job Shop Scheduling with Service-Level Constraint
@@ -702,7 +702,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -722,29 +722,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_plane_landing_2(self):
         """
         Test the stochastic aircraft landing problem with reliability chance constraint, a compact but nontrivial MILP with 4 aircraft, 6 slots, and 4 delay scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // Aircraft Landing Slot Assignment with Reliability Chance Constraint (PyOPL)
@@ -874,7 +874,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -894,29 +894,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_vrp(self):
         """
         Test the two-stage stochastic VRP with time windows, a complex MILP with 3 customers, 2 vehicles, and 2 demand/travel scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 /*
@@ -1155,7 +1155,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -1175,29 +1175,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_multistage_stochastic_portfolio(self):
         """
         Test the multi-stage stochastic portfolio optimization problem with proportional transaction costs, a compact but nontrivial nonlinear program with 2 assets, 4 scenarios, and 3 stages.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 /*
@@ -1350,7 +1350,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -1370,29 +1370,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_multi_echelon(self):
         """
         Test the two-stage stochastic supply chain planning problem, a moderately complex MILP with 2 plants, 2 warehouses, 2 customers, and 3 demand scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // -----------------------------------------------------------------------------
@@ -1677,7 +1677,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -1697,29 +1697,29 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_stochastic_plane_landing(self):
         """
         Test the single-runway stochastic landing scheduling problem, a compact but nontrivial MILP with 4 aircraft, 6 slots, and 4 scenarios.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // -----------------------------------------------------------------------------
@@ -1875,7 +1875,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -1895,30 +1895,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     @unittest.skip("this test is cumbersome to run")
     def test_hotel_rostering(self):
         """
         Test the hotel rostering problem, a realistic and moderately complex MILP with 12 employees, 33 shifts, and 3 days.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.ERROR)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.ERROR)
         try:
             model_code = """
                 // Hotel rota / staff scheduling MILP
@@ -2227,7 +2227,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -2247,30 +2247,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_portfolio_diversification(self):
         """
         Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 // -----------------------------------------------------------------------------
@@ -2403,7 +2403,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -2423,30 +2423,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_RMAB_relaxation_tuples(self):
         """
         Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 /*
@@ -2576,7 +2576,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -2596,30 +2596,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_RMAB_relaxation_dense(self):
         """
         Test the Restless Multi-Armed Bandit (RMAB) LP relaxation with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 /*
@@ -2751,7 +2751,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -2771,30 +2771,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_column_generation(self):
         """
         Test a column generation model with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 /*
@@ -2951,7 +2951,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -2971,30 +2971,30 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_TOPSIS(self):
         """
         Test the TOPSIS problem with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 // -----------------------------
@@ -3091,7 +3091,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3111,18 +3111,18 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(data_file)
 
             # Require both to be optimal and compare objectives
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     # @unittest.skip("this test is cumbersome to run")
     def test_asset_location(self):
@@ -3130,12 +3130,12 @@ class TestPyOPLProblems(unittest.TestCase):
         Test the asset location problem with both solvers.
         Checks that both solvers produce the same objective value for the given data.
         """
-        # Set scipy codegen logger to INFO only for this test
+        # Set highs codegen logger to INFO only for this test
         import logging
 
-        _scipy_logger = logging.getLogger("pyopl.scipy_codegen_csc")
-        _prev_level = _scipy_logger.level
-        _scipy_logger.setLevel(logging.INFO)
+        _highs_logger = logging.getLogger("pyopl.highs_codegen_csc")
+        _prev_level = _highs_logger.level
+        _highs_logger.setLevel(logging.INFO)
         try:
             model_code = """
                 // Cell-based 8-neighbor MILP for A--B routing with per-asset zones (PyOPL)
@@ -3308,7 +3308,7 @@ class TestPyOPLProblems(unittest.TestCase):
             from pyopl.pyopl_core import solve
 
             results = {}
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 with (
                     tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                     tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3327,18 +3327,18 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                     os.remove(data_file)
 
-            self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+            self.assertEqual(results["highs"]["status"], "OPTIMAL")
             self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-            self.assertIn("objective_value", results["scipy"])
+            self.assertIn("objective_value", results["highs"])
             self.assertIn("objective_value", results["gurobi"])
             self.assertAlmostEqual(
-                results["scipy"]["objective_value"],
+                results["highs"]["objective_value"],
                 results["gurobi"]["objective_value"],
                 places=6,
             )
         finally:
             # Restore previous level
-            _scipy_logger.setLevel(_prev_level)
+            _highs_logger.setLevel(_prev_level)
 
     def test_vrp(self):
         """
@@ -3494,7 +3494,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3514,12 +3514,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -3596,7 +3596,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3616,12 +3616,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -3691,7 +3691,7 @@ class TestPyOPLProblems(unittest.TestCase):
         """
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3722,7 +3722,7 @@ class TestPyOPLProblems(unittest.TestCase):
             subject to { }
         """
 
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(model_code)
                 tmp_mod.flush()
@@ -3844,7 +3844,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3864,12 +3864,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -3945,7 +3945,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -3965,12 +3965,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -4076,7 +4076,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4096,12 +4096,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -4158,7 +4158,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("gurobi",):  # Disable scipy for this test as it does not support this class of implications
+        for solver in ("gurobi",):  # Disable highs for this test as it does not support this class of implications
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4392,7 +4392,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4412,12 +4412,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -4532,7 +4532,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4552,12 +4552,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -4667,7 +4667,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         results = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4687,12 +4687,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 os.remove(data_file)
 
         # Require both to be optimal and compare objectives
-        self.assertEqual(results["scipy"]["status"], "OPTIMAL")
+        self.assertEqual(results["highs"]["status"], "OPTIMAL")
         self.assertEqual(results["gurobi"]["status"], "OPTIMAL")
-        self.assertIn("objective_value", results["scipy"])
+        self.assertIn("objective_value", results["highs"])
         self.assertIn("objective_value", results["gurobi"])
         self.assertAlmostEqual(
-            results["scipy"]["objective_value"],
+            results["highs"]["objective_value"],
             results["gurobi"]["objective_value"],
             places=6,
         )
@@ -4739,7 +4739,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(model_code)
                 tmp_mod.flush()
@@ -4753,7 +4753,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 if os.path.exists(model_file):
                     os.remove(model_file)
         # Cross-solver objective agreement
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_employee_rostering(self):
         """
@@ -4802,7 +4802,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4821,7 +4821,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_minl_maxl_in_index_constraint(self):
         """
@@ -4874,7 +4874,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(model_code)
                 tmp_mod.flush()
@@ -4887,7 +4887,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
         # Objective should be zero for both (y >= 0 and minimized)
-        self.assertAlmostEqual(obj_values["scipy"], 0.0, places=6)
+        self.assertAlmostEqual(obj_values["highs"], 0.0, places=6)
         self.assertAlmostEqual(obj_values["gurobi"], 0.0, places=6)
 
     def test_tuple_set_comprehension_pairs(self):
@@ -4939,7 +4939,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -4958,7 +4958,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_param_multi_index_rhs_expression_initialization(self):
         """
@@ -4990,7 +4990,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5009,7 +5009,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_tuples_index_specifiers(self):
         """
@@ -5043,7 +5043,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5062,7 +5062,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_min_max(self):
         """
@@ -5089,7 +5089,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5108,7 +5108,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_minl_maxl(self):
         """
@@ -5142,7 +5142,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5161,7 +5161,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_wagner_whitin_backorders(self):
         """
@@ -5222,7 +5222,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5241,7 +5241,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_production_planning_conditional_compare_solvers_1(self):
         """
@@ -5269,7 +5269,7 @@ class TestPyOPLProblems(unittest.TestCase):
                     } else {
                         I[t] == I[t-1] + Q[t] - demand[t];
                     }
-                    // SciPy accepts inequality consequent; Q[t] is float+ so this forces Q[t]=0
+                    // Highs accepts inequality consequent; Q[t] is float+ so this forces Q[t]=0
                     (order[t] == 0) => (Q[t] <= 0);
                 }
             }
@@ -5283,7 +5283,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5302,7 +5302,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_production_planning_conditional_compare_solvers_2(self):
         """
@@ -5344,7 +5344,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5363,7 +5363,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_production_planning_compare_solvers(self):
         """
@@ -5404,7 +5404,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5423,7 +5423,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["scipy"], obj_values["gurobi"], places=6)
+        self.assertAlmostEqual(obj_values["highs"], obj_values["gurobi"], places=6)
 
     def test_vehicle_routing_with_nested_tuples_dat(self):
         """
@@ -5459,7 +5459,7 @@ class TestPyOPLProblems(unittest.TestCase):
         arcs = { < <1,0.0,0.0>, <2,1.0,0.0>, 10.0 >, < <2,1.0,0.0>, <3,0.0,1.0>, 12.5 >, < <3,0.0,1.0>, <1,0.0,0.0>, 8.0 > };
         """
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -5478,7 +5478,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_not_operator_in_forall_and_constraint(self):
         """TDD: Parser/codegen support for logical NOT '!' inside forall index constraint and implication.
@@ -5565,8 +5565,8 @@ class TestPyOPLProblems(unittest.TestCase):
         self.assertIn(" or ", code)
 
     def test_composite_boolean_implication(self):
-        """Composite antecedent (a && b) => (c || !d) linearization with auxiliaries (Gurobi) and fallback (SciPy).
-        Gurobi should build model; SciPy currently lacks composite boolean linearization and should raise.
+        """Composite antecedent (a && b) => (c || !d) linearization with auxiliaries (Gurobi) and fallback (Highs).
+        Gurobi should build model; Highs currently lacks composite boolean linearization and should raise.
         """
         model_code = """
         dvar boolean a;
@@ -5603,18 +5603,18 @@ class TestPyOPLProblems(unittest.TestCase):
         code = GurobiCodeGenerator(ast).generate_code()
         # We no longer rely on specific 'impl_bin' name; ensure auxiliary binary variables were introduced
         self.assertRegex(code, r"_b\d+_c0")
-        # SciPy should preserve the same composite implication semantics.
+        # Highs should preserve the same composite implication semantics.
         import os
         import tempfile
 
-        from pyopl.pyopl_core import solve_with_scipy
+        from pyopl.pyopl_core import solve_with_highs
 
         with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
             tmp.write(model_code)
             tmp.flush()
             path = tmp.name
         try:
-            res = solve_with_scipy(path)
+            res = solve_with_highs(path)
             self.assertEqual(res["status"], "OPTIMAL")
             self.assertIn("solution", res)
         finally:
@@ -5651,7 +5651,7 @@ class TestPyOPLProblems(unittest.TestCase):
         }
         """
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             print(f"\n[DEBUG] Parsing with solver: {solver}")
             print("[DEBUG] OPL code being parsed:")
             print(code)
@@ -5717,7 +5717,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
         # Check that both solvers return the same objective value (within tolerance)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_wagner_whitin_linear(self):
         """
@@ -5781,7 +5781,7 @@ class TestPyOPLProblems(unittest.TestCase):
         import os
         import tempfile
 
-        from pyopl.pyopl_core import solve, solve_with_scipy
+        from pyopl.pyopl_core import solve, solve_with_highs
 
         with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
             tmp_mod.write(model_code)
@@ -5790,7 +5790,7 @@ class TestPyOPLProblems(unittest.TestCase):
             try:
                 for solver, solve_fn in [
                     ("gurobi", solve),
-                    ("scipy", solve_with_scipy),
+                    ("highs", solve_with_highs),
                 ]:
                     result = solve_fn(model_file)
                     self.assertNotEqual(result["status"], "FAILED")
@@ -5876,7 +5876,7 @@ class TestPyOPLProblems(unittest.TestCase):
         import os
         import tempfile
 
-        from pyopl.pyopl_core import solve, solve_with_scipy
+        from pyopl.pyopl_core import solve, solve_with_highs
 
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -5891,7 +5891,7 @@ class TestPyOPLProblems(unittest.TestCase):
             try:
                 for solver, solve_fn in [
                     ("gurobi", solve),
-                    ("scipy", solve_with_scipy),
+                    ("highs", solve_with_highs),
                 ]:
                     result = solve_fn(model_file, data_file)
                     self.assertNotEqual(result["status"], "FAILED")
@@ -5918,7 +5918,7 @@ class TestPyOPLProblems(unittest.TestCase):
         """
         Variant of Wagner-Whitin 5-period lot-sizing model using implication constraints:
         x[t] > 0 => y[t] == 1
-        Should solve with Gurobi, and raise error with SciPy.
+        Should solve with Gurobi, and raise error with Highs.
         """
         model_code = """
         // Wagner-Whitin 5-period lot-sizing model with implication constraint
@@ -5996,20 +5996,20 @@ class TestPyOPLProblems(unittest.TestCase):
                     places=4,
                     msg=f"gurobi: {k}={norm_sol[k]}, expected {v}",
                 )
-            # SciPy: now supports this implication via big-M gating (x <= M*y)
-            result_scipy = solve(model_file, solver="scipy")
-            self.assertNotEqual(result_scipy["status"], "FAILED")
-            self.assertIn("objective_value", result_scipy)
-            self.assertAlmostEqual(result_scipy["objective_value"], expected_obj, places=4)
-            sol_scipy = result_scipy.get("solution", {})
-            norm_sol_scipy = {self.normalize_varname(k): v for k, v in sol_scipy.items()}
+            # Highs: now supports this implication via big-M gating (x <= M*y)
+            result_highs = solve(model_file, solver="highs")
+            self.assertNotEqual(result_highs["status"], "FAILED")
+            self.assertIn("objective_value", result_highs)
+            self.assertAlmostEqual(result_highs["objective_value"], expected_obj, places=4)
+            sol_highs = result_highs.get("solution", {})
+            norm_sol_highs = {self.normalize_varname(k): v for k, v in sol_highs.items()}
             for k, v in expected_solution.items():
-                self.assertIn(k, norm_sol_scipy, f"Missing variable {k} in scipy solution")
+                self.assertIn(k, norm_sol_highs, f"Missing variable {k} in highs solution")
                 self.assertAlmostEqual(
-                    norm_sol_scipy[k],
+                    norm_sol_highs[k],
                     v,
                     places=4,
-                    msg=f"scipy: {k}={norm_sol_scipy[k]}, expected {v}",
+                    msg=f"highs: {k}={norm_sol_highs[k]}, expected {v}",
                 )
         finally:
             if os.path.exists(model_file):
@@ -6075,7 +6075,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6096,7 +6096,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_warehouse_location(self):
         """
@@ -6139,7 +6139,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6160,7 +6160,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_graph_coloring_tuples(self):
         """
@@ -6204,7 +6204,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6225,7 +6225,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_graph_coloring_matrix(self):
         """
@@ -6267,7 +6267,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6288,7 +6288,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_vehicle_routing_matrix_dat(self):
         """
@@ -6320,7 +6320,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6340,7 +6340,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_vehicle_routing_with_tuples_dat(self):
         """
@@ -6369,7 +6369,7 @@ class TestPyOPLProblems(unittest.TestCase):
         obj_values = {}
         import tempfile
 
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
 
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
@@ -6389,7 +6389,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_vehicle_routing_with_tuples(self):
         """
@@ -6419,7 +6419,7 @@ class TestPyOPLProblems(unittest.TestCase):
         import tempfile
 
         obj_values = {}
-        for solver in ("scipy", "gurobi"):
+        for solver in ("highs", "gurobi"):
             print(f"\n[DEBUG] Parsing with solver: {solver}")
             print("[DEBUG] OPL code being parsed:")
             print(code)
@@ -6482,7 +6482,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
         # Check that both solvers return the same objective value (within tolerance)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_basic_production_planning_gurobi(self):
         """Test Gurobi codegen for a basic production planning model."""
@@ -6500,20 +6500,20 @@ class TestPyOPLProblems(unittest.TestCase):
         """
         self.run_test_case_gurobi(opl_code)
 
-    def run_test_case_scipy(self, opl_code, data_dict=None):
-        """Helper: Check SciPy code generation for a given OPL model string."""
-        from pyopl.pyopl_core import OPLLexer, OPLParser, SciPyCodeGenerator
+    def run_test_case_highs(self, opl_code, data_dict=None):
+        """Helper: Check Highs code generation for a given OPL model string."""
+        from pyopl.pyopl_core import HighsCodeGenerator, OPLLexer, OPLParser
 
         lexer = OPLLexer()
         parser = OPLParser()
         ast = parser.parse(lexer.tokenize(opl_code))
-        generator = SciPyCodeGenerator(ast, data_dict or {})
-        scipy_code = generator.generate_code()
+        generator = HighsCodeGenerator(ast, data_dict or {})
+        highs_code = generator.generate_code()
         self.assertIsInstance(ast, dict)
-        self.assertIsInstance(scipy_code, str)
+        self.assertIsInstance(highs_code, str)
 
-    def test_basic_production_planning_scipy(self):
-        """Test SciPy codegen for a basic production planning model."""
+    def test_basic_production_planning_highs(self):
+        """Test Highs codegen for a basic production planning model."""
         opl_code = """
         dvar float x;
         dvar float y;
@@ -6526,10 +6526,10 @@ class TestPyOPLProblems(unittest.TestCase):
             x + y <= 20;
         }
         """
-        self.run_test_case_scipy(opl_code)
+        self.run_test_case_highs(opl_code)
 
     def pyopl_vs_cplex_output(self, model, data, cplex_obj=None):
-        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for knapsack.mod/dat."""
+        """Compare pyopl (Gurobi/Highs) solution to CPLEX reference for knapsack.mod/dat."""
 
         # Solve with pyopl (default solver is gurobi)
         result = pyopl.solve(model, data)
@@ -6546,32 +6546,32 @@ class TestPyOPLProblems(unittest.TestCase):
                 msg=f"CPLEX: {cplex_obj}, pyopl+gurobi: {gurobi_obj}",
             )
 
-        # Solve with pyopl using scipy
-        result_scipy = pyopl.solve(model, data, solver="scipy")
-        self.assertNotIn(result_scipy["status"], ["ERROR", "FAILED", "EXECUTION_ERROR"])
-        if isinstance(result_scipy, dict) and "objective_value" in result_scipy:
-            scipy_obj = result_scipy["objective_value"]
+        # Solve with pyopl using highs
+        result_highs = pyopl.solve(model, data, solver="highs")
+        self.assertNotIn(result_highs["status"], ["ERROR", "FAILED", "EXECUTION_ERROR"])
+        if isinstance(result_highs, dict) and "objective_value" in result_highs:
+            highs_obj = result_highs["objective_value"]
         else:
-            scipy_obj = result_scipy
+            highs_obj = result_highs
         if cplex_obj is not None:
             self.assertAlmostEqual(
-                scipy_obj,
+                highs_obj,
                 cplex_obj,
                 places=4,
-                msg=f"CPLEX: {cplex_obj}, pyopl+scipy: {scipy_obj}",
+                msg=f"CPLEX: {cplex_obj}, pyopl+highs: {highs_obj}",
             )
 
         if cplex_obj is None:
             self.assertAlmostEqual(
-                scipy_obj,
+                highs_obj,
                 gurobi_obj,
                 places=4,
-                msg=f"CPLEX: {cplex_obj}, pyopl+scipy: {scipy_obj}",
+                msg=f"CPLEX: {cplex_obj}, pyopl+highs: {highs_obj}",
             )
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "pyopl or gurobi not available")
     def test_knapsack_pyopl_vs_cplex_output(self):
-        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for knapsack.mod/dat."""
+        """Compare pyopl (Gurobi/Highs) solution to CPLEX reference for knapsack.mod/dat."""
         # CPLEX reference solution
         cplex_obj = 10.0
 
@@ -6582,7 +6582,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "pyopl or gurobi not available")
     def test_multi_knapsack_pyopl_vs_cplex_output(self):
-        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for knapsackp.mod/dat."""
+        """Compare pyopl (Gurobi/Highs) solution to CPLEX reference for knapsackp.mod/dat."""
         # CPLEX reference solution
         cplex_obj = 498.0
 
@@ -6593,7 +6593,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
     @unittest.skipUnless(GUROBI_AVAILABLE, "pyopl or gurobi not available")
     def test_inventory_routing_pyopl_vs_cplex_output(self):
-        """Compare pyopl (Gurobi/SciPy) solution to CPLEX reference for multi_knapsack.mod/dat."""
+        """Compare pyopl (Gurobi/Highs) solution to CPLEX reference for multi_knapsack.mod/dat."""
         # CPLEX reference solution
         cplex_obj = 103.0
 
@@ -6648,8 +6648,8 @@ class TestPyOPLProblems(unittest.TestCase):
         # Optionally, check that the code compiles
         compile(gurobi_code, "<string>", "exec")
 
-    def test_tsp_model_parsing_and_codegen_scipy(self):
-        """Test parsing and codegen for the TSP model (SciPy)."""
+    def test_tsp_model_parsing_and_codegen_highs(self):
+        """Test parsing and codegen for the TSP model (Highs)."""
         # Paths to the TSP model and data
         model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.mod")
         data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/tsp/tsp.dat")
@@ -6658,9 +6658,9 @@ class TestPyOPLProblems(unittest.TestCase):
         with open(data_path) as f:
             data_code = f.read()
         compiler = OPLCompiler()
-        ast, scipy_code, data_dict = compiler.compile_model(model_code, data_code, solver="scipy")
-        print("\n==== DEBUG: Generated SciPy Code ====")
-        print(scipy_code)
+        ast, highs_code, data_dict = compiler.compile_model(model_code, data_code, solver="highs")
+        print("\n==== DEBUG: Generated Highs Code ====")
+        print(highs_code)
         print("==== END DEBUG ====")
 
         def find_node_with_index_constraint(node, node_type):
@@ -6678,16 +6678,16 @@ class TestPyOPLProblems(unittest.TestCase):
 
         found_sum = find_node_with_index_constraint(ast, "sum")
         found_forall = find_node_with_index_constraint(ast, "forall_constraint")
-        self.assertTrue(found_sum, "Sum with index constraint not found in AST (scipy)")
-        self.assertTrue(found_forall, "Forall with index constraint not found in AST (scipy)")
-        self.assertIn("linprog", scipy_code)
-        self.assertIn("if ", scipy_code)
+        self.assertTrue(found_sum, "Sum with index constraint not found in AST (highs)")
+        self.assertTrue(found_forall, "Forall with index constraint not found in AST (highs)")
+        self.assertIn("highs.run()", highs_code)
+        self.assertIn("if ", highs_code)
         # Optionally, check that the code compiles
-        compile(scipy_code, "<string>", "exec")
+        compile(highs_code, "<string>", "exec")
 
     def test_knapsack_problem_compare_solvers(self):
-        """Compare Gurobi and SciPy solutions for a generated knapsack problem."""
-        from pyopl.pyopl_core import solve, solve_with_scipy
+        """Compare Gurobi and Highs solutions for a generated knapsack problem."""
+        from pyopl.pyopl_core import solve, solve_with_highs
 
         dummy_model_file = "knapsack_model.mod"
         dummy_data_file = "knapsack_data.dat"
@@ -6715,26 +6715,26 @@ class TestPyOPLProblems(unittest.TestCase):
                 """)
             # Gurobi
             result_gurobi = solve(dummy_model_file, dummy_data_file)
-            # SciPy
-            result_scipy = solve_with_scipy(dummy_model_file, dummy_data_file)
+            # Highs
+            result_highs = solve_with_highs(dummy_model_file, dummy_data_file)
             # Print diagnostic output
             print("Gurobi solution:", result_gurobi.get("solution", {}))
             print("Gurobi objective:", result_gurobi.get("objective_value"))
-            print("SciPy solution:", result_scipy.get("solution", {}))
-            print("SciPy objective:", result_scipy.get("objective_value"))
+            print("Highs solution:", result_highs.get("solution", {}))
+            print("Highs objective:", result_highs.get("objective_value"))
             # Only compare objectives, since multiple optima are possible
             try:
                 self.compare_objectives(
                     result_gurobi.get("objective_value"),
-                    result_scipy.get("objective_value"),
+                    result_highs.get("objective_value"),
                 )
             except AssertionError as e:
                 msg = (
                     f"Objective mismatch in knapsack_problem_compare_solvers.\n"
                     f"Gurobi objective: {result_gurobi.get('objective_value')}\n"
-                    f"SciPy objective: {result_scipy.get('objective_value')}\n"
+                    f"Highs objective: {result_highs.get('objective_value')}\n"
                     f"Gurobi solution: {result_gurobi.get('solution', {})}\n"
-                    f"SciPy solution: {result_scipy.get('solution', {})}\n"
+                    f"Highs solution: {result_highs.get('solution', {})}\n"
                 )
                 raise AssertionError(msg) from e
         finally:
@@ -6743,9 +6743,9 @@ class TestPyOPLProblems(unittest.TestCase):
             if os.path.exists(dummy_data_file):
                 os.remove(dummy_data_file)
 
-    def test_knapsack_problem_scipy(self):
-        """Test SciPy codegen and solution for a generated knapsack problem."""
-        from pyopl.pyopl_core import load_opl_model, solve_with_scipy
+    def test_knapsack_problem_highs(self):
+        """Test Highs codegen and solution for a generated knapsack problem."""
+        from pyopl.pyopl_core import load_opl_model, solve_with_highs
 
         dummy_model_file = "knapsack_model.mod"
         dummy_data_file = "knapsack_data.dat"
@@ -6771,12 +6771,12 @@ class TestPyOPLProblems(unittest.TestCase):
                 value = [2,3,4,5,5];
                 C = 10;
                 """)
-            ast, scipy_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
+            ast, highs_code, data_dict = load_opl_model(dummy_model_file, dummy_data_file)
             self.assertIsInstance(ast, dict)
-            self.assertIsInstance(scipy_code, str)
+            self.assertIsInstance(highs_code, str)
             self.assertIsInstance(data_dict, dict)
-            # Also test solve_with_scipy
-            result = solve_with_scipy(dummy_model_file, dummy_data_file)
+            # Also test solve_with_highs
+            result = solve_with_highs(dummy_model_file, dummy_data_file)
             self.assertIsInstance(result, dict)
             self.assertIn("status", result)
         finally:
@@ -6816,8 +6816,8 @@ class TestPyOPLProblems(unittest.TestCase):
         self.assertAlmostEqual(obj1, obj2, delta=tol)
 
     def test_assignment_problem_compare_solvers(self):
-        """Compare Gurobi and SciPy solutions for a generated assignment problem."""
-        from pyopl.pyopl_core import solve, solve_with_scipy
+        """Compare Gurobi and Highs solutions for a generated assignment problem."""
+        from pyopl.pyopl_core import solve, solve_with_highs
 
         dummy_model_file = "assign_model.mod"
         dummy_data_file = "assign_data.dat"
@@ -6841,28 +6841,28 @@ class TestPyOPLProblems(unittest.TestCase):
                 f.write("")  # No data needed
             # Gurobi
             result_gurobi = solve(dummy_model_file, dummy_data_file)
-            # SciPy
-            result_scipy = solve_with_scipy(dummy_model_file, dummy_data_file)
+            # Highs
+            result_highs = solve_with_highs(dummy_model_file, dummy_data_file)
             # Compare solutions
             try:
-                self.compare_solutions(result_gurobi.get("solution", {}), result_scipy.get("solution", {}))
+                self.compare_solutions(result_gurobi.get("solution", {}), result_highs.get("solution", {}))
             except AssertionError as e:
                 msg = (
                     f"Solution mismatch in assignment_problem_compare_solvers.\n"
                     f"Gurobi solution: {result_gurobi.get('solution', {})}\n"
-                    f"SciPy solution: {result_scipy.get('solution', {})}\n"
+                    f"Highs solution: {result_highs.get('solution', {})}\n"
                 )
                 raise AssertionError(msg) from e
             try:
                 self.compare_objectives(
                     result_gurobi.get("objective_value"),
-                    result_scipy.get("objective_value"),
+                    result_highs.get("objective_value"),
                 )
             except AssertionError as e:
                 msg = (
                     f"Objective mismatch in assignment_problem_compare_solvers.\n"
                     f"Gurobi objective: {result_gurobi.get('objective_value')}\n"
-                    f"SciPy objective: {result_scipy.get('objective_value')}\n"
+                    f"Highs objective: {result_highs.get('objective_value')}\n"
                 )
                 raise AssertionError(msg) from e
         finally:
@@ -7008,7 +7008,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(opl_code)
                 tmp_mod.flush()
@@ -7020,7 +7020,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 obj_values[solver] = result["objective_value"]
             finally:
                 os.remove(model_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_tuple_field_access_and_nested_tuple_set(self):
         """Test tuple field access and nested tuple sets with both solvers."""
@@ -7040,7 +7040,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(opl_code)
                 tmp_mod.flush()
@@ -7052,7 +7052,7 @@ class TestPyOPLProblems(unittest.TestCase):
                 obj_values[solver] = result["objective_value"]
             finally:
                 os.remove(model_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_inline_and_external_data_mix(self):
         """Test model with both inline and .dat data, including parameter arrays."""
@@ -7077,7 +7077,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -7096,7 +7096,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 os.remove(model_file)
                 os.remove(data_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_filtered_sum_and_nested_forall(self):
         """Test constraints using filtered sums and nested forall with both solvers."""
@@ -7118,7 +7118,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(opl_code)
                 tmp_mod.flush()
@@ -7130,10 +7130,10 @@ class TestPyOPLProblems(unittest.TestCase):
                 obj_values[solver] = result["objective_value"]
             finally:
                 os.remove(model_file)
-        self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_simple_blending_problem(self):
-        """Test codegen & solve for a simple blending problem with both Gurobi and SciPy."""
+        """Test codegen & solve for a simple blending problem with both Gurobi and Highs."""
         opl_code = """
         dvar float blendA;
         dvar float blendB;
@@ -7154,7 +7154,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod:
                 tmp_mod.write(opl_code)
                 tmp_mod.flush()
@@ -7174,15 +7174,15 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 if os.path.exists(model_file):
                     os.remove(model_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_blending_string_sets_list_index_error(self):
         """Blending with string-indexed scalar sets and list data (bug regression test).
 
         Original bug: parameters stored as Python lists were indexed by string labels, raising
         'list indices must be integers or slices, not str'. The codegen now emits <Set>_index
-        maps and remaps string labels to integer positions for both Gurobi and SciPy backends.
+        maps and remaps string labels to integer positions for both Gurobi and Highs backends.
 
         This test verifies both solvers produce the same optimal objective (342.5) and thus
         guards against regressions in typed string set indexing for 1D/2D list parameters.
@@ -7235,7 +7235,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -7265,8 +7265,8 @@ class TestPyOPLProblems(unittest.TestCase):
                 if os.path.exists(data_file):
                     os.remove(data_file)
         # Cross-solver objective agreement
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=3)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=3)
 
     def test_workforce_planning_conditional_vs_explicit(self):
         """
@@ -7531,7 +7531,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
         try:
             # Test both solvers for both models
-            for solver in ("gurobi", "scipy"):
+            for solver in ("gurobi", "highs"):
                 result_explicit = solve(model_file1, data_file, solver=solver)
                 result_conditional = solve(model_file2, data_file, solver=solver)
                 self.assertNotEqual(
@@ -7620,7 +7620,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -7645,7 +7645,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
                 Constructs used:
                     - color[i] != color[j] (numeric != with tightening)
-                    - Implication: (color[1] == 2) => (color[2] >= 2)  (uses a simple equality antecedent supported by SciPy)
+                    - Implication: (color[1] == 2) => (color[2] >= 2)  (uses a simple equality antecedent supported by Highs)
         Both backends should solve with same objective (minimize maxColor).
         """
         base_model = """
@@ -7669,8 +7669,8 @@ class TestPyOPLProblems(unittest.TestCase):
         }
         """
         results = {}
-        # Use implication with equality antecedent so SciPy can encode (pattern b==1 style).
-        for solver in ("gurobi", "scipy"):
+        # Use implication with equality antecedent so Highs can encode (pattern b==1 style).
+        for solver in ("gurobi", "highs"):
             model_code = base_model.replace("// IMPL_LINE", "(color[1] == 2) => (color[2] >= 2);")
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
                 tmp.write(model_code)
@@ -7684,7 +7684,7 @@ class TestPyOPLProblems(unittest.TestCase):
             finally:
                 if os.path.exists(path):
                     os.remove(path)
-        self.assertAlmostEqual(results["gurobi"], results["scipy"], places=6)
+        self.assertAlmostEqual(results["gurobi"], results["highs"], places=6)
 
     def test_food_blending_problem(self):
         """Food blending problem: mixes ingredients into foods meeting nutrient demands.
@@ -7751,7 +7751,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -7781,8 +7781,8 @@ class TestPyOPLProblems(unittest.TestCase):
                 if os.path.exists(data_file):
                     os.remove(data_file)
         # Cross-solver objective agreement
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=3)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=3)
 
     def test_transportation_problem_with_tuples_and_string_sets(self):
         """
@@ -7903,7 +7903,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -7925,8 +7925,8 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_transportation_problem_with_tuples_and_string_sets_and_string_filtering(
         self,
@@ -8047,7 +8047,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8069,8 +8069,8 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_inventory_problem_with_tuples(self):
         """
@@ -8128,7 +8128,7 @@ class TestPyOPLProblems(unittest.TestCase):
 
         obj_values = {}
         expected_obj = 136
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8158,8 +8158,8 @@ class TestPyOPLProblems(unittest.TestCase):
                 if os.path.exists(data_file):
                     os.remove(data_file)
         # Cross-solver objective agreement
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=3)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=3)
 
     def test_complex_inventory_problem_with_tuples(self):
         """
@@ -8237,7 +8237,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8259,8 +8259,8 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_shortest_path_with_tuples(self):
         """
@@ -8308,7 +8308,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8330,8 +8330,8 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_shortest_path_with_tuples_and_strings(self):
         """
@@ -8403,7 +8403,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8425,8 +8425,8 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)
 
     def test_logistics_with_tuples_and_strings(self):
         """
@@ -8477,7 +8477,7 @@ class TestPyOPLProblems(unittest.TestCase):
         from pyopl.pyopl_core import solve
 
         obj_values = {}
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             with (
                 tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp_mod,
                 tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as tmp_dat,
@@ -8499,5 +8499,5 @@ class TestPyOPLProblems(unittest.TestCase):
                     os.remove(model_file)
                 if os.path.exists(data_file):
                     os.remove(data_file)
-        if "gurobi" in obj_values and "scipy" in obj_values:
-            self.assertAlmostEqual(obj_values["gurobi"], obj_values["scipy"], places=6)
+        if "gurobi" in obj_values and "highs" in obj_values:
+            self.assertAlmostEqual(obj_values["gurobi"], obj_values["highs"], places=6)

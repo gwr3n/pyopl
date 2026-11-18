@@ -2,15 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem_highs import build_highs_model, export_linear_problem
 from pyopl.pyopl_core import parse_model
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 class TestLinearProblemHighs(unittest.TestCase):
     def test_build_highs_model_and_export_lp_mps(self):
         ast = parse_model("dvar float+ x; minimize 2 * x + 3; subject to { x >= 1; x <= 4; }")
-        problem = SciPyCSCCodeGenerator(ast).build_problem()
+        problem = HighsCSCCodeGenerator(ast).build_problem()
 
         highs = build_highs_model(problem)
         self.assertEqual(highs.getNumCol(), 1)

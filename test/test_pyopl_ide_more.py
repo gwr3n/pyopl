@@ -606,6 +606,7 @@ minimize x;
         widgets = [Widget() for _ in range(6)]
         dummy = SimpleNamespace(
             _active_operation=SimpleNamespace(kind="genai-generate"),
+            _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
             _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
             genai_panel_mode_var=DummyVar("generate"),
             genai_prompt_title_var=DummyVar(),
@@ -621,6 +622,7 @@ minimize x;
             _submit_genai_request=mock.Mock(),
         )
         dummy._refresh_genai_mode_buttons = lambda: OPLIDE._refresh_genai_mode_buttons(dummy)
+        dummy._refresh_genai_submit_button = lambda active: OPLIDE._refresh_genai_submit_button(dummy, active)
 
         OPLIDE._refresh_genai_panel_state(dummy)
 
@@ -633,6 +635,11 @@ minimize x;
 
         self.assertEqual([widget.state for widget in widgets], ["normal"] * 6)
         self.assertEqual(dummy.genai_submit_label_var.value, "Generate")
+
+        dummy._active_operation = SimpleNamespace(kind="solve")
+        OPLIDE._refresh_genai_panel_state(dummy)
+
+        self.assertEqual(dummy.genai_submit_button.state, "disabled")
 
     def test_editor_drop_routes_model_and_data_paths(self):
         dummy = SimpleNamespace(
@@ -841,7 +848,7 @@ minimize x;
             label="Solve Model",
             header="Header",
             status="Running",
-            solver_choice="scipy",
+            solver_choice="highs",
         )
 
         self.assertIsInstance(operation, _ForegroundOperation)
@@ -1621,6 +1628,11 @@ minimize x;
         self.assertIsNone(OPLIDE._progress_sample_time(dummy, {"runtime": "nan"}))
         self.assertEqual(OPLIDE._format_progress_value(dummy, None), "-")
         self.assertEqual(OPLIDE._format_progress_value(dummy, 1_200_000), "1.2e+06")
+
+    def test_highs_uses_solver_progress_chart(self):
+        dummy = SimpleNamespace(_current_solver_choice="highs")
+        self.assertTrue(OPLIDE._solver_tracks_progress(dummy))
+        self.assertTrue(OPLIDE._solver_tracks_progress(dummy, "gurobi"))
 
     def test_redraw_solver_progress_chart_waiting_line_and_points(self):
         """Progress chart rendering covers the waiting state and LB/UB line drawing path."""

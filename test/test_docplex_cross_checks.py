@@ -81,7 +81,7 @@ class TestDocplexCrossChecks(unittest.TestCase):
 
         model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.mod")
         data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/multi_knapsack/multi_knapsack.dat")
-        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as docplex_mod_file,
             tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as docplex_dat_file,
@@ -129,7 +129,7 @@ class TestDocplexCrossChecks(unittest.TestCase):
 
         model_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsack.mod")
         data_path = os.path.join(os.path.dirname(__file__), "../pyopl/opl_models/knapsack/knapsack.dat")
-        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
         docplex_model = build_docplex_model(model_path, data_path)
         docplex_solution = docplex_model.solve(log_output=False)
         self.assertIsNotNone(docplex_solution)
@@ -161,7 +161,7 @@ class TestDocplexCrossChecks(unittest.TestCase):
             os.path.dirname(__file__),
             "../pyopl/opl_models/inventory_routing/inventory_routing.dat",
         )
-        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+        results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
         with (
             tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as docplex_mod_file,
             tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as docplex_dat_file,
@@ -241,7 +241,7 @@ subject to {
         try:
             results = {
                 "gurobi": solve(model_path, data_path, solver="gurobi"),
-                "scipy": solve(model_path, data_path, solver="scipy"),
+                "highs": solve(model_path, data_path, solver="highs"),
             }
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
@@ -291,7 +291,7 @@ subject to {
         try:
             results = {
                 "gurobi": solve(model_path, data_path, solver="gurobi"),
-                "scipy": solve(model_path, data_path, solver="scipy"),
+                "highs": solve(model_path, data_path, solver="highs"),
             }
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
@@ -428,7 +428,7 @@ subject to {
             dat_file.write(data_code)
             model_path, data_path = mod_file.name, dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
                 docplex_model_path = docplex_mod_file.name
@@ -511,7 +511,7 @@ subject to {
         docplex_model_path = model_path + ".docplex.mod"
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model_code = (
                 model_code.replace("{string} Employees = ...;", "{string} Employees = ...;")
                 .replace("{string} Shifts = ...;", "{string} Shifts = ...;")
@@ -611,7 +611,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -723,7 +723,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -804,7 +804,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -899,7 +899,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -985,7 +985,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1047,7 +1047,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1111,7 +1111,7 @@ subject to {
         with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as docplex_dat_file:
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1182,7 +1182,7 @@ subject to {
             dat_file.write(data_code)
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1248,7 +1248,7 @@ subject to {
         with tempfile.NamedTemporaryFile("w", suffix=".dat", delete=False) as docplex_dat_file:
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1313,7 +1313,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
                 docplex_model_path = docplex_mod_file.name
@@ -1387,7 +1387,7 @@ subject to {
             data_path = dat_file.name
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1450,7 +1450,7 @@ subject to {
             data_path = dat_file.name
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1524,7 +1524,7 @@ subject to {
             data_path = dat_file.name
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1578,7 +1578,7 @@ subject to {
             data_path = dat_file.name
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1638,7 +1638,7 @@ subject to {
             data_path = dat_file.name
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1699,7 +1699,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1758,7 +1758,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1823,7 +1823,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -1893,7 +1893,7 @@ subject to {
             docplex_mod_file.write(docplex_model_code)
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2003,7 +2003,7 @@ subject to {
             docplex_dat_file.write(docplex_data_code)
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2070,7 +2070,7 @@ subject to {
             docplex_mod_file.write(docplex_model_code)
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2178,7 +2178,7 @@ subject to {
             docplex_model_path = docplex_mod_file.name
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2247,7 +2247,7 @@ subject to {
             docplex_dat_file.write(docplex_data_code)
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2326,7 +2326,7 @@ subject to {
             docplex_model_path = docplex_mod_file.name
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2454,7 +2454,7 @@ subject to {
             docplex_mod_file.write(docplex_model_code)
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2517,7 +2517,7 @@ subject to {
             docplex_mod_file.write(docplex_model_code)
             docplex_model_path = docplex_mod_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2628,7 +2628,7 @@ subject to {
             docplex_model_path = docplex_mod_file.name
             docplex_data_path = docplex_dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2693,7 +2693,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -2818,7 +2818,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model_path = model_path + ".docplex.mod"
             docplex_data_path = data_path + ".docplex.dat"
             with open(docplex_model_path, "w") as docplex_mod_file:
@@ -2932,7 +2932,7 @@ subject to {
         docplex_model_path = model_path + ".docplex.mod"
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_model_path, "w") as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
             with open(docplex_data_path, "w") as docplex_dat_file:
@@ -3005,7 +3005,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3091,7 +3091,7 @@ subject to {
         docplex_model_path = model_path + ".docplex.mod"
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_model_path, "w") as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
             with open(docplex_data_path, "w") as docplex_dat_file:
@@ -3189,7 +3189,7 @@ subject to {
             docplex_model_path = model_path + ".docplex.mod"
             docplex_data_path = data_path + ".docplex.dat"
             try:
-                results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+                results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
                 with open(docplex_model_path, "w") as docplex_mod_file:
                     docplex_mod_file.write(docplex_model_code)
                 with open(docplex_data_path, "w") as docplex_dat_file:
@@ -3270,7 +3270,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_data_path = data_path + ".docplex.dat"
             with open(data_path) as source_data, open(docplex_data_path, "w") as target_data:
                 target_data.write(
@@ -3334,7 +3334,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3410,7 +3410,7 @@ subject to {
         docplex_model_path = model_path + ".docplex.mod"
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model_code = (
                 model_code.replace("int demand[Shifts];", "int demand[Shifts] = ...;")
                 .replace("int pref[Pairs];", "int pref[Employees][Shifts] = ...;")
@@ -3499,7 +3499,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3569,7 +3569,7 @@ subject to {
         docplex_model_path = model_path + ".docplex.mod"
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model_code = model_code
             with open(docplex_model_path, "w") as docplex_mod_file:
                 docplex_mod_file.write(docplex_model_code)
@@ -3629,7 +3629,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model_path = model_path + ".docplex.mod"
             docplex_data_path = data_path + ".docplex.dat"
             with open(docplex_model_path, "w") as docplex_mod_file:
@@ -3690,7 +3690,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3742,7 +3742,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3804,7 +3804,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3859,7 +3859,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3912,7 +3912,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -3959,7 +3959,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4011,7 +4011,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4060,7 +4060,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4109,7 +4109,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4179,7 +4179,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4243,12 +4243,12 @@ subject to {
             pyopl_results = {
                 (formulation, solver): solve(path, data_path, solver=solver)
                 for formulation, path in (("explicit", explicit_path), ("conditional", conditional_path))
-                for solver in ("scipy", "gurobi")
+                for solver in ("highs", "gurobi")
             }
             for result in pyopl_results.values():
                 self.assertEqual(result["status"], "OPTIMAL")
 
-            for solver in ("scipy", "gurobi"):
+            for solver in ("highs", "gurobi"):
                 self.assertAlmostEqual(
                     pyopl_results[("explicit", solver)]["objective_value"],
                     pyopl_results[("conditional", solver)]["objective_value"],
@@ -4286,7 +4286,7 @@ subject to {
                 places=6,
             )
             for formulation, model in docplex_models.items():
-                for solver in ("scipy", "gurobi"):
+                for solver in ("highs", "gurobi"):
                     with self.subTest(formulation=formulation, solver=solver):
                         result = pyopl_results[(formulation, solver)]
                         self.assertAlmostEqual(
@@ -4358,7 +4358,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4415,7 +4415,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4486,7 +4486,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4539,7 +4539,7 @@ subject to {
             data_path = dat_file.name
             docplex_path = docplex_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -4633,7 +4633,7 @@ subject to {
             docplex_path = docplex_file.name
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_data_path, "w") as docplex_data_file:
                 docplex_data_file.write(docplex_data_code)
             docplex_model = build_docplex_model(docplex_path, docplex_data_path)
@@ -4732,7 +4732,7 @@ subject to {
             docplex_path = docplex_file.name
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_data_path, "w") as docplex_data_file:
                 docplex_data_file.write(docplex_data_code)
             docplex_model = build_docplex_model(docplex_path, docplex_data_path)
@@ -4810,7 +4810,7 @@ subject to {
             docplex_path = docplex_file.name
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_data_path, "w") as docplex_data_file:
                 docplex_data_file.write(docplex_data_code)
             docplex_model = build_docplex_model(docplex_path, docplex_data_path)
@@ -4886,7 +4886,7 @@ subject to {
             docplex_path = docplex_file.name
         docplex_data_path = data_path + ".docplex.dat"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_data_path, "w") as docplex_data_file:
                 docplex_data_file.write(docplex_data_code)
             docplex_model = build_docplex_model(docplex_path, docplex_data_path)
@@ -5008,7 +5008,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(model_path, data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -5103,7 +5103,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_data_path = data_path + ".docplex.dat"
             with open(docplex_data_path, "w") as target_data:
                 target_data.write(
@@ -5217,7 +5217,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_data_path = data_path + ".docplex.dat"
             with open(docplex_data_path, "w") as target_data:
                 target_data.write(
@@ -5342,7 +5342,7 @@ subject to {
         docplex_data_path = data_path + ".docplex.dat"
         docplex_model_path = model_path + ".docplex.mod"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_data_path, "w") as dat_file:
                 dat_file.write(docplex_data_code)
             with open(docplex_model_path, "w") as mod_file:
@@ -5404,7 +5404,7 @@ subject to {
             model_path, data_path = mod_file.name, dat_file.name
         docplex_model_path = model_path + ".docplex.mod"
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             with open(docplex_model_path, "w") as mod_file:
                 mod_file.write(docplex_model_code)
             docplex_model = build_docplex_model(docplex_model_path, data_path)
@@ -5449,7 +5449,7 @@ subject to {
         try:
             with open(docplex_data_path, "w") as compatibility_data:
                 compatibility_data.write(docplex_data)
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_model = build_docplex_model(docplex_model_path, docplex_data_path)
             docplex_solution = docplex_model.solve(log_output=False)
             self.assertIsNotNone(docplex_solution)
@@ -5609,7 +5609,7 @@ subject to {
             model_path = mod_file.name
             data_path = dat_file.name
         try:
-            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("scipy", "gurobi")}
+            results = {solver: solve(model_path, data_path, solver=solver) for solver in ("highs", "gurobi")}
             docplex_data_path = data_path + ".docplex.dat"
             with open(data_path) as source_data, open(docplex_data_path, "w") as target_data:
                 target_data.write(

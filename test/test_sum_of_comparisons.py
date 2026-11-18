@@ -36,7 +36,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) >= 2;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -70,7 +70,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) == 1;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -103,7 +103,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             b == (sum(i in I) (x[i] >= y[i]) >= 3);
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -134,7 +134,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) >= 0;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -161,7 +161,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) >= 3; // |I|
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -189,7 +189,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I : 1==0) (x[i] >= y[i]) == 0;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -220,7 +220,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) > 2; // requires at least 3 true
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -252,7 +252,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             b == (sum(i in I) (x[i] >= y[i]) > 2); // reified strict >
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:
@@ -282,7 +282,7 @@ class TestSumOfComparisonsCardinality(unittest.TestCase):
             sum(i in I) (x[i] >= y[i]) <= 1;
         }
         """
-        for solver in ("gurobi", "scipy"):
+        for solver in ("gurobi", "highs"):
             if solver == "gurobi" and not GUROBI_AVAILABLE:
                 continue
             with tempfile.NamedTemporaryFile("w", suffix=".mod", delete=False) as tmp:

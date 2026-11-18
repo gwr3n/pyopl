@@ -10,8 +10,8 @@ class TestTypedStringSetData(unittest.TestCase):
     def test_data_file_population_gurobi(self):
         self._run_test("gurobi")
 
-    def test_data_file_population_scipy(self):
-        self._run_test("scipy")
+    def test_data_file_population_highs(self):
+        self._run_test("highs")
 
     def _run_test(self, solver):
         compiler = OPLCompiler()

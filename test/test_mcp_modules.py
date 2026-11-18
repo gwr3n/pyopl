@@ -26,12 +26,14 @@ _ROOT_LOGGER.setLevel(_ROOT_LOGGER_LEVEL)
 
 class TestPyOPLMCP(unittest.TestCase):
     def test_solver_normalization_and_backend_mapping(self):
-        self.assertEqual(_pyopl_mcp._normalize_solver(None), "scipy")
-        self.assertEqual(_pyopl_mcp._normalize_solver(" highs "), "scipy")
+        self.assertEqual(_pyopl_mcp._normalize_solver(None), "highs")
+        self.assertEqual(_pyopl_mcp._normalize_solver(" highs "), "highs")
         self.assertEqual(_pyopl_mcp._normalize_solver("GUROBI"), "gurobi")
         self.assertEqual(_pyopl_mcp._normalize_solver("custom"), "custom")
         self.assertEqual(_pyopl_mcp._solve_backend("gurobi"), "gurobi")
-        self.assertEqual(_pyopl_mcp._solve_backend("highs"), "scipy")
+        self.assertEqual(_pyopl_mcp._solve_backend("highs"), "highs")
+        with self.assertRaisesRegex(ValueError, "Unsupported solver: scipy"):
+            _pyopl_mcp.solve_from_strings("dvar int+ x; minimize x; subject to {}", solver="scipy")
 
     def test_export_py_from_files_reads_inputs_and_normalizes_solver(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -61,7 +63,7 @@ class TestPyOPLMCP(unittest.TestCase):
         with patch.object(_pyopl_mcp, "OPLCompiler", return_value=FakeCompiler()) as compiler_cls:
             result = _pyopl_mcp._compile_to_python("m", "d", solver="highs")
 
-        self.assertEqual(result, "code:scipy:m:d")
+        self.assertEqual(result, "code:highs:m:d")
         compiler_cls.assert_called_once_with()
 
     def test_solve_from_files_and_strings_delegate_to_solver(self):
@@ -75,7 +77,7 @@ class TestPyOPLMCP(unittest.TestCase):
                 result = _pyopl_mcp.solve_from_files(model_path, data_path, solver="highs")
 
             self.assertEqual(result, {"status": "OK"})
-            solve_mock.assert_called_once_with(str(model_path), str(data_path), solver="scipy")
+            solve_mock.assert_called_once_with(str(model_path), str(data_path), solver="highs")
 
         captured = {}
 
@@ -122,8 +124,8 @@ class TestPyOPLMCP(unittest.TestCase):
         solve_mock.assert_called_once_with("m.mod", "d.dat", "highs")
 
         with patch.object(_pyopl_mcp, "export_py_from_strings", return_value="code") as export_mock:
-            self.assertEqual(_pyopl_mcp.export_py_strings_tool("m", None, "scipy"), "code")
-        export_mock.assert_called_once_with("m", None, "scipy")
+            self.assertEqual(_pyopl_mcp.export_py_strings_tool("m", None, "highs"), "code")
+        export_mock.assert_called_once_with("m", None, "highs")
 
         with patch.object(_pyopl_mcp, "compare_model_strings", return_value={"equivalent": True}) as compare_mock:
             self.assertEqual(_pyopl_mcp.compare_model_strings_tool("left", "right", None, None), {"equivalent": True})
@@ -139,7 +141,7 @@ class TestPyOPLMCP(unittest.TestCase):
             result = _pyopl_mcp.solve_from_files("m.mod", "d.dat", "highs", settings)
 
         self.assertEqual(result, {"status": "OK"})
-        solve_mock.assert_called_once_with("m.mod", "d.dat", solver="scipy", solver_settings=settings)
+        solve_mock.assert_called_once_with("m.mod", "d.dat", solver="highs", solver_settings=settings)
 
         with patch.object(_pyopl_mcp, "solve_from_files", return_value={"status": "OK"}) as solve_files_mock:
             result = _pyopl_mcp.solve_files_tool("m.mod", "d.dat", "gurobi", settings)
@@ -163,10 +165,10 @@ class TestPyOPLMCP(unittest.TestCase):
 
     def test_file_export_tool_delegates_to_file_compiler(self):
         with patch.object(_pyopl_mcp, "export_py_from_files", return_value="compiled") as export_mock:
-            result = _pyopl_mcp.export_py_files_tool("m.mod", "d.dat", "scipy")
+            result = _pyopl_mcp.export_py_files_tool("m.mod", "d.dat", "highs")
 
         self.assertEqual(result, "compiled")
-        export_mock.assert_called_once_with("m.mod", "d.dat", "scipy")
+        export_mock.assert_called_once_with("m.mod", "d.dat", "highs")
 
     def test_grammar_tool_returns_packaged_grammar(self):
         grammar = _pyopl_mcp.read_pyopl_grammar()
@@ -441,7 +443,7 @@ class TestRhetorMCP(unittest.TestCase):
                 _rhetor_mcp._request_running_ide("GET")
 
     def test_provider_and_backend_edge_branches(self):
-        self.assertEqual(_rhetor_mcp._normalize_solver(None), "scipy")
+        self.assertEqual(_rhetor_mcp._normalize_solver(None), "highs")
         with self.assertRaisesRegex(ValueError, "Unsupported provider"):
             _rhetor_mcp.list_models("unsupported")
         with patch.dict("sys.modules", {"pyopl.genai.pyopl_generative_graphchain": None}):
@@ -478,7 +480,7 @@ class TestRhetorMCP(unittest.TestCase):
         self.assertIn("Plain language feedback", result["markdown"])
 
     def test_provider_normalization_and_llm_kwargs(self):
-        self.assertEqual(_rhetor_mcp._normalize_solver("highs"), "scipy")
+        self.assertEqual(_rhetor_mcp._normalize_solver("highs"), "highs")
         self.assertEqual(_rhetor_mcp._solve_backend("GUROBI"), "gurobi")
         self.assertEqual(_rhetor_mcp._normalize_provider(None), _rhetor_mcp.DEFAULT_PROVIDER)
         self.assertEqual(_rhetor_mcp._normalize_provider(" Gemini "), "google")

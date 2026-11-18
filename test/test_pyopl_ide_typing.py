@@ -26,6 +26,35 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_short_text_dialog_waits_until_visible_before_grabbing_input(self):
+        dialog = mock.Mock()
+        dialog.wait_visibility.side_effect = lambda: setattr(dialog, "visible", True)
+        entry = mock.Mock()
+
+        def grab_set():
+            self.assertTrue(getattr(dialog, "visible", False))
+
+        dialog.grab_set.side_effect = grab_set
+
+        def focus_set():
+            self.assertTrue(getattr(dialog, "visible", False))
+            dialog.grab_set.assert_called_once_with()
+
+        entry.focus_set.side_effect = focus_set
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label"),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", return_value=entry),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Button"),
+        ):
+            self.assertIsNone(OPLIDE._ask_short_text(mock.Mock(), "Save Exemplar", "Exemplar name:"))
+
+        dialog.wait_visibility.assert_called_once_with()
+        dialog.grab_set.assert_called_once_with()
+        entry.focus_set.assert_called_once_with()
+
     def test_data_paths_must_be_paired(self):
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("", ""))
         self.assertTrue(pyopl_ide_bootstrap._data_paths_are_paired("left.dat", "right.dat"))
@@ -404,6 +433,14 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(file_labels[open_index + 1], "Retrieve Exemplar...")
         export_index = file_labels.index("Export Model...")
         self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
+        exemplar_command = next(
+            entry[1]["command"]
+            for entry in FakeMenu.instances[1].entries
+            if entry[0] == "command" and entry[1]["label"] == "Save Exemplar..."
+        )
+        exemplar_command()
+        dummy.after_idle.assert_called_once_with(dummy.save_exemplar)
+        dummy.save_exemplar.assert_not_called()
 
     def test_classify_exemplar_search_result_handles_worker_messages(self):
         low = {"name": "low", "description_path": Path("/tmp/low.md")}
@@ -616,7 +653,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     with mock.patch.object(
                         pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process
                     ) as process_cls:
-                        started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+                        started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "highs", operation)
             finally:
                 os.chdir(old_cwd)
 
@@ -624,7 +661,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy._solver_ipc.session_id, operation.session_id)
         process_cls.assert_called_once_with(
             target=pyopl_ide_bootstrap._solve_wrapper,
-            args=("model.mod", "data.dat", "scipy", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
+            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue),
         )
         process.start.assert_called_once_with()
         dummy._append_output.assert_called_once_with(
@@ -650,7 +687,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Queue", return_value=result_queue),
             mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", return_value=process),
         ):
-            started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "scipy", operation)
+            started = OPLIDE._start_solver_process(dummy, "model.mod", "data.dat", "highs", operation)
 
         self.assertFalse(started)
         self.assertIsNone(dummy._solver_ipc.handles())
@@ -771,6 +808,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     )
                 ),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -822,6 +860,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(side_effect=["existing", "replacement"]),
                 _review_exemplar_draft=mock.Mock(side_effect=lambda draft, _root: draft),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -860,6 +899,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="cancelled"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -909,6 +949,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _write_exemplar=mock.Mock(),
                 _ask_short_text=mock.Mock(return_value="failed"),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -950,6 +991,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="race"),
                 _review_exemplar_draft=mock.Mock(side_effect=create_competing_destination),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -980,8 +1022,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _resolve_exemplar_destination=OPLIDE._resolve_exemplar_destination,
                 _ask_short_text=mock.Mock(return_value="async"),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="test-model",
+                after=lambda _delay, callback, *args: callback(*args),
             )
             thread = mock.Mock()
             thread.start = worker
@@ -997,6 +1041,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
             distill.assert_not_called()
             self.assertTrue(dummy._exemplar_save_state.pending)
             self.assertTrue(thread_cls.call_args.kwargs["daemon"])
+            OPLIDE._interrupt_exemplar_preparation(dummy)
+            thread_cls.call_args.kwargs["target"]()
+            distill.assert_not_called()
+            self.assertFalse(dummy._exemplar_save_state.pending)
 
     def test_save_exemplar_snapshots_inputs_and_blocks_duplicate_preparation(self):
         with TemporaryDirectory() as tmpdir:
@@ -1013,6 +1061,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 _ask_short_text=mock.Mock(return_value="fleet"),
                 _review_exemplar_draft=mock.Mock(return_value=None),
                 _exemplar_save_state=pyopl_ide_bootstrap._ExemplarSaveState(),
+                _refresh_genai_panel_state=mock.Mock(),
                 genai_provider="openai",
                 genai_model="first-model",
                 after=lambda _delay, callback, *args: callback(*args),
@@ -1049,6 +1098,47 @@ class TestPyOPLIDETyping(unittest.TestCase):
         with mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", side_effect=RuntimeError("cannot start")):
             with self.assertRaisesRegex(RuntimeError, "cannot start"):
                 state.start(mock.Mock())
+        self.assertFalse(state.pending)
+
+    def test_exemplar_interrupt_restores_generate_button_and_discards_late_result(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True)
+        host = SimpleNamespace(
+            _exemplar_save_state=state,
+            _active_operation=None,
+            _genai_attachments=pyopl_ide_bootstrap._GenAIAttachments(),
+            _refresh_genai_mode_buttons=mock.Mock(),
+            genai_panel_mode_var=SimpleNamespace(get=lambda: "generate"),
+            genai_prompt_title_var=mock.Mock(),
+            genai_submit_label_var=mock.Mock(),
+            genai_attachment_summary_var=mock.Mock(),
+            genai_submit_button=mock.Mock(),
+            _submit_genai_request=mock.Mock(),
+            _review_exemplar_draft=mock.Mock(),
+            status_var=mock.Mock(),
+        )
+        host._interrupt_exemplar_preparation = lambda: OPLIDE._interrupt_exemplar_preparation(host)
+        host._refresh_genai_submit_button = lambda active: OPLIDE._refresh_genai_submit_button(host, active)
+        host._refresh_genai_panel_state = lambda: OPLIDE._refresh_genai_panel_state(host)
+
+        host._refresh_genai_panel_state()
+        host.genai_submit_label_var.set.assert_called_with("Interrupt")
+        interrupt = host.genai_submit_button.configure.call_args.kwargs["command"]
+        interrupt()
+
+        self.assertTrue(state.cancel_requested)
+        host.genai_submit_label_var.set.assert_called_with("Generate")
+        host.genai_submit_button.configure.assert_called_with(command=host._submit_genai_request, state="normal")
+        draft = pyopl_ide_bootstrap.ExemplarDraft("name", "model", "data", "description", "session")
+        OPLIDE._finish_exemplar_preparation(host, draft, Path("/tmp/opl_models"))
+        host._review_exemplar_draft.assert_not_called()
+        self.assertFalse(state.pending)
+
+    def test_exemplar_interrupt_discards_late_failure(self):
+        state = pyopl_ide_bootstrap._ExemplarSaveState(pending=True, cancel_requested=True)
+        host = SimpleNamespace(_exemplar_save_state=state, _refresh_genai_panel_state=mock.Mock())
+        with mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror:
+            OPLIDE._finish_exemplar_preparation_error(host, RuntimeError("late failure"))
+        showerror.assert_not_called()
         self.assertFalse(state.pending)
 
     def test_exemplar_preparation_completion_after_shutdown_skips_review(self):
@@ -1302,7 +1392,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertIn("Syntax error in .dat file at end of file", dummy.status_syntax_var.value)
 
-    def test_run_model_does_not_open_live_progress_window_for_scipy(self):
+    def test_run_model_opens_live_progress_window_for_highs(self):
         class DummyText:
             def __init__(self, value):
                 self.value = value
@@ -1337,13 +1427,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 kind="solve",
                 label="Solve Model",
                 session_id="session-1",
-                solver_choice="scipy",
+                solver_choice="highs",
             )
             dummy = SimpleNamespace(
                 _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
                 model_text=DummyText("dvar float+ x;\nminimize x;\nsubject to { x >= 1; }"),
                 data_text=DummyText(""),
-                solver=DummyVar("scipy"),
+                solver=DummyVar("highs"),
                 _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
                 status_var=DummyVar(),
@@ -1364,7 +1454,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "Process", DummyProcess):
                     OPLIDE.run_model(dummy, model_file_override=model_path, data_file_override=data_path)
 
-        dummy._reset_solver_progress_window.assert_not_called()
+        dummy._reset_solver_progress_window.assert_called_once_with("highs")
         dummy._show_solver_log_textbox.assert_called_once()
         dummy._start_run_timer.assert_called_once_with("Solving model...")
         dummy.after.assert_called_once()
@@ -1375,7 +1465,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(),
             model_text=SimpleNamespace(get=lambda *_args: "int required = ...;"),
             data_text=SimpleNamespace(get=lambda *_args: ""),
-            solver=SimpleNamespace(get=lambda: "scipy"),
+            solver=SimpleNamespace(get=lambda: "highs"),
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             status_var=mock.Mock(),
             _start_foreground_operation=mock.Mock(return_value=operation),
@@ -1452,7 +1542,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             kind="solve",
             label="Solve Model",
             session_id="session-1",
-            solver_choice="scipy",
+            solver_choice="highs",
         )
         dummy = SimpleNamespace(
             _solver_ipc=pyopl_ide_bootstrap._SolverProcessState(DummyProcess(), DummyQueue()),
@@ -1473,7 +1563,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         dummy._append_solver_log_text.assert_called_once_with("first line\n")
         dummy._display_solve_results.assert_called_once_with(
-            {"status": "OPTIMAL"}, session_id="session-1", solver_choice="scipy"
+            {"status": "OPTIMAL"}, session_id="session-1", solver_choice="highs"
         )
         dummy._restore_output_textbox.assert_called_once()
 
@@ -1653,7 +1743,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(output_text.state, "disabled")
         self.assertTrue(output_text.seen)
 
-    def test_finish_solver_progress_for_scipy_opens_summary_without_chart(self):
+    def test_finish_solver_progress_for_highs_keeps_live_chart(self):
         class DummyWindow:
             def __init__(self):
                 self.geometry_values = []
@@ -1707,7 +1797,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         canvas = DummyCanvas()
         status_var = DummyVar()
         dummy = SimpleNamespace(
-            _current_solver_choice="scipy",
+            _current_solver_choice="highs",
             _solver_progress_update_after_id=None,
             _solver_progress_samples=[],
             _solver_progress_pending_sample=None,
@@ -1726,7 +1816,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._set_solver_progress_status = lambda text: OPLIDE._set_solver_progress_status(dummy, text)
         dummy._reset_solver_progress_window = lambda solver_choice: OPLIDE._reset_solver_progress_window(dummy, solver_choice)
 
-        scipy_stats = OPLIDE._solver_progress_stats(
+        highs_stats = OPLIDE._solver_progress_stats(
             dummy,
             {
                 "objective_value": 3.0,
@@ -1738,10 +1828,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 "solutions": 2,
             },
         )
-        self.assertEqual(
-            [label for label, _value in scipy_stats],
-            ["Objective", "Dual Bound", "Gap", "Nodes", "Runtime", "Iterations"],
-        )
+        self.assertEqual([label for label, _value in highs_stats], ["LB", "UB", "Gap", "Nodes", "Solutions", "Runtime"])
+
+        OPLIDE._configure_solver_progress_display(dummy, True)
 
         OPLIDE._finish_solver_progress(
             dummy,
@@ -1763,14 +1852,12 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(summary["gap"], 0.1)
         self.assertEqual(summary["nodes"], 9)
 
-        self.assertEqual(window.geometry_values[-1], "520x220")
-        self.assertTrue(canvas.removed)
+        self.assertEqual(window.geometry_values[-1], "760x460")
+        self.assertFalse(canvas.removed)
         self.assertFalse(canvas.deleted)
-        self.assertTrue(window.deiconified)
+        self.assertFalse(window.deiconified)
         self.assertEqual(status_var.value, "Solve complete.")
-
-        OPLIDE._redraw_solver_progress_chart(dummy)
-        self.assertFalse(canvas.deleted)
+        dummy._append_solver_progress_sample.assert_called_once()
 
     def test_solver_progress_display_can_be_disabled(self):
         class DummyWindow:
@@ -1883,7 +1970,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             dummy = SimpleNamespace(
                 _config_path=config_path,
                 theme_var=DummyVar("flatly"),
-                solver=DummyVar("scipy"),
+                solver=DummyVar("highs"),
                 current_font_size=12,
                 verbose_llm_var=DummyVar(False),
                 display_solver_progress_var=DummyVar(False),
@@ -1898,7 +1985,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             loaded = OPLIDE._load_settings(dummy)
 
         self.assertFalse(payload["display-solver-progress"])
-        self.assertEqual(payload["solver"], "scipy")
+        self.assertEqual(payload["solver"], "highs")
         self.assertEqual(loaded, payload)
 
     def test_initialize_preferences_keeps_valid_values_with_invalid_font_size(self):
@@ -1915,7 +2002,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         saved = {
             "font-size": "not a number",
             "theme": "darkly",
-            "solver": "scipy",
+            "solver": "highs",
             "verbose-llm-logs": True,
             "display-solver-progress": False,
             "genai-method": "pyopl_standard",
@@ -1941,7 +2028,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertIs(loaded, saved)
         self.assertEqual(theme, "darkly")
         self.assertEqual(dummy.current_font_size, 12)
-        self.assertEqual(dummy.solver.get(), "scipy")
+        self.assertEqual(dummy.solver.get(), "highs")
         self.assertFalse(dummy.display_solver_progress_var.get())
         self.assertTrue(dummy.verbose_llm_var.get())
         self.assertEqual(dummy.genai_method_var.get(), "pyopl_standard")
@@ -2016,7 +2103,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 return self.value
 
         dummy = SimpleNamespace(
-            solver=DummyVar("scipy"),
+            solver=DummyVar("highs"),
             _current_solver_choice="gurobi",
             _refresh_status_context=mock.Mock(),
             _save_settings=mock.Mock(),
@@ -2024,7 +2111,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         OPLIDE._on_solver_selected(dummy)
 
-        self.assertEqual(dummy._current_solver_choice, "scipy")
+        self.assertEqual(dummy._current_solver_choice, "highs")
         dummy._refresh_status_context.assert_called_once()
         dummy._save_settings.assert_called_once()
 
@@ -2064,6 +2151,33 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertFalse(any(tag == "ERROR" for tag, _start, _end in text.tags))
         self.assertIsNone(dummy._model_editor_state.syntax_error)
+
+    def test_highlight_review_preview_does_not_use_main_editor_state(self):
+        host = SimpleNamespace(
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            model_gutter=mock.Mock(),
+            data_gutter=mock.Mock(),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="existing error"),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(syntax_error="existing data error"),
+            _text_too_large_for_highlight=lambda widget: OPLIDE._text_too_large_for_highlight(host, widget),
+            _clear_highlight_tags=lambda widget: OPLIDE._clear_highlight_tags(host, widget),
+            _disable_highlight_for_large_text=lambda widget: OPLIDE._disable_highlight_for_large_text(host, widget),
+            _set_highlight_error=lambda widget, prefix, exc: OPLIDE._set_highlight_error(host, widget, prefix, exc),
+            _is_transient_live_parse_error=OPLIDE._is_transient_live_parse_error,
+        )
+
+        for source, is_data in (("invalid model", False), ("invalid data", True), ("x" * 10001, False)):
+            with self.subTest(source=source[:20], is_data=is_data):
+                preview = mock.Mock()
+                preview.get.return_value = source
+                preview.count.return_value = (len(source),)
+                OPLIDE.highlight(host, preview, is_data=is_data)
+
+        host.model_gutter.refresh.assert_not_called()
+        host.data_gutter.refresh.assert_not_called()
+        self.assertEqual(host._model_editor_state.syntax_error, "existing error")
+        self.assertEqual(host._data_editor_state.syntax_error, "existing data error")
 
     def test_autohide_scrollbar_idle_refresh_passes_string_fractions(self):
         class DummyWidget:

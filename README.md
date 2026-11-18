@@ -37,7 +37,7 @@ Docs:
 [![Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/gwr3n/pyopl/blob/main/ipynb/Using_PyOPL_and_Rhetor_in_Google_Colab.ipynb)
 
 
-`pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source SciPy (HiGHS) solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
+`pyopl` is a Python library for parsing and solving OPL-like [1] mathematical programming models using either Gurobi or the open-source HiGHS solver. PyOPL supports a rich subset of Optimisation Programming Language (OPL) syntax for linear and mixed-integer programming.
 
 [1] Van Hentenryck, P. (1999). The OPL optimization programming language. London, England: MIT Press.
 
@@ -63,7 +63,7 @@ Dependencies are managed in `pyproject.toml`. Install development tools with `pi
 
 PyOPL requires Python 3.10+
 
-You can use either Gurobi or SciPy/HiGHS as the solver. Both solvers are selectable in the API and the Rhetor IME. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
+You can use either Gurobi or HiGHS as the solver. Both solvers are selectable in the API and the Rhetor IME. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
 
 ## Usage
 
@@ -74,7 +74,7 @@ You can use the `solve` function to load and solve an OPL model (and optional da
 ```python
 from pyopl import solve
 results = solve('model.mod', 'data.dat', solver='gurobi')  # Use Gurobi (default)
-results = solve('model.mod', 'data.dat', solver='scipy')   # Use SciPy/HiGHS
+results = solve('model.mod', 'data.dat', solver="highs")   # Use HiGHS
 ```
 
 #### Example
@@ -159,7 +159,7 @@ The IME features:
 - Session-based model version tracking: each run/request can keep a timestamped snapshot that can be previewed, diffed against the current editors, restored, renamed, or deleted
 - Output and session panels for reviewing recent runs, generated artifacts, model/data snapshots, and GenAI interactions
 - Syntax-highlighted model and data editors with open, save, save-as, undo, redo, find, and replace
-- Integrated solve workflow with Gurobi or SciPy/HiGHS selection, solver logs, elapsed-time status, and optional solver-progress display
+- Integrated solve workflow with Gurobi or HiGHS selection, solver logs, elapsed-time status, and optional solver-progress display
 - Export support for compiled Python, LP, and MPS artifacts where supported by the selected backend
 - Light/dark themes and configurable editor font sizes, with settings saved between sessions
 
@@ -173,7 +173,7 @@ python -m pyopl
 
 If installed as a package, the `pyopl` console command can be used in place of `python -m pyopl`.
 
-This opens the Rhetor IME window. You can open `.mod` model files and optional `.dat` data files, generate or revise formulations with GenAI assistance, edit them directly, solve them from the interface, export generated artifacts, and choose either Gurobi or SciPy/HiGHS from the Solve menu.
+This opens the Rhetor IME window. You can open `.mod` model files and optional `.dat` data files, generate or revise formulations with GenAI assistance, edit them directly, solve them from the interface, export generated artifacts, and choose either Gurobi or HiGHS from the Solve menu.
 
 ### Sessions and Model Versions
 
@@ -221,7 +221,7 @@ PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so exter
   - **compare_model_strings_tool**: Compare two OPL models from strings using the selectable `concrete` or `abstract` strategy, matching the IDE's Compare models workflow. Pass `observable_mapping_json` for a manual affine-observable mapping, or set `generate_mapping=true` and select `provider` and `model_name` to generate one with GenAI. These options are mutually exclusive. Concrete comparison can prove projected equivalence over shared or affine-related binary observables when formulations use different auxiliaries. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
   - **generate_observable_mapping_tool**: Generate reusable affine-observable mapping JSON from two model strings and optional data strings. The returned JSON can be passed to `compare_model_strings_tool` as `observable_mapping_json`.
 - **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
-- **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
+- **Solver mapping**: Default solver alias `highs` → HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:
 ```json
 {

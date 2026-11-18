@@ -47,7 +47,7 @@
 - [Rhetor MCP](#rhetor-mcp)
 - [Rhetor SKILL.md](#rhetor-skillmd)
 
-This guide describes the syntax and features of the Optimisation Programming Language (OPL) as implemented in PyOPL. PyOPL is a Python library and IDE for defining and solving optimization problems. The PyOPL compiler translates OPL models into code for use with either the Gurobi Optimizer or the open-source SciPy/HiGHS solver. You can choose which solver to use. For SciPy/HiGHS, integrality is passed to `linprog` if present, but full MIP support depends on your SciPy version and solver. PyOPL now provides robust support for tuple types, sets of tuples, tuple field access, multi-indexed variables, advanced sum/forall constructs, and improved semantic error handling.
+This guide describes the syntax and features of the Optimisation Programming Language (OPL) as implemented in PyOPL. PyOPL is a Python library and IDE for defining and solving optimization problems. The PyOPL compiler translates OPL models into code for use with either the Gurobi Optimizer or the open-source HiGHS solver. You can choose which solver to use. The HiGHS backend uses `highspy` directly for LP and MIP models. PyOPL also supports tuple types, sets of tuples, tuple field access, multi-indexed variables, advanced sum/forall constructs, and semantic error handling.
 
 ## Core Concepts
 
@@ -214,7 +214,7 @@ Arr = [
 
 Notes:
 - Tuple arrays may be indexed by named ranges, typed scalar sets, or a combination of them.
-- PyOPL normalizes tuple arrays internally for both Gurobi and SciPy/HiGHS. Use OPL dot syntax such as `Arr[i][j].cost`; generated Python representation is an implementation detail.
+- PyOPL normalizes tuple arrays internally for both Gurobi and HiGHS. Use OPL dot syntax such as `Arr[i][j].cost`; generated Python representation is an implementation detail.
 - Positional tuple indexing (e.g., `a[2]`) is not supported in OPL; always use dot access.
 
 ### Data Input (`.dat` files)
@@ -424,7 +424,7 @@ Backend notes:
 - Gurobi backend:
   - Uses complementary indicator constraints to reify antecedents and a native indicator to activate the consequent.
   - Generic implication handling does not use an arbitrary fallback big-M.
-- SciPy/HiGHS backend:
+- HiGHS backend:
   - Uses sparse linear big-M rows with automatically inferred bounds.
   - Rejects affine implication forms without finite variable bounds instead of generating an invalid or arbitrary formulation.
   - Supports composite and nested Boolean antecedents and consequents through auxiliary binaries.
@@ -451,7 +451,7 @@ Boolean objectives are interpreted as integer (1 for true, 0 for false).
 
 ### Boolean Expression Trees in Constraints
 - Gurobi: complex boolean formulas (`and`, `or`, `not`, and nested implication) are compiled to exactly linked auxiliary binaries and native indicators.
-- SciPy: supports the same Boolean compositions and compiles them to sparse linear constraints with auxiliary binaries, provided required affine bounds are finite.
+- HiGHS: supports the same Boolean compositions and compiles them to sparse linear constraints with auxiliary binaries, provided required affine bounds are finite.
 
 ### Field Access
 Use dot notation to access tuple fields in constraints (including nested fields):
@@ -663,19 +663,19 @@ print(results)
 ```
 
 
-By default, PyOPL uses Gurobi as the solver. You can also use the open-source SciPy/HiGHS solver for linear programs and, if supported by your SciPy version, mixed-integer programming (MIP, i.e., integer and boolean variables) by specifying the `solver` argument. Both solvers are selectable in the API and the IDE.
+By default, PyOPL uses Gurobi as the solver. You can also select the open-source HiGHS solver for linear and mixed-integer programming (MIP) with the `solver` argument. Both solvers are selectable in the API and the IDE.
 
 ```python
 results = solve('model.mod', 'data.dat', solver='gurobi')  # Use Gurobi (default)
-results = solve('model.mod', 'data.dat', solver='scipy')   # Use SciPy/HiGHS (LP or MIP, if supported)
+results = solve('model.mod', 'data.dat', solver='highs')   # Use HiGHS (LP or MIP)
 ```
 
 - `solver='gurobi'` (default): Uses Gurobi for linear and mixed-integer models (requires Gurobi license).
-- `solver='scipy'`: Uses SciPy's HiGHS solver for linear programming (LP) and, if supported by your SciPy version, mixed-integer programming (MIP, i.e., integer and boolean variables) models. Integrality is passed to `linprog` if present, but full MIP support depends on your SciPy installation.
+- `solver='highs'`: Uses `highspy` directly for linear and mixed-integer models.
 
 ### Solver settings
 
-Pass backend-native solver parameters with the optional `solver_settings` dictionary. Gurobi keys are passed to `Model.setParam`; SciPy/HiGHS keys are merged into the `options` dictionary passed to `scipy.optimize.linprog`.
+Pass backend-native solver parameters with the optional `solver_settings` dictionary. Gurobi keys are passed to `Model.setParam`; HiGHS keys are passed to `Highs.setOptionValue`.
 
 ```python
 from pyopl import solve
@@ -690,14 +690,14 @@ gurobi_results = solve(
 highs_results = solve(
   "model.mod",
   "data.dat",
-  solver="scipy",
-  solver_settings={"time_limit": 60.0, "mip_rel_gap": 0.001, "presolve": True},
+  solver="highs",
+  solver_settings={"time_limit": 60.0, "mip_rel_gap": 0.001, "presolve": "on"},
 )
 ```
 
-The repository provides [`gurobi.json`](https://github.com/gwr3n/pyopl/blob/main/gurobi.json) and [`highs.json`](https://github.com/gwr3n/pyopl/blob/main/highs.json) templates containing the default settings exposed by the supported solver APIs. A JSON `null` value means “retain the backend default” and is not passed to the solver. When `solver_settings` is omitted, PyOPL uses its normal default solver configuration.
+The repository provides [`gurobi.json`](https://github.com/gwr3n/pyopl/blob/main/gurobi.json) and [`highs.json`](https://github.com/gwr3n/pyopl/blob/main/highs.json) settings templates. The HiGHS template lists every option field exposed by `highspy` 1.16.0 with its default value. JSON cannot encode infinity, so `"Infinity"` and `"-Infinity"` represent the numeric defaults for `objective_bound`, `objective_target`, and `time_limit`; PyOPL converts those values before passing them to `Highs.setOptionValue`. A JSON `null` in custom settings still means “retain the backend default.” When `solver_settings` is omitted, PyOPL uses its normal default solver configuration. The IDE loads `highs.json` from its current working directory; API callers pass its contents explicitly through `solver_settings`.
 
-Settings are backend-specific. Invalid names or values are reported by Gurobi or SciPy/HiGHS; PyOPL does not translate parameter names between solvers. Do not store credentials or secrets in solver settings files.
+Settings are backend-specific. Use HiGHS-native names such as `output_flag`, `simplex_iteration_limit`, and `mip_max_nodes`; set `presolve` to `"choose"`, `"on"`, or `"off"`, not a boolean. The former `disp` and `maxiter` names are not supported. Invalid names or values are reported by Gurobi or HiGHS; PyOPL does not translate parameter names between solvers. Do not store credentials or secrets in solver settings files.
 
 Backend time limits such as HiGHS `time_limit` and Gurobi `TimeLimit` apply to optimization after PyOPL has parsed, materialized, and compiled the OPL model. They are not whole-process limits. Large generic models with substantial indexed data may therefore spend significant time compiling before the solver timer starts. PyOPL reports the compilation and optimization phases separately in solver output.
 
@@ -708,7 +708,7 @@ The `solve` function returns a dictionary with the following keys:
 - `stats`: Solver statistics (MIPGap, Runtime, etc.)
 - `message`: Error or status messages
 
-Gurobi or SciPy/HiGHS output will be printed, including variable values and objective value if optimal.
+Gurobi or HiGHS output will be printed, including variable values and objective value if optimal.
 
 ### Batch solving
 
@@ -751,16 +751,16 @@ PyOPL can export the compiled Python source for a model, or lower a model to its
 
 ```python
 from pyopl.pyopl_core import OPLCompiler
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem_highs import export_linear_problem
 
 model_text = open("model.mod", encoding="utf-8").read()
 data_text = open("data.dat", encoding="utf-8").read()
 
-ast, python_code, data = OPLCompiler().compile_model(model_text, data_text, solver="scipy")
+ast, python_code, data = OPLCompiler().compile_model(model_text, data_text, solver="highs")
 open("model.py", "w", encoding="utf-8").write(python_code)
 
-problem = SciPyCSCCodeGenerator(ast, data).build_problem()
+problem = HighsCSCCodeGenerator(ast, data).build_problem()
 
 export_linear_problem(problem, "model.lp")
 export_linear_problem(problem, "model.mps")
@@ -776,7 +776,7 @@ python -m pyopl solve model.mod data.dat --out mps --out-file model.mps
 
 Solver specifics:
 - Gurobi (default): linear and mixed-integer models; uses indicator constraints for many logical patterns and big-M encodings with automatic tightening.
-- SciPy/HiGHS: linear programs and (if supported by your SciPy version) MIP. Integrality is passed to `linprog`; boolean/logic and implications are compiled via big-M with automatic tightening; some composite boolean antecedents for implications may be limited.
+- HiGHS: linear and mixed-integer programs through `highspy`; boolean/logic and implications are compiled via big-M with automatic tightening; some composite boolean antecedents for implications may be limited.
 
 Facilities for converting MPS/LP to OPL are available in repo [`mps-to-opl`](https://github.com/gwr3n/mps-to-opl).
 
@@ -785,9 +785,9 @@ Facilities for converting MPS/LP to OPL are available in repo [`mps-to-opl`](htt
 ## Limitations
 - Tuple types are data schemas and cannot be used as `dvar` types. Use scalar decision variables indexed by tuple sets instead.
 - Named tuple initialization (`#<field:value, ...>#`), tuple `key` fields, and sorted tuple sets are not yet supported.
-- SciPy/HiGHS backend:
+- HiGHS backend:
   - Some composite boolean implication antecedents are supported via big‑M and auxiliaries; prefer simple forms for robustness.
-  - Capabilities for larger MIP models depend on your SciPy/HiGHS version.
+  - Capabilities for larger MIP models depend on your HiGHS version.
 - Non-linear arithmetic over decision variables (e.g., `variable*variable`, `exp(x)` for decision variable `x`), piecewise linear, SOS, `<=>` bi-implication, global constraints, and user-defined functions are not supported.
 - Big-M tightening uses declared types, simple expression spans, and collected bounds; when information is insufficient, conservative fallback M is used.
 
@@ -886,7 +886,7 @@ PyOPL includes a graphical IDE for editing, running, and debugging OPL models an
 - Side-by-side model and data editors
 - Output panel for solver results, errors, messages, and detailed solver statistics (the 'stats' field)
 - File tree for easy switching between model and data
-- Solver selection (Gurobi or SciPy/HiGHS) — choose your preferred solver from the menu
+- Solver selection (Gurobi or HiGHS) — choose your preferred solver from the menu
 - Font size adjustment and modern UI
 
 ### Launching the IDE
@@ -897,9 +897,9 @@ You can launch the IDE from the command line or if installed as a package:
 python -m pyopl
 ```
 
-This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or SciPy/HiGHS as the solver from the IDE's menu bar. The IDE provides syntax highlighting, error diagnostics, and a modern UI for rapid prototyping and learning.
+This will open the PyOPL IDE window. You can open `.mod` (model) and `.dat` (data) files, edit them, and run your model directly from the interface. You can select either Gurobi or HiGHS as the solver from the IDE's menu bar. The IDE provides syntax highlighting, error diagnostics, and a modern UI for rapid prototyping and learning.
 
-When the IDE solves a model, it looks in the current working directory for `gurobi.json` when Gurobi is selected or `highs.json` when SciPy/HiGHS is selected. If the corresponding file exists, the IDE loads its top-level JSON object and passes it as the solver settings. If the file is absent, default solver settings apply. Invalid JSON or a top-level value other than an object stops the solve and reports an error.
+When the IDE solves a model, it looks in the current working directory for `gurobi.json` when Gurobi is selected or `highs.json` when HiGHS is selected. If the corresponding file exists, the IDE loads its top-level JSON object and passes it as the solver settings. If the file is absent, default solver settings apply. Invalid JSON or a top-level value other than an object stops the solve and reports an error.
 
 ### Collapsible model sections
 
@@ -954,7 +954,7 @@ python -m pyopl solve model.mod data.dat --solver highs --solver-settings highs.
 # Solve with backend-native Gurobi settings from a JSON file
 python -m pyopl solve model.mod data.dat --solver gurobi --solver-settings gurobi.json --out json
 
-# Export the compiled SciPy/HiGHS model to LP or MPS
+# Export the compiled HiGHS model to LP or MPS
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out lp --out-file tmp/lot_sizing.lp
 python -m pyopl solve opl_models/lot_sizing/lot_sizing.mod opl_models/lot_sizing/lot_sizing.dat --out mps --out-file tmp/lot_sizing.mps
 
@@ -987,7 +987,7 @@ python -m pyopl genai insight "$(cat opl_models/lot_sizing/lot_sizing.md)" --pro
 ```
 
 Notes:
-- LP/MPS export uses PyOPL's SciPy/HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
+- LP/MPS export uses PyOPL's HiGHS linear-problem lowering and HiGHS model writer. It requires `highspy` to be installed.
 - `compare` returns JSON with `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`. The IDE's Compare models dialog exposes the same concrete/abstract strategy selector. Concrete comparison first tries normalized graph isomorphism, then falls back to projected MILP comparison when models share binary decision variables but use different continuous auxiliary formulations. A successful fallback reports level `projected_milp_proven`.
 - The `genai insight` pipeline uses the configured LLM provider and model to produce a model and data draft (saved in `tmp/`), solves it with the selected solver, then asks the assistant to produce a lay-language summary and suggested next steps in Markdown. Environment credentials (e.g., `OPENAI_API_KEY`) must be set for remote providers.
 - Generated affine-observable mappings are grounded to the supplied finite model/data instances and must reference compiled column names. Manual and generated mappings are mutually exclusive; review generated JSON before using it for equivalence certification because an LLM can still propose an incomplete or semantically inappropriate correspondence.
@@ -1007,7 +1007,7 @@ PyOPL MCP exposes core PyOPL compiler/solver functionality as MCP tools so exter
   - **compare_model_strings_tool**: Compare two OPL models from strings using `strategy="concrete"` or `strategy="abstract"`, matching the IDE's Compare models workflow. Pass `observable_mapping_json` for a manual mapping, or set `generate_mapping=true` and choose `provider` and `model_name` to generate one. Returns `strategy`, `status`, `equivalent`, `level`, `reason`, `proof_steps`, and `counterexample`.
   - **generate_observable_mapping_tool**: Generate reusable affine-observable mapping JSON from two model strings and optional data strings. Pass the returned JSON to `compare_model_strings_tool` as `observable_mapping_json`.
 - **Not exposed as MCP tools**: File-path helpers such as `solve_files_tool` and `export_py_files_tool` are retained in the Python module for trusted local/internal use, but are not registered as MCP tools by default for security reasons.
-- **Solver mapping**: Default solver alias `highs` → SciPy/HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
+- **Solver mapping**: Default solver alias `highs` → HiGHS; `gurobi` → Gurobi. See the tool `solver` parameter for selection.
 - **Solver settings**: `solve_strings_tool` accepts an optional `solver_settings` JSON object containing backend-native parameter names and values. For example, use `{"time_limit": 60.0}` with `solver="highs"` or `{"TimeLimit": 60.0}` with `solver="gurobi"`. Unlike the IDE, the MCP tool does not discover settings files; the client supplies the object directly.
 - **Mapping boundary**: Generated mappings are grounded to supplied finite instances, not all future parameter valuations. The comparison path parses the mapping and rejects unknown compiled columns; generated output should still be reviewed before it is used as a proof input.
 - **Quick start (VS Code MCP example - .vscode/mcp.json)**:
@@ -1046,7 +1046,7 @@ Rhetor MCP exposes the Generative (GenAI) assistants, model discovery helpers, l
   - **ask_tool**: Send a feedback `prompt` about an existing model/data pair at `model_file` and `data_file` to the selected LLM provider. Returns text feedback or structured feedback metadata.
   - **insight_tool**: Generate model/data from a `prompt`, solve it, and request a lay-language Markdown summary. Accepts optional `provider`, `llm_model`, `iterations`, and `solver` arguments and returns artifact paths, generation statistics, solver results, feedback, and Markdown.
 - **Provider and model config**: `provider` aliases normalized (e.g., `gemini` → `google`). Pass `llm_model` and `provider` args to select backend.
-- **Solver config**: `insight_tool` accepts `highs` (mapped to the SciPy/HiGHS backend), `scipy`, or `gurobi` through its `solver` argument. The default is `highs`.
+- **Solver config**: `insight_tool` accepts `highs` or `gurobi` through its `solver` argument. The default is `highs`.
 - **Prerequisites**:
   - Set credentials for remote providers (e.g., `OPENAI_API_KEY`, `ELM_API_KEY`, `GEMINI_API_KEY`) or run an Ollama instance for `ollama` support.
   - `read_ide_editors_tool` and `write_ide_editors_tool` require a running Rhetor IDE; the other tools can run directly through the stdio MCP server.

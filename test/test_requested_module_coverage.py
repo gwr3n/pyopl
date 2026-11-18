@@ -6,10 +6,10 @@ from unittest.mock import patch
 
 from pyopl._index_safety import find_index_safety_issue
 from pyopl.gurobi_codegen import GurobiCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
 from pyopl.linear_problem import LinearProblem
 from pyopl.linear_problem_highs import _import_highspy, build_highs_model, export_linear_problem
 from pyopl.pyopl_core import OPLDataLexer, OPLDataParser, SemanticError
-from pyopl.scipy_codegen_csc import SciPyCSCCodeGenerator
 
 
 def number(value):
@@ -165,8 +165,8 @@ class TestParserAndGeneratorCoverage(unittest.TestCase):
             with self.subTest(operator=operator, value=value):
                 self.assertEqual(indicator(operator, number(value)), expected)
 
-    def test_scipy_bounds_for_negation_subtraction_and_unbounded_product(self):
-        generator = SciPyCSCCodeGenerator(
+    def test_highs_bounds_for_negation_subtraction_and_unbounded_product(self):
+        generator = HighsCSCCodeGenerator(
             {
                 "declarations": [],
                 "objective": {"type": "minimize", "expression": number(0)},
@@ -180,8 +180,8 @@ class TestParserAndGeneratorCoverage(unittest.TestCase):
         self.assertEqual(generator._linear_bounds_safe(binary(name("x"), "*", name("x"))), (None, None))
         self.assertEqual(generator._linear_bounds_safe({"type": "uminus", "value": None}), (None, None))
 
-    def test_scipy_boolean_disjuncts_flatten_and_reject_noncomparisons(self):
-        generator = SciPyCSCCodeGenerator(
+    def test_highs_boolean_disjuncts_flatten_and_reject_noncomparisons(self):
+        generator = HighsCSCCodeGenerator(
             {
                 "declarations": [],
                 "objective": {"type": "minimize", "expression": number(0)},

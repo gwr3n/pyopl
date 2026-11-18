@@ -13,8 +13,8 @@ from typing import Any, Callable, Optional
 
 from .pyopl_core import solve
 
-_CONFIG_NAMES = {"gurobi.json": "gurobi", "highs.json": "scipy"}
-_SOLVER_NAMES = {"scipy": "scipy", "highs": "scipy", "gurobi": "gurobi"}
+_CONFIG_NAMES = {"gurobi.json": "gurobi", "highs.json": "highs"}
+_SOLVER_NAMES = {"highs": "highs", "gurobi": "gurobi"}
 
 
 def _is_metadata_member(member: Path) -> bool:
@@ -159,15 +159,14 @@ def _solve_data_file(
     solver_name: str,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
-    public_solver = "highs" if solver_name == "scipy" else solver_name
     try:
         result = solve(str(model_path), str(data_path), solver=solver_name, solver_settings=settings)
-        return {"model": model_name, "data": data_name, "solver": public_solver, **_json_safe(result)}
+        return {"model": model_name, "data": data_name, "solver": solver_name, **_json_safe(result)}
     except Exception as error:
         return {
             "model": model_name,
             "data": data_name,
-            "solver": public_solver,
+            "solver": solver_name,
             "status": "ERROR",
             "message": str(error),
             "solution": {},
@@ -305,7 +304,7 @@ def batch_solve(
         models = [model.as_posix() for model, _ in batches]
         json_path = archive.with_suffix(".json")
         markdown_path = archive.with_suffix(".md")
-        records = _load_partial_records(json_path, "highs" if solver_name == "scipy" else solver_name)
+        records = _load_partial_records(json_path, solver_name)
         completed = {(record.get("model"), record.get("data")) for record in records}
         return _solve_batch_instances(
             archive,

@@ -1,3 +1,5 @@
+import json
+import math
 import unittest
 from collections import defaultdict
 from contextlib import redirect_stdout
@@ -6,7 +8,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import highspy
+
 from pyopl.gurobi_codegen import EPS, GurobiCodeGenerator
+from pyopl.highs_codegen import HighsCodeGenerator
+from pyopl.highs_codegen_base import HighsCodeGeneratorBase
+from pyopl.highs_codegen_csc import BOOL_EPS, HighsCSCCodeGenerator
 from pyopl.pyopl_core import (
     OPLCompiler,
     SemanticError,
@@ -26,12 +33,10 @@ from pyopl.pyopl_core import (
     _string_label_value_pair,
     _unquote_string_literal,
     export_model,
+    solve,
     solve_with_gurobi,
-    solve_with_scipy,
+    solve_with_highs,
 )
-from pyopl.scipy_codegen import SciPyCodeGenerator
-from pyopl.scipy_codegen_base import SciPyCodeGeneratorBase
-from pyopl.scipy_codegen_csc import BOOL_EPS, SciPyCSCCodeGenerator
 
 
 def _num(value):
@@ -62,7 +67,7 @@ class TestCoreHelperCoverage(unittest.TestCase):
             data_path = Path(tmpdir) / "model.dat"
             model_path.write_text(model, encoding="utf-8")
             data_path.write_text(data, encoding="utf-8")
-            for solve_backend in (solve_with_gurobi, solve_with_scipy):
+            for solve_backend in (solve_with_gurobi, solve_with_highs):
                 with self.subTest(solve_backend=solve_backend.__name__):
                     result = solve_backend(model_path, data_path)
 
@@ -75,7 +80,7 @@ class TestCoreHelperCoverage(unittest.TestCase):
             model_path = Path(tmpdir) / "model.mod"
             model_path.write_text("", encoding="utf-8")
 
-            for solve_backend in (solve_with_gurobi, solve_with_scipy):
+            for solve_backend in (solve_with_gurobi, solve_with_highs):
                 with self.subTest(solve_backend=solve_backend.__name__):
                     output = StringIO()
                     with patch("pyopl.pyopl_core.load_opl_model", return_value=(None, None, None)):
@@ -99,7 +104,7 @@ class TestCoreHelperCoverage(unittest.TestCase):
     def test_execution_error_hint_specializes_string_arithmetic(self):
         exc = TypeError("unsupported operand type(s) for -: 'str' and 'str'")
 
-        msg = _execution_error_with_hint(exc, "scipy")
+        msg = _execution_error_with_hint(exc, "highs")
 
         self.assertIn("string comparison", msg)
         self.assertIn("inside an algebraic expression", msg)
@@ -113,7 +118,7 @@ class TestCoreHelperCoverage(unittest.TestCase):
         self.assertIn("separate linear constraints", msg)
 
     def test_execution_error_hint_falls_back_to_backend_construct_hint(self):
-        msg = _execution_error_with_hint(RuntimeError("boom"), "scipy")
+        msg = _execution_error_with_hint(RuntimeError("boom"), "highs")
 
         self.assertIn("construct accepted by parsing", msg)
         self.assertIn("Simplify boolean logic", msg)
@@ -156,13 +161,96 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
         with TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "model.py"
-            written_path = export_model(model_code, "", "scipy", output_path)
+            written_path = export_model(model_code, "", "highs", output_path)
 
             self.assertEqual(written_path, output_path)
             exported = output_path.read_text(encoding="utf-8")
 
-        self.assertIn("linprog", exported)
+        self.assertIn("import highspy", exported)
+        self.assertNotIn("from scipy", exported)
         self.assertIn("var_names = ['x']", exported)
+
+    def test_generated_highspy_code_solves_maximization_mip(self):
+        model = """
+            dvar int+ x;
+            maximize 2 * x + 3;
+            subject to { x <= 4; }
+        """
+        _, code, _ = OPLCompiler().compile_model(model, solver="highs")
+
+        self.assertNotIn("scipy.", code)
+        self.assertNotIn("linprog", code)
+        self.assertIn("highs.run()", code)
+
+        results_container = {}
+        with redirect_stdout(StringIO()):
+            exec(code, {"results_container": results_container, "_pyopl_solver_settings": {"output_flag": False}})
+
+        result = results_container["highs_output"]
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["solution"]["x"], 4.0)
+        self.assertEqual(result["objective_value"], 11.0)
+        self.assertEqual(result["stats"]["mip_dual_bound"], 11.0)
+
+    def test_shipped_highs_settings_solve_with_native_options(self):
+        settings_path = Path(__file__).resolve().parents[1] / "highs.json"
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        defaults = highspy.Highs().getOptions()
+        option_fields = {name for name in dir(defaults) if not name.startswith("_")}
+        self.assertTrue(option_fields <= settings.keys(), option_fields - settings.keys())
+        self.assertTrue(all(value is not None for value in settings.values()))
+        for name in option_fields:
+            default = getattr(defaults, name)
+            expected = (
+                ("-Infinity" if default < 0 else "Infinity") if isinstance(default, float) and math.isinf(default) else default
+            )
+            self.assertEqual(settings[name], expected, name)
+        settings["output_flag"] = False
+        settings["mip_abs_gap"] = 0.25
+        model = "dvar int+ x; maximize x; subject to { x <= 4; }"
+        _, code, _ = OPLCompiler().compile_model(model, solver="highs")
+        results_container = {}
+        scope = {"results_container": results_container, "_pyopl_solver_settings": settings}
+
+        with redirect_stdout(StringIO()):
+            exec(code, scope)
+
+        self.assertEqual(results_container["highs_output"]["status"], "OPTIMAL")
+        self.assertEqual(results_container["highs_output"]["objective_value"], 4.0)
+        self.assertEqual(scope["highs"].getOptionValue("mip_abs_gap"), (highspy.HighsStatus.kOk, 0.25))
+        self.assertEqual(scope["highs"].getOptionValue("objective_bound"), (highspy.HighsStatus.kOk, math.inf))
+        self.assertEqual(scope["highs"].getOptionValue("objective_target"), (highspy.HighsStatus.kOk, -math.inf))
+
+    def test_highs_reports_mip_progress_in_objective_sense(self):
+        for objective, expected in (("maximize", 41.0), ("minimize -", -27.0)):
+            with self.subTest(objective=objective), TemporaryDirectory() as tmpdir:
+                model_path = Path(tmpdir) / "progress.mod"
+                model_path.write_text(
+                    f"range I = 1..10; dvar boolean x[I]; {objective} sum(i in I) i * x[i] + 7; "
+                    "subject to { sum(i in I) x[i] <= 4.5; }",
+                    encoding="utf-8",
+                )
+                events = []
+                with redirect_stdout(StringIO()):
+                    result = solve(
+                        model_path,
+                        solver="highs",
+                        progress_callback=events.append,
+                        solver_settings={"presolve": "off"},
+                    )
+
+                self.assertEqual(result["status"], "OPTIMAL")
+                self.assertEqual(result["objective_value"], expected)
+                self.assertTrue(events)
+                self.assertTrue(all(event["solver"] == "highs" and event["event"] == "mip" for event in events))
+                self.assertTrue(any(event["nodes"] >= 0 and event["runtime"] >= 0 for event in events))
+                self.assertTrue(
+                    any(
+                        event["lower_bound"] <= expected <= event["upper_bound"]
+                        for event in events
+                        if event["lower_bound"] != float("-inf") and event["upper_bound"] != float("inf")
+                    )
+                )
 
 
 class TestCodeGeneratorCoverage(unittest.TestCase):
@@ -176,16 +264,16 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         """
 
         _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
-        _, scipy_code, _ = OPLCompiler().compile_model(model, solver="scipy")
+        _, highs_code, _ = OPLCompiler().compile_model(model, solver="highs")
 
         self.assertIn("x = model.addVar(vtype=GRB.INTEGER, name='x', lb=-(2), ub=3)", gurobi_code)
         self.assertIn(
             "y = model.addVars(range(1, I + 1), vtype=GRB.CONTINUOUS, name='y', lb=1.5, ub=4)",
             gurobi_code,
         )
-        self.assertIn("var_names = ['x', 'y_1', 'y_2']", scipy_code)
-        self.assertIn("bounds = [[-2.0, 3.0], [1.5, 4.0], [1.5, 4.0]]", scipy_code)
-        self.assertIn("integrality = [1, 0, 0]", scipy_code)
+        self.assertIn("var_names = ['x', 'y_1', 'y_2']", highs_code)
+        self.assertIn("bounds = [[-2.0, 3.0], [1.5, 4.0], [1.5, 4.0]]", highs_code)
+        self.assertIn("integrality = [1, 0, 0]", highs_code)
 
     def test_explicit_dvar_domains_use_scalar_and_per_index_parameters(self):
         model = """
@@ -209,18 +297,18 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         """
 
         _, gurobi_code, _ = OPLCompiler().compile_model(model, data, solver="gurobi")
-        _, scipy_code, _ = OPLCompiler().compile_model(model, data, solver="scipy")
+        _, highs_code, _ = OPLCompiler().compile_model(model, data, solver="highs")
 
         self.assertIn("x = model.addVar(vtype=GRB.CONTINUOUS, name='x', lb=lower, ub=upper)", gurobi_code)
         self.assertIn("y = model.addVars(range(1, I + 1), vtype=GRB.INTEGER, name='y', lb=lb, ub=ub)", gurobi_code)
-        self.assertIn("bounds = [[-1.5, 2.5], [0.0, 1.0], [3.0, 4.0]]", scipy_code)
+        self.assertIn("bounds = [[-1.5, 2.5], [0.0, 1.0], [3.0, 4.0]]", highs_code)
 
         with TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "domain.mod"
             data_path = Path(tmpdir) / "domain.dat"
             model_path.write_text(model, encoding="utf-8")
             data_path.write_text(data, encoding="utf-8")
-            result = solve_with_scipy(model_path, data_path)
+            result = solve_with_highs(model_path, data_path)
 
         self.assertEqual(result["status"], "OPTIMAL")
         self.assertAlmostEqual(result["objective_value"], 7.5)
@@ -238,14 +326,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         """
 
         _, gurobi_code, _ = OPLCompiler().compile_model(model, solver="gurobi")
-        _, scipy_code, _ = OPLCompiler().compile_model(model, solver="scipy")
+        _, highs_code, _ = OPLCompiler().compile_model(model, solver="highs")
 
         self.assertIn("x = model.addVar(vtype=GRB.INTEGER, name='x', lb=max(0, -(2)), ub=3)", gurobi_code)
         self.assertIn(
             "y = model.addVars(range(1, I + 1), vtype=GRB.CONTINUOUS, name='y', lb=max(0, -(1.5)), ub=4)",
             gurobi_code,
         )
-        self.assertIn("bounds = [[0, 3.0], [0, 4.0], [0, 4.0]]", scipy_code)
+        self.assertIn("bounds = [[0, 3.0], [0, 4.0], [0, 4.0]]", highs_code)
 
     def test_gurobi_materializes_iterator_dependent_dvar_bounds(self):
         model = """
@@ -278,7 +366,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             gurobi_code,
         )
 
-    def test_scipy_solve_returns_mip_statistics(self):
+    def test_highs_solve_returns_mip_statistics(self):
         model = """
         dvar int+ x;
         maximize x;
@@ -288,14 +376,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             model_path = Path(tmpdir) / "mip.mod"
             model_path.write_text(model, encoding="utf-8")
-            result = solve_with_scipy(model_path, solver_settings={"disp": False})
+            result = solve_with_highs(model_path, solver_settings={"output_flag": False})
 
         self.assertEqual(result["status"], "OPTIMAL")
         self.assertEqual(result["stats"]["mip_node_count"], 0)
         self.assertEqual(result["stats"]["mip_gap"], 0.0)
         self.assertIsNotNone(result["stats"]["mip_dual_bound"])
 
-    def test_scipy_mip_dual_bound_uses_model_objective_sense_and_offset(self):
+    def test_highs_mip_dual_bound_uses_model_objective_sense_and_offset(self):
         for objective, constraint, expected in (
             ("maximize", "x <= 3", 10.0),
             ("minimize", "x >= 3", 10.0),
@@ -303,7 +391,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             with self.subTest(objective=objective), TemporaryDirectory() as tmpdir:
                 model_path = Path(tmpdir) / "mip.mod"
                 model_path.write_text(f"dvar int+ x; {objective} x + 7; subject to {{ {constraint}; }}", encoding="utf-8")
-                result = solve_with_scipy(model_path, solver_settings={"disp": False})
+                result = solve_with_highs(model_path, solver_settings={"output_flag": False})
 
                 self.assertEqual(result["status"], "OPTIMAL")
                 self.assertAlmostEqual(result["objective_value"], expected)
@@ -318,7 +406,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         }
 
         gurobi_code = GurobiCodeGenerator(ast).generate_code()
-        scipy_code = SciPyCSCCodeGenerator(ast).generate_code()
+        highs_code = HighsCSCCodeGenerator(ast).generate_code()
 
         self.assertIn("globals().get('_pyopl_solver_settings', {})", gurobi_code)
         self.assertIn("model.setParam(_param_name, _param_value)", gurobi_code)
@@ -336,18 +424,19 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("for constraint in model.getGenConstrs():", gurobi_code)
         self.assertIn("if constraint.IISGenConstr:", gurobi_code)
         self.assertIn("'kind': 'general_constraint'", gurobi_code)
-        self.assertIn("solver_options.update", scipy_code)
-        self.assertIn("options=solver_options", scipy_code)
-        self.assertIn("status_str = 'TIME_LIMIT'", scipy_code)
-        self.assertIn("has_incumbent = res.x is not None and res.fun is not None", scipy_code)
-        self.assertIn("status_str == 'TIME_LIMIT' and has_incumbent", scipy_code)
-        self.assertIn("print('Incumbent solution found:')", scipy_code)
-        self.assertIn("results['stats'] = stats", scipy_code)
-        self.assertIn("stats['mip_node_count']", scipy_code)
-        self.assertIn("stats['mip_dual_bound']", scipy_code)
-        self.assertIn("stats['mip_gap']", scipy_code)
+        self.assertIn("solver_options.update", highs_code)
+        self.assertIn("for option_name, option_value in solver_options.items()", highs_code)
+        self.assertIn("highs.setOptionValue(option_name, option_value)", highs_code)
+        self.assertIn("HighsModelStatus.kTimeLimit: 'TIME_LIMIT'", highs_code)
+        self.assertIn("has_incumbent = solution_values.value_valid", highs_code)
+        self.assertIn("status_str == 'TIME_LIMIT' and has_incumbent", highs_code)
+        self.assertIn("print('Incumbent solution found:')", highs_code)
+        self.assertIn("results['stats'] = stats", highs_code)
+        self.assertIn("stats['mip_node_count']", highs_code)
+        self.assertIn("stats['mip_dual_bound']", highs_code)
+        self.assertIn("stats['mip_gap']", highs_code)
 
-    def test_scipy_codegen_factory_rejects_unknown_mode(self):
+    def test_highs_codegen_factory_rejects_unknown_mode(self):
         ast = {
             "declarations": [],
             "objective": {"type": "minimize", "expression": {"type": "number", "value": 0}},
@@ -355,11 +444,11 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "Unknown mode: dense"):
-            SciPyCodeGenerator(ast, mode="dense")
+            HighsCodeGenerator(ast, mode="dense")
 
-    def test_scipy_codegen_base_initializes_shared_state_and_is_abstract(self):
+    def test_highs_codegen_base_initializes_shared_state_and_is_abstract(self):
         ast = {"declarations": []}
-        base = SciPyCodeGeneratorBase(ast, data_dict={"p": 1})
+        base = HighsCodeGeneratorBase(ast, data_dict={"p": 1})
 
         self.assertIs(base.ast, ast)
         self.assertEqual(base.data_dict, {"p": 1})
@@ -436,8 +525,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaisesRegex(NotImplementedError, "Unsupported function call 'unknown'"):
             gen._traverse_expression({"type": "funcall", "name": "unknown", "args": [{"type": "number", "value": 1}]}, {})
 
-    def test_scipy_csc_strict_rhs_and_vector_updates(self):
-        gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
+    def test_highs_csc_strict_rhs_and_vector_updates(self):
+        gen = HighsCSCCodeGenerator({"declarations": [], "constraints": []})
         gen.var_indices = {"x": 0, "y": 1}
         vector = [0.0, 0.0]
 
@@ -454,8 +543,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen._strict_adjusted_rhs("<", 5.0), ("<=", 5.0 - BOOL_EPS))
         self.assertEqual(gen._strict_adjusted_rhs("==", 2.0), ("==", 2.0))
 
-    def test_scipy_csc_variable_and_tuple_helpers(self):
-        gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
+    def test_highs_csc_variable_and_tuple_helpers(self):
+        gen = HighsCSCCodeGenerator({"declarations": [], "constraints": []})
         gen.tuple_types = {"Arc": [{"name": "from"}, {"name": "to"}]}
 
         first_name, first_idx = gen._add_variable("aux", lower=-1.0, upper=2.0)
@@ -478,8 +567,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "missing fields.*right.*unknown fields.*extra"):
             gen._tuple_array_records({1: {"left": 1, "extra": 2}}, ["left", "right"])
 
-    def test_scipy_csc_error_factories_return_semantic_errors(self):
-        gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
+    def test_highs_csc_error_factories_return_semantic_errors(self):
+        gen = HighsCSCCodeGenerator({"declarations": [], "constraints": []})
 
         self.assertIsInstance(gen._not_found_error("parameter", "p"), SemanticError)
         self.assertEqual(str(gen._not_found_error("parameter", "p")), "Semantic Error: Not found: parameter 'p'")
@@ -492,11 +581,11 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             "Semantic Error: Semantic Error: Unsupported operator in constraint: ~",
         )
 
-    def test_scipy_csc_indentation_and_symbolic_traversal(self):
-        gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
+    def test_highs_csc_indentation_and_symbolic_traversal(self):
+        gen = HighsCSCCodeGenerator({"declarations": [], "constraints": []})
         gen.indent_level = 2
         gen._add_code_line("x = 1")
-        self.assertEqual(gen.scipy_code_lines[-1], "        x = 1")
+        self.assertEqual(gen.highs_code_lines[-1], "        x = 1")
 
         gen.tuple_types = {"Arc": [{"name": "from"}, {"name": "to"}]}
         expr = {
@@ -525,9 +614,9 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen._traverse_expression(tuple_expr), "('A', 2)")
         self.assertEqual(gen._traverse_expression({"type": "unknown", "value": 1}), "")
 
-    def test_scipy_csc_flat_kv_rows_aux_and_tuple_set_helpers(self):
+    def test_highs_csc_flat_kv_rows_aux_and_tuple_set_helpers(self):
         ast = {"declarations": [{"type": "set_of_tuples", "name": "Arcs"}]}
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen._find_decl = lambda name, decl_type=None: ast["declarations"][0] if name == "Arcs" else None
 
         self.assertEqual(gen._convert_flat_kv_to_dict(["A", 1, "B", 2.5]), {"A": 1, "B": 2.5})
@@ -549,8 +638,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(gen.integrality[-2:], [1, 1])
         self.assertEqual(gen.aux_created[-2:], ["flag", "flag_1"])
 
-    def test_scipy_csc_bool_flatten_and_sum_term_filtering(self):
-        gen = SciPyCSCCodeGenerator({"declarations": [], "constraints": []})
+    def test_highs_csc_bool_flatten_and_sum_term_filtering(self):
+        gen = HighsCSCCodeGenerator({"declarations": [], "constraints": []})
         leaf1 = _cmp(_name("x"), "<=", _num(1))
         leaf2 = _cmp(_name("y"), ">=", _num(0))
         tree = {"type": "and", "left": leaf1, "right": {"type": "and", "left": leaf2, "right": "raw"}}
@@ -594,7 +683,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             [],
         )
 
-    def test_scipy_csc_big_m_and_bounds_helpers(self):
+    def test_highs_csc_big_m_and_bounds_helpers(self):
         ast = {
             "declarations": [
                 {"type": "dvar", "var_type": "boolean", "name": "b"},
@@ -602,7 +691,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
                 {"type": "dvar", "var_type": "float", "name": "y"},
             ]
         }
-        gen = SciPyCSCCodeGenerator(ast)
+        gen = HighsCSCCodeGenerator(ast)
         gen.var_names = ["x", "y", "b"]
         gen.var_indices = {"x": 0, "y": 1, "b": 2}
         gen._collected_lbs = {"x": 2.0, "y": -3.0}
@@ -629,8 +718,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             gen._big_m_for_comparison(comp)
 
-    def test_scipy_csc_linearize_or_and_expand_and_helpers(self):
-        gen = SciPyCSCCodeGenerator({"declarations": []})
+    def test_highs_csc_linearize_or_and_expand_and_helpers(self):
+        gen = HighsCSCCodeGenerator({"declarations": []})
         gen.var_names = ["x", "y"]
         gen.var_indices = {"x": 0, "y": 1}
         gen.bounds = [[0, 10], [0, 10]]
@@ -647,7 +736,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertGreaterEqual(len(gen.A_ub), 5)
         self.assertEqual(gen.b_ub[-1], -1.0)
 
-        gen2 = SciPyCSCCodeGenerator({"declarations": []})
+        gen2 = HighsCSCCodeGenerator({"declarations": []})
         gen2.var_names = ["x", "y"]
         gen2.var_indices = {"x": 0, "y": 1}
         gen2._eval_expr = lambda node, env=None: (
@@ -658,8 +747,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual(len(gen2.A_eq), 1)
         self.assertEqual(len(gen2.A_ub), 2)
 
-    def test_scipy_csc_linearize_or_not_equal_expands_strict_branches(self):
-        gen = SciPyCSCCodeGenerator({"declarations": []})
+    def test_highs_csc_linearize_or_not_equal_expands_strict_branches(self):
+        gen = HighsCSCCodeGenerator({"declarations": []})
         comparison = _cmp(_name("x"), "!=", _num(3))
         calls = []
         gen._linearize_or = lambda comparisons, env=None: calls.append((comparisons, env))
@@ -672,8 +761,8 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertEqual([call[0][0]["right"] for call in calls], [comparison["right"]] * 2)
         self.assertEqual([call[1] for call in calls], [env, env])
 
-    def test_scipy_csc_accumulate_sum_helpers(self):
-        gen = SciPyCSCCodeGenerator({"declarations": []})
+    def test_highs_csc_accumulate_sum_helpers(self):
+        gen = HighsCSCCodeGenerator({"declarations": []})
         gen.var_indices = {"x_1": 0, "x_2": 1, "z": 2}
         gen._iterate_iterators_dynamic = lambda iterators, env: [({"i": 1}, (1,)), ({"i": 2}, (2,))]
         gen._eval_expr = lambda expr, env=None: (
@@ -710,12 +799,12 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         }
         """
 
-        scipy_ast, scipy_code, scipy_data = OPLCompiler().compile_model(model, solver="scipy")
+        highs_ast, highs_code, highs_data = OPLCompiler().compile_model(model, solver="highs")
         gurobi_ast, gurobi_code, gurobi_data = OPLCompiler().compile_model(model, solver="gurobi")
 
-        scipy_gen = SciPyCSCCodeGenerator(scipy_ast, scipy_data)
-        scipy_gen.generate_code()
-        self.assertTrue(any(name.startswith("bool_") or name.startswith("cmp_") for name in scipy_gen.var_names))
+        highs_gen = HighsCSCCodeGenerator(highs_ast, highs_data)
+        highs_gen.generate_code()
+        self.assertTrue(any(name.startswith("bool_") or name.startswith("cmp_") for name in highs_gen.var_names))
         self.assertIn("quicksum", gurobi_code)
         self.assertEqual(gurobi_ast["objective"]["type"], "minimize")
         self.assertEqual(gurobi_data["w"], [1, 2])
@@ -732,14 +821,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         }
         """
 
-        scipy_ast, _scipy_code, scipy_data = OPLCompiler().compile_model(model, solver="scipy")
+        highs_ast, _highs_code, highs_data = OPLCompiler().compile_model(model, solver="highs")
         gurobi_ast, gurobi_code, _gurobi_data = OPLCompiler().compile_model(model, solver="gurobi")
 
-        scipy_gen = SciPyCSCCodeGenerator(scipy_ast, scipy_data)
-        scipy_gen.generate_code()
+        highs_gen = HighsCSCCodeGenerator(highs_ast, highs_data)
+        highs_gen.generate_code()
         self.assertIn("_cmp_sum_list", gurobi_code)
         self.assertIn("model.addConstr(b == _cmp_expr", gurobi_code)
-        self.assertTrue(any(name.startswith("cmp_") for name in scipy_gen.var_names))
+        self.assertTrue(any(name.startswith("cmp_") for name in highs_gen.var_names))
         self.assertTrue(any(constraint.get("op") == "==" for constraint in gurobi_ast["constraints"]))
 
     def test_gurobi_reified_cardinality_specialized_constraint_node_path(self):
@@ -922,14 +1011,14 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         gen._generate_data_declarations(data_dict)
         gurobi_data_code = "\n".join(gen.gurobi_code_lines)
 
-        scipy_gen = SciPyCSCCodeGenerator(ast, data_dict)
-        scipy_gen._generate_data_declarations(data_dict)
-        scipy_data_code = "\n".join(scipy_gen.scipy_code_lines)
+        highs_gen = HighsCSCCodeGenerator(ast, data_dict)
+        highs_gen._generate_data_declarations(data_dict)
+        highs_data_code = "\n".join(highs_gen.highs_code_lines)
 
         self.assertIn("demand =", gurobi_data_code)
         self.assertIn("(('A',), 1)", gurobi_data_code)
-        self.assertIn("demand =", scipy_data_code)
-        self.assertIn("('A',): {1: 1.0", scipy_data_code)
+        self.assertIn("demand =", highs_data_code)
+        self.assertIn("('A',): {1: 1.0", highs_data_code)
 
     def test_gurobi_data_declarations_cover_flattening_and_shape_errors(self):
         ast = {
@@ -1252,7 +1341,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         with self.assertRaisesRegex(SemanticError, "declared set 'Labels' has 2 elements"):
             bad_label_values._generate_data_declarations(bad_label_values.data_dict)
 
-    def test_scipy_data_declarations_cover_nested_and_structured_forms(self):
+    def test_highs_data_declarations_cover_nested_and_structured_forms(self):
         ast = {
             "declarations": [
                 {"type": "tuple_type", "name": "Node", "fields": [{"name": "id"}, {"name": "cost"}]},
@@ -1280,15 +1369,15 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
             "cube": {"P1": [[1, 2], [3, 4]], "P2": [[5, 6], [7, 8]]},
             "by_range": [9, 10],
         }
-        gen = SciPyCSCCodeGenerator(ast, data)
+        gen = HighsCSCCodeGenerator(ast, data)
         gen._generate_data_declarations(data)
-        code = "\n".join(gen.scipy_code_lines)
+        code = "\n".join(gen.highs_code_lines)
 
         self.assertIn("nodes = {1: {'id': 'A', 'cost': 1}", code)
         self.assertIn("cube = {'P1': [[1, 2], [3, 4]]", code)
         self.assertIn("by_range = [9, 10]", code)
 
-        bad = SciPyCSCCodeGenerator(ast, {"by_range": [1]})
+        bad = HighsCSCCodeGenerator(ast, {"by_range": [1]})
         with self.assertRaises(SemanticError):
             bad._generate_data_declarations(bad.data_dict)
 
