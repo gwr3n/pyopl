@@ -37,7 +37,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     sys.executable,
                     "-m",
                     "unittest",
-                    f"{__name__}.TestPyOPLIDETyping.test_text_padding_applies_to_editors_and_dialogs",
+                    "test.test_pyopl_ide_typing.TestPyOPLIDETyping.test_text_padding_applies_to_editors_and_dialogs",
                 ],
                 env={**os.environ, "PYOPL_PADDING_TEST_CHILD": "1"},
                 capture_output=True,

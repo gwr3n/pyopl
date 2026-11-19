@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Run the isolated IDE text-padding test reliably during unittest discovery.
+
 ### Changed
 
 ### Removed
