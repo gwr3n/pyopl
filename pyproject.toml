@@ -14,7 +14,8 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE.txt"]
 dependencies = [
   "sly>=0.5",
   "numpy>=1.26",
@@ -70,7 +71,7 @@ include = ["pyopl", "pyopl.*"]
 pyopl = ["*.pyi", "icon/mindset.png", "icon/attachments.png", "grammars/*", "opl_models/*"]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=77.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.black]
