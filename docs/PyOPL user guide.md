@@ -1076,21 +1076,19 @@ python -m pyopl.rhetor_mcp
 
 ---
 
-## Rhetor SKILL.md
+## Rhetor Agent
 
-The [`agent`](../agent/) folder provides a portable GitHub Copilot agent configuration for PyOPL modeling. It reproduces Rhetor's two principal authoring workflows directly in a Copilot-enabled workspace: generating a model/data pair from a problem description and reviewing or correcting an existing pair. Unlike Rhetor MCP, these skills do not call a separate GenAI tool. Copilot performs the formulation and review itself, then uses PyOPL MCP or the local compiler for validation.
+The [`agent`](../agent/) folder provides a portable GitHub Copilot agent configuration for PyOPL modeling. Its structure separates the agent profile from the workflow skills:
 
-The folder contains:
-
-- [`agent/.github/copilot-instructions.md`](../agent/.github/copilot-instructions.md): Shared modeling policy. It routes generation requests to `pyopl-generate` and review requests to `pyopl-ask`, defines clarification and assumption rules, requires literate models, and establishes compilation and reporting requirements.
-- [`pyopl-generate/SKILL.md`](../agent/.github/skills/pyopl-generate/SKILL.md): Generates a complete `.mod` and matching `.dat` file from a natural-language optimization problem. It looks up the PyOPL grammar, retrieves up to three relevant complete exemplars, formulates and documents the model, compiles it, and performs bounded syntax and semantic-alignment revisions. It can also run a representative solve when runtime evidence is useful.
-- [`pyopl-ask/SKILL.md`](../agent/.github/skills/pyopl-ask/SKILL.md): Reviews, explains, critiques, or minimally corrects an existing model/data pair. It reads the complete files, gathers only the validation evidence relevant to the question, and validates any proposed replacement pair. When behavior must be preserved, it can use model equivalence comparison rather than inferring equivalence from similar output.
+- [`agent/.github/agents/pyopl-modeller.agent.md`](../agent/.github/agents/pyopl-modeller.agent.md): The PyOPL Modeller agent profile, which defines shared modeling, clarification, validation, and tool-use guidance and routes tasks to the appropriate skill.
+- [`agent/.github/skills/pyopl-generate/SKILL.md`](../agent/.github/skills/pyopl-generate/SKILL.md): Generates a complete `.mod` and matching `.dat` file from a natural-language optimization problem. It looks up the PyOPL grammar, retrieves up to three relevant complete exemplars, formulates and documents the model, compiles it, and performs bounded syntax and semantic-alignment revisions. It can also run a representative solve when runtime evidence is useful.
+- [`agent/.github/skills/pyopl-ask/SKILL.md`](../agent/.github/skills/pyopl-ask/SKILL.md): Reviews, explains, critiques, or minimally corrects an existing model/data pair. It reads the complete files, gathers only the validation evidence relevant to the question, and validates any proposed replacement pair. When behavior must be preserved, it can use model equivalence comparison rather than inferring equivalence from similar output.
 
 ### Workflow and tool use
 
 Both skills treat the user's problem statement and files as the semantic source of truth. Compiler success proves that PyOPL accepts a model; it does not prove that the formulation matches the intended optimization problem. Likewise, a feasible or optimal solve is runtime evidence, not proof of modeling correctness.
 
-The agent uses PyOPL MCP tools according to the task:
+The skills use PyOPL MCP tools according to the task:
 
 - `read_pyopl_grammar_tool` supplies authoritative syntax guidance.
 - `export_py_strings_tool` performs compile-only validation of complete model/data strings.
@@ -1101,6 +1099,6 @@ If PyOPL MCP is unavailable, the instructions direct the agent to use the local 
 
 ### Using the agent folder
 
-Place the contents of [`agent/.github`](../agent/.github/) in the `.github` directory of the Copilot workspace where models will be authored. With PyOPL MCP configured, a request to formulate an optimization problem activates `pyopl-generate`; a request to explain, validate, debug, or correct an existing model activates `pyopl-ask`. Target model/data paths, additional exemplar folders, desired solve behavior, and consequential assumptions can be supplied in the request.
+Copy the contents of [`agent/.github`](../agent/.github/) into the `.github` directory of the Copilot workspace where models will be authored, preserving the `agents/pyopl-modeller.agent.md` and `skills/pyopl-generate/` and `skills/pyopl-ask/` paths. Select the PyOPL Modeller agent for the task. It routes optimization-problem formulation to `pyopl-generate` and questions, validation, debugging, or correction of existing models to `pyopl-ask`. Configure PyOPL MCP for grammar lookup and validation; the skills do not call Rhetor MCP. Target model/data paths, additional exemplar folders, desired solve behavior, and consequential assumptions can be supplied in the request.
 
 Generated or revised artifacts are presented as valid only after complete-pair compilation and an alignment review. If the bounded revision budget is exhausted, the agent retains the latest artifacts but reports the remaining compiler or alignment issue instead of claiming success.

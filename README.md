@@ -253,6 +253,12 @@ Choose **PyOPL: Solve with Gurobi** or **PyOPL: Solve with HiGHS** from the Comm
 
 
 
+## Rhetor Agent
+
+The [`agent`](../agent/) folder provides a portable GitHub Copilot agent configuration for PyOPL modeling.
+
+
+
 ## User Guide
 
 A comprehensive [User Guide](docs/PyOPL%20user%20guide.md) is available in the `docs` folder of the repository.
