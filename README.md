@@ -243,7 +243,7 @@ python -m pyopl.pyopl_mcp
 
 
 
-## VSCode extension
+## VS Code extension
 
 [pyopl](vsix/pyopl-0.1.0.vsix) is a VS Code extension for PyOPL `.mod` model files and `.dat` data files. It provides syntax highlighting, debounced compile diagnostics, and commands to solve a model with Gurobi or HiGHS.
 
