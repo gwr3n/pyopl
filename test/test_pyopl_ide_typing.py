@@ -3457,6 +3457,32 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(attachments.render_pdf.call_args.args[0], "/tmp/sketch.pdf")
         dummy._refresh_genai_attachment_list.assert_called_once()
 
+    def test_attachment_double_click_opens_one_dialog_after_event_and_cancel(self):
+        idle_callbacks = []
+        dummy = SimpleNamespace(
+            _genai_attachment_dialog_pending=False,
+            after_idle=idle_callbacks.append,
+            _genai_add_images=mock.Mock(),
+        )
+        dummy._genai_add_images.side_effect = lambda: self.assertEqual(
+            OPLIDE._on_genai_attachment_double_click(dummy, None), "break"
+        )
+
+        self.assertEqual(OPLIDE._on_genai_attachment_double_click(dummy, None), "break")
+        self.assertEqual(OPLIDE._on_genai_attachment_double_click(dummy, None), "break")
+        dummy._genai_add_images.assert_not_called()
+        self.assertEqual(len(idle_callbacks), 1)
+
+        idle_callbacks.pop(0)()
+        dummy._genai_add_images.assert_called_once_with()
+        self.assertEqual(OPLIDE._on_genai_attachment_double_click(dummy, None), "break")
+        self.assertEqual(len(idle_callbacks), 1)
+        idle_callbacks.pop(0)()
+        self.assertEqual(OPLIDE._on_genai_attachment_double_click(dummy, None), "break")
+        self.assertEqual(len(idle_callbacks), 1)
+        idle_callbacks.pop(0)()
+        self.assertEqual(dummy._genai_add_images.call_count, 2)
+
     def test_genai_prompt_uses_attachment_snapshot_after_list_clears(self):
         attachments = pyopl_ide_bootstrap._GenAIAttachments(paths=["/tmp/sketch.png"])
         dummy = SimpleNamespace(

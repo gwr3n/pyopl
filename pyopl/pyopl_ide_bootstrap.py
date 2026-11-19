@@ -3299,9 +3299,10 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_attachment_menu.add_command(label="Remove selected", command=self._genai_remove_selected_image)
         self.genai_attachment_menu.add_separator()
         self.genai_attachment_menu.add_command(label="Clear all", command=self._genai_clear_images)
+        self._genai_attachment_dialog_pending = False
         self.genai_attachment_listbox.bind("<Button-3>", self._on_genai_attachment_right_click)
-        self.genai_attachment_listbox.bind("<Double-Button-1>", lambda _event: self._genai_add_images())
-        self.genai_attachment_empty_icon.bind("<Double-Button-1>", lambda _event: self._genai_add_images())
+        self.genai_attachment_listbox.bind("<Double-Button-1>", self._on_genai_attachment_double_click)
+        self.genai_attachment_empty_icon.bind("<Double-Button-1>", self._on_genai_attachment_double_click)
         self.genai_attachment_empty_icon.bind("<Button-3>", self._on_genai_attachment_right_click)
         if sys.platform == "darwin":
             self.genai_attachment_listbox.bind("<Button-2>", self._on_genai_attachment_right_click)
@@ -3596,6 +3597,20 @@ class OPLIDE(TkinterDnD.Tk):
             for path in self._genai_attachments.paths:
                 self.genai_attachment_listbox.insert(tk.END, self._genai_attachments.list_label(path))
         self._refresh_genai_panel_state()
+
+    def _on_genai_attachment_double_click(self, _event: tk.Event) -> str:
+        if self._genai_attachment_dialog_pending:
+            return "break"
+        self._genai_attachment_dialog_pending = True
+
+        def open_dialog() -> None:
+            try:
+                self._genai_add_images()
+            finally:
+                self.after_idle(lambda: setattr(self, "_genai_attachment_dialog_pending", False))
+
+        self.after_idle(open_dialog)
+        return "break"
 
     def _genai_add_images(self) -> None:
         """Attach one or more visual files to the docked GenAI composer."""

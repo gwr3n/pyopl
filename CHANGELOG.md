@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Open the GenAI attachment picker only once per double-click, including when file selection is cancelled.
+
 ### Changed
 
 - Update the Rhetor SKILL.md guide section to document the PyOPL Modeller agent profile and its separate generation and review skills.
