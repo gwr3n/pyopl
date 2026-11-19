@@ -51,6 +51,7 @@ from .genai.pyopl_generative import (
     generative_indexed_observable_mapping,
     generative_observable_mapping,
 )
+from .import_model import convert_file as import_lp_mps_model
 from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
@@ -116,6 +117,7 @@ TOKEN_COLORS = {
 }
 
 MAX_HIGHLIGHT_CHARS = 10_000
+MAX_FOLD_SCAN_CHARS = 1_000_000
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
@@ -448,11 +450,16 @@ class _EditorGutter:
 
     def refresh(self) -> None:
         text = self.text_widget.get("1.0", "end-1c")
-        if self._fold_text != text:
-            self.folded_lines = _remap_folded_lines(self._fold_text, text, self.folded_lines)
-        self.fold_regions = _find_fold_regions(text)
-        self.folded_lines.intersection_update(self.fold_regions)
-        self._fold_text = text
+        if len(text) > MAX_FOLD_SCAN_CHARS:
+            self.fold_regions = {}
+            self.folded_lines.clear()
+            self._fold_text = ""
+        else:
+            if self._fold_text != text:
+                self.folded_lines = _remap_folded_lines(self._fold_text, text, self.folded_lines)
+            self.fold_regions = _find_fold_regions(text)
+            self.folded_lines.intersection_update(self.fold_regions)
+            self._fold_text = text
         self._update_width()
         self._apply_folds()
         self.schedule_redraw()
@@ -2218,6 +2225,7 @@ class OPLIDE(TkinterDnD.Tk):
         filemenu.add_command(label="Save As...", command=self.save_current_buffer_as)
         filemenu.add_command(label="Save Exemplar...", command=lambda: self.after_idle(self.save_exemplar))
         filemenu.add_separator()
+        filemenu.add_command(label="Import model...", command=self.import_model)
         filemenu.add_command(label="Export Model...", command=self.export_model)
         filemenu.add_separator()
         filemenu.add_command(label="Compare Models...", command=self.compare_models)
@@ -4699,8 +4707,8 @@ class OPLIDE(TkinterDnD.Tk):
     @staticmethod
     def _unique_timestamped_model_data_paths(tmp_dir: Path, file_stem: str, safe_timestamp: str) -> tuple[Path, Path]:
         base_path = tmp_dir / f"{file_stem}_{safe_timestamp}"
-        model_path = base_path.with_suffix(".mod")
-        data_path = base_path.with_suffix(".dat")
+        model_path = Path(f"{base_path}.mod")
+        data_path = Path(f"{base_path}.dat")
         suffix = 1
         while model_path.exists() or data_path.exists():
             model_path = Path(f"{base_path}_{suffix}.mod")
@@ -6155,6 +6163,104 @@ class OPLIDE(TkinterDnD.Tk):
         self._append_output(output, session_id)
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
+
+    def import_model(self) -> None:
+        """Import an LP/MPS file into timestamped model and data editors."""
+        if not self._ensure_no_active_operation("Import model"):
+            return
+        source = filedialog.askopenfilename(
+            filetypes=[("Optimization models", ("*.mps", "*.lp")), ("MPS files", "*.mps"), ("LP files", "*.lp")]
+        )
+        if not source:
+            return
+        if not self._resolve_editor_replacement("Import model", model=True, data=True):
+            return
+        tmp_dir = Path.cwd() / "tmp"
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        model_path, data_path = OPLIDE._unique_timestamped_model_data_paths(tmp_dir, Path(source).stem, timestamp)
+        dialog = tk.Toplevel(self)
+        dialog.title("Import model")
+        dialog.transient(self)
+        label = ttk.Label(dialog, text="Reading model...")
+        label.pack(padx=20, pady=(20, 8))
+        bar = ttk.Progressbar(dialog, mode="indeterminate", length=280)
+        bar.pack(padx=20, pady=8)
+        bar.start(10)
+        cancelled = threading.Event()
+        messages: queue.Queue[tuple[str, Any]] = queue.Queue()
+
+        def stop() -> None:
+            cancelled.set()
+            label.config(text="Stopping import...")
+            stop_button.config(state="disabled")
+
+        stop_button = ttk.Button(dialog, text="Stop", command=stop)
+        stop_button.pack(pady=(8, 20))
+        dialog.protocol("WM_DELETE_WINDOW", stop)
+
+        def show_error(exc: Exception) -> None:
+            detail = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).error("Import model failed", exc_info=(type(exc), exc, exc.__traceback__))
+            self.status_var.set(f"Import failed: {detail}")
+            messagebox.showerror("Import model", f"Import failed:\n{detail}")
+
+        def poll() -> None:
+            try:
+                while True:
+                    kind, payload = messages.get_nowait()
+                    if kind == "progress":
+                        if cancelled.is_set():
+                            continue
+                        stage, percent = payload
+                        if percent and str(bar.cget("mode")) == "indeterminate":
+                            bar.stop()
+                            bar.config(mode="determinate", maximum=100)
+                        label.config(text=stage)
+                        if percent:
+                            bar["value"] = percent
+                        continue
+                    dialog.destroy()
+                    if cancelled.is_set():
+                        model_path.unlink(missing_ok=True)
+                        data_path.unlink(missing_ok=True)
+                        self.status_var.set("Model import stopped")
+                    elif kind == "error":
+                        show_error(payload)
+                    else:
+                        try:
+                            self._open_model_path(str(model_path), confirm_changes=False)
+                            self._open_data_path(str(data_path), confirm_changes=False)
+                        except Exception as exc:
+                            show_error(exc)
+                        else:
+                            self.status_var.set(f"Imported model from {source}")
+                    return
+            except queue.Empty:
+                dialog.after(50, poll)
+
+        def convert() -> None:
+            try:
+                import_lp_mps_model(
+                    source,
+                    model_path,
+                    data_path,
+                    progress=lambda stage, percent: messages.put(("progress", (stage, percent))),
+                    stop_requested=cancelled.is_set,
+                )
+            except Exception as exc:
+                messages.put(("error", exc))
+            else:
+                messages.put(("done", None))
+
+        try:
+            threading.Thread(target=convert, daemon=True).start()
+        except Exception as exc:
+            dialog.destroy()
+            show_error(exc)
+            return
+        dialog.wait_visibility()
+        dialog.grab_set()
+        poll()
 
     def export_model(self) -> None:
         """Export the current model as Python, LP, or MPS using the selected solver/lowering."""

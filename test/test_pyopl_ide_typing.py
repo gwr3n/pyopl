@@ -499,12 +499,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
             for index, entry in enumerate(file_entries)
             if entry[0] == "command" and entry[1]["label"] == "Export Model..."
         )
-        self.assertEqual(file_entries[export_entry_index - 1], ("separator", {}))
-        self.assertEqual(file_entries[export_entry_index - 2][1]["label"], "Save Exemplar...")
+        self.assertEqual(file_entries[export_entry_index - 1][1]["label"], "Import model...")
+        self.assertEqual(file_entries[export_entry_index - 2], ("separator", {}))
+        self.assertEqual(file_entries[export_entry_index - 3][1]["label"], "Save Exemplar...")
         exemplar_command = next(
-            entry[1]["command"]
-            for entry in file_entries
-            if entry[0] == "command" and entry[1]["label"] == "Save Exemplar..."
+            entry[1]["command"] for entry in file_entries if entry[0] == "command" and entry[1]["label"] == "Save Exemplar..."
         )
         exemplar_command()
         dummy.after_idle.assert_called_once_with(dummy.save_exemplar)
@@ -855,6 +854,159 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(process.join.call_args_list, [mock.call(timeout=1.0), mock.call(timeout=1.0)])
         owner.join(timeout=0.1)
         self.assertEqual(process.join.call_args_list[-1], mock.call(timeout=0.1))
+
+    def test_import_model_creates_timestamped_pair_and_opens_both_editors(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "input.v1.lp"
+            source.write_text("min\n obj: + x\nst\n row: + x >= 1\nbounds\n x <= 3\nend\n")
+            host = mock.Mock()
+            host._ensure_no_active_operation.return_value = True
+            host._resolve_editor_replacement.return_value = True
+            dialog = mock.Mock()
+            bar = mock.MagicMock()
+            bar.cget.return_value = "indeterminate"
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "askopenfilename", return_value=str(source)),
+                mock.patch.object(pyopl_ide_bootstrap.Path, "cwd", return_value=Path(directory)),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Label"),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Progressbar", return_value=bar),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Button"),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
+            ):
+                OPLIDE.import_model(host)
+
+            host._resolve_editor_replacement.assert_called_once_with("Import model", model=True, data=True)
+            model = Path(host._open_model_path.call_args.args[0])
+            data = Path(host._open_data_path.call_args.args[0])
+            self.assertEqual(model.parent, Path(directory) / "tmp")
+            self.assertRegex(model.name, r"^input\.v1_\d{4}-\d\d-\d\d_\d\d-\d\d-\d\d\.mod$")
+            self.assertEqual(data.with_suffix(".mod"), model)
+            self.assertTrue(model.exists())
+            self.assertTrue(data.exists())
+            self.assertEqual(host._open_model_path.call_args.kwargs, {"confirm_changes": False})
+            bar.config.assert_called_with(mode="determinate", maximum=100)
+            bar.__setitem__.assert_any_call("value", 100)
+            dialog.destroy.assert_called_once_with()
+            showerror.assert_not_called()
+
+    def test_import_model_does_not_replace_editors_when_cancelled(self):
+        host = mock.Mock()
+        host._ensure_no_active_operation.return_value = True
+        host._resolve_editor_replacement.return_value = False
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.filedialog, "askopenfilename", return_value="input.lp"),
+            mock.patch.object(pyopl_ide_bootstrap, "import_lp_mps_model") as converter,
+        ):
+            OPLIDE.import_model(host)
+        converter.assert_not_called()
+        host._open_model_path.assert_not_called()
+
+    def test_import_model_reports_invalid_source_without_opening_editors(self):
+        with TemporaryDirectory() as directory:
+            host = mock.Mock()
+            host._ensure_no_active_operation.return_value = True
+            host._resolve_editor_replacement.return_value = True
+            dialog = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "askopenfilename", return_value="invalid.txt"),
+                mock.patch.object(pyopl_ide_bootstrap.Path, "cwd", return_value=Path(directory)),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+                mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Label"),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Progressbar", return_value=mock.MagicMock()),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Button"),
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", _ImmediateThread),
+            ):
+                OPLIDE.import_model(host)
+            host._open_model_path.assert_not_called()
+            host._open_data_path.assert_not_called()
+            self.assertFalse((Path(directory) / "tmp").exists())
+            self.assertIn("Expected a .mps or .lp file", showerror.call_args.args[1])
+
+    def test_import_stop_waits_for_worker_and_keeps_editors_unchanged(self):
+        threads = []
+
+        class DeferredThread:
+            def __init__(self, *, target, daemon):
+                self.target = target
+                threads.append(self)
+
+            def start(self):
+                pass
+
+        with TemporaryDirectory() as directory:
+            host = mock.Mock()
+            host._ensure_no_active_operation.return_value = True
+            host._resolve_editor_replacement.return_value = True
+            dialog = mock.Mock()
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "askopenfilename", return_value="input.mps"),
+                mock.patch.object(pyopl_ide_bootstrap.Path, "cwd", return_value=Path(directory)),
+                mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Label") as label,
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Progressbar", return_value=mock.MagicMock()),
+                mock.patch.object(pyopl_ide_bootstrap.ttk, "Button") as button,
+                mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", DeferredThread),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                OPLIDE.import_model(host)
+                dialog.after.assert_called_once()
+                button.call_args.kwargs["command"]()
+                self.assertEqual(dialog.protocol.call_args.args[0], "WM_DELETE_WINDOW")
+                label.return_value.config.assert_called_with(text="Stopping import...")
+                threads[0].target()
+                dialog.after.call_args.args[1]()
+
+            dialog.destroy.assert_called_once_with()
+            host._open_model_path.assert_not_called()
+            host._open_data_path.assert_not_called()
+            showerror.assert_not_called()
+            self.assertEqual(host.status_var.set.call_args.args[0], "Model import stopped")
+
+    def test_large_editor_skips_fold_scan_but_small_editor_still_scans(self):
+        gutter = object.__new__(pyopl_ide_bootstrap._EditorGutter)
+        gutter.text_widget = mock.Mock()
+        gutter.fold_regions = {1: 3}
+        gutter.folded_lines = {1}
+        gutter._fold_text = "previous"
+        gutter._update_width = mock.Mock()
+        gutter._apply_folds = mock.Mock()
+        gutter.schedule_redraw = mock.Mock()
+        gutter.text_widget.get.return_value = "x" * (pyopl_ide_bootstrap.MAX_FOLD_SCAN_CHARS + 1)
+        with mock.patch.object(pyopl_ide_bootstrap, "_find_fold_regions") as scan:
+            gutter.refresh()
+            scan.assert_not_called()
+        self.assertEqual(gutter.fold_regions, {})
+        self.assertEqual(gutter.folded_lines, set())
+
+        gutter.text_widget.get.return_value = "// § Section\nfoo;\n"
+        with mock.patch.object(pyopl_ide_bootstrap, "_find_fold_regions", return_value={1: 2}) as scan:
+            gutter.refresh()
+            scan.assert_called_once_with("// § Section\nfoo;\n")
+        self.assertEqual(gutter.fold_regions, {1: 2})
+
+    def test_session_restore_loads_oversized_data_without_fold_scan(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "large.dat"
+            content = "x" * (pyopl_ide_bootstrap.MAX_FOLD_SCAN_CHARS + 1)
+            source.write_text(content, encoding="utf-8")
+            editor = pyopl_ide_bootstrap._EditorBufferState()
+            widget = mock.Mock()
+            OPLIDE._restore_session_file(mock.Mock(), str(source), editor, widget)
+            widget.insert.assert_called_once_with(pyopl_ide_bootstrap.tk.END, content)
+            self.assertEqual(editor.path, str(source))
+
+    def test_session_restore_still_loads_small_files(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "small.dat"
+            source.write_text("x = 1;", encoding="utf-8")
+            editor = pyopl_ide_bootstrap._EditorBufferState()
+            widget = mock.Mock()
+            OPLIDE._restore_session_file(mock.Mock(), str(source), editor, widget)
+            widget.insert.assert_called_once_with(pyopl_ide_bootstrap.tk.END, "x = 1;")
+            self.assertEqual(editor.path, str(source))
 
     def test_export_model_dialog_supports_lp_and_mps(self):
         class DummyText:

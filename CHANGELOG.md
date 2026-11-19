@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show import progress in a responsive dialog with a Stop button for LP/MPS conversion.
+- Import LP and MPS models through the File menu into timestamped OPL model/data files in `tmp/` using HiGHS.
 - Accept a root folder as input to batch solving, including nested model folders and reports beside the folder.
 - Place Export Model in its own File menu section after the save actions.
 
 ### Fixed
 
+- Keep GUI startup responsive with large saved data files by skipping expensive fold scanning while still restoring their editor contents.
+- Keep large LP/MPS imports responsive by reading HiGHS matrix and column vectors once and wrapping generated data lines for the editor.
 - Stop CLI batch solving gracefully on Ctrl-C after the active instance, preserving resumable reports and exit status 130.
 - Open the GenAI attachment picker only once per double-click, including when file selection is cancelled.
 
