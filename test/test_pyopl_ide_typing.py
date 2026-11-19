@@ -1,5 +1,7 @@
 import os
 import queue
+import subprocess
+import sys
 import unittest
 from builtins import open as builtin_open
 from contextlib import redirect_stdout
@@ -26,6 +28,85 @@ class _ImmediateThread:
 
 
 class TestPyOPLIDETyping(unittest.TestCase):
+    def test_text_padding_applies_to_editors_and_dialogs(self):
+        # Isolate Tk's application-wide state from other GUI tests.
+        if not os.environ.get("PYOPL_PADDING_TEST_CHILD"):
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    f"{__name__}.TestPyOPLIDETyping.test_text_padding_applies_to_editors_and_dialogs",
+                ],
+                env={**os.environ, "PYOPL_PADDING_TEST_CHILD": "1"},
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            if "skipped=1" in result.stderr:
+                self.skipTest(result.stderr)
+            return
+
+        with (
+            mock.patch.object(OPLIDE, "_init_settings_storage"),
+            mock.patch.object(OPLIDE, "_load_settings", return_value={}),
+            mock.patch.object(OPLIDE, "_build_genai_model_menus_async"),
+            mock.patch.object(OPLIDE, "_load_session"),
+            mock.patch.object(OPLIDE, "_save_settings"),
+            mock.patch.object(pyopl_ide_bootstrap, "RhetorIDEBridge"),
+        ):
+            try:
+                app = OPLIDE()
+            except pyopl_ide_bootstrap.tk.TclError as exc:
+                self.skipTest(f"Tk display unavailable: {exc}")
+            try:
+                app.withdraw()
+                dialog = pyopl_ide_bootstrap.tk.Toplevel(app)
+                description = pyopl_ide_bootstrap.tk.Text(dialog)
+                listbox = pyopl_ide_bootstrap.tk.Listbox(dialog, highlightthickness=1)
+                listbox.pack()
+                listbox.insert("end", "Example")
+                preview = app._create_diff_preview_text(pyopl_ide_bootstrap.ttk.Frame(dialog))
+                self.assertEqual((int(preview.cget("padx")), int(preview.cget("pady"))), (8, 8))
+                padding = app.style.scaling.logical(5)
+                for widget in (app.model_text, app.data_text, app.output_text, app.genai_prompt_text, description):
+                    self.assertEqual((int(widget.cget("padx")), int(widget.cget("pady"))), (padding, padding))
+                app._show_solver_log_textbox()
+                log = app._solver_log_text
+                self.assertIsNotNone(log)
+                self.assertEqual(int(log.cget("highlightthickness")), 1)
+                for option in ("highlightbackground", "highlightcolor", "bg", "fg"):
+                    self.assertEqual(log.cget(option), app.output_text.cget(option))
+                for theme in ("flatly", "darkly"):
+                    app.set_theme(theme)
+                    for item_list in (app.request_listbox, app.genai_attachment_listbox, listbox):
+                        with self.subTest(theme=theme, item_list=item_list):
+                            self.assertEqual(int(item_list.cget("borderwidth")), padding)
+                            self.assertEqual(item_list.cget("relief"), "flat")
+                    dialog.update_idletasks()
+                    self.assertEqual(listbox.bbox(0)[:2], (padding + 1, padding + 1))
+                    listbox.selection_set(0)
+                    self.assertEqual((listbox.curselection(), listbox.get(0)), ((0,), "Example"))
+                    for option in ("highlightthickness", "highlightbackground", "highlightcolor", "bg", "fg"):
+                        with self.subTest(theme=theme, option=option):
+                            self.assertEqual(log.cget(option), app.output_text.cget(option))
+                    for widget in (
+                        app.model_text,
+                        app.data_text,
+                        app.output_text,
+                        app.genai_prompt_text,
+                        description,
+                        preview,
+                    ):
+                        with self.subTest(theme=theme, widget=widget):
+                            self.assertEqual((int(widget.cget("padx")), int(widget.cget("pady"))), (padding, padding))
+                app._restore_output_textbox()
+                self.assertIsNone(app._solver_log_text)
+                self.assertEqual(app.output_text.frame.winfo_manager(), "pack")
+            finally:
+                app.destroy()
+
     def test_short_text_dialog_waits_until_visible_before_grabbing_input(self):
         dialog = mock.Mock()
         dialog.wait_visibility.side_effect = lambda: setattr(dialog, "visible", True)
@@ -630,6 +711,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertEqual(listbox_options["font"], "TkDefaultFont")
             self.assertEqual(listbox_options["selectbackground"], "#cfe0ff")
             self.assertEqual(listbox_options["relief"], pyopl_ide_bootstrap.tk.FLAT)
+            self.assertNotIn("bd", listbox_options)
             self.assertEqual(listbox_options["highlightthickness"], 1)
             self.assertEqual(listbox_options["highlightbackground"], "#ced4da")
             self.assertEqual(listbox_options["highlightcolor"], "#ced4da")
@@ -2562,6 +2644,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         ):
             with self.subTest(orient=orient):
                 widget = mock.Mock()
+                widget.cget.return_value = "1"
                 scrollbar = mock.Mock()
                 callbacks = {}
                 jobs = {}
@@ -2573,31 +2656,59 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     jobs["hide"] = callback
                     return "hide"
 
+                idle_jobs = {}
+                idle_count = [0]
+
+                def schedule_idle(callback):
+                    job = f"idle-{idle_count[0]}"
+                    idle_count[0] += 1
+                    idle_jobs[job] = callback
+                    return job
+
+                def cancel_job(job):
+                    jobs.pop(job, None)
+                    idle_jobs.pop(job, None)
+
                 host = SimpleNamespace(
-                    after_idle=lambda callback: callback(),
+                    after_idle=schedule_idle,
                     after=schedule,
-                    after_cancel=lambda job: jobs.pop(job, None),
+                    after_cancel=cancel_job,
                 )
                 redraw = mock.Mock()
                 OPLIDE._overlay_scrollbar(host, widget, scrollbar, orient=orient, on_scroll=redraw)
 
                 update = widget.configure.call_args.kwargs[option]
+                idle_jobs.pop("idle-0")()
                 scrollbar.set.assert_called_once_with(0.0, 0.5)
                 scrollbar.place.assert_not_called()
                 update("0.0", "0.4")
                 scrollbar.place.assert_not_called()
                 update("0.25", "0.75")
+                scrollbar.place.assert_not_called()
+                idle_jobs.pop("idle-1")()
                 self.assertIs(scrollbar.place.call_args.kwargs["in_"], widget)
                 self.assertIn(
                     "relheight" if orient == pyopl_ide_bootstrap.tk.VERTICAL else "relwidth", scrollbar.place.call_args.kwargs
                 )
-                update("0.25", "0.6")
+                self.assertEqual(
+                    scrollbar.place.call_args.kwargs["x" if orient == pyopl_ide_bootstrap.tk.VERTICAL else "y"], -1
+                )
+                self.assertEqual(
+                    scrollbar.place.call_args.kwargs["y" if orient == pyopl_ide_bootstrap.tk.VERTICAL else "x"], 1
+                )
+                self.assertEqual(
+                    scrollbar.place.call_args.kwargs["height" if orient == pyopl_ide_bootstrap.tk.VERTICAL else "width"],
+                    -2,
+                )
+                update("0.3", "0.6")
                 scrollbar.place.assert_called_once()
                 jobs["hide"]()
                 scrollbar.place_forget.assert_called_once()
-                update("0.25", "0.6")
+                update("0.3", "0.6")
                 scrollbar.place.assert_called_once()
                 update("0.5", "0.75")
+                scrollbar.place.assert_called_once()
+                idle_jobs.pop("idle-2")()
                 self.assertEqual(scrollbar.place.call_count, 2)
                 update("0.0", "1.0")
                 self.assertEqual(scrollbar.place_forget.call_count, 2)
@@ -2663,9 +2774,15 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertEqual(dummy.style.configured["GenaiMode.TButton"]["font"], "TkDefaultFont")
         self.assertEqual(dummy.style.configured["GenaiModeActive.TButton"]["font"], "TkDefaultFont")
+        self.assertEqual(dummy.style.configured["Sidebar.TCheckbutton"]["indicatormargin"], (0, 0, 4, 0))
         self.assertEqual(dummy.style.configured["TEntry"], {"borderwidth": 1, "bordercolor": "#ced4da"})
         self.assertEqual(dummy.style.mapped["TEntry"]["bordercolor"], [("focus", "#ced4da")])
         self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
+        for orientation in ("Vertical", "Horizontal"):
+            style = dummy.style.configured[f"{orientation}.TScrollbar"]
+            self.assertEqual(style["troughcolor"], "#ffffff")
+            self.assertNotIn("fieldbackground", style)
+            self.assertNotIn(f"{orientation}.TScrollbar", dummy.style.mapped)
         self.assertNotIn("TNotebook.Tab", dummy.style.mapped)
         self.assertEqual(dummy.editor_notebook.calls[-1], {"style": "TNotebook", "padding": 0})
         for widget in (dummy.model_text, dummy.data_text, dummy.output_text, dummy.genai_prompt_text):
@@ -2674,6 +2791,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy.theme_var.value = "darkly"
         OPLIDE._apply_theme_colors(dummy)
         self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
+        for orientation in ("Vertical", "Horizontal"):
+            self.assertEqual(dummy.style.configured[f"{orientation}.TScrollbar"]["troughcolor"], "#2b3035")
 
     def test_populate_genai_model_menus_preserves_current_selection(self):
         class DummyVar:

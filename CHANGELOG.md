@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match Retrieve Exemplar list and description surfaces to the active IDE theme, with consistent thin borders on the list and search field.
 - Remove redundant section captions from Compare Models and use a thin, theme-matched results border.
 - Remove gray fills and borders from the solver progress chart while retaining visible theme-colored axes.
+- Add breathing room between the GenAI output checkbox and its label.
+- Keep the scrollable widget's thin border visible beside its overlay scrollbar.
+- Avoid scrollbar thumb jitter by keeping the overlay placed during scrolling.
+- Style ttkbootstrap's orientation-specific scrollbars and defer their first display until the thumb range is applied.
+- Keep scrollbar thumb centers and end caps uniformly colored using the theme's standard styling.
+- Blend the light-theme scrollbar trough into the editor surface so only its thumb is visible.
+- Restore internal padding in multiline text boxes throughout Rhetor.
+- Add matching internal spacing to lists while keeping their borders thin.
+- Keep the live solver output border and colors consistent with the final output box.
 - Keep GUI startup responsive with large saved data files by skipping expensive fold scanning while still restoring their editor contents.
 - Keep large LP/MPS imports responsive by reading HiGHS matrix and column vectors once and wrapping generated data lines for the editor.
 - Stop CLI batch solving gracefully on Ctrl-C after the active instance, preserving resumable reports and exit status 130.

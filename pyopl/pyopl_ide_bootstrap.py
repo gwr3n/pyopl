@@ -1949,6 +1949,11 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Styling (ttkbootstrap 'flatly' theme by default)
         self.style = tb.Style(theme="flatly")
+        text_padding = self.style.scaling.logical(5)
+        self.option_add("*Text.padX", text_padding, "widgetDefault")
+        self.option_add("*Text.padY", text_padding, "widgetDefault")
+        self.option_add("*Listbox.borderWidth", text_padding, "widgetDefault")
+        self.option_add("*Listbox.relief", tk.FLAT, "widgetDefault")
 
         self._set_icon()
         self._setup_menu()
@@ -3106,6 +3111,7 @@ class OPLIDE(TkinterDnD.Tk):
             fg="#212529",
             relief=tk.FLAT,
             bd=0,
+            highlightthickness=1,
         )
         self._replace_scrolled_text_vbar(self.output_text)
         self.output_text.pack(fill=tk.BOTH, expand=1)
@@ -3144,6 +3150,7 @@ class OPLIDE(TkinterDnD.Tk):
                 fg="#212529",
                 relief=tk.FLAT,
                 bd=0,
+                highlightthickness=1,
             )
             self._replace_scrolled_text_vbar(log_text)
             log_text.pack(fill=tk.BOTH, expand=1)
@@ -4553,7 +4560,6 @@ class OPLIDE(TkinterDnD.Tk):
             selectbackground=colors["list_select_bg"],
             selectforeground=colors["editor_fg"],
             relief=tk.FLAT,
-            bd=0,
             highlightthickness=1,
             highlightbackground=colors["inset_border"],
             highlightcolor=colors["inset_border"],
@@ -7681,36 +7687,68 @@ class OPLIDE(TkinterDnD.Tk):
     ) -> None:
         """Float a transient scrollbar above its scrollable widget."""
         view = widget.xview if orient == tk.HORIZONTAL else widget.yview
+        border = int(widget.cget("highlightthickness"))
         hide_job: Optional[str] = None
+        show_job: Optional[str] = None
         previous_first: Optional[float] = None
+        scrollbar_visible = False
 
         def hide() -> None:
-            nonlocal hide_job
+            nonlocal hide_job, scrollbar_visible
             hide_job = None
             scrollbar.place_forget()
+            scrollbar_visible = False
 
         def show() -> None:
-            nonlocal hide_job
+            nonlocal hide_job, show_job, scrollbar_visible
+            show_job = None
             if hide_job is not None:
                 self.after_cancel(hide_job)
-            if orient == tk.HORIZONTAL:
-                scrollbar.place(in_=widget, relx=0, rely=1, relwidth=1, anchor="sw")
-            else:
-                scrollbar.place(in_=widget, relx=1, rely=0, relheight=1, anchor="ne")
-            scrollbar.lift()
+            if not scrollbar_visible:
+                if orient == tk.HORIZONTAL:
+                    scrollbar.place(
+                        in_=widget,
+                        relx=0,
+                        rely=1,
+                        relwidth=1,
+                        width=-2 * border,
+                        anchor="sw",
+                        x=border,
+                        y=-border,
+                    )
+                else:
+                    scrollbar.place(
+                        in_=widget,
+                        relx=1,
+                        rely=0,
+                        relheight=1,
+                        height=-2 * border,
+                        anchor="ne",
+                        x=-border,
+                        y=border,
+                    )
+                scrollbar.lift()
+                scrollbar_visible = True
             hide_job = self.after(1200, hide)
 
         def update(first: float, last: float) -> None:
-            nonlocal previous_first, hide_job
+            nonlocal previous_first, hide_job, show_job, scrollbar_visible
             scrollbar.set(first, last)
             position = float(first)
             if previous_first is not None and position != previous_first and (position > 0 or float(last) < 1):
-                show()
+                if scrollbar_visible:
+                    show()
+                elif show_job is None:
+                    show_job = self.after_idle(show)
             elif position <= 0 and float(last) >= 1:
                 if hide_job is not None:
                     self.after_cancel(hide_job)
                     hide_job = None
+                if show_job is not None:
+                    self.after_cancel(show_job)
+                    show_job = None
                 scrollbar.place_forget()
+                scrollbar_visible = False
             previous_first = position
             if on_scroll is not None:
                 on_scroll()
@@ -7718,6 +7756,8 @@ class OPLIDE(TkinterDnD.Tk):
         def destroy(event: tk.Event) -> None:
             if event.widget == widget and hide_job is not None:
                 self.after_cancel(hide_job)
+            if event.widget == widget and show_job is not None:
+                self.after_cancel(show_job)
 
         if orient == tk.HORIZONTAL:
             widget.configure(xscrollcommand=update)
@@ -7758,8 +7798,6 @@ class OPLIDE(TkinterDnD.Tk):
                 "scrollbar_thumb_bg": "#495057",
                 "scrollbar_active_bg": "#5c636a",
                 "scrollbar_trough_bg": "#212529",
-                "ttk_scrollbar_bg": "#495057",
-                "ttk_scrollbar_active_bg": "#5c636a",
                 "ttk_scrollbar_trough_bg": "#2b3035",
             }
         return {
@@ -7782,9 +7820,7 @@ class OPLIDE(TkinterDnD.Tk):
             "scrollbar_thumb_bg": "#c1c9d0",
             "scrollbar_active_bg": "#adb5bd",
             "scrollbar_trough_bg": "#f1f3f5",
-            "ttk_scrollbar_bg": "#c1c9d0",
-            "ttk_scrollbar_active_bg": "#adb5bd",
-            "ttk_scrollbar_trough_bg": "#f1f3f5",
+            "ttk_scrollbar_trough_bg": "#ffffff",
         }
 
         pass
@@ -7814,23 +7850,25 @@ class OPLIDE(TkinterDnD.Tk):
             gutter = getattr(self, gutter_name, None)
             if gutter is not None:
                 gutter.configure_colors(colors["editor_bg"], colors["status_meta_fg"])
-        output = getattr(self, "output_text", None)
-        if output is not None:
-            output.config(
-                bg=colors["output_bg"],
-                fg=colors["output_fg"],
-                relief=tk.FLAT,
-                bd=0,
-                highlightthickness=1,
-                highlightbackground=colors["inset_border"],
-                highlightcolor=colors["inset_border"],
-            )
+        for widget_name in ("output_text", "_solver_log_text"):
+            output = getattr(self, widget_name, None)
+            if output is not None:
+                output.config(
+                    bg=colors["output_bg"],
+                    fg=colors["output_fg"],
+                    relief=tk.FLAT,
+                    bd=0,
+                    highlightthickness=1,
+                    highlightbackground=colors["inset_border"],
+                    highlightcolor=colors["inset_border"],
+                )
 
     @staticmethod
     def _apply_theme_styles(self: Any, colors: dict[str, str]) -> None:
         try:
             style = self.style
             style.configure("Editor.TFrame", background=colors["editor_bg"])
+            style.configure("Sidebar.TCheckbutton", indicatormargin=(0, 0, 4, 0))
             style.configure("TEntry", borderwidth=1, bordercolor=colors["inset_border"])
             style.map("TEntry", bordercolor=[("focus", colors["inset_border"])])
             style.configure("TNotebook.Tab", padding=(12, 6))
@@ -7883,21 +7921,19 @@ class OPLIDE(TkinterDnD.Tk):
                 foreground=colors["status_meta_fg"],
                 font=self.interface_button_font,
             )
-            style.configure(
-                "TScrollbar",
-                background=colors["ttk_scrollbar_bg"],
-                troughcolor=colors["ttk_scrollbar_trough_bg"],
-                bordercolor=colors["ttk_scrollbar_trough_bg"],
-                darkcolor=colors["ttk_scrollbar_bg"],
-                lightcolor=colors["ttk_scrollbar_bg"],
-                arrowcolor=colors["editor_fg"],
-                gripcount=0,
-            )
-            style.map(
-                "TScrollbar",
-                background=[("active", colors["ttk_scrollbar_active_bg"]), ("pressed", colors["ttk_scrollbar_active_bg"])],
-                arrowcolor=[("disabled", colors["sidebar_muted"]), ("active", colors["editor_fg"])],
-            )
+            for orientation in ("Vertical", "Horizontal"):
+                scrollbar_style = f"{orientation}.TScrollbar"
+                style.configure(
+                    scrollbar_style,
+                    background=colors["ttk_scrollbar_trough_bg"],
+                    troughcolor=colors["ttk_scrollbar_trough_bg"],
+                    bordercolor=colors["ttk_scrollbar_trough_bg"],
+                    darkcolor=colors["ttk_scrollbar_trough_bg"],
+                    lightcolor=colors["ttk_scrollbar_trough_bg"],
+                    relief=tk.FLAT,
+                    borderwidth=0,
+                    arrowsize=0,
+                )
         except Exception:
             pass
 
@@ -7951,7 +7987,6 @@ class OPLIDE(TkinterDnD.Tk):
                     selectbackground=colors["list_select_bg"],
                     selectforeground=colors["editor_fg"],
                     relief=tk.FLAT,
-                    bd=0,
                     highlightthickness=0,
                 )
         surface = getattr(self, "sessions_surface", None)
