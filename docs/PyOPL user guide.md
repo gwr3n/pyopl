@@ -45,7 +45,7 @@
 - [PyOPL CLI](#pyopl-cli)
 - [PyOPL MCP](#pyopl-mcp)
 - [Rhetor MCP](#rhetor-mcp)
-- [Rhetor SKILL.md](#rhetor-skillmd)
+- [Rhetor SKILL.md](#rhetor-agent)
 
 This guide describes the syntax and features of the Optimisation Programming Language (OPL) as implemented in PyOPL. PyOPL is a Python library and IDE for defining and solving optimization problems. The PyOPL compiler translates OPL models into code for use with either the Gurobi Optimizer or the open-source HiGHS solver. You can choose which solver to use. The HiGHS backend uses `highspy` directly for LP and MIP models. PyOPL also supports tuple types, sets of tuples, tuple field access, multi-indexed variables, advanced sum/forall constructs, and semantic error handling.
 
