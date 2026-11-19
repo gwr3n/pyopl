@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Accept a root folder as input to batch solving, including nested model folders and reports beside the folder.
+- Place Export Model in its own File menu section after the save actions.
 
 ### Fixed
 

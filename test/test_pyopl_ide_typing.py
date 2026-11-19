@@ -450,7 +450,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             "The request exceeds the model's context window. Reduce the model/data size or choose a model with a larger context window.",
         )
 
-    def test_save_exemplar_menu_item_follows_export_model(self):
+    def test_export_model_has_separate_menu_section_after_save_items(self):
         class FakeMenu:
             instances = []
 
@@ -490,14 +490,20 @@ class TestPyOPLIDETyping(unittest.TestCase):
         with mock.patch.object(pyopl_ide_bootstrap.tk, "Menu", FakeMenu):
             OPLIDE._setup_menu(dummy)
 
+        file_entries = FakeMenu.instances[1].entries
         file_labels = [entry[1]["label"] for entry in FakeMenu.instances[1].entries if entry[0] == "command"]
         open_index = file_labels.index("Open...")
         self.assertEqual(file_labels[open_index + 1], "Retrieve Exemplar...")
-        export_index = file_labels.index("Export Model...")
-        self.assertEqual(file_labels[export_index + 1], "Save Exemplar...")
+        export_entry_index = next(
+            index
+            for index, entry in enumerate(file_entries)
+            if entry[0] == "command" and entry[1]["label"] == "Export Model..."
+        )
+        self.assertEqual(file_entries[export_entry_index - 1], ("separator", {}))
+        self.assertEqual(file_entries[export_entry_index - 2][1]["label"], "Save Exemplar...")
         exemplar_command = next(
             entry[1]["command"]
-            for entry in FakeMenu.instances[1].entries
+            for entry in file_entries
             if entry[0] == "command" and entry[1]["label"] == "Save Exemplar..."
         )
         exemplar_command()
