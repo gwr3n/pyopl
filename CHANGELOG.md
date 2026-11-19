@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.9.0] - 2026-11-19
+
+### Added
+
 - Show import progress in a responsive dialog with a Stop button for LP/MPS conversion.
 - Import LP and MPS models through the File menu into timestamped OPL model/data files in `tmp/` using HiGHS.
 - Accept a root folder as input to batch solving, including nested model folders and reports beside the folder.
