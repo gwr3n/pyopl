@@ -247,7 +247,7 @@ python -m pyopl.pyopl_mcp
 
 [pyopl](vsix/pyopl-0.1.0.vsix) is a VS Code extension for PyOPL `.mod` model files and `.dat` data files. It provides syntax highlighting, debounced compile diagnostics, and commands to solve a model with Gurobi or HiGHS.
 
-Install and enable the VS Code Python extension, select a Python interpreter with **Python: Select Interpreter**, and install Rhetor/PyOPL in that environment. 
+Install the extension via the menu item `Install from VSIX...`, select a Python interpreter with **Python: Select Interpreter**, and install Rhetor/PyOPL in that environment. 
 
 Choose **PyOPL: Solve with Gurobi** or **PyOPL: Solve with HiGHS** from the Command Palette, then select the model and data files. Alternatively, select exactly one `.mod` and one `.dat` file together in the Explorer, right-click either selected file, and choose **PyOPL: Solve Selected Pair with Gurobi** or **PyOPL: Solve Selected Pair with HiGHS**.
 
