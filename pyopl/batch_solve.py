@@ -1,12 +1,14 @@
-"""Solve all model instances contained in a PyOPL batch archive."""
+"""Solve all model instances contained in a PyOPL batch ZIP or directory."""
 
 from __future__ import annotations
 
 import json
 import multiprocessing
+import signal
 import tempfile
 import time
 import zipfile
+from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from threading import Event
 from typing import Any, Callable, Optional
@@ -29,6 +31,23 @@ def _archive_members(batch_archive: zipfile.ZipFile) -> list[Path]:
         for info in batch_archive.infolist()
         if not info.is_dir() and not _is_metadata_member(Path(info.filename))
     ]
+
+
+def _batch_members(batch_path: Path, extraction_root: Path) -> list[Path]:
+    if batch_path.is_dir():
+        members = sorted(
+            (path.relative_to(batch_path) for path in batch_path.rglob("*") if path.is_file()),
+            key=lambda path: path.as_posix().lower(),
+        )
+        return [member for member in members if not _is_metadata_member(member)]
+    if batch_path.suffix.lower() != ".zip":
+        raise ValueError("Batch archive must have a .zip extension")
+    if not batch_path.is_file():
+        raise FileNotFoundError(f"Batch archive not found: {batch_path}")
+    with zipfile.ZipFile(batch_path) as batch_archive:
+        members = _archive_members(batch_archive)
+        _extract_safely(batch_archive, extraction_root)
+    return members
 
 
 def _model_batches(members: list[Path]) -> list[tuple[Path, list[Path]]]:
@@ -201,7 +220,7 @@ def _solve_batch_instances(
     json_path: Path,
     markdown_path: Path,
     progress_callback: Optional[Callable[[dict[str, Any]], None]],
-    stop_event: Optional[Event],
+    stop_event: Optional[Event | ProcessEvent],
 ) -> dict[str, Any]:
     total_instances = sum(len(data_files) for _, data_files in batches)
     solved_instances = len(completed)
@@ -278,32 +297,29 @@ def batch_solve(
     zip_path: str | Path,
     solver: str = "highs",
     progress_callback: Optional[Callable[[dict[str, Any]], None]] = None,
-    stop_event: Optional[Event] = None,
+    stop_event: Optional[Event | ProcessEvent] = None,
 ) -> dict[str, Any]:
     """Solve each folder containing one ``.mod`` and one or more ``.dat`` files."""
     archive = Path(zip_path)
-    if archive.suffix.lower() != ".zip":
-        raise ValueError("Batch archive must have a .zip extension")
-    if not archive.is_file():
-        raise FileNotFoundError(f"Batch archive not found: {archive}")
+    if archive.is_dir():
+        archive = archive.resolve()
+    is_directory = archive.is_dir()
     try:
         solver_name = _SOLVER_NAMES[solver.lower()]
     except (AttributeError, KeyError) as error:
         raise ValueError("Unsupported solver; choose highs or gurobi") from error
 
     with tempfile.TemporaryDirectory(prefix="pyopl-batch-") as temporary_directory:
-        extraction_root = Path(temporary_directory)
-        with zipfile.ZipFile(archive) as batch_archive:
-            members = _archive_members(batch_archive)
-            batches = _model_batches(members)
-            if not batches:
-                raise ValueError("Batch archive must contain a folder with exactly one .mod and at least one .dat file")
-            _extract_safely(batch_archive, extraction_root)
-            settings = _solver_configuration(members, extraction_root, solver_name)
+        extraction_root = archive if is_directory else Path(temporary_directory)
+        members = _batch_members(archive, extraction_root)
+        batches = _model_batches(members)
+        if not batches:
+            raise ValueError("Batch input must contain a folder with exactly one .mod and at least one .dat file")
+        settings = _solver_configuration(members, extraction_root, solver_name)
 
         models = [model.as_posix() for model, _ in batches]
-        json_path = archive.with_suffix(".json")
-        markdown_path = archive.with_suffix(".md")
+        json_path = archive.with_name(archive.name + ".json") if is_directory else archive.with_suffix(".json")
+        markdown_path = archive.with_name(archive.name + ".md") if is_directory else archive.with_suffix(".md")
         records = _load_partial_records(json_path, solver_name)
         completed = {(record.get("model"), record.get("data")) for record in records}
         return _solve_batch_instances(
@@ -322,14 +338,20 @@ def batch_solve(
         )
 
 
-def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> dict[str, Any]:
+def batch_solve_with_progress(
+    zip_path: str | Path, solver: str = "highs", stop_event: Optional[ProcessEvent] = None
+) -> dict[str, Any]:
     """Run batch solving with a small Tk progress window and a stop button."""
     import tkinter as tk
     from queue import Empty
     from tkinter import ttk
 
     events: multiprocessing.Queue = multiprocessing.Queue()
-    process = multiprocessing.Process(target=_batch_solve_worker, args=(str(zip_path), solver, events))
+    process = multiprocessing.Process(target=_batch_solve_worker, args=(str(zip_path), solver, events, stop_event))
+    batch_path = Path(zip_path)
+    if batch_path.is_dir():
+        batch_path = batch_path.resolve()
+    report_path = batch_path.with_name(batch_path.name + ".json") if batch_path.is_dir() else batch_path.with_suffix(".json")
 
     root = tk.Tk()
     root.title("PyOPL batch solve")
@@ -410,7 +432,10 @@ def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> di
                     if event["event"] == "stopped":
                         stop_button.configure(state="disabled")
                 elif event["event"] == "finished":
-                    show_close_button()
+                    if stop_event is not None and stop_event.is_set():
+                        close_window()
+                    else:
+                        show_close_button()
         except Empty:
             pass
         if process.is_alive() or not events.empty():
@@ -421,7 +446,6 @@ def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> di
     root.mainloop()
     process.join()
     if process.exitcode not in (0, None):
-        report_path = Path(zip_path).with_suffix(".json")
         if report_path.is_file():
             try:
                 report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -430,7 +454,6 @@ def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> di
             except (OSError, json.JSONDecodeError):
                 pass
         raise RuntimeError("Batch solve process was interrupted")
-    report_path = Path(zip_path).with_suffix(".json")
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -440,9 +463,15 @@ def batch_solve_with_progress(zip_path: str | Path, solver: str = "highs") -> di
     return report
 
 
-def _batch_solve_worker(zip_path: str, solver: str, events: multiprocessing.Queue) -> None:
-    stop_event = Event()
+def _batch_solve_worker(
+    zip_path: str, solver: str, events: multiprocessing.Queue, stop_event: Optional[ProcessEvent] = None
+) -> None:
+    previous_handler = None
+    if stop_event is not None:
+        previous_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        batch_solve(zip_path, solver=solver, progress_callback=events.put, stop_event=stop_event)
+        batch_solve(zip_path, solver=solver, progress_callback=events.put, stop_event=stop_event or Event())
     finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
         events.put({"event": "finished"})

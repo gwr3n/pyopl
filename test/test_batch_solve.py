@@ -1,5 +1,8 @@
 import json
+import multiprocessing
+import os
 import queue
+import signal
 import tempfile
 import time
 import unittest
@@ -119,11 +122,43 @@ class TestBatchSolve(unittest.TestCase):
 
         self.assertEqual(events.items, [{"event": "finished"}])
 
+    def test_worker_uses_parent_stop_event_and_preserves_partial_report(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch"
+            root.mkdir()
+            (root / "model.mod").write_text("model", encoding="utf-8")
+            for name in ("a.dat", "b.dat"):
+                (root / name).write_text("data", encoding="utf-8")
+
+            stop_event = multiprocessing.Event()
+            events = queue.Queue()
+            previous_handler = signal.getsignal(signal.SIGINT)
+
+            def fake_solve(*args, **kwargs):
+                self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+                stop_event.set()
+                return {"status": "OPTIMAL"}
+
+            with patch("pyopl.batch_solve.solve", side_effect=fake_solve) as solve_mock:
+                _batch_solve_worker(str(root), "highs", events, stop_event)
+
+            self.assertIs(signal.getsignal(signal.SIGINT), previous_handler)
+            self.assertEqual(solve_mock.call_count, 1)
+            self.assertEqual(
+                [item["data"] for item in json.loads((root.parent / "batch.json").read_text(encoding="utf-8"))["instances"]],
+                ["a.dat"],
+            )
+            received = []
+            while not events.empty():
+                received.append(events.get_nowait()["event"])
+            self.assertEqual(received[-2:], ["stopped", "finished"])
+
     def test_progress_window_handles_events_and_returns_report(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
-            archive = Path(temporary_directory) / "batch.zip"
+            archive = Path(temporary_directory) / "batch.v1"
+            archive.mkdir()
             report = {"instances": [{"status": "OPTIMAL"}]}
-            archive.with_suffix(".json").write_text(json.dumps(report), encoding="utf-8")
+            archive.with_name("batch.v1.json").write_text(json.dumps(report), encoding="utf-8")
             events = queue.Queue()
             for event in (
                 {"event": "started", "total": 2, "completed": 0},
@@ -356,6 +391,62 @@ class TestBatchSolve(unittest.TestCase):
 
             self.assertEqual(report["model"], "knapsack/model.mod")
             self.assertEqual(report["instances"][0]["data"], "knapsack/data.dat")
+
+    def test_solves_nested_folders_from_directory_and_resumes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch.v1"
+            model_folder = root / "production"
+            model_folder.mkdir(parents=True)
+            (model_folder / "model.mod").write_text("model", encoding="utf-8")
+            (model_folder / "b.dat").write_text("data", encoding="utf-8")
+            (model_folder / "a.dat").write_text("data", encoding="utf-8")
+            (model_folder / "highs.json").write_text('{"time_limit": 2}', encoding="utf-8")
+            ignored_folder = root / "invalid"
+            ignored_folder.mkdir()
+            (ignored_folder / "orphan.dat").write_text("data", encoding="utf-8")
+            (model_folder / "._extra.mod").write_text("metadata", encoding="utf-8")
+
+            with patch("pyopl.batch_solve.solve", return_value={"status": "OPTIMAL"}) as solve_mock:
+                report = batch_solve(root)
+                resumed = batch_solve(root)
+
+            self.assertEqual(report["archive"], "batch.v1")
+            self.assertEqual(report["models"], ["production/model.mod"])
+            self.assertEqual([record["data"] for record in report["instances"]], ["production/a.dat", "production/b.dat"])
+            self.assertEqual(report, resumed)
+            self.assertEqual(solve_mock.call_count, 2)
+            self.assertEqual(solve_mock.call_args.kwargs["solver_settings"], {"time_limit": 2})
+            self.assertEqual(Path(solve_mock.call_args.args[0]), (model_folder / "model.mod").resolve())
+            self.assertEqual(json.loads((root.parent / "batch.v1.json").read_text(encoding="utf-8")), report)
+            self.assertTrue((root.parent / "batch.v1.md").is_file())
+
+    def test_rejects_directory_without_model_data_pair_or_with_invalid_settings(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch"
+            root.mkdir()
+            with self.assertRaisesRegex(ValueError, "exactly one .mod"):
+                batch_solve(root)
+            (root / "model.mod").write_text("model", encoding="utf-8")
+            (root / "data.dat").write_text("data", encoding="utf-8")
+            (root / "highs.json").write_text("not json", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Invalid solver configuration"):
+                batch_solve(root)
+
+    def test_accepts_current_directory_as_root(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch"
+            root.mkdir()
+            (root / "model.mod").write_text("model", encoding="utf-8")
+            (root / "data.dat").write_text("data", encoding="utf-8")
+            previous_directory = Path.cwd()
+            try:
+                os.chdir(root)
+                with patch("pyopl.batch_solve.solve", return_value={"status": "OPTIMAL"}):
+                    report = batch_solve(".")
+            finally:
+                os.chdir(previous_directory)
+            self.assertEqual(report["model"], "model.mod")
+            self.assertTrue((root.parent / "batch.json").is_file())
 
     def test_recursively_solves_every_model_folder_and_continues_after_errors(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

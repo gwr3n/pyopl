@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Accept a root folder as input to batch solving, including nested model folders and reports beside the folder.
+
 ### Fixed
 
+- Stop CLI batch solving gracefully on Ctrl-C after the active instance, preserving resumable reports and exit status 130.
 - Open the GenAI attachment picker only once per double-click, including when file selection is cancelled.
 
 ### Changed

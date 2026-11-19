@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
+import signal
 import sys
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -199,17 +201,17 @@ def _build_parser() -> argparse.ArgumentParser:
     # batch-solve subcommand
     p_batch = subparsers.add_parser(
         "batch-solve",
-        help="Solve all instances in a ZIP archive",
+        help="Solve all instances in a ZIP archive or root folder",
         description=(
-            "Solve every archive folder containing exactly one .mod file and one or more .dat files. "
-            "Folders may be nested, and the archive may include highs.json or gurobi.json for solver settings. "
+            "Solve every ZIP archive or root folder directory containing exactly one .mod file and one or more .dat files. "
+            "Folders may be nested, and the input may include highs.json or gurobi.json for solver settings. "
             "Each .dat file is solved independently; processing continues when an instance fails."
         ),
     )
     p_batch.add_argument(
         "archive",
         help=(
-            "ZIP containing one or more folders, each with one .mod file and one or more .dat files, "
+            "ZIP or root folder containing one or more model folders, each with one .mod file and one or more .dat files, "
             "plus optional highs.json or gurobi.json"
         ),
     )
@@ -360,10 +362,15 @@ def _handle_solve(args: argparse.Namespace) -> int:
 
 
 def _handle_batch_solve(args: argparse.Namespace) -> int:
+    stop_event = multiprocessing.Event()
+    previous_handler = signal.signal(signal.SIGINT, lambda _signum, _frame: stop_event.set())
     try:
         with redirect_stdout(sys.stderr):
             solve_batch = batch_solve_with_progress if args.progress else batch_solve
-            report = solve_batch(args.archive, solver=args.solver)
+            report = solve_batch(args.archive, solver=args.solver, stop_event=stop_event)
+        if stop_event.is_set():
+            print("Batch solve interrupted; partial results saved in generated reports", file=sys.stderr)
+            return 130
         failed = any(
             "ERROR" in str(instance.get("status", "")).upper() or "FAIL" in str(instance.get("status", "")).upper()
             for instance in report.get("instances", [])
@@ -375,6 +382,8 @@ def _handle_batch_solve(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"Error during batch solve: {exc}", file=sys.stderr)
         return 1
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
 
 
 def _handle_batch_compare(args: argparse.Namespace) -> int:

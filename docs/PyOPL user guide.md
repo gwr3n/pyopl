@@ -712,9 +712,9 @@ Gurobi or HiGHS output will be printed, including variable values and objective 
 
 ### Batch solving
 
-Use `batch_solve` to solve multiple data instances from a ZIP archive. Each archive folder is an independent batch
-and must contain exactly one `.mod` file and at least one `.dat` file. Folders may be nested, so one archive can
-contain several model batches:
+Use `batch_solve` to solve multiple data instances from a ZIP archive or a root folder. Each model folder is an
+independent batch and must contain exactly one `.mod` file and at least one `.dat` file. Folders may be nested,
+so one input can contain several model batches:
 
 ```text
 batch.zip
@@ -732,15 +732,18 @@ filesystem metadata files are ignored as well.
 
 The optional `highs.json` or `gurobi.json` file supplies backend-native solver settings for the selected solver. An
 invalid configuration for the selected solver stops the batch with an error; a configuration for the other solver is
-ignored. The function writes `<archive>.json` and `<archive>.md` beside the input ZIP. The JSON report contains an
+ignored. The function writes `<name>.json` and `<name>.md` beside the input ZIP or root folder. The JSON report contains an
 `instances` list with `model`, `data`, `solver`, status, objective, statistics, and any error message. It also contains
-`models`, listing every processed model; the legacy singular `model` field is retained when the archive has only one
-model.
+`models`, listing every processed model; the legacy singular `model` field is retained when the input has only one
+model. For CLI batch solving, Ctrl-C requests a graceful stop after the current instance finishes; completed
+instances remain in the reports and a later run resumes from them. An interrupted CLI run exits with status 130.
 
 ```python
 from pyopl.batch_solve import batch_solve
 
 report = batch_solve("batch.zip", solver="highs")
+# Or solve the same layout directly from a folder:
+report = batch_solve("batch", solver="highs")
 for instance in report["instances"]:
     print(instance["model"], instance["data"], instance["status"])
 ```
@@ -933,7 +936,7 @@ PyOPL provides a command-line interface that complements the IDE for scripting, 
 - Subcommands:
   - `ide`: launch the IDE; enable verbose/diagnostic logging with `--debug` (explicit to this subcommand).
   - `solve <model.mod> [data.dat]`: compile and solve/export a model from the command line. Choose solver with `--solver highs|gurobi` and output format with `--out json|py|lp|mps` (use `--out-file` to write to a file; `lp` and `mps` require it). For a solve, pass a settings object from a file with `--solver-settings <file.json>`.
-  - `batch-solve <archive.zip>`: solve every folder containing exactly one `.mod` file and one or more `.dat` files, including nested folders, with `--solver highs|gurobi` (default: `highs`). Each data file is an independent instance; failed instances are recorded while other instances continue. Optional `highs.json` or `gurobi.json` files provide solver settings. Writes `.json` and `.md` reports beside the archive.
+  - `batch-solve <archive.zip|root-folder>`: solve every folder containing exactly one `.mod` file and one or more `.dat` files, including nested folders, with `--solver highs|gurobi` (default: `highs`). Each data file is an independent instance; failed instances are recorded while other instances continue. Optional `highs.json` or `gurobi.json` files provide solver settings. Writes `.json` and `.md` reports beside the input.
   - `batch-compare <left.zip> <right.zip>`: compare data instances with matching filenames across two batch archives using `--strategy abstract|concrete` (default: `abstract`). Each archive must contain exactly one model. Writes paired `.json` and `.md` reports beside the left archive.
   - `compare <left.mod> <right.mod>`: compare two models for MILP equivalence. Select `--strategy abstract|concrete` (default: `abstract`). Abstract comparison first compares model schemas and can use optional `--left-data` and `--right-data` to ground finite indexed schemas; concrete comparison compares the instantiated matrix models. Use `--observable-mapping <mapping.json>` for a manual affine-observable mapping, or `--generate-mapping` with `--provider <openai|elm|google|ollama>` and `--llm-model <model>` to generate one. Add `--mapping-out-file <path>` to save generated JSON, and use `genai generate-mapping` to generate a mapping without comparison. Use `--out-file <path>` to write the comparison JSON to a file.
   - `genai`: generative AI utilities with nested commands:
@@ -966,6 +969,7 @@ python -m pyopl batch-solve knapsack.zip --solver gurobi
 # (for example, production/model.mod + production/*.dat and
 # experiments/scenario/model.mod + experiments/scenario/*.dat)
 python -m pyopl batch-solve models.zip --solver highs
+python -m pyopl batch-solve models --solver highs
 
 # Compare matching data instances in two archives
 python -m pyopl batch-compare baseline.zip candidate.zip --strategy abstract

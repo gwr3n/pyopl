@@ -1,5 +1,9 @@
 import io
 import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -23,7 +27,9 @@ class TestCLI(unittest.TestCase):
 
         self.assertEqual(cm.exception.code, 0)
         help_text = " ".join(out_buf.getvalue().split())
-        self.assertIn("every archive folder containing exactly one .mod file and one or more .dat files", help_text)
+        self.assertIn(
+            "ZIP archive or root folder directory containing exactly one .mod file and one or more .dat files", help_text
+        )
         self.assertIn("Folders may be nested", help_text)
         self.assertIn("processing continues when an instance fails", help_text)
         self.assertIn("highs.json or gurobi.json", help_text)
@@ -86,14 +92,86 @@ class TestCLI(unittest.TestCase):
                 ret = pyopl_cli.main(["batch-solve", str(archive), "--solver", "gurobi"])
 
         self.assertEqual(ret, 0)
-        batch_mock.assert_called_once_with(str(archive), solver="gurobi")
+        batch_mock.assert_called_once()
+        self.assertEqual(batch_mock.call_args.args, (str(archive),))
+        self.assertEqual(batch_mock.call_args.kwargs["solver"], "gurobi")
+
+    def test_cli_batch_solve_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch"
+            root.mkdir()
+            (root / "model.mod").write_text("model", encoding="utf-8")
+            (root / "data.dat").write_text("data", encoding="utf-8")
+
+            with patch("pyopl.batch_solve.solve", return_value={"status": "OPTIMAL"}):
+                ret = pyopl_cli.main(["batch-solve", str(root)])
+
+            self.assertEqual(ret, 0)
+            self.assertEqual(json.loads((root.parent / "batch.json").read_text(encoding="utf-8"))["model"], "model.mod")
 
     def test_cli_batch_solve_progress(self):
         with patch("pyopl.pyopl_cli.batch_solve_with_progress", return_value={}) as progress_mock:
             ret = pyopl_cli.main(["batch-solve", "batch.zip", "--progress"])
 
         self.assertEqual(ret, 0)
-        progress_mock.assert_called_once_with("batch.zip", solver="highs")
+        progress_mock.assert_called_once()
+        self.assertEqual(progress_mock.call_args.args, ("batch.zip",))
+        self.assertEqual(progress_mock.call_args.kwargs["solver"], "highs")
+
+    def test_cli_batch_solve_ctrl_c_stops_after_current_instance_and_resumes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "batch"
+            root.mkdir()
+            (root / "model.mod").write_text("model", encoding="utf-8")
+            for name in ("a.dat", "b.dat"):
+                (root / name).write_text("data", encoding="utf-8")
+
+            previous_handler = signal.getsignal(signal.SIGINT)
+
+            def interrupted_solve(*args, **kwargs):
+                os.kill(os.getpid(), signal.SIGINT)
+                return {"status": "OPTIMAL"}
+
+            output = io.StringIO()
+            with patch("pyopl.batch_solve.solve", side_effect=interrupted_solve) as solve_mock, redirect_stderr(output):
+                code = pyopl_cli.main(["batch-solve", str(root)])
+
+            self.assertEqual(code, 130)
+            self.assertIs(signal.getsignal(signal.SIGINT), previous_handler)
+            self.assertEqual(solve_mock.call_count, 1)
+            self.assertIn("interrupted", output.getvalue().lower())
+            self.assertNotIn("Traceback", output.getvalue())
+            report_path = root.parent / "batch.json"
+            self.assertEqual(
+                [item["data"] for item in json.loads(report_path.read_text(encoding="utf-8"))["instances"]], ["a.dat"]
+            )
+            self.assertTrue((root.parent / "batch.md").is_file())
+            with patch("pyopl.batch_solve.solve", return_value={"status": "OPTIMAL"}) as resumed_solve:
+                self.assertEqual(pyopl_cli.main(["batch-solve", str(root)]), 0)
+            resumed_solve.assert_called_once()
+            self.assertEqual(
+                [item["data"] for item in json.loads(report_path.read_text(encoding="utf-8"))["instances"]],
+                ["a.dat", "b.dat"],
+            )
+
+    def test_cli_batch_progress_ctrl_c_sets_worker_stop_event(self):
+        def interrupted_progress(*args, stop_event, **kwargs):
+            os.kill(os.getpid(), signal.SIGINT)
+            self.assertTrue(stop_event.is_set())
+            return {"instances": []}
+
+        with patch("pyopl.pyopl_cli.batch_solve_with_progress", side_effect=interrupted_progress):
+            self.assertEqual(pyopl_cli.main(["batch-solve", "batch.zip", "--progress"]), 130)
+
+    def test_module_batch_solve_propagates_exit_status(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            result = subprocess.run(
+                [sys.executable, "-m", "pyopl", "batch-solve", str(Path(temporary_directory) / "missing.zip")],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 1)
 
     def test_cli_batch_solve_returns_nonzero_for_failed_instance(self):
         for status in ("ERROR", "FAILED", "EXECUTION_ERROR"):
