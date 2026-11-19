@@ -3,6 +3,7 @@ import queue
 import subprocess
 import sys
 import unittest
+import warnings
 from builtins import open as builtin_open
 from contextlib import redirect_stdout
 from datetime import datetime
@@ -55,7 +56,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(OPLIDE, "_load_session"),
             mock.patch.object(OPLIDE, "_save_settings"),
             mock.patch.object(pyopl_ide_bootstrap, "RhetorIDEBridge"),
+            warnings.catch_warnings(record=True) as caught_warnings,
         ):
+            warnings.simplefilter("always", DeprecationWarning)
             try:
                 app = OPLIDE()
             except pyopl_ide_bootstrap.tk.TclError as exc:
@@ -78,7 +81,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 self.assertEqual(int(log.cget("highlightthickness")), 1)
                 for option in ("highlightbackground", "highlightcolor", "bg", "fg"):
                     self.assertEqual(log.cget(option), app.output_text.cget(option))
-                for theme in ("flatly", "darkly"):
+                for theme in ("bootstrap-light", "bootstrap-dark"):
                     app.set_theme(theme)
                     for item_list in (app.request_listbox, app.genai_attachment_listbox, listbox):
                         with self.subTest(theme=theme, item_list=item_list):
@@ -101,11 +104,59 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     ):
                         with self.subTest(theme=theme, widget=widget):
                             self.assertEqual((int(widget.cget("padx")), int(widget.cget("pady"))), (padding, padding))
+                self._assert_dark_theme_surfaces(app)
                 app._restore_output_textbox()
                 self.assertIsNone(app._solver_log_text)
                 self.assertEqual(app.output_text.frame.winfo_manager(), "pack")
+                self.assertFalse(
+                    [
+                        warning
+                        for warning in caught_warnings
+                        if issubclass(warning.category, DeprecationWarning)
+                        and any(name in str(warning.message) for name in ("flatly", "darkly"))
+                    ]
+                )
             finally:
                 app.destroy()
+
+    def _assert_dark_theme_surfaces(self, app):
+        self.assertEqual(app.cget("bg"), app.style.colors.bg)
+        self.assertEqual(app.model_text.cget("bg"), app.style.colors.inputbg)
+        self.assertEqual(app.output_text.cget("bg"), app.style.colors.inputbg)
+        self.assertEqual(app.genai_prompt_text.cget("bg"), app.style.colors.inputbg)
+        self.assertEqual(app.request_listbox.cget("bg"), app.style.colors.inputbg)
+        self.assertEqual(app.style.lookup("Sidebar.TFrame", "background"), app.style.colors.bg)
+        self.assertEqual(app.model_text.cget("highlightbackground"), app.style.colors.border)
+        self.assertEqual(app.style.lookup("TEntry", "bordercolor"), app.style.colors.border)
+
+        comparison = pyopl_ide_bootstrap._ComparisonDialog(app)
+        comparison.open()
+        try:
+            comparison_root = comparison.dialog.winfo_children()[0]
+            result_frame = comparison_root.grid_slaves(row=2, column=0)[0]
+            result_text = result_frame.winfo_children()[0].winfo_children()[0]
+            self.assertEqual(result_text.cget("bg"), app.output_text.cget("bg"))
+            self.assertEqual(result_text.cget("highlightbackground"), app.style.colors.border)
+        finally:
+            comparison.close()
+        worker = mock.Mock()
+        worker.get_nowait.side_effect = queue.Empty()
+        with (
+            mock.patch.object(app, "_available_exemplars", return_value=[]),
+            mock.patch.object(pyopl_ide_bootstrap, "ExemplarRankingWorker", return_value=worker),
+        ):
+            existing_windows = set(app.winfo_children())
+            app.retrieve_exemplar()
+            try:
+                exemplar_dialog = (set(app.winfo_children()) - existing_windows).pop()
+                content = exemplar_dialog.grid_slaves(row=2, column=0)[0]
+                for column in (0, 1):
+                    frame = content.grid_slaves(row=0, column=column)[0]
+                    widget = frame.grid_slaves(row=0, column=0)[0]
+                    self.assertEqual(widget.cget("bg"), app.style.colors.inputbg)
+                    self.assertEqual(widget.cget("highlightbackground"), app.style.colors.border)
+            finally:
+                app._exemplar_search_cleanup(None)
 
     def test_short_text_dialog_waits_until_visible_before_grabbing_input(self):
         dialog = mock.Mock()
@@ -336,7 +387,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         host = SimpleNamespace(
             _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
-            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             _theme_palette=OPLIDE._theme_palette,
             genai_provider=None,
             genai_model=None,
@@ -673,7 +724,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _available_exemplars=lambda _dirs: [],
             _exemplar_search_cleanup=None,
             style=mock.Mock(),
-            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             interface_button_font="TkDefaultFont",
             _theme_palette=OPLIDE._theme_palette,
             _overlay_scrollbar=mock.Mock(),
@@ -721,7 +772,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertEqual(description_options["highlightbackground"], "#ced4da")
             self.assertEqual(entry.configure.call_args, mock.call(style="ExemplarSearchHint.TEntry"))
             host.style.configure.assert_called_once_with(
-                "ExemplarSearchHint.TEntry", foreground=OPLIDE._theme_palette("flatly")["sidebar_muted"]
+                "ExemplarSearchHint.TEntry", foreground=OPLIDE._theme_palette("bootstrap-light")["sidebar_muted"]
             )
             self.assertEqual(bindings["<Button-1>"](None), "break")
             entry.icursor.assert_called_with(0)
@@ -754,7 +805,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _ensure_no_active_operation=lambda action: True,
             _exemplar_search_cleanup=previous_cleanup,
             style=mock.Mock(),
-            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             interface_button_font="TkDefaultFont",
             _theme_palette=OPLIDE._theme_palette,
             _overlay_scrollbar=mock.Mock(),
@@ -2427,7 +2478,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             config_path = Path(tmpdir) / "settings.json"
             dummy = SimpleNamespace(
                 _config_path=config_path,
-                theme_var=DummyVar("flatly"),
+                theme_var=DummyVar("bootstrap-light"),
                 solver=DummyVar("highs"),
                 current_font_size=12,
                 verbose_llm_var=DummyVar(False),
@@ -2444,7 +2495,21 @@ class TestPyOPLIDETyping(unittest.TestCase):
 
         self.assertFalse(payload["display-solver-progress"])
         self.assertEqual(payload["solver"], "highs")
+        self.assertEqual(payload["theme"], "bootstrap-light")
         self.assertEqual(loaded, payload)
+
+    def test_saved_theme_names_are_migrated(self):
+        for saved, expected in (
+            ("flatly", "bootstrap-light"),
+            ("darkly", "bootstrap-dark"),
+            ("bootstrap-light", "bootstrap-light"),
+            ("bootstrap-dark", "bootstrap-dark"),
+            ("unknown", None),
+            ([], None),
+        ):
+            with self.subTest(saved=saved):
+                preferences = pyopl_ide_bootstrap._parse_ide_preferences({"theme": saved}, 12, False)
+                self.assertEqual(preferences.theme, expected)
 
     def test_initialize_preferences_keeps_valid_values_with_invalid_font_size(self):
         class DummyVar:
@@ -2484,7 +2549,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             theme, loaded = OPLIDE._initialize_preferences(dummy)
 
         self.assertIs(loaded, saved)
-        self.assertEqual(theme, "darkly")
+        self.assertEqual(theme, "bootstrap-dark")
         self.assertEqual(dummy.current_font_size, 12)
         self.assertEqual(dummy.solver.get(), "highs")
         self.assertFalse(dummy.display_solver_progress_var.get())
@@ -2754,7 +2819,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 pass
 
         dummy = SimpleNamespace(
-            theme_var=DummyVar("flatly"),
+            theme_var=DummyVar("bootstrap-light"),
             style=DummyStyle(),
             interface_font_family="TkDefaultFont",
             interface_button_font="TkDefaultFont",
@@ -2788,11 +2853,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
         for widget in (dummy.model_text, dummy.data_text, dummy.output_text, dummy.genai_prompt_text):
             self.assertEqual(widget.calls[-1]["highlightthickness"], 1)
 
-        dummy.theme_var.value = "darkly"
+        dummy.theme_var.value = "bootstrap-dark"
         OPLIDE._apply_theme_colors(dummy)
         self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
         for orientation in ("Vertical", "Horizontal"):
-            self.assertEqual(dummy.style.configured[f"{orientation}.TScrollbar"]["troughcolor"], "#2b3035")
+            self.assertEqual(dummy.style.configured[f"{orientation}.TScrollbar"]["troughcolor"], "#262b30")
 
     def test_populate_genai_model_menus_preserves_current_selection(self):
         class DummyVar:

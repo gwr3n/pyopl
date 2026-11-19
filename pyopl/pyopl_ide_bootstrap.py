@@ -69,6 +69,8 @@ from .semantic_error import SemanticError
 # Settings storage (same strategy as sample.py)
 APP_NAME = "rhetor"
 CONFIG_FILENAME = "settings.json"
+_LIGHT_THEME = "bootstrap-light"
+_DARK_THEME = "bootstrap-dark"
 _SESSION_ARTIFACT_UNSET = object()
 
 # Pillow (optional) for window icon
@@ -148,12 +150,14 @@ def _parse_ide_preferences(settings: dict[str, Any], font_size: int, debug: bool
     except (TypeError, ValueError):
         saved_font_size = font_size
     theme = settings.get("theme")
+    if isinstance(theme, str):
+        theme = {"flatly": _LIGHT_THEME, "darkly": _DARK_THEME}.get(theme, theme)
     solver = settings.get("solver")
     display_progress = settings.get("display-solver-progress", True)
     genai_method = settings.get("genai-method")
     return _IDEPreferences(
         font_size=saved_font_size,
-        theme=theme if isinstance(theme, str) and theme in ("flatly", "darkly") else None,
+        theme=theme if theme in (_LIGHT_THEME, _DARK_THEME) else None,
         solver=solver if solver in ("gurobi", "highs") else None,
         verbose_llm_logs=bool(settings.get("verbose-llm-logs", debug)),
         display_solver_progress=display_progress if isinstance(display_progress, bool) else True,
@@ -1892,7 +1896,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.interface_font_family = tkfont.nametofont("TkDefaultFont").actual("family")
         self.interface_button_font = "TkDefaultFont"
         self.solver = tk.StringVar(value="gurobi")  # 'gurobi' or 'highs'
-        self.theme_var = tk.StringVar(value="flatly")
+        self.theme_var = tk.StringVar(value=_LIGHT_THEME)
         self.show_genai_panel_var = tk.BooleanVar(value=True)
 
         # Solver process
@@ -1947,8 +1951,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         desired_theme, loaded_settings = self._initialize_preferences()
 
-        # Styling (ttkbootstrap 'flatly' theme by default)
-        self.style = tb.Style(theme="flatly")
+        self.style = tb.Style(theme=_LIGHT_THEME)
         text_padding = self.style.scaling.logical(5)
         self.option_add("*Text.padX", text_padding, "widgetDefault")
         self.option_add("*Text.padY", text_padding, "widgetDefault")
@@ -1966,7 +1969,7 @@ class OPLIDE(TkinterDnD.Tk):
         self._apply_theme_colors()
 
         # Apply saved theme after widgets exist
-        if desired_theme in ("flatly", "darkly") and desired_theme != self.theme_var.get():
+        if desired_theme in (_LIGHT_THEME, _DARK_THEME) and desired_theme != self.theme_var.get():
             self.set_theme(desired_theme)
 
         # Load previous IDE session if present in current working directory
@@ -2177,7 +2180,7 @@ class OPLIDE(TkinterDnD.Tk):
             if not ns_app:
                 return
 
-            appearance_name = b"NSAppearanceNameDarkAqua" if theme_name == "darkly" else b"NSAppearanceNameAqua"
+            appearance_name = b"NSAppearanceNameDarkAqua" if theme_name == _DARK_THEME else b"NSAppearanceNameAqua"
             objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_char_p]
             ns_appearance_name = objc.objc_msgSend(ns_string_class, sel_string_with_utf8, appearance_name)
             if not ns_appearance_name:
@@ -2313,16 +2316,16 @@ class OPLIDE(TkinterDnD.Tk):
         # Theme
         theme_menu = tk.Menu(settings_menu, tearoff=0)
         theme_menu.add_radiobutton(
-            label="Light (Flatly)",
+            label="Light (Bootstrap)",
             variable=self.theme_var,
-            value="flatly",
-            command=self._make_theme_cmd("flatly"),
+            value=_LIGHT_THEME,
+            command=self._make_theme_cmd(_LIGHT_THEME),
         )
         theme_menu.add_radiobutton(
-            label="Dark (Darkly)",
+            label="Dark (Bootstrap)",
             variable=self.theme_var,
-            value="darkly",
-            command=self._make_theme_cmd("darkly"),
+            value=_DARK_THEME,
+            command=self._make_theme_cmd(_DARK_THEME),
         )
         settings_menu.add_cascade(label="Theme", menu=theme_menu)
 
@@ -3869,7 +3872,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _configure_diff_preview_tags(self, text_widget: tk.Text) -> None:
         """Apply VS Code-like diff colors to the preview text widget."""
-        if self.theme_var.get() == "darkly":
+        if self.theme_var.get() == _DARK_THEME:
             bg = "#1f2329"
             fg = "#e6edf3"
             add_bg = "#12261b"
@@ -7597,7 +7600,7 @@ class OPLIDE(TkinterDnD.Tk):
     # --- Theme ---
     def set_theme(self, theme_name: str) -> None:
         """Switch ttkbootstrap theme and reapply widget colors."""
-        if theme_name not in ("flatly", "darkly"):
+        if theme_name not in (_LIGHT_THEME, _DARK_THEME):
             return
         self.theme_var.set(theme_name)
         try:
@@ -7777,28 +7780,28 @@ class OPLIDE(TkinterDnD.Tk):
 
     @staticmethod
     def _theme_palette(theme: str) -> dict[str, str]:
-        if theme == "darkly":
+        if theme == _DARK_THEME:
             return {
                 "root_bg": "#212529",
-                "editor_bg": "#2b3035",
-                "editor_fg": "#e9ecef",
-                "caret_fg": "#e9ecef",
-                "sidebar_bg": "#2b3035",
-                "output_bg": "#212529",
-                "output_fg": "#e9ecef",
+                "editor_bg": "#262b30",
+                "editor_fg": "#f8f9fa",
+                "caret_fg": "#f8f9fa",
+                "sidebar_bg": "#212529",
+                "output_bg": "#262b30",
+                "output_fg": "#f8f9fa",
                 "error_fg": "white",
                 "paned_bg": "#212529",
-                "sidebar_fg": "#e9ecef",
+                "sidebar_fg": "#f8f9fa",
                 "sidebar_muted": "#aab4be",
-                "list_select_bg": "#334155",
-                "inset_border": "#495057",
+                "list_select_bg": "#45484b",
+                "inset_border": "#45484b",
                 "status_bg": "#212529",
                 "status_fg": "#cfd6dd",
                 "status_meta_fg": "#8f9aa3",
                 "scrollbar_thumb_bg": "#495057",
                 "scrollbar_active_bg": "#5c636a",
                 "scrollbar_trough_bg": "#212529",
-                "ttk_scrollbar_trough_bg": "#2b3035",
+                "ttk_scrollbar_trough_bg": "#262b30",
             }
         return {
             "root_bg": "#f8f9fa",
@@ -8044,7 +8047,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Save current settings to disk."""
         try:
             payload = {
-                "theme": self.theme_var.get() if hasattr(self, "theme_var") else "flatly",
+                "theme": self.theme_var.get() if hasattr(self, "theme_var") else _LIGHT_THEME,
                 "font-size": int(getattr(self, "current_font_size", 12)),
                 "solver": (
                     self.solver.get() if hasattr(self, "solver") and self.solver.get() in ("gurobi", "highs") else "gurobi"

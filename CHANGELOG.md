@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restore internal padding in multiline text boxes throughout Rhetor.
 - Add matching internal spacing to lists while keeping their borders thin.
 - Keep the live solver output border and colors consistent with the final output box.
+- Use maintained ttkbootstrap themes and align dark surfaces across the main window and dialogs.
 - Keep GUI startup responsive with large saved data files by skipping expensive fold scanning while still restoring their editor contents.
 - Keep large LP/MPS imports responsive by reading HiGHS matrix and column vectors once and wrapping generated data lines for the editor.
 - Stop CLI batch solving gracefully on Ctrl-C after the active instance, preserving resumable reports and exit status 130.

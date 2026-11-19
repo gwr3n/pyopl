@@ -1188,7 +1188,7 @@ minimize x;
     def test_populate_diff_preview_text_tags_headers_and_changes(self):
         """Diff preview rendering writes headers and tags additions/removals/context."""
         text = ExistingDummyText()
-        dummy = SimpleNamespace(theme_var=DummyVar("flatly"))
+        dummy = SimpleNamespace(theme_var=DummyVar("bootstrap-light"))
         dummy._configure_diff_preview_tags = lambda text_widget: OPLIDE._configure_diff_preview_tags(dummy, text_widget)
 
         OPLIDE._populate_diff_preview_text(dummy, text, "same\nold\n", "same\nnew\n")
@@ -1744,7 +1744,7 @@ minimize x;
             _solver_progress_canvas=canvas,
             _solver_progress_rolling_seconds=60,
             _solver_progress_samples=[],
-            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             _theme_palette=OPLIDE._theme_palette,
             _display_solver_progress_enabled=lambda: True,
             _solver_tracks_progress=lambda: True,
@@ -1768,7 +1768,7 @@ minimize x;
         stats = mock.Mock()
         canvas = mock.Mock()
         dummy = SimpleNamespace(
-            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             interface_font_family="TkDefaultFont",
             _theme_palette=OPLIDE._theme_palette,
         )
