@@ -255,6 +255,8 @@ class TestPyOPLIDETyping(unittest.TestCase):
         host = SimpleNamespace(
             _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            _theme_palette=OPLIDE._theme_palette,
             genai_provider=None,
             genai_model=None,
             _active_operation=None,
@@ -282,11 +284,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
             mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
-            mock.patch.object(pyopl_ide_bootstrap.ttk, "LabelFrame", side_effect=lambda *_a, **_kw: mock.Mock()),
+            mock.patch.object(
+                pyopl_ide_bootstrap.ttk, "LabelFrame", side_effect=lambda *_a, **_kw: mock.Mock()
+            ) as label_frame,
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=lambda *_a, **_kw: mock.Mock()),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
-            mock.patch.object(pyopl_ide_bootstrap.scrolledtext, "ScrolledText", return_value=result_text),
+            mock.patch.object(pyopl_ide_bootstrap.scrolledtext, "ScrolledText", return_value=result_text) as scrolled_text,
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as showwarning,
             mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
             mock.patch.object(
@@ -298,6 +302,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=mock.Mock()) as thread_cls,
         ):
             OPLIDE.compare_models(host)
+            self.assertEqual([call.kwargs for call in label_frame.call_args_list], [{"padding": 10}, {"padding": 10}])
+            result_options = scrolled_text.call_args.kwargs
+            self.assertEqual(result_options["highlightthickness"], 1)
+            self.assertEqual(result_options["highlightbackground"], "#ced4da")
+            self.assertEqual(result_options["relief"], pyopl_ide_bootstrap.tk.FLAT)
             compare_button = buttons["Compare"]
             compare_button.command()
             showwarning.assert_called_once()
@@ -584,6 +593,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _exemplar_search_cleanup=None,
             style=mock.Mock(),
             theme_var=SimpleNamespace(get=lambda: "flatly"),
+            interface_button_font="TkDefaultFont",
             _theme_palette=OPLIDE._theme_palette,
             _overlay_scrollbar=mock.Mock(),
         )
@@ -615,6 +625,18 @@ class TestPyOPLIDETyping(unittest.TestCase):
             OPLIDE.retrieve_exemplar(host)
             bindings = {call.args[0]: call.args[1] for call in entry.bind.call_args_list}
             self.assertEqual(value[0], "Search exemplars")
+            self.assertEqual(dialog.configure.call_args, mock.call(bg="#f8f9fa"))
+            listbox_options = pyopl_ide_bootstrap.tk.Listbox.call_args.kwargs
+            self.assertEqual(listbox_options["font"], "TkDefaultFont")
+            self.assertEqual(listbox_options["selectbackground"], "#cfe0ff")
+            self.assertEqual(listbox_options["relief"], pyopl_ide_bootstrap.tk.FLAT)
+            self.assertEqual(listbox_options["highlightthickness"], 1)
+            self.assertEqual(listbox_options["highlightbackground"], "#ced4da")
+            self.assertEqual(listbox_options["highlightcolor"], "#ced4da")
+            description_options = pyopl_ide_bootstrap.tk.Text.call_args.kwargs
+            self.assertEqual(description_options["font"], "TkDefaultFont")
+            self.assertEqual(description_options["highlightthickness"], 1)
+            self.assertEqual(description_options["highlightbackground"], "#ced4da")
             self.assertEqual(entry.configure.call_args, mock.call(style="ExemplarSearchHint.TEntry"))
             host.style.configure.assert_called_once_with(
                 "ExemplarSearchHint.TEntry", foreground=OPLIDE._theme_palette("flatly")["sidebar_muted"]
@@ -651,6 +673,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _exemplar_search_cleanup=previous_cleanup,
             style=mock.Mock(),
             theme_var=SimpleNamespace(get=lambda: "flatly"),
+            interface_button_font="TkDefaultFont",
             _theme_palette=OPLIDE._theme_palette,
             _overlay_scrollbar=mock.Mock(),
             _available_exemplars=lambda roots: [exemplar],
@@ -2613,6 +2636,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def config(self, **kwargs):
                 self.calls.append(kwargs)
 
+            def configure(self, **kwargs):
+                self.config(**kwargs)
+
             def tag_configure(self, *_args, **_kwargs):
                 pass
 
@@ -2629,12 +2655,25 @@ class TestPyOPLIDETyping(unittest.TestCase):
             model_text=DummyWidget(),
             data_text=DummyWidget(),
             output_text=DummyWidget(),
+            genai_prompt_text=DummyWidget(),
+            editor_notebook=DummyWidget(),
         )
 
         OPLIDE._apply_theme_colors(dummy)
 
         self.assertEqual(dummy.style.configured["GenaiMode.TButton"]["font"], "TkDefaultFont")
         self.assertEqual(dummy.style.configured["GenaiModeActive.TButton"]["font"], "TkDefaultFont")
+        self.assertEqual(dummy.style.configured["TEntry"], {"borderwidth": 1, "bordercolor": "#ced4da"})
+        self.assertEqual(dummy.style.mapped["TEntry"]["bordercolor"], [("focus", "#ced4da")])
+        self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
+        self.assertNotIn("TNotebook.Tab", dummy.style.mapped)
+        self.assertEqual(dummy.editor_notebook.calls[-1], {"style": "TNotebook", "padding": 0})
+        for widget in (dummy.model_text, dummy.data_text, dummy.output_text, dummy.genai_prompt_text):
+            self.assertEqual(widget.calls[-1]["highlightthickness"], 1)
+
+        dummy.theme_var.value = "darkly"
+        OPLIDE._apply_theme_colors(dummy)
+        self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
 
     def test_populate_genai_model_menus_preserves_current_selection(self):
         class DummyVar:

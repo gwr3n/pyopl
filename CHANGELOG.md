@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Use ttkbootstrap's standard notebook tabs, including its tab borders and selected state.
+- Match Retrieve Exemplar list and description surfaces to the active IDE theme, with consistent thin borders on the list and search field.
+- Remove redundant section captions from Compare Models and use a thin, theme-matched results border.
+- Remove gray fills and borders from the solver progress chart while retaining visible theme-colored axes.
 - Keep GUI startup responsive with large saved data files by skipping expensive fold scanning while still restoring their editor contents.
 - Keep large LP/MPS imports responsive by reading HiGHS matrix and column vectors once and wrapping generated data lines for the editor.
 - Stop CLI batch solving gracefully on Ctrl-C after the active instance, preserving resumable reports and exit status 130.

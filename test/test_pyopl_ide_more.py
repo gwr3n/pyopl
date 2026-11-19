@@ -1744,16 +1744,48 @@ minimize x;
             _solver_progress_canvas=canvas,
             _solver_progress_rolling_seconds=60,
             _solver_progress_samples=[],
+            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            _theme_palette=OPLIDE._theme_palette,
             _display_solver_progress_enabled=lambda: True,
             _solver_tracks_progress=lambda: True,
         )
         OPLIDE._redraw_solver_progress_chart(dummy)
         self.assertTrue(any(call[0] == "text" and "Waiting" in call[2].get("text", "") for call in canvas.calls))
+        axes = [call for call in canvas.calls if call[0] == "line" and "width" not in call[2]]
+        self.assertEqual(len(axes), 2)
+        self.assertTrue(all(call[2]["fill"] == "#212529" for call in axes))
 
         canvas.calls.clear()
         dummy._solver_progress_samples = [{"lower_bound": 1, "upper_bound": 3}, {"lower_bound": 2, "upper_bound": 4}]
         OPLIDE._redraw_solver_progress_chart(dummy)
-        self.assertTrue(any(call[0] == "line" and call[2].get("width") == 2 for call in canvas.calls))
+        lines = [call for call in canvas.calls if call[0] == "line"]
+        self.assertTrue(any(call[2].get("width") == 2 for call in lines))
+        self.assertEqual(len([call for call in lines if "width" not in call[2]]), 2)
+
+    def test_solver_progress_window_uses_borderless_theme_surface(self):
+        window = mock.Mock()
+        header = mock.Mock()
+        stats = mock.Mock()
+        canvas = mock.Mock()
+        dummy = SimpleNamespace(
+            theme_var=SimpleNamespace(get=lambda: "flatly"),
+            interface_font_family="TkDefaultFont",
+            _theme_palette=OPLIDE._theme_palette,
+        )
+        with (
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=window),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=[header, stats]),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", return_value=mock.Mock()),
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Canvas", return_value=canvas) as canvas_factory,
+        ):
+            OPLIDE._create_solver_progress_window(dummy)
+
+        window.configure.assert_called_once_with(bg="#ffffff")
+        self.assertEqual(
+            canvas_factory.call_args.kwargs,
+            {"height": 260, "highlightthickness": 0, "bd": 0, "bg": "#ffffff"},
+        )
 
     def test_ensure_saved_unsaved_changes_and_close(self):
         """Close-time helpers save editor buffers, detect unsaved changes, and shut down cleanly."""

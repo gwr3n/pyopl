@@ -2989,7 +2989,7 @@ class OPLIDE(TkinterDnD.Tk):
         parent.add(editor_frame, stretch="always")
 
         # Notebook
-        self.editor_notebook = ttk.Notebook(editor_frame, style="Editor.TNotebook")
+        self.editor_notebook = ttk.Notebook(editor_frame)
         self.editor_notebook.pack(fill=tk.BOTH, expand=1)
 
         # Model editor
@@ -4494,6 +4494,8 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.grab_set()
         dialog.rowconfigure(2, weight=1)
         dialog.columnconfigure(0, weight=1)
+        colors = self._theme_palette(self.theme_var.get())
+        dialog.configure(bg=colors["root_bg"])
 
         search_var = tk.StringVar()
         search_entry = ttk.Entry(dialog, textvariable=search_var)
@@ -4532,27 +4534,53 @@ class OPLIDE(TkinterDnD.Tk):
 
         show_search_hint()
 
-        content_frame = ttk.Frame(dialog)
+        content_frame = ttk.Frame(dialog, style="Editor.TFrame")
         content_frame.grid(row=2, column=0, sticky="nsew", padx=12, pady=4)
         content_frame.rowconfigure(0, weight=1)
         content_frame.columnconfigure(0, weight=1, minsize=180)
         content_frame.columnconfigure(1, weight=2, minsize=180)
 
-        list_frame = ttk.Frame(content_frame)
+        list_frame = ttk.Frame(content_frame, style="Editor.TFrame")
         list_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         list_frame.rowconfigure(0, weight=1)
         list_frame.columnconfigure(0, weight=1)
-        exemplar_list = tk.Listbox(list_frame, exportselection=False)
+        exemplar_list = tk.Listbox(
+            list_frame,
+            exportselection=False,
+            font=self.interface_button_font,
+            bg=colors["editor_bg"],
+            fg=colors["editor_fg"],
+            selectbackground=colors["list_select_bg"],
+            selectforeground=colors["editor_fg"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["inset_border"],
+            highlightcolor=colors["inset_border"],
+        )
         exemplar_list.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=exemplar_list.yview)
         exemplar_list.configure(yscrollcommand=scrollbar.set)
         self._overlay_scrollbar(exemplar_list, scrollbar)
 
-        description_frame = ttk.Frame(content_frame)
+        description_frame = ttk.Frame(content_frame, style="Editor.TFrame")
         description_frame.grid(row=0, column=1, sticky="nsew")
         description_frame.rowconfigure(0, weight=1)
         description_frame.columnconfigure(0, weight=1)
-        description_text = tk.Text(description_frame, width=35, wrap="word", state="disabled")
+        description_text = tk.Text(
+            description_frame,
+            width=35,
+            wrap="word",
+            state="disabled",
+            font=self.interface_button_font,
+            bg=colors["editor_bg"],
+            fg=colors["editor_fg"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["inset_border"],
+            highlightcolor=colors["inset_border"],
+        )
         description_text.grid(row=0, column=0, sticky="nsew")
         description_scrollbar = ttk.Scrollbar(
             description_frame,
@@ -4562,7 +4590,9 @@ class OPLIDE(TkinterDnD.Tk):
         description_text.configure(yscrollcommand=description_scrollbar.set)
         self._overlay_scrollbar(description_text, description_scrollbar)
         empty_var = tk.StringVar()
-        ttk.Label(dialog, textvariable=empty_var).grid(row=3, column=0, sticky="w", padx=12, pady=4)
+        ttk.Label(dialog, textvariable=empty_var, style="SidebarSubtle.TLabel").grid(
+            row=3, column=0, sticky="w", padx=12, pady=4
+        )
 
         search = _ExemplarSearchState(ExemplarRankingWorker(models_dirs), exemplars)
 
@@ -5407,7 +5437,9 @@ class OPLIDE(TkinterDnD.Tk):
                 pass
 
     def _create_solver_progress_window(self) -> None:
+        colors = self._theme_palette(self.theme_var.get())
         window = tk.Toplevel(self)
+        window.configure(bg=colors["editor_bg"])
         window.title("Solve Progress")
         window.geometry("760x460")
         window.transient(self)
@@ -5424,7 +5456,7 @@ class OPLIDE(TkinterDnD.Tk):
         )
         ttk.Label(header, textvariable=status_var).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
-        canvas = tk.Canvas(window, height=260, highlightthickness=1, highlightbackground="#d6d8dc", bg="#ffffff")
+        canvas = tk.Canvas(window, height=260, highlightthickness=0, bd=0, bg=colors["editor_bg"])
         canvas.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 8))
         canvas.bind("<Configure>", lambda _event: self._redraw_solver_progress_chart())
 
@@ -5646,8 +5678,9 @@ class OPLIDE(TkinterDnD.Tk):
         pad_left, pad_right, pad_top, pad_bottom = 56, 20, 24, 38
         plot_w = max(1, width - pad_left - pad_right)
         plot_h = max(1, height - pad_top - pad_bottom)
-        canvas.create_line(pad_left, pad_top, pad_left, pad_top + plot_h, fill="#6b7280")
-        canvas.create_line(pad_left, pad_top + plot_h, pad_left + plot_w, pad_top + plot_h, fill="#6b7280")
+        axis_color = OPLIDE._theme_palette(self.theme_var.get())["editor_fg"]
+        canvas.create_line(pad_left, pad_top, pad_left, pad_top + plot_h, fill=axis_color)
+        canvas.create_line(pad_left, pad_top + plot_h, pad_left + plot_w, pad_top + plot_h, fill=axis_color)
         canvas.create_text(pad_left, 10, text="LB / UB", anchor="w", fill="#374151")
         canvas.create_text(
             pad_left + plot_w,
@@ -7769,6 +7802,7 @@ class OPLIDE(TkinterDnD.Tk):
             "insertbackground": colors["caret_fg"],
             "relief": tk.FLAT,
             "bd": 0,
+            "highlightthickness": 1,
             "highlightbackground": colors["inset_border"],
             "highlightcolor": colors["inset_border"],
         }
@@ -7787,6 +7821,7 @@ class OPLIDE(TkinterDnD.Tk):
                 fg=colors["output_fg"],
                 relief=tk.FLAT,
                 bd=0,
+                highlightthickness=1,
                 highlightbackground=colors["inset_border"],
                 highlightcolor=colors["inset_border"],
             )
@@ -7796,6 +7831,9 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             style = self.style
             style.configure("Editor.TFrame", background=colors["editor_bg"])
+            style.configure("TEntry", borderwidth=1, bordercolor=colors["inset_border"])
+            style.map("TEntry", bordercolor=[("focus", colors["inset_border"])])
+            style.configure("TNotebook.Tab", padding=(12, 6))
             style.configure("Sidebar.TFrame", background=colors["sidebar_bg"])
             style.configure(
                 "SidebarHeader.TLabel",
@@ -7890,6 +7928,7 @@ class OPLIDE(TkinterDnD.Tk):
             "insertbackground": colors["caret_fg"],
             "relief": tk.FLAT,
             "bd": 0,
+            "highlightthickness": 1,
             "highlightbackground": colors["inset_border"],
             "highlightcolor": colors["inset_border"],
         }
@@ -8791,7 +8830,7 @@ class _ComparisonDialog:
         )
         concrete_button.grid(row=0, column=3, sticky="ew")
 
-        path_frame = ttk.LabelFrame(root, text="Model files", padding=10)
+        path_frame = ttk.LabelFrame(root, padding=10)
         path_frame.grid(row=1, column=0, sticky="ew")
         path_frame.columnconfigure(1, weight=1)
         path_frame.columnconfigure(3, minsize=90)
@@ -8871,12 +8910,24 @@ class _ComparisonDialog:
         mapping_generate_button = ttk.Button(path_frame, text="Generate")
         mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
 
-        result_frame = ttk.LabelFrame(root, text="Equivalence result", padding=10)
+        result_frame = ttk.LabelFrame(root, padding=10)
         result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
         result_frame.rowconfigure(0, weight=1)
         result_frame.columnconfigure(0, weight=1)
 
-        result_text = scrolledtext.ScrolledText(result_frame, wrap=tk.WORD, height=14)
+        colors = self.parent._theme_palette(self.parent.theme_var.get())
+        result_text = scrolledtext.ScrolledText(
+            result_frame,
+            wrap=tk.WORD,
+            height=14,
+            bg=colors["output_bg"],
+            fg=colors["output_fg"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["inset_border"],
+            highlightcolor=colors["inset_border"],
+        )
         self.parent._replace_scrolled_text_vbar(result_text)
         result_text.grid(row=0, column=0, sticky="nsew")
         self.parent._overlay_scrollbar(result_text, result_text.vbar)
