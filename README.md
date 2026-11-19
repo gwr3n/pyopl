@@ -61,7 +61,7 @@ pip install .
 
 Dependencies are managed in `pyproject.toml`. Install development tools with `pip install -e ".[dev]"`.
 
-PyOPL requires Python 3.10+
+PyOPL requires Python 3.11+
 
 You can use either Gurobi or HiGHS as the solver. Both solvers are selectable in the API and the Rhetor IME. PyOPL provides robust support for tuple/nested tuple data, advanced boolean logic, implication, and field access in both models and data files.
 

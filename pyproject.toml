@@ -6,11 +6,10 @@ authors = [
   { name = "Roberto Rossi", email = "robros@gmail.com" },
 ]
 readme = "RHETOR.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -23,9 +22,9 @@ dependencies = [
   "sympy>=1.14",
   "gurobipy>=11.0",
   "highspy>=1.16",
-  "Pillow>=10",
+  "Pillow>=13",
   "PyMuPDF>=1.24",
-  "ttkbootstrap>=1.14,<2",
+  "ttkbootstrap>=2,<3",
   "tkinterdnd2>=0.4.3",
   "platformdirs>=4.1",
   "openai>=1.99",
@@ -36,13 +35,13 @@ dependencies = [
   "sentence-transformers>=5.1.1",
   "tf-keras>=2.16.0",
   "tiktoken>=0.12.0",
-  "mcp>=1.28.1,<2",
+  "mcp>=1.30.0,<2",
   "networkx>=3.4",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "black",
+  "black>=26.10.1",
   "ruff",
   "flake8",
   "mypy",
@@ -76,7 +75,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.black]
 line-length = 127
-target-version = ["py310", "py311", "py312", "py313"]
+target-version = ["py311", "py312", "py313"]
 exclude = '''
 /(
   \.git
@@ -104,7 +103,7 @@ omit = [
 
 [tool.ruff]
 line-length = 300
-target-version = "py39"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Core Flake8 rules + import sorting
