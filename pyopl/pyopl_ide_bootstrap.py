@@ -450,6 +450,9 @@ class _EditorGutter:
         self._fold_text = ""
         self._redraw_after_id: Optional[str] = None
         self._foreground = "#7b8794"
+        self._line_number_right = self.LINE_NUMBER_WIDTH - 4
+        self._gutter_width = self.LINE_NUMBER_WIDTH
+        self._fold_marker_x = self.FOLDING_WIDTH - 12
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Configure>", lambda _event: self.schedule_redraw(), add="+")
 
@@ -471,7 +474,29 @@ class _EditorGutter:
         self.schedule_redraw()
 
     def _update_width(self) -> None:
-        width = self.FOLDING_WIDTH if self.fold_regions else self.LINE_NUMBER_WIDTH
+        line_number_width = self.LINE_NUMBER_WIDTH
+        text_widget = getattr(self, "text_widget", None)
+        if text_widget is not None:
+            try:
+                line_count = int(text_widget.index("end-1c").split(".", 1)[0])
+                digits = len(str(line_count))
+                font_spec = text_widget.cget("font")
+                if digits != getattr(self, "_line_number_digits", None) or font_spec != getattr(
+                    self, "_line_number_font", None
+                ):
+                    measured_width = tkfont.Font(font=font_spec).measure("8" * digits)
+                    self._line_number_width = max(self.LINE_NUMBER_WIDTH, measured_width + 8)
+                    self._line_number_digits = digits
+                    self._line_number_font = font_spec
+                line_number_width = self._line_number_width
+            except (tk.TclError, TypeError, ValueError):
+                line_number_width = self.LINE_NUMBER_WIDTH
+        self._line_number_right = line_number_width - 4
+        width = line_number_width
+        if self.fold_regions:
+            width = max(self.FOLDING_WIDTH, line_number_width + self.FOLDING_WIDTH - self.LINE_NUMBER_WIDTH)
+        self._gutter_width = width
+        self._fold_marker_x = width - 12
         self.canvas.configure(width=width)
 
     def toggle_fold(self, opening_line: int) -> bool:
@@ -508,6 +533,7 @@ class _EditorGutter:
     def redraw(self) -> None:
         self._redraw_after_id = None
         try:
+            self._update_width()
             self.canvas.delete("all")
             index = self.text_widget.index("@0,0")
             while True:
@@ -517,7 +543,7 @@ class _EditorGutter:
                 line = int(str(index).split(".", 1)[0])
                 y = int(line_info[1])
                 self.canvas.create_text(
-                    self.LINE_NUMBER_WIDTH - 4,
+                    self._line_number_right,
                     y,
                     anchor="ne",
                     text=str(line),
@@ -535,7 +561,7 @@ class _EditorGutter:
 
     def _draw_fold_marker(self, line: int, y: int) -> None:
         middle_y = y + max(5, self.current_line_height() // 2)
-        marker_x = self.FOLDING_WIDTH - 12
+        marker_x = self._fold_marker_x
         if line in self.folded_lines:
             points = (marker_x, middle_y - 4, marker_x, middle_y + 4, marker_x + 5, middle_y)
         else:
@@ -560,7 +586,7 @@ class _EditorGutter:
             line = int(self.text_widget.index(f"@0,{event.y}").split(".", 1)[0])
         except (tk.TclError, ValueError):
             return
-        if self.fold_regions and event.x >= self.FOLDING_WIDTH - 18:
+        if self.fold_regions and event.x >= self._fold_marker_x - 6:
             self.toggle_fold(line)
 
     def configure_colors(self, background: str, foreground: str) -> None:
@@ -4886,6 +4912,7 @@ class OPLIDE(TkinterDnD.Tk):
             self.model_text.insert(tk.END, model_handle.read())
         self._model_editor_state.path = path
         self._model_editor_state.saved_text = self._get_editor_text(self.model_text)
+        self._model_editor_state.marked_tab_text = None
         self.highlight(self.model_text)
         self._restore_fold_state(path, self.model_gutter)
         self._update_caret_position(self.model_text)
@@ -4936,8 +4963,10 @@ class OPLIDE(TkinterDnD.Tk):
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
             self.data_text.insert(tk.END, data_handle.read())
+        self.data_text.edit_modified(False)
         self._data_editor_state.path = path
         self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
+        self._data_editor_state.marked_tab_text = None
         stat = os.stat(path)
         self._data_editor_state.saved_stat = (stat.st_size, stat.st_mtime_ns)
         self.highlight(self.data_text, is_data=True)
@@ -4990,6 +5019,7 @@ class OPLIDE(TkinterDnD.Tk):
                 handle.close()
                 self._data_editor_state.path = path
                 self._data_editor_state.saved_text = "".join(saved_chunks)
+                self._data_editor_state.marked_tab_text = None
                 stat = data_path.stat()
                 self._data_editor_state.saved_stat = (stat.st_size, stat.st_mtime_ns)
                 self.editor_notebook.tab(self.data_frame, text=f"Data: {data_path.name}")
@@ -5128,6 +5158,7 @@ class OPLIDE(TkinterDnD.Tk):
             return
         editor.path = path
         editor.saved_text = content
+        editor.marked_tab_text = None
         if widget is self.data_text:
             stat = os.stat(path)
             editor.saved_stat = (stat.st_size, stat.st_mtime_ns)
@@ -5249,6 +5280,7 @@ class OPLIDE(TkinterDnD.Tk):
                 os.replace(temporary_path, destination)
                 editor.path = path
                 editor.saved_text = content if content is not None else ""
+                editor.marked_tab_text = None
                 if widget is self.data_text:
                     stat = destination.stat()
                     editor.saved_stat = (stat.st_size, stat.st_mtime_ns)

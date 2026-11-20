@@ -159,7 +159,9 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             path = Path(directory) / "large.dat"
             path.write_text("previous", encoding="utf-8")
             text = ChunkedDummyText("x" * 1_100_000)
-            editor = pyopl_ide_bootstrap._EditorBufferState(path=str(path), saved_text="previous")
+            editor = pyopl_ide_bootstrap._EditorBufferState(
+                path=str(path), saved_text="previous", marked_tab_text="Data: large.dat • "
+            )
             dialog = mock.Mock()
             bar = mock.MagicMock()
             host = mock.Mock()
@@ -179,6 +181,7 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             self.assertEqual(path.read_text(encoding="utf-8"), text.value)
             self.assertEqual(editor.saved_text, text.value)
             self.assertEqual(editor.saved_stat[0], path.stat().st_size)
+            self.assertIsNone(editor.marked_tab_text)
             bar.__setitem__.assert_any_call("value", 100)
 
     def test_chunked_save_preserves_unicode_without_implicit_newline(self):
@@ -441,6 +444,69 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             data.insert("1.0", "data")
             root.update()
             self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
+
+    def test_opened_data_is_clean_until_edited(self):
+        class ModifiedText(ChunkedDummyText):
+            modified = False
+
+            def insert(self, *args):
+                super().insert(*args)
+                self.modified = True
+
+            def delete(self, *args):
+                super().delete(*args)
+                self.modified = True
+
+            def edit_modified(self, value=None):
+                if value is not None:
+                    self.modified = value
+                return self.modified
+
+        model = ModifiedText()
+        data = ModifiedText()
+        notebook = mock.Mock()
+        labels = {"model": "Model", "data": "Data"}
+        notebook.tab.side_effect = lambda frame, option=None, **kwargs: (
+            labels.update({frame: kwargs["text"]}) if kwargs else labels[frame]
+        )
+        host = SimpleNamespace(
+            model_text=model,
+            data_text=data,
+            model_frame="model",
+            data_frame="data",
+            editor_notebook=notebook,
+            data_gutter=mock.Mock(),
+            _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            _get_editor_text=lambda widget: widget.get("1.0", "end-1c"),
+            _store_fold_state=mock.Mock(),
+            _restore_fold_state=mock.Mock(),
+            _update_caret_position=mock.Mock(),
+            highlight=mock.Mock(),
+            on_tab_changed=mock.Mock(),
+            _save_session=mock.Mock(),
+        )
+        host._update_editor_tab = lambda widget: OPLIDE._update_editor_tab(host, widget)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "imported.dat"
+            path.write_text("x" * 20_000, encoding="utf-8")
+            OPLIDE._open_data_path(host, str(path), confirm_changes=False)
+            OPLIDE._on_editor_modified(host, data)
+            self.assertEqual(labels["data"], "Data: imported.dat")
+            self.assertIsNone(host._data_editor_state.marked_tab_text)
+
+            data.insert("end", "y")
+            OPLIDE._on_editor_modified(host, data)
+            self.assertEqual(labels["data"], "Data: imported.dat • ")
+            OPLIDE._save_editor_to_path(host, host._data_editor_state, data, "data", str(path), "Data")
+            self.assertIsNone(host._data_editor_state.marked_tab_text)
+            data.insert("end", "z")
+            OPLIDE._on_editor_modified(host, data)
+            OPLIDE._open_data_path(host, str(path), confirm_changes=False)
+            OPLIDE._on_editor_modified(host, data)
+            self.assertEqual(labels["data"], "Data: imported.dat")
+            self.assertIsNone(host._data_editor_state.marked_tab_text)
 
     def test_editor_tab_preserves_snapshot_and_bullet_in_filename(self):
         notebook = mock.Mock()
@@ -775,6 +841,29 @@ minimize x;
         gutter.fold_regions = {2: 4}
         gutter._update_width()
         canvas.configure.assert_called_with(width=_EditorGutter.FOLDING_WIDTH)
+
+    def test_editor_gutter_expands_for_large_line_numbers(self):
+        gutter = _EditorGutter.__new__(_EditorGutter)
+        gutter.canvas = mock.Mock()
+        gutter.text_widget = mock.Mock()
+        gutter.text_widget.index.return_value = "123456.0"
+        gutter.text_widget.cget.return_value = ("TkFixedFont", 12)
+        gutter.fold_regions = {}
+        gutter.folded_lines = set()
+
+        with mock.patch.object(pyopl_ide_bootstrap.tkfont, "Font") as font:
+            font.return_value.measure.return_value = 48
+            gutter._update_width()
+
+        self.assertEqual(gutter._line_number_right, 52)
+        self.assertEqual(gutter._gutter_width, 56)
+        gutter.canvas.configure.assert_called_with(width=56)
+
+        gutter.fold_regions = {1: 3}
+        gutter._update_width()
+        self.assertEqual(gutter._gutter_width, 72)
+        self.assertEqual(gutter._fold_marker_x, 60)
+        gutter.canvas.configure.assert_called_with(width=72)
 
     def test_editor_gutter_preserves_fold_after_line_insertions_and_deletions(self):
         original = "// heading\n// § Bounds\nx >= 0;\nx <= 1;\n"

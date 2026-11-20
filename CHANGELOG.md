@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep imported and opened data tabs clean until edited, including large files.
 - Keep large model/data saves and Python/LP/MPS exports responsive with cancellable progress; preserve existing destinations until output is complete.
 - Restore editor dirty-tab updates and solver cleanup when closing the IDE.
 - Preserve Gurobi and HiGHS incumbents on IDE Stop by prioritizing final results over solver logs and waiting asynchronously for graceful interruption; a second Stop forces termination.
@@ -20,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep CLI solves interruptible during large data compilation and avoid eager serialization of solver input in logs.
 - Avoid dense constraint-matrix snapshots when generating HiGHS solve code; retain the existing dense `LinearProblem` export representation for now.
 - Show non-blocking progress when opening large data files from the file menu, drag-and-drop, exemplars, or saved sessions.
+- Expand the editor gutter as needed so large row numbers are not clipped.
 - Keep the IDE responsive during native HiGHS import and open large generated data files in scheduled chunks.
 - Match the model import progress dialog's background, spacing, and controls to the active IDE theme.
 - Run the isolated IDE text-padding test reliably during unittest discovery.

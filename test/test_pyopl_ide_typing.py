@@ -1102,6 +1102,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             host._ensure_no_active_operation.return_value = True
             host._resolve_editor_replacement.return_value = True
             host._theme_palette.return_value = {"root_bg": "#f8f9fa"}
+            host._data_editor_state = pyopl_ide_bootstrap._EditorBufferState(marked_tab_text="Data: previous.dat • ")
             host._load_large_data_path.side_effect = lambda *args, **kwargs: OPLIDE._load_large_data_path(
                 host, *args, **kwargs
             )
@@ -1139,6 +1140,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertEqual(host.data_text.insert.call_count, 9)
             self.assertEqual(host._data_editor_state.path, str(next(Path(directory).glob("tmp/*.dat"))))
             self.assertEqual(host._data_editor_state.saved_text, "x" * 1_100_000)
+            self.assertIsNone(host._data_editor_state.marked_tab_text)
             host._get_editor_text.assert_not_called()
             progress.return_value.__setitem__.assert_any_call("value", 100)
 
