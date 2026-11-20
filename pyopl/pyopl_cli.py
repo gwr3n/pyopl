@@ -17,6 +17,7 @@ import argparse
 import json
 import multiprocessing
 import os
+import queue
 import signal
 import sys
 from contextlib import redirect_stdout
@@ -35,6 +36,7 @@ from .genai._strategy_base import (
     list_openai_models,
 )
 from .genai.pyopl_generative import generative_indexed_observable_mapping, generative_observable_mapping
+from .import_model import start_import
 from .model_equivalence import compare_models, comparison_result_to_dict
 from .pyopl_core import OPLCompiler, export_model
 from .pyopl_ide_bootstrap import OPLIDE
@@ -198,6 +200,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_solve.add_argument("--out-file", help="Write output to file instead of stdout")
     p_solve.add_argument("--solver-settings", help="Path to a JSON object containing backend-native solver settings")
 
+    p_import = subparsers.add_parser("import", help="Convert an LP/MPS file to OPL model and data files")
+    p_import.add_argument("source", help="Input .lp or .mps file")
+    p_import.add_argument("--model-file", help="Output .mod file (default: timestamped file in tmp/)")
+    p_import.add_argument("--data-file", help="Output .dat file (default: timestamped file in tmp/)")
+
     # batch-solve subcommand
     p_batch = subparsers.add_parser(
         "batch-solve",
@@ -359,6 +366,105 @@ def _handle_solve(args: argparse.Namespace) -> int:
             return 2
         print(f"Error during solve/export: {exc}", file=sys.stderr)
         return 1
+
+
+def _import_paths(args: argparse.Namespace) -> Optional[tuple[Path, Path, Path]]:
+    source = Path(args.source)
+    if not _validate_input_file(source, "source") or source.suffix.lower() not in (".lp", ".mps"):
+        print("Error: source must be an existing .lp or .mps file", file=sys.stderr)
+        return None
+    if bool(args.model_file) != bool(args.data_file):
+        print("Error: --model-file and --data-file must be specified together", file=sys.stderr)
+        return None
+    if args.model_file:
+        model_path, data_path = Path(args.model_file), Path(args.data_file)
+    else:
+        model_path, data_path = OPLIDE._unique_timestamped_model_data_paths(
+            Path.cwd() / "tmp", source.stem, datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        )
+    if model_path.exists() or data_path.exists():
+        print("Error: import output files already exist", file=sys.stderr)
+        return None
+    return source, model_path, data_path
+
+
+def _show_import_progress(stage: str, percent: int, frame: int) -> None:
+    width = 24
+    if stage == "Reading model..." and percent == 0:
+        position = frame % (width - 3)
+        fill = " " * position + "====" + " " * (width - position - 4)
+        suffix = ""
+    else:
+        filled = width * percent // 100
+        fill = "#" * filled + "-" * (width - filled)
+        suffix = f" {percent}%"
+    print(f"\r{stage:<30} [{fill}]{suffix:<5}", end="" if sys.stderr.isatty() else "\n", file=sys.stderr, flush=True)
+
+
+def _follow_import_progress(process, messages) -> None:
+    stage = ""
+    frame = 0
+    previous_percent = -1
+    while True:
+        try:
+            kind, payload = messages.get(timeout=0.2)
+        except queue.Empty:
+            if not process.is_alive():
+                raise RuntimeError(f"Import worker exited unexpectedly (code {process.exitcode})")
+            if sys.stderr.isatty() and (not stage or stage == "Reading model..."):
+                _show_import_progress(stage or "Reading model...", 0, frame)
+                frame += 1
+            continue
+        if kind == "error":
+            error_type, error_message, _details = payload
+            raise RuntimeError(f"{error_type}: {error_message}")
+        if kind == "done":
+            return
+        if kind != "progress":
+            raise ValueError(f"Unexpected import worker message: {kind}")
+        new_stage, percent = payload
+        if new_stage != stage or percent != previous_percent:
+            stage = new_stage
+            previous_percent = percent
+            _show_import_progress(stage, percent, frame)
+
+
+def _handle_import(args: argparse.Namespace) -> int:
+    paths = _import_paths(args)
+    if paths is None:
+        return 2
+    source, model_path, data_path = paths
+    try:
+        process, messages, stopped = start_import(source, model_path, data_path)
+    except Exception as exc:
+        print(f"Error starting import: {exc}", file=sys.stderr)
+        return 1
+    try:
+        _follow_import_progress(process, messages)
+        if sys.stderr.isatty():
+            print(file=sys.stderr)
+        print(f"Imported model: {model_path}\nImported data: {data_path}")
+        return 0
+    except KeyboardInterrupt:
+        stopped.set()
+        process.terminate()
+        process.join(timeout=1)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=1)
+        model_path.unlink(missing_ok=True)
+        data_path.unlink(missing_ok=True)
+        print("\nModel import stopped", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        if not process.is_alive() and process.exitcode != 0:
+            model_path.unlink(missing_ok=True)
+            data_path.unlink(missing_ok=True)
+        print(f"\nError during import: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        process.join(timeout=1)
+        messages.close()
 
 
 def _handle_batch_solve(args: argparse.Namespace) -> int:
@@ -704,6 +810,9 @@ def _dispatch_command(args: argparse.Namespace) -> int:
     # HANDLE OTHER SUBCOMMANDS
     if args.command == "solve":
         return _handle_solve(args)
+
+    if args.command == "import":
+        return _handle_import(args)
 
     if args.command == "batch-solve":
         return _handle_batch_solve(args)

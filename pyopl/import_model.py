@@ -3,10 +3,48 @@
 from __future__ import annotations
 
 import math
+import multiprocessing
+import traceback
 from pathlib import Path
 from typing import Callable
 
 import highspy
+
+
+def start_import(input_path: str | Path, model_path: str | Path, data_path: str | Path):
+    """Run native HiGHS parsing outside the caller's event loop."""
+    context = multiprocessing.get_context("spawn")
+    messages = context.Queue()
+    stopped = context.Event()
+    process = context.Process(
+        target=_import_worker,
+        args=(str(input_path), str(model_path), str(data_path), messages, stopped),
+        daemon=True,
+    )
+    try:
+        process.start()
+    except Exception:
+        messages.close()
+        raise
+    return process, messages, stopped
+
+
+def _import_worker(input_path: str, model_path: str, data_path: str, messages, stopped) -> None:
+    try:
+        convert_file(
+            input_path,
+            model_path,
+            data_path,
+            progress=lambda stage, percent: messages.put(("progress", (stage, percent))),
+            stop_requested=stopped.is_set,
+        )
+    except Exception as exc:
+        messages.put(("error", (type(exc).__name__, str(exc), traceback.format_exc())))
+    else:
+        messages.put(("done", None))
+    finally:
+        messages.close()
+        messages.join_thread()
 
 
 def convert_file(
@@ -23,11 +61,15 @@ def convert_file(
     if input_path.suffix.lower() not in (".lp", ".mps"):
         raise ValueError(f"Expected a .mps or .lp file, got: {input_path}")
 
+    last_progress: tuple[str, int] | None = None
+
     def report(stage: str, percent: int) -> None:
+        nonlocal last_progress
         if stop_requested is not None and stop_requested():
             raise InterruptedError("Model import stopped")
-        if progress is not None:
+        if progress is not None and last_progress != (stage, percent):
             progress(stage, percent)
+            last_progress = (stage, percent)
 
     report("Reading model...", 0)
     highs = highspy.Highs()
@@ -53,7 +95,7 @@ def convert_file(
     try:
         _write_mod(model_path, lp.sense_ == highspy.ObjSense.kMinimize, bool(matrix_rows))
         report("Writing data...", 90)
-        _write_dat(data_path, lp, matrix_rows, rhs, senses, binaries, integers)
+        _write_dat(data_path, lp, matrix_rows, rhs, senses, binaries, integers, report)
         report("Import complete", 100)
     except Exception:
         if not existing_model:
@@ -200,29 +242,33 @@ def _write_dat(
     senses: list[str],
     binaries: list[int],
     integers: list[int],
+    report: Callable[[str, int], None],
 ) -> None:
-    matrix = ",\n".join("  { " + _wrap_dat_values([f"<{var}, {coef}>" for var, coef in row]) + " }" for row in rows)
     costs, lower_bounds, upper_bounds = lp.col_cost_, lp.col_lower_, lp.col_upper_
     sense_values = _wrap_dat_values([f'"{sense}"' for sense in senses])
-    path.write_text(
-        f"numVars = {lp.num_col_};\n"
-        f"objOffset = {lp.offset_};\n"
-        f"objCoef = [{_wrap_dat_values([str(float(value)) for value in costs])}];\n"
-        f"lb = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in lower_bounds])}];\n"
-        f"ub = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in upper_bounds])}];\n"
-        f"hasLb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in lower_bounds])}];\n"
-        f"hasUb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in upper_bounds])}];\n"
-        f"isBinary = [{_wrap_dat_values([str(value) for value in binaries])}];\n"
-        f"isInteger = [{_wrap_dat_values([str(value) for value in integers])}];\n"
-        + (
-            f"numConstraints = {len(rows)};\nmatrix = [\n{matrix}\n];\n"
-            f"rhs = [{_wrap_dat_values([str(value) for value in rhs])}];\n"
-            f"sense = [{sense_values}];\n"
-            if rows
-            else ""
-        ),
-        encoding="utf-8",
-    )
+    with path.open("w", encoding="utf-8") as output:
+        output.write(
+            f"numVars = {lp.num_col_};\n"
+            f"objOffset = {lp.offset_};\n"
+            f"objCoef = [{_wrap_dat_values([str(float(value)) for value in costs])}];\n"
+            f"lb = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in lower_bounds])}];\n"
+            f"ub = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in upper_bounds])}];\n"
+            f"hasLb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in lower_bounds])}];\n"
+            f"hasUb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in upper_bounds])}];\n"
+            f"isBinary = [{_wrap_dat_values([str(value) for value in binaries])}];\n"
+            f"isInteger = [{_wrap_dat_values([str(value) for value in integers])}];\n"
+        )
+        if rows:
+            output.write(f"numConstraints = {len(rows)};\nmatrix = [\n")
+            for index, row in enumerate(rows):
+                if index:
+                    output.write(",\n")
+                output.write("  { " + _wrap_dat_values([f"<{var}, {coef}>" for var, coef in row]) + " }")
+                if index % 4096 == 0:
+                    report("Writing data...", 90 + 9 * index // len(rows))
+            output.write("\n];\n")
+            output.write(f"rhs = [{_wrap_dat_values([str(value) for value in rhs])}];\n")
+            output.write(f"sense = [{sense_values}];\n")
 
 
 def _wrap_dat_values(values: list[str]) -> str:

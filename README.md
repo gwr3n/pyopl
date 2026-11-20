@@ -173,7 +173,7 @@ python -m pyopl
 
 If installed as a package, the `pyopl` console command can be used in place of `python -m pyopl`.
 
-This opens the Rhetor IME window. You can open `.mod` model files and optional `.dat` data files, generate or revise formulations with GenAI assistance, edit them directly, solve them from the interface, export generated artifacts, and choose either Gurobi or HiGHS from the Solve menu. File > Import model... reads linear `.lp` or `.mps` files with HiGHS and opens timestamped `.mod` and `.dat` files in the current working directory's `tmp/` folder. Conversion runs in a background thread with a progress dialog; Stop cancels the import without opening or retaining incomplete files. During the native HiGHS file read, cancellation takes effect when reading finishes. Large files still open and restore normally; fold detection is disabled for editor text over 1 million characters. Indicator constraints, quadratic objectives, and semi-continuous/semi-integer variables are not supported by this importer.
+This opens the Rhetor IME window. You can open `.mod` model files and optional `.dat` data files, generate or revise formulations with GenAI assistance, edit them directly, solve them from the interface, export generated artifacts, and choose either Gurobi or HiGHS from the Solve menu. File > Import model... reads linear `.lp` or `.mps` files with HiGHS and opens timestamped `.mod` and `.dat` files in the current working directory's `tmp/` folder. Conversion runs in a separate process so the progress dialog remains responsive even during the native HiGHS read. Stop terminates the worker and removes incomplete outputs. Large data files opened from the file menu, drag-and-drop, exemplars, or a saved session display a progress bar and load in scheduled chunks to keep the interface responsive; syntax highlighting and fold detection are disabled for very large editor text. Indicator constraints, quadratic objectives, and semi-continuous/semi-integer variables are not supported by this importer.
 
 ### Sessions and Model Versions
 
@@ -194,6 +194,7 @@ python -m pyopl solve model.mod data.dat --solver highs --out json
 The CLI supports:
 
 - `python -m pyopl solve <model.mod> [data.dat]` to compile and solve a model
+- `python -m pyopl import <source.lp|source.mps>` to import a linear model into timestamped `.mod` and `.dat` files in `tmp/` (use `--model-file` and `--data-file` together to choose paths). A terminal progress bar appears on stderr (indeterminate while HiGHS reads the file); Ctrl-C terminates the import and removes incomplete outputs.
 - `python -m pyopl compare <left.mod> <right.mod>` to compare two models for MILP equivalence
 - `--solver highs|gurobi` to choose the backend solver
 - `--out json|py|lp|mps` to print results, export generated Python, or write LP/MPS solver files

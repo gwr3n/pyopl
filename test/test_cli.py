@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
@@ -15,6 +16,106 @@ from pyopl import pyopl_cli
 
 
 class TestCLI(unittest.TestCase):
+    def test_cli_import_runs_worker_and_reports_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.lp"
+            model = Path(directory) / "output.mod"
+            data = Path(directory) / "output.dat"
+            source.write_text("min\n obj: + x\nst\n row: + x >= 1\nbounds\n x <= 3\nend\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pyopl",
+                    "import",
+                    str(source),
+                    "--model-file",
+                    str(model),
+                    "--data-file",
+                    str(data),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Converting matrix...", result.stderr)
+            self.assertRegex(result.stderr, r"Converting matrix\..*\[#+-+\] \d+%")
+            self.assertIn("[########################] 100%", result.stderr)
+            self.assertIn(str(model), result.stdout)
+            self.assertIn(str(data), result.stdout)
+            self.assertTrue(model.exists())
+            self.assertTrue(data.exists())
+
+    def test_cli_import_interactive_bar_animates_during_native_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mps"
+            source.touch()
+            messages = Mock()
+            messages.get.side_effect = [
+                ("progress", ("Reading model...", 0)),
+                queue.Empty(),
+                ("progress", ("Converting matrix...", 50)),
+                ("done", None),
+            ]
+            process = Mock()
+            process.is_alive.return_value = True
+            stderr = io.StringIO()
+            with (
+                patch.object(pyopl_cli, "start_import", return_value=(process, messages, Mock())),
+                patch.object(stderr, "isatty", return_value=True),
+                redirect_stderr(stderr),
+                redirect_stdout(io.StringIO()),
+            ):
+                code = pyopl_cli.main(["import", str(source)])
+
+            self.assertEqual(code, 0)
+            self.assertIn("Reading model...", stderr.getvalue())
+            self.assertIn("[====", stderr.getvalue())
+            self.assertIn("[############------------] 50%", stderr.getvalue())
+
+    def test_cli_import_interrupt_stops_worker(self):
+        messages = Mock()
+        messages.get.side_effect = KeyboardInterrupt
+        process = Mock()
+        stopped = Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mps"
+            source.touch()
+            model = Path(directory) / "output.mod"
+            data = Path(directory) / "output.dat"
+            with patch.object(pyopl_cli, "start_import", return_value=(process, messages, stopped)):
+                with redirect_stderr(io.StringIO()):
+                    code = pyopl_cli.main(["import", str(source), "--model-file", str(model), "--data-file", str(data)])
+            self.assertEqual(code, 130)
+            stopped.set.assert_called_once_with()
+            process.terminate.assert_called_once_with()
+            self.assertFalse(model.exists())
+            self.assertFalse(data.exists())
+
+    def test_cli_import_worker_crash_removes_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mps"
+            source.touch()
+            model = Path(directory) / "output.mod"
+            data = Path(directory) / "output.dat"
+            messages = Mock()
+            messages.get.side_effect = queue.Empty
+            process = Mock(exitcode=-9)
+            process.is_alive.return_value = False
+
+            def crashed_import(*_args):
+                model.write_text("incomplete", encoding="utf-8")
+                data.write_text("incomplete", encoding="utf-8")
+                return process, messages, Mock()
+
+            with patch.object(pyopl_cli, "start_import", side_effect=crashed_import), redirect_stderr(io.StringIO()) as err:
+                code = pyopl_cli.main(["import", str(source), "--model-file", str(model), "--data-file", str(data)])
+            self.assertEqual(code, 1)
+            self.assertIn("exited unexpectedly", err.getvalue())
+            self.assertFalse(model.exists())
+            self.assertFalse(data.exists())
+
     def test_cli_help_exits_zero(self):
         with self.assertRaises(SystemExit) as cm:
             pyopl_cli.main(["--help"])

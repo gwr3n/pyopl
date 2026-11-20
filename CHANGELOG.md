@@ -7,12 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add a CLI LP/MPS import command with progress reporting and Ctrl-C cancellation.
+
 ### Fixed
 
+- Show non-blocking progress when opening large data files from the file menu, drag-and-drop, exemplars, or saved sessions.
+- Keep the IDE responsive during native HiGHS import and open large generated data files in scheduled chunks.
+- Match the model import progress dialog's background, spacing, and controls to the active IDE theme.
 - Run the isolated IDE text-padding test reliably during unittest discovery.
 - Declare the MIT license with SPDX metadata and include the license file in builds.
 
 ### Changed
+
+- Show a CLI progress bar during model import without adding a dependency; native HiGHS file reading remains indeterminate.
 
 ### Removed
 

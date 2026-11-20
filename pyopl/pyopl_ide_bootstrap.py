@@ -51,7 +51,7 @@ from .genai.pyopl_generative import (
     generative_indexed_observable_mapping,
     generative_observable_mapping,
 )
-from .import_model import convert_file as import_lp_mps_model
+from .import_model import start_import
 from .model_equivalence import ModelComparisonResult, compare_models
 from .pyopl_core import (
     OPLDataLexer,
@@ -453,12 +453,13 @@ class _EditorGutter:
         self.canvas.bind("<Configure>", lambda _event: self.schedule_redraw(), add="+")
 
     def refresh(self) -> None:
-        text = self.text_widget.get("1.0", "end-1c")
-        if len(text) > MAX_FOLD_SCAN_CHARS:
+        count = self.text_widget.count("1.0", "end-1c", "chars")
+        if isinstance(count, (tuple, list)) and count and int(count[0]) > MAX_FOLD_SCAN_CHARS:
             self.fold_regions = {}
             self.folded_lines.clear()
             self._fold_text = ""
         else:
+            text = self.text_widget.get("1.0", "end-1c")
             if self._fold_text != text:
                 self.folded_lines = _remap_folded_lines(self._fold_text, text, self.folded_lines)
             self.fold_regions = _find_fold_regions(text)
@@ -4292,6 +4293,10 @@ class OPLIDE(TkinterDnD.Tk):
         return result["value"]
 
     def _on_editor_modified(self, text_widget: tk.Text) -> None:
+        if text_widget is self.data_text and getattr(self, "_loading_data_file", False):
+            if text_widget.edit_modified():
+                text_widget.edit_modified(False)
+            return
         if text_widget.edit_modified():
             text_widget.edit_modified(False)
             self._update_editor_tab(text_widget)
@@ -4838,6 +4843,31 @@ class OPLIDE(TkinterDnD.Tk):
         """Open a data path into the data editor."""
         if confirm_changes and not self._resolve_editor_replacement("Open Data", model=False, data=True):
             return False
+        if Path(path).stat().st_size > 1_000_000:
+            dialog = tk.Toplevel(self)
+            dialog.title("Open data file")
+            dialog.transient(self)
+            dialog.configure(bg=self._theme_palette(self.theme_var.get())["root_bg"])
+            dialog.resizable(False, False)
+            dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+            content = ttk.Frame(dialog, padding=20)
+            content.grid(row=0, column=0, sticky="nsew")
+            ttk.Label(content, text="Opening data file...").grid(row=0, column=0, sticky="w", pady=(0, 12))
+            bar = ttk.Progressbar(content, mode="determinate", maximum=100, length=280)
+            bar.grid(row=1, column=0, sticky="ew")
+
+            def show_error(exc: Exception) -> None:
+                logging.getLogger(__name__).error("Failed to open data file", exc_info=(type(exc), exc, exc.__traceback__))
+                dialog.destroy()
+                self.status_var.set(f"Failed to open data file: {exc}")
+                messagebox.showerror("Open data file", f"Failed to open data file:\n{exc}")
+
+            dialog.after(
+                0, lambda: self._load_large_data_path(path, dialog, bar, on_complete=dialog.destroy, on_error=show_error)
+            )
+            dialog.wait_visibility()
+            dialog.grab_set()
+            return True
         self._store_fold_state(self._data_editor_state.path, self.data_gutter, touch=False)
         with open(path, "r", encoding="utf-8") as data_handle:
             self.data_text.delete(1.0, tk.END)
@@ -4852,6 +4882,62 @@ class OPLIDE(TkinterDnD.Tk):
         self.on_tab_changed(None)
         self._save_session()
         return True
+
+    def _load_large_data_path(
+        self,
+        path: str,
+        dialog: tk.Toplevel,
+        bar: ttk.Progressbar,
+        *,
+        on_complete: Callable[[], None],
+        on_error: Callable[[Exception], None],
+    ) -> None:
+        data_path = Path(path)
+        try:
+            size = data_path.stat().st_size
+            handle = data_path.open("r", encoding="utf-8")
+        except Exception as exc:
+            on_error(exc)
+            return
+        try:
+            self._store_fold_state(self._data_editor_state.path, self.data_gutter, touch=False)
+            self.data_text.delete("1.0", tk.END)
+            self._loading_data_file = True
+        except Exception as exc:
+            handle.close()
+            on_error(exc)
+            return
+        loaded = 0
+        saved_chunks: list[str] = []
+
+        def load_chunk() -> None:
+            nonlocal loaded
+            try:
+                chunk = handle.read(128 * 1024)
+                if chunk:
+                    self.data_text.insert(tk.END, chunk)
+                    saved_chunks.append(chunk)
+                    loaded += len(chunk.encode("utf-8"))
+                    bar["value"] = min(100, 100 * loaded // max(1, size))
+                    dialog.after(1, load_chunk)
+                    return
+                handle.close()
+                self._data_editor_state.path = path
+                self._data_editor_state.saved_text = "".join(saved_chunks)
+                self.editor_notebook.tab(self.data_frame, text=f"Data: {data_path.name}")
+                self.editor_notebook.select(self.data_frame)
+                self.on_tab_changed(None)
+                self._restore_fold_state(path, self.data_gutter)
+                self._save_session()
+                self.data_text.edit_modified(False)
+                self._loading_data_file = False
+                on_complete()
+            except Exception as exc:
+                handle.close()
+                self._loading_data_file = False
+                on_error(exc)
+
+        dialog.after(0, load_chunk)
 
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
@@ -6223,36 +6309,67 @@ class OPLIDE(TkinterDnD.Tk):
         dialog = tk.Toplevel(self)
         dialog.title("Import model")
         dialog.transient(self)
-        label = ttk.Label(dialog, text="Reading model...")
-        label.pack(padx=20, pady=(20, 8))
-        bar = ttk.Progressbar(dialog, mode="indeterminate", length=280)
-        bar.pack(padx=20, pady=8)
+        dialog.configure(bg=self._theme_palette(self.theme_var.get())["root_bg"])
+        dialog.resizable(False, False)
+        content = ttk.Frame(dialog, padding=20)
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        label = ttk.Label(content, text="Reading model...")
+        label.grid(row=0, column=0, sticky="w", pady=(0, 12))
+        bar = ttk.Progressbar(content, mode="indeterminate", length=280)
+        bar.grid(row=1, column=0, sticky="ew")
         bar.start(10)
-        cancelled = threading.Event()
-        messages: queue.Queue[tuple[str, Any]] = queue.Queue()
+        cancelled = False
 
         def stop() -> None:
-            cancelled.set()
+            nonlocal cancelled
+            cancelled = True
             label.config(text="Stopping import...")
             stop_button.config(state="disabled")
+            stopped.set()
+            if process.is_alive():
+                process.terminate()
 
-        stop_button = ttk.Button(dialog, text="Stop", command=stop)
-        stop_button.pack(pady=(8, 20))
+        stop_button = ttk.Button(content, text="Stop", command=stop)
+        stop_button.grid(row=2, column=0, sticky="e", pady=(16, 0))
         dialog.protocol("WM_DELETE_WINDOW", stop)
 
-        def show_error(exc: Exception) -> None:
-            detail = f"{type(exc).__name__}: {exc}"
-            logging.getLogger(__name__).error("Import model failed", exc_info=(type(exc), exc, exc.__traceback__))
+        def show_error(detail: str) -> None:
             self.status_var.set(f"Import failed: {detail}")
             messagebox.showerror("Import model", f"Import failed:\n{detail}")
 
+        def open_imported_data() -> None:
+            stop_button.config(state="disabled")
+            dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+            label.config(text="Opening imported data...")
+            bar.config(mode="determinate", maximum=100)
+
+            def complete() -> None:
+                self.status_var.set(f"Imported model from {source}")
+                dialog.destroy()
+
+            def fail(exc: Exception) -> None:
+                dialog.destroy()
+                show_error(f"{type(exc).__name__}: {exc}")
+
+            self._load_large_data_path(str(data_path), dialog, bar, on_complete=complete, on_error=fail)
+
         def poll() -> None:
+            if cancelled:
+                if process.is_alive():
+                    dialog.after(50, poll)
+                    return
+                process.join(timeout=0)
+                messages.close()
+                dialog.destroy()
+                model_path.unlink(missing_ok=True)
+                data_path.unlink(missing_ok=True)
+                self.status_var.set("Model import stopped")
+                return
             try:
-                while True:
+                for _ in range(32):
                     kind, payload = messages.get_nowait()
                     if kind == "progress":
-                        if cancelled.is_set():
-                            continue
                         stage, percent = payload
                         if percent and str(bar.cget("mode")) == "indeterminate":
                             bar.stop()
@@ -6261,44 +6378,48 @@ class OPLIDE(TkinterDnD.Tk):
                         if percent:
                             bar["value"] = percent
                         continue
-                    dialog.destroy()
-                    if cancelled.is_set():
-                        model_path.unlink(missing_ok=True)
-                        data_path.unlink(missing_ok=True)
-                        self.status_var.set("Model import stopped")
-                    elif kind == "error":
-                        show_error(payload)
+                    process.join(timeout=0)
+                    messages.close()
+                    if kind == "error":
+                        dialog.destroy()
+                        error_type, error_message, details = payload
+                        logging.getLogger(__name__).error("Import model failed: %s", details)
+                        show_error(f"{error_type}: {error_message}")
                     else:
                         try:
                             self._open_model_path(str(model_path), confirm_changes=False)
-                            self._open_data_path(str(data_path), confirm_changes=False)
+                            if data_path.stat().st_size > 1_000_000:
+                                open_imported_data()
+                            else:
+                                self._open_data_path(str(data_path), confirm_changes=False)
+                                self.status_var.set(f"Imported model from {source}")
+                                dialog.destroy()
                         except Exception as exc:
-                            show_error(exc)
-                        else:
-                            self.status_var.set(f"Imported model from {source}")
+                            logging.getLogger(__name__).exception("Failed to open imported model")
+                            dialog.destroy()
+                            show_error(f"{type(exc).__name__}: {exc}")
                     return
             except queue.Empty:
-                dialog.after(50, poll)
-
-        def convert() -> None:
-            try:
-                import_lp_mps_model(
-                    source,
-                    model_path,
-                    data_path,
-                    progress=lambda stage, percent: messages.put(("progress", (stage, percent))),
-                    stop_requested=cancelled.is_set,
-                )
-            except Exception as exc:
-                messages.put(("error", exc))
+                pass
             else:
-                messages.put(("done", None))
+                dialog.after(1, poll)
+                return
+            if not process.is_alive():
+                process.join(timeout=0)
+                messages.close()
+                dialog.destroy()
+                model_path.unlink(missing_ok=True)
+                data_path.unlink(missing_ok=True)
+                show_error(f"Import worker exited unexpectedly (code {process.exitcode})")
+                return
+            dialog.after(50, poll)
 
         try:
-            threading.Thread(target=convert, daemon=True).start()
+            process, messages, stopped = start_import(source, model_path, data_path)
         except Exception as exc:
             dialog.destroy()
-            show_error(exc)
+            logging.getLogger(__name__).exception("Failed to start import")
+            show_error(f"{type(exc).__name__}: {exc}")
             return
         dialog.wait_visibility()
         dialog.grab_set()
@@ -6895,7 +7016,11 @@ class OPLIDE(TkinterDnD.Tk):
     def _restore_session_files(self, session: dict[str, Any]) -> None:
         try:
             OPLIDE._restore_session_file(self, session.get("model_file"), self._model_editor_state, self.model_text)
-            OPLIDE._restore_session_file(self, session.get("data_file"), self._data_editor_state, self.data_text)
+            data_file = session.get("data_file")
+            if data_file and Path(data_file).is_file() and Path(data_file).stat().st_size > 1_000_000:
+                self.after_idle(lambda: self._open_data_path(data_file, confirm_changes=False))
+            else:
+                OPLIDE._restore_session_file(self, data_file, self._data_editor_state, self.data_text)
             for path, gutter in (
                 (self._model_editor_state.path, getattr(self, "model_gutter", None)),
                 (self._data_editor_state.path, getattr(self, "data_gutter", None)),
