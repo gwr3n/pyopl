@@ -1087,6 +1087,15 @@ class TestPyOPLIDETyping(unittest.TestCase):
         converter.assert_not_called()
         host._open_model_path.assert_not_called()
 
+    def test_import_model_uses_dropped_source_without_file_picker(self):
+        host = mock.Mock()
+        host._ensure_no_active_operation.return_value = True
+        host._resolve_editor_replacement.return_value = False
+        with mock.patch.object(pyopl_ide_bootstrap.filedialog, "askopenfilename") as picker:
+            OPLIDE.import_model(host, "/tmp/input.mps")
+        picker.assert_not_called()
+        host._resolve_editor_replacement.assert_called_once_with("Import model", model=True, data=True)
+
     def test_import_large_data_opens_in_scheduled_chunks(self):
         with TemporaryDirectory() as directory:
             host = mock.Mock()

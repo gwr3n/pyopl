@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Import a single dropped LP/MPS file from the editor or its tab bar; reject mixed or multiple import drops explicitly.
 - Add a CLI LP/MPS import command with progress reporting and Ctrl-C cancellation.
 
 ### Fixed
 
+- Keep large model/data saves and Python/LP/MPS exports responsive with cancellable progress; preserve existing destinations until output is complete.
 - Restore editor dirty-tab updates and solver cleanup when closing the IDE.
 - Preserve Gurobi and HiGHS incumbents on IDE Stop by prioritizing final results over solver logs and waiting asynchronously for graceful interruption; a second Stop forces termination.
 - Avoid sending one live-log message per solution variable before delivering the final solver result.

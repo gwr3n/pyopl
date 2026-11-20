@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -51,6 +54,31 @@ class DummyText:
 
     def config(self, **kwargs):
         self.configure(**kwargs)
+
+
+class ChunkedDummyText(DummyText):
+    def count(self, *_args):
+        if len(_args) > 1 and _args[1] != "end-1c":
+            return (int(_args[1].split(".")[1]) - int(_args[0].split(".")[1]),)
+        return (len(self.value),)
+
+    def index(self, position):
+        if position == "end-1c":
+            return f"1.{len(self.value)}"
+        base, _, advance = position.partition(" + ")
+        offset = int(base.split(".")[1]) + (int(advance.split()[0]) if advance else 0)
+        return f"1.{min(len(self.value), offset)}"
+
+    def compare(self, first, op, second):
+        left, right = int(first.split(".")[1]), int(second.split(".")[1])
+        return left < right if op == "<" else left > right
+
+    def get(self, start="1.0", end="end-1c"):
+        if end in ("end-1c", pyopl_ide_bootstrap.tk.END):
+            return self.value
+        first = int(start.split(".")[1])
+        last = int(end.split(".")[1])
+        return self.value[first:last]
 
 
 class ExistingDummyText(DummyText):
@@ -126,6 +154,235 @@ class EditorText(DummyText):
 
 
 class TestIDEUtilitiesMore(unittest.TestCase):
+    def test_large_data_save_writes_chunks_then_replaces_destination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.dat"
+            path.write_text("previous", encoding="utf-8")
+            text = ChunkedDummyText("x" * 1_100_000)
+            editor = pyopl_ide_bootstrap._EditorBufferState(path=str(path), saved_text="previous")
+            dialog = mock.Mock()
+            bar = mock.MagicMock()
+            host = mock.Mock()
+            host.data_text = text
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), bar, mock.Mock())
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+
+            OPLIDE._save_editor_to_path(host, editor, text, mock.Mock(), str(path), "Data")
+            self.assertEqual(path.read_text(encoding="utf-8"), "previous")
+            host._get_editor_text.assert_not_called()
+            for _ in range(12):
+                if dialog.destroy.called:
+                    break
+                dialog.after.call_args.args[1]()
+
+            dialog.destroy.assert_called_once_with()
+            self.assertEqual(path.read_text(encoding="utf-8"), text.value)
+            self.assertEqual(editor.saved_text, text.value)
+            self.assertEqual(editor.saved_stat[0], path.stat().st_size)
+            bar.__setitem__.assert_any_call("value", 100)
+
+    def test_chunked_save_preserves_unicode_without_implicit_newline(self):
+        if os.environ.get("PYOPL_UNICODE_SAVE_TEST") != "1":
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", f"test.test_pyopl_ide_more.TestIDEUtilitiesMore.{self._testMethodName}"],
+                env={**os.environ, "PYOPL_UNICODE_SAVE_TEST": "1"},
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return
+        tk = pyopl_ide_bootstrap.tk
+        try:
+            root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        value = "α😀β\n" * 300_000
+        widget = tk.Text(root)
+        widget.insert("1.0", value)
+        dialog = mock.Mock()
+        bar = mock.MagicMock()
+        completed = mock.Mock()
+        failed = mock.Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "unicode.mod"
+            OPLIDE._write_editor_chunks(mock.Mock(), widget, path, dialog, bar, completed, failed, capture_text=True)
+            for _ in range(20):
+                if completed.called or failed.called:
+                    break
+                dialog.after.call_args.args[1]()
+            failed.assert_not_called()
+            completed.assert_called_once_with(value)
+            self.assertEqual(path.read_text(encoding="utf-8"), value)
+
+    def test_stopping_large_save_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "large.mod"
+            path.write_text("previous", encoding="utf-8")
+            text = ChunkedDummyText("x" * 1_100_000)
+            dialog = mock.Mock()
+            stop_button = mock.Mock()
+            host = mock.Mock()
+            host.data_text = mock.Mock()
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), mock.MagicMock(), stop_button)
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+
+            OPLIDE._save_editor_to_path(host, pyopl_ide_bootstrap._EditorBufferState(), text, mock.Mock(), str(path), "Model")
+            dialog.after.call_args.args[1]()
+            stop_button.config.call_args.kwargs["command"]()
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "previous")
+            self.assertEqual(list(Path(directory).iterdir()), [path])
+            dialog.after_cancel.assert_called_once()
+
+    def test_large_export_stages_data_and_replaces_output_after_worker_completes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "output.lp"
+            destination.write_text("previous", encoding="utf-8")
+            host = mock.Mock()
+            host.model_text = ChunkedDummyText("dvar float x; minimize x;")
+            host.data_text = ChunkedDummyText(" " * 1_100_000)
+            original_get = host.data_text.get
+
+            def chunk_only(start, end):
+                if end == pyopl_ide_bootstrap.tk.END:
+                    raise AssertionError("read entire data on GUI thread")
+                return original_get(start, end)
+
+            host.data_text.get = mock.Mock(side_effect=chunk_only)
+            host._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            host._ensure_no_active_operation.return_value = True
+            host.solver.get.return_value = "highs"
+            host._export_large_model.side_effect = lambda *args: OPLIDE._export_large_model(host, *args)
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+            dialog = mock.Mock()
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), mock.MagicMock(), mock.Mock())
+            messages = mock.Mock()
+            messages.get_nowait.return_value = ("done", None)
+            context = mock.Mock()
+            context.Queue.return_value = messages
+            process = context.Process.return_value
+            process.pid = 123
+            process.is_alive.return_value = False
+
+            def finish_worker():
+                Path(context.Process.call_args.kwargs["args"][3]).write_text("generated", encoding="utf-8")
+
+            process.start.side_effect = finish_worker
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.filedialog, "asksaveasfilename", return_value=str(destination)),
+                mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "get_context", return_value=context),
+            ):
+                OPLIDE.export_model(host)
+                self.assertEqual(destination.read_text(encoding="utf-8"), "previous")
+                for _ in range(16):
+                    if dialog.destroy.called:
+                        break
+                    dialog.after.call_args.args[1]()
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), "generated")
+            self.assertGreater(host.data_text.get.call_count, 1)
+            self.assertEqual(host.status_var.set.call_args.args[0], f"Exported model to {destination}")
+
+    def test_stopping_large_export_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "output.mps"
+            destination.write_text("previous", encoding="utf-8")
+            host = mock.Mock()
+            host.data_text = ChunkedDummyText(" " * 1_100_000)
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+            dialog = mock.Mock()
+            stop_button = mock.Mock()
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), mock.MagicMock(), stop_button)
+
+            OPLIDE._export_large_model(host, str(destination), "highs", "minimize 0;", None)
+            dialog.after.call_args.args[1]()
+            stop_button.config.call_args.kwargs["command"]()
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous")
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+            dialog.after_cancel.assert_called_once()
+
+    def test_stopping_export_worker_terminates_it_and_preserves_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "output.lp"
+            destination.write_text("previous", encoding="utf-8")
+            host = mock.Mock()
+            host.data_text = ChunkedDummyText(" " * 1_100_000)
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+            dialog = mock.Mock()
+            stop_button = mock.Mock()
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), mock.MagicMock(), stop_button)
+            context = mock.Mock()
+            process = context.Process.return_value
+            process.pid = 123
+            process.is_alive.side_effect = [True, False]
+            with mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "get_context", return_value=context):
+                OPLIDE._export_large_model(host, str(destination), "highs", "minimize 0;", None)
+                for _ in range(10):
+                    if process.start.called:
+                        break
+                    dialog.after.call_args.args[1]()
+                process.start.assert_called_once_with()
+                stop_button.config.call_args.kwargs["command"]()
+
+            process.terminate.assert_called_once_with()
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous")
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
+    def test_large_export_worker_failure_preserves_existing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "output.lp"
+            destination.write_text("previous", encoding="utf-8")
+            host = mock.Mock()
+            host.data_text = ChunkedDummyText(" " * 1_100_000)
+            host._write_editor_chunks.side_effect = lambda *args, **kwargs: OPLIDE._write_editor_chunks(host, *args, **kwargs)
+            dialog = mock.Mock()
+            host._file_progress_dialog.return_value = (dialog, mock.Mock(), mock.MagicMock(), mock.Mock())
+            context = mock.Mock()
+            context.Queue.return_value.get_nowait.return_value = ("error", ("ValueError", "invalid model", "trace"))
+            process = context.Process.return_value
+            process.pid = 123
+            process.is_alive.return_value = False
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.multiprocessing, "get_context", return_value=context),
+                mock.patch.object(pyopl_ide_bootstrap.messagebox, "showerror") as showerror,
+            ):
+                OPLIDE._export_large_model(host, str(destination), "highs", "minimize 0;", None)
+                for _ in range(12):
+                    if dialog.destroy.called:
+                        break
+                    dialog.after.call_args.args[1]()
+
+            self.assertEqual(destination.read_text(encoding="utf-8"), "previous")
+            self.assertIn("invalid model", showerror.call_args.args[1])
+            self.assertEqual(list(Path(directory).iterdir()), [destination])
+
+    def test_export_worker_writes_model_before_reporting_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "source.mod"
+            data = Path(directory) / "source.dat"
+            model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            data.write_text("", encoding="utf-8")
+            for extension in (".py", ".lp", ".mps"):
+                with self.subTest(extension=extension):
+                    output = Path(directory) / f"output{extension}"
+                    messages = mock.Mock()
+                    pyopl_ide_bootstrap._export_file_worker(str(model), str(data), "highs", str(output), messages)
+                    self.assertGreater(output.stat().st_size, 0)
+                    messages.put.assert_called_once_with(("done", None))
+
+            failed_output = Path(directory) / "missing.lp"
+            failed_messages = mock.Mock()
+            pyopl_ide_bootstrap._export_file_worker(
+                str(Path(directory) / "missing.mod"), str(data), "highs", str(failed_output), failed_messages
+            )
+            self.assertEqual(failed_messages.put.call_args.args[0][0], "error")
+            self.assertFalse(failed_output.exists())
+
     def test_editor_tabs_follow_modified_events_and_saves(self):
         tk = pyopl_ide_bootstrap.tk
         try:
@@ -746,6 +1003,50 @@ minimize x;
         self.assertEqual(OPLIDE._on_editor_files_dropped(dummy, SimpleNamespace(data="unused")), "break")
         dummy._open_model_path.assert_not_called()
         dummy._open_data_path.assert_not_called()
+
+    def test_editor_drop_imports_single_lp_or_mps(self):
+        for source in ("/tmp/model.lp", "/tmp/model.MPS"):
+            with self.subTest(source=source):
+                host = SimpleNamespace(
+                    _dropped_paths=lambda _event: [source],
+                    import_model=mock.Mock(),
+                    _open_model_path=mock.Mock(),
+                    _open_data_path=mock.Mock(),
+                    _resolve_editor_replacement=mock.Mock(),
+                )
+                self.assertEqual(OPLIDE._on_editor_files_dropped(host, SimpleNamespace(data="unused")), "break")
+                host.import_model.assert_called_once_with(source)
+                host._open_model_path.assert_not_called()
+                host._open_data_path.assert_not_called()
+                host._resolve_editor_replacement.assert_not_called()
+
+    def test_editor_drop_rejects_mixed_or_multiple_imports(self):
+        for paths in (["/tmp/model.lp", "/tmp/input.dat"], ["/tmp/first.lp", "/tmp/second.mps"]):
+            with self.subTest(paths=paths):
+                host = SimpleNamespace(
+                    _dropped_paths=lambda _event: paths,
+                    import_model=mock.Mock(),
+                    status_var=DummyVar(),
+                )
+                with mock.patch.object(pyopl_ide_bootstrap.messagebox, "showwarning") as warning:
+                    self.assertEqual(OPLIDE._on_editor_files_dropped(host, SimpleNamespace(data="unused")), "break")
+                host.import_model.assert_not_called()
+                warning.assert_called_once()
+                self.assertIn("one LP or MPS file", warning.call_args.args[1])
+
+    def test_editor_notebook_accepts_model_file_drops(self):
+        host = SimpleNamespace(
+            model_text=mock.Mock(),
+            data_text=mock.Mock(),
+            editor_notebook=mock.Mock(),
+            genai_attachment_listbox=mock.Mock(),
+            genai_attachment_empty_icon=mock.Mock(),
+            _on_editor_files_dropped=mock.Mock(),
+            _on_attachment_files_dropped=mock.Mock(),
+        )
+        OPLIDE._setup_file_drop_targets(host)
+        host.editor_notebook.drop_target_register.assert_called_once_with(pyopl_ide_bootstrap.DND_FILES)
+        host.editor_notebook.dnd_bind.assert_called_once_with("<<Drop>>", host._on_editor_files_dropped)
 
     def test_open_model_shortcut_opens_model_and_stops_event(self):
         dummy = SimpleNamespace(open_model=mock.Mock())

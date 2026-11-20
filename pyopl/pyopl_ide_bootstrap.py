@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib.resources import files
 from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -763,6 +764,25 @@ def _solve_wrapper(
             result_conn.close()
         sys.stdout = old_stdout
         sys.stderr = old_stderr
+
+
+def _export_file_worker(
+    model_path: str, data_path: str, solver: str, output_path: str, messages: multiprocessing.Queue
+) -> None:
+    try:
+        export_opl_model(
+            Path(model_path).read_text(encoding="utf-8"),
+            Path(data_path).read_text(encoding="utf-8"),
+            solver,
+            output_path,
+        )
+    except Exception as exc:
+        messages.put(("error", (type(exc).__name__, str(exc), traceback.format_exc())))
+    else:
+        messages.put(("done", None))
+    finally:
+        messages.close()
+        messages.join_thread()
 
 
 def _compare_models_wrapper(
@@ -4989,7 +5009,7 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _setup_file_drop_targets(self) -> None:
         """Register model/data editors and the attachment list for file drops."""
-        for widget in (self.model_text, self.data_text):
+        for widget in (self.model_text, self.data_text, self.editor_notebook):
             drop_target = cast(_DropTargetWidget, widget)
             drop_target.drop_target_register(DND_FILES)
             drop_target.dnd_bind("<<Drop>>", self._on_editor_files_dropped)
@@ -5006,10 +5026,19 @@ class OPLIDE(TkinterDnD.Tk):
         return [str(path) for path in self.tk.splitlist(data) if str(path)]
 
     def _on_editor_files_dropped(self, event: tk.Event) -> str:
-        """Open dropped model and data files in their matching editors."""
+        """Open OPL files or import a dropped LP/MPS model."""
+        paths = self._dropped_paths(event)
+        imports = [path for path in paths if Path(path).suffix.lower() in (".lp", ".mps")]
+        if imports:
+            if len(paths) != 1:
+                detail = "Drop one LP or MPS file at a time, without other files."
+                self.status_var.set(detail)
+                messagebox.showwarning("Import model", detail, parent=self)
+            else:
+                self.import_model(imports[0])
+            return "break"
         if not self._ensure_no_active_operation("Open dropped files"):
             return "break"
-        paths = self._dropped_paths(event)
         if not self._resolve_editor_replacement(
             "Open dropped files",
             model=any(Path(path).suffix.lower() in (".mod", ".opl") for path in paths),
@@ -5086,6 +5115,9 @@ class OPLIDE(TkinterDnD.Tk):
     def _save_editor_to_path(
         self, editor: _EditorBufferState, widget: tk.Text, frame: ttk.Frame, path: str, label: str
     ) -> None:
+        if OPLIDE._editor_text_length(widget) > 1_000_000:
+            OPLIDE._save_large_editor_to_path(self, editor, widget, frame, path, label)
+            return
         content = self._get_editor_text(widget)
         try:
             with open(path, "w", encoding="utf-8") as file_obj:
@@ -5104,6 +5136,141 @@ class OPLIDE(TkinterDnD.Tk):
             self._save_session()
         except Exception:
             pass
+
+    @staticmethod
+    def _editor_text_length(widget: tk.Text) -> int:
+        try:
+            count = widget.count("1.0", "end-1c", "chars")
+        except AttributeError:
+            return len(widget.get("1.0", "end-1c"))
+        return int(count[0]) if count else 0
+
+    def _file_progress_dialog(self, title: str, stage: str) -> tuple[tk.Toplevel, ttk.Label, ttk.Progressbar, ttk.Button]:
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.configure(bg=self._theme_palette(self.theme_var.get())["root_bg"])
+        dialog.resizable(False, False)
+        content = ttk.Frame(dialog, padding=20)
+        content.grid(row=0, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        label = ttk.Label(content, text=stage)
+        label.grid(row=0, column=0, sticky="w", pady=(0, 12))
+        bar = ttk.Progressbar(content, mode="determinate", maximum=100, length=280)
+        bar.grid(row=1, column=0, sticky="ew")
+        stop_button = ttk.Button(content, text="Stop")
+        stop_button.grid(row=2, column=0, sticky="e", pady=(16, 0))
+        return dialog, label, bar, stop_button
+
+    def _write_editor_chunks(
+        self,
+        widget: tk.Text,
+        path: Path,
+        dialog: tk.Toplevel,
+        bar: ttk.Progressbar,
+        on_complete: Callable[[Optional[str]], None],
+        on_error: Callable[[Exception], None],
+        *,
+        capture_text: bool = False,
+    ) -> Callable[[], None]:
+        total = OPLIDE._editor_text_length(widget)
+        final_index = widget.index("end-1c")
+        output = path.open("w", encoding="utf-8")
+        chunks: list[str] = []
+        cursor = "1.0"
+        copied = 0
+        scheduled: Optional[str] = None
+
+        def write_chunk() -> None:
+            nonlocal cursor, copied, scheduled
+            try:
+                end = widget.index(f"{cursor} + {128 * 1024} chars")
+                if widget.compare(end, ">", final_index):
+                    end = final_index
+                chunk = widget.get(cursor, end)
+                output.write(chunk)
+                if capture_text:
+                    chunks.append(chunk)
+                count = widget.count(cursor, end, "chars")
+                copied += int(count[0]) if count else 0
+                cursor = end
+                bar["value"] = 100 * copied // max(1, total)
+                if widget.compare(cursor, "<", final_index):
+                    scheduled = dialog.after(1, write_chunk)
+                    return
+                output.close()
+                on_complete("".join(chunks) if capture_text else None)
+            except Exception as exc:
+                output.close()
+                on_error(exc)
+
+        scheduled = dialog.after(0, write_chunk)
+
+        def cancel_stream() -> None:
+            if scheduled is not None:
+                dialog.after_cancel(scheduled)
+            output.close()
+
+        return cancel_stream
+
+    def _save_large_editor_to_path(
+        self, editor: _EditorBufferState, widget: tk.Text, frame: ttk.Frame, path: str, label: str
+    ) -> None:
+        dialog, _stage, bar, stop_button = self._file_progress_dialog(f"Save {label}", f"Saving {label.lower()}...")
+        destination = Path(path)
+        try:
+            temporary = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix=f".{destination.name}.", dir=destination.parent, delete=False
+            )
+            temporary_path = Path(temporary.name)
+            temporary.close()
+        except OSError as exc:
+            dialog.destroy()
+            logging.getLogger(__name__).exception("Failed to start saving %s", label.lower())
+            messagebox.showerror(f"Save {label}", f"Could not save {label.lower()} file:\n{exc}", parent=self)
+            return
+        pending: Optional[Callable[[], None]] = None
+
+        def cancel() -> None:
+            if pending is not None:
+                pending()
+            temporary_path.unlink(missing_ok=True)
+            dialog.destroy()
+            self.status_var.set(f"Save {label.lower()} stopped")
+
+        def fail(exc: Exception) -> None:
+            temporary_path.unlink(missing_ok=True)
+            dialog.destroy()
+            logging.getLogger(__name__).error("Failed to save %s", label.lower(), exc_info=(type(exc), exc, exc.__traceback__))
+            messagebox.showerror(f"Save {label}", f"Could not save {label.lower()} file:\n{exc}", parent=self)
+
+        def complete(content: Optional[str]) -> None:
+            try:
+                os.replace(temporary_path, destination)
+                editor.path = path
+                editor.saved_text = content if content is not None else ""
+                if widget is self.data_text:
+                    stat = destination.stat()
+                    editor.saved_stat = (stat.st_size, stat.st_mtime_ns)
+                self.editor_notebook.tab(frame, text=f"{label}: {destination.name}")
+            except Exception as exc:
+                fail(exc)
+                return
+            dialog.destroy()
+            try:
+                self._save_session()
+            except Exception:
+                logging.getLogger(__name__).exception("Failed to save IDE session after saving %s", label.lower())
+
+        stop_button.config(command=cancel)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        try:
+            pending = self._write_editor_chunks(widget, temporary_path, dialog, bar, complete, fail, capture_text=True)
+        except Exception as exc:
+            fail(exc)
+            return
+        dialog.wait_visibility()
+        dialog.grab_set()
 
     # --- Syntax Highlighting ---
     @staticmethod
@@ -6366,13 +6533,14 @@ class OPLIDE(TkinterDnD.Tk):
         msg = results.get("message") or results.get("status", "Done")
         self.status_var.set(msg)
 
-    def import_model(self) -> None:
+    def import_model(self, source: Optional[str] = None) -> None:
         """Import an LP/MPS file into timestamped model and data editors."""
         if not self._ensure_no_active_operation("Import model"):
             return
-        source = filedialog.askopenfilename(
-            filetypes=[("Optimization models", ("*.mps", "*.lp")), ("MPS files", "*.mps"), ("LP files", "*.lp")]
-        )
+        if source is None:
+            source = filedialog.askopenfilename(
+                filetypes=[("Optimization models", ("*.mps", "*.lp")), ("MPS files", "*.mps"), ("LP files", "*.lp")]
+            )
         if not source:
             return
         if not self._resolve_editor_replacement("Import model", model=True, data=True):
@@ -6504,19 +6672,25 @@ class OPLIDE(TkinterDnD.Tk):
         if not self._ensure_no_active_operation("Export model"):
             return
         try:
-            model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
-            data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
+            model_code = (
+                None
+                if OPLIDE._editor_text_length(self.model_text) > 1_000_000
+                else self.model_text.get(1.0, tk.END).rstrip("\n")
+            )
+            data_code = (
+                None
+                if OPLIDE._editor_text_length(self.data_text) > 1_000_000
+                else self.data_text.get(1.0, tk.END).rstrip("\n")
+            )
 
-            if not model_code.strip():
+            if model_code is not None and not model_code.strip():
                 messagebox.showwarning("Export model", "Model editor is empty.")
                 return
 
             solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
 
-            default_name = "model_gurobi.py" if solver_choice == "gurobi" else "model_highs.py"
-            if self._model_editor_state.path:
-                base = os.path.splitext(os.path.basename(self._model_editor_state.path or ""))[0]
-                default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'highs'}.py"
+            base = os.path.splitext(os.path.basename(self._model_editor_state.path or "model"))[0]
+            default_name = f"{base}_{'gurobi' if solver_choice == 'gurobi' else 'highs'}.py"
 
             dest_path = filedialog.asksaveasfilename(
                 defaultextension=".py",
@@ -6539,23 +6713,149 @@ class OPLIDE(TkinterDnD.Tk):
                 )
                 return
 
-            try:
-                export_opl_model(model_code, data_code, solver_choice, dest_path)
-            except Exception as e:
-                detail = f"{type(e).__name__}: {e}"
-                logging.getLogger(__name__).exception("Export failed")
-                self.status_var.set(f"Error: Export failed: {detail}")
-                messagebox.showerror("Export model", f"Export failed:\n{detail}")
+            if model_code is None or data_code is None:
+                self._export_large_model(dest_path, solver_choice, model_code, data_code)
                 return
-
-            self.status_var.set(f"Exported model to {dest_path}")
-            print(f"Model exported to {export_ext.lstrip('.').upper()}")
+            OPLIDE._export_small_model(self, model_code, data_code, solver_choice, dest_path, export_ext)
         except Exception as e:
             detail = f"{type(e).__name__}: {e}"
             logging.getLogger(__name__).exception("Unexpected export error")
             self.status_var.set(f"Unexpected error during export: {detail}")
             messagebox.showerror("Export model", f"Unexpected error:\n{detail}")
             self.status_var.set(f"Export failed: {detail}")
+
+    def _export_small_model(self, model_code: str, data_code: str, solver: str, path: str, extension: str) -> None:
+        try:
+            export_opl_model(model_code, data_code, solver, path)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            logging.getLogger(__name__).exception("Export failed")
+            self.status_var.set(f"Error: Export failed: {detail}")
+            messagebox.showerror("Export model", f"Export failed:\n{detail}")
+            return
+        self.status_var.set(f"Exported model to {path}")
+        print(f"Model exported to {extension.lstrip('.').upper()}")
+
+    def _export_large_model(self, destination: str, solver: str, model_code: Optional[str], data_code: Optional[str]) -> None:
+        dialog, label, bar, stop_button = self._file_progress_dialog("Export model", "Preparing model...")
+        try:
+            temporary = tempfile.TemporaryDirectory(prefix=".pyopl-export-", dir=Path(destination).parent)
+        except OSError as exc:
+            dialog.destroy()
+            messagebox.showerror("Export model", f"Could not prepare export:\n{exc}", parent=self)
+            return
+        root = Path(temporary.name)
+        model_path, data_path = root / "model.mod", root / "data.dat"
+        output_path = root / f"result{Path(destination).suffix.lower()}"
+        process: Optional[BaseProcess] = None
+        messages: Optional[multiprocessing.Queue] = None
+        pending: Optional[Callable[[], None]] = None
+        finished = False
+
+        def cleanup() -> None:
+            nonlocal finished
+            if finished:
+                return
+            finished = True
+            if pending is not None:
+                pending()
+            if process is not None and process.pid is not None:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(timeout=0.2)
+                    if process.is_alive():
+                        process.kill()
+                process.join(timeout=0.2)
+            if messages is not None:
+                messages.close()
+            temporary.cleanup()
+            dialog.destroy()
+
+        def stop() -> None:
+            cleanup()
+            self.status_var.set("Model export stopped")
+
+        def fail(exc: Exception) -> None:
+            logging.getLogger(__name__).error("Export failed", exc_info=(type(exc), exc, exc.__traceback__))
+            cleanup()
+            self.status_var.set(f"Export failed: {exc}")
+            messagebox.showerror("Export model", f"Export failed:\n{type(exc).__name__}: {exc}", parent=self)
+
+        def poll() -> None:
+            if finished or messages is None or process is None:
+                return
+            try:
+                kind, payload = messages.get_nowait()
+            except queue.Empty:
+                if process.is_alive():
+                    dialog.after(50, poll)
+                else:
+                    fail(RuntimeError(f"Export worker exited unexpectedly (code {process.exitcode})"))
+                return
+            if kind == "error":
+                error_type, detail, trace = payload
+                logging.getLogger(__name__).error("Export worker failed: %s", trace)
+                fail(RuntimeError(f"{error_type}: {detail}"))
+                return
+            if kind != "done":
+                fail(ValueError(f"Invalid export worker message: {kind}"))
+                return
+            try:
+                os.replace(output_path, destination)
+            except Exception as exc:
+                fail(exc)
+                return
+            cleanup()
+            self.status_var.set(f"Exported model to {destination}")
+
+        def launch(_content: Optional[str] = None) -> None:
+            nonlocal process, messages, pending
+            pending = None
+            label.config(text="Exporting model...")
+            bar.config(mode="indeterminate")
+            bar.start(10)
+            try:
+                context = multiprocessing.get_context("spawn")
+                messages = context.Queue()
+                worker = context.Process(
+                    target=_export_file_worker,
+                    args=(str(model_path), str(data_path), solver, str(output_path), messages),
+                    daemon=True,
+                )
+                worker.start()
+                process = worker
+            except Exception as exc:
+                fail(exc)
+                return
+            dialog.after(50, poll)
+
+        def prepare_data(_content: Optional[str] = None) -> None:
+            nonlocal pending
+            try:
+                if data_code is None:
+                    label.config(text="Preparing data...")
+                    bar["value"] = 0
+                    pending = self._write_editor_chunks(self.data_text, data_path, dialog, bar, launch, fail)
+                else:
+                    data_path.write_text(data_code, encoding="utf-8")
+                    launch()
+            except Exception as exc:
+                fail(exc)
+
+        stop_button.config(command=stop)
+        dialog.protocol("WM_DELETE_WINDOW", stop)
+        try:
+            if model_code is None:
+                pending = self._write_editor_chunks(self.model_text, model_path, dialog, bar, prepare_data, fail)
+            else:
+                model_path.write_text(model_code, encoding="utf-8")
+                prepare_data()
+        except Exception as exc:
+            fail(exc)
+            return
+        if not finished:
+            dialog.wait_visibility()
+            dialog.grab_set()
 
     @staticmethod
     def _resolve_exemplar_destination(models_root: Path, name: str) -> tuple[Path, str]:
