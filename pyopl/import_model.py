@@ -6,7 +6,7 @@ import math
 import multiprocessing
 import traceback
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TextIO
 
 import highspy
 
@@ -244,20 +244,9 @@ def _write_dat(
     integers: list[int],
     report: Callable[[str, int], None],
 ) -> None:
-    costs, lower_bounds, upper_bounds = lp.col_cost_, lp.col_lower_, lp.col_upper_
     sense_values = _wrap_dat_values([f'"{sense}"' for sense in senses])
     with path.open("w", encoding="utf-8") as output:
-        output.write(
-            f"numVars = {lp.num_col_};\n"
-            f"objOffset = {lp.offset_};\n"
-            f"objCoef = [{_wrap_dat_values([str(float(value)) for value in costs])}];\n"
-            f"lb = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in lower_bounds])}];\n"
-            f"ub = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in upper_bounds])}];\n"
-            f"hasLb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in lower_bounds])}];\n"
-            f"hasUb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in upper_bounds])}];\n"
-            f"isBinary = [{_wrap_dat_values([str(value) for value in binaries])}];\n"
-            f"isInteger = [{_wrap_dat_values([str(value) for value in integers])}];\n"
-        )
+        _write_dat_variables(output, lp, binaries, integers)
         if rows:
             output.write(f"numConstraints = {len(rows)};\nmatrix = [\n")
             for index, row in enumerate(rows):
@@ -269,6 +258,21 @@ def _write_dat(
             output.write("\n];\n")
             output.write(f"rhs = [{_wrap_dat_values([str(value) for value in rhs])}];\n")
             output.write(f"sense = [{sense_values}];\n")
+
+
+def _write_dat_variables(output: TextIO, lp: highspy.HighsLp, binaries: list[int], integers: list[int]) -> None:
+    costs, lower_bounds, upper_bounds = lp.col_cost_, lp.col_lower_, lp.col_upper_
+    output.write(
+        f"numVars = {lp.num_col_};\n"
+        f"objOffset = {lp.offset_};\n"
+        f"objCoef = [{_wrap_dat_values([str(float(value)) for value in costs])}];\n"
+        f"lb = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in lower_bounds])}];\n"
+        f"ub = [{_wrap_dat_values([str(float(value) if math.isfinite(value) else 0.0) for value in upper_bounds])}];\n"
+        f"hasLb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in lower_bounds])}];\n"
+        f"hasUb = [{_wrap_dat_values([str(int(math.isfinite(value))) for value in upper_bounds])}];\n"
+        f"isBinary = [{_wrap_dat_values([str(value) for value in binaries])}];\n"
+        f"isInteger = [{_wrap_dat_values([str(value) for value in integers])}];\n"
+    )
 
 
 def _wrap_dat_values(values: list[str]) -> str:

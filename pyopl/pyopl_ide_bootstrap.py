@@ -4350,7 +4350,7 @@ class OPLIDE(TkinterDnD.Tk):
             label = label[:-3]
         dirty = (
             True
-            if text_widget is self.data_text and self._text_too_large_for_highlight(text_widget)
+            if text_widget is self.data_text and OPLIDE._text_too_large_for_highlight(self, text_widget)
             else self._get_editor_text(text_widget) != editor.saved_text
         )
         display_label = f"{label} • " if dirty else label
@@ -8317,6 +8317,10 @@ class OPLIDE(TkinterDnD.Tk):
             exemplar_search_cleanup()
         try:
             self._ide_bridge.stop()
+        except Exception:
+            pass
+        try:
+            self.stop_model()
         except Exception:
             pass
         try:

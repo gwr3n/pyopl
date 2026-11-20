@@ -89,6 +89,17 @@ class TestCoreHelperCoverage(unittest.TestCase):
 
                     self.assertEqual(output.getvalue(), "PyOPL: compiling model...\n")
 
+    def test_solver_backends_report_missing_inputs_consistently(self):
+        with TemporaryDirectory() as directory:
+            model = Path(directory) / "model.mod"
+            missing = Path(directory) / "missing.dat"
+            for backend in (solve_with_gurobi, solve_with_highs):
+                with self.subTest(backend=backend.__name__):
+                    model.unlink(missing_ok=True)
+                    self.assertEqual(backend(model)["message"], f"Error: Model file '{model}' does not exist.")
+                    model.write_text("minimize 0;", encoding="utf-8")
+                    self.assertEqual(backend(model, missing)["message"], f"Error: Data file '{missing}' does not exist.")
+
     def test_parser_error_hint_specializes_unexpected_in(self):
         msg = _parser_error_with_hint("IN", "in")
 

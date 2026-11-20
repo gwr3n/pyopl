@@ -1855,7 +1855,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         if converted is None:
             return val
         self.data_dict[name] = converted
-        logger.debug(f"[resolve_parameter] Converted flat KV list to dict for param '{name}': {converted}")
+        logger.debug("[resolve_parameter] Converted flat KV list to dict for param '%s': %s", name, converted)
         return converted
 
     def _parameter_list_start_index(self, name: str, dimension_index: int) -> int:
@@ -1895,9 +1895,12 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
 
     def _lookup_parameter_dimension(self, name: str, resolved: object, index: object, dimension_index: int, env: dict, logger):
         evaluated_index = self._eval_index(index, env)
-        logger.debug(f"[resolve_parameter] Index eval: idx={index}, idx_eval={evaluated_index}, " f"v={resolved}, env={env}")
+        logger.debug(
+            "[resolve_parameter] Index eval: idx=%s, idx_eval=%s, v=%s, env=%s", index, evaluated_index, resolved, env
+        )
         if isinstance(resolved, dict):
-            logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"[resolve_parameter] Dict lookup: v[{evaluated_index}] (keys={list(resolved.keys())})")
             return resolved[evaluated_index]
         if isinstance(evaluated_index, float) and evaluated_index.is_integer():
             evaluated_index = int(evaluated_index)
@@ -1948,7 +1951,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         logger = logging.getLogger("pyopl.highs_codegen_csc")
         val = self.data_dict.get(f"{name}__map", self.data_dict.get(name))
         val = self._normalize_parameter_lookup_value(name, val, indices, logger)
-        logger.debug(f"[resolve_parameter] Lookup param: {name}, indices={indices}, val={val}, env={env}")
+        logger.debug("[resolve_parameter] Lookup param: %s, indices=%s, val=%s, env=%s", name, indices, val, env)
         if indices is not None and val is not None:
             try:
                 resolved = self._lookup_indexed_parameter(name, indices, env, val, logger)

@@ -3295,16 +3295,14 @@ class OPLDataParser(Parser):
         self.lexer = lexer
         self.data = {}
         self.name_linenos = {}
-        # Materialize tokens to capture last token line; feed iterator to SLY
-        tok_list = list(tokens)
-        if tok_list:
-            try:
-                self._last_token_lineno = getattr(tok_list[-1], "lineno", 1)
-            except Exception:
-                self._last_token_lineno = 1
-        else:
-            self._last_token_lineno = 1
-        return super().parse(iter(tok_list))
+        self._last_token_lineno = 1
+
+        def track_line():
+            for token in tokens:
+                self._last_token_lineno = getattr(token, "lineno", self._last_token_lineno)
+                yield token
+
+        return super().parse(track_line())
 
     @_("data_declaration_list")  # type: ignore
     def data_file(self, p):
@@ -4101,10 +4099,11 @@ class OPLCompiler:
             raise SemanticError(f"Too many indices for parameter '{parameter_name}'.")
         dimension = dimensions[dimension_index]
         dimension_type = dimension.get("type")
+        domain: range | list[Any]
         if dimension_type == "range_index":
             start = self._eval_bound_expr(dimension["start"], working_data)
             end = self._eval_bound_expr(dimension["end"], working_data)
-            domain = list(range(start, end + 1))
+            domain = range(start, end + 1)
         elif dimension_type in ("named_range", "named_range_dimension"):
             start, end = self._resolve_named_range(
                 model_ast,
@@ -4112,7 +4111,7 @@ class OPLCompiler:
                 dimension["name"],
                 context=f"indexed access to '{parameter_name}'",
             )
-            domain = list(range(start, end + 1))
+            domain = range(start, end + 1)
         elif dimension_type in ("named_set", "named_set_dimension"):
             set_value = working_data.get(dimension["name"], [])
             domain = list(set_value.get("elements", []) if isinstance(set_value, dict) else set_value)
@@ -6190,6 +6189,14 @@ def solve(
         raise ValueError(f"Unsupported solver: {solver}")
 
 
+def _missing_solver_input(model_file: str, data_file: Optional[str]) -> Optional[str]:
+    if not os.path.exists(model_file):
+        return f"Error: Model file '{model_file}' does not exist."
+    if data_file is not None and not os.path.exists(data_file):
+        return f"Error: Data file '{data_file}' does not exist."
+    return None
+
+
 def solve_with_gurobi(
     model_file,
     data_file=None,
@@ -6214,12 +6221,9 @@ def solve_with_gurobi(
         "stats": {},
     }
 
-    if not os.path.exists(model_file):
-        results["message"] = f"Error: Model file '{model_file}' does not exist."
-        logger.error(results["message"])
-        return results
-    if data_file is not None and not os.path.exists(data_file):
-        results["message"] = f"Error: Data file '{data_file}' does not exist."
+    missing_input = _missing_solver_input(model_file, data_file)
+    if missing_input is not None:
+        results["message"] = missing_input
         logger.error(results["message"])
         return results
 
@@ -6345,12 +6349,9 @@ def solve_with_highs(
         "stats": {},
     }
 
-    if not os.path.exists(model_file):
-        results["message"] = f"Error: Model file '{model_file}' does not exist."
-        logger.error(results["message"])
-        return results
-    if data_file is not None and not os.path.exists(data_file):
-        results["message"] = f"Error: Data file '{data_file}' does not exist."
+    missing_input = _missing_solver_input(model_file, data_file)
+    if missing_input is not None:
+        results["message"] = missing_input
         logger.error(results["message"])
         return results
 

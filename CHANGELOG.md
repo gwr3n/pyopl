@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore editor dirty-tab updates and solver cleanup when closing the IDE.
 - Preserve Gurobi and HiGHS incumbents on IDE Stop by prioritizing final results over solver logs and waiting asynchronously for graceful interruption; a second Stop forces termination.
 - Avoid sending one live-log message per solution variable before delivering the final solver result.
 - Keep the IDE responsive when starting solves with unchanged large data files by reusing their on-disk contents and deferring validation to the solver process; avoid duplicating large data in session snapshots.
@@ -24,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Separate import data-vector writing and share solver input-file checks to clear Lizard complexity warnings without changing solver behavior.
+- Stream OPL data tokens through SLY, use constant-time integer range indexing without losing non-integer index compatibility, and avoid formatting unused HiGHS debug messages during parameter lookup.
 - Show a CLI progress bar during model import without adding a dependency; native HiGHS file reading remains indeterminate.
 
 ### Removed

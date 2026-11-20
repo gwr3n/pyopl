@@ -4,6 +4,7 @@ import math
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1985,6 +1986,27 @@ class TestPyOPLCompiler(TestPyOPL):
 
         self.assertNotIn("first", parser.name_linenos)
         self.assertIn("second", parser.name_linenos)
+
+    def test_large_range_parameter_indices_do_not_require_a_domain_list(self):
+        declaration = {
+            "name": "values",
+            "dimensions": [
+                {
+                    "type": "range_index",
+                    "start": {"type": "number", "value": 1},
+                    "end": {"type": "number", "value": 1_000_000},
+                }
+            ],
+        }
+        compiler = OPLCompiler()
+        model_ast = {"declarations": [declaration]}
+
+        self.assertEqual(compiler._parameter_list_position(model_ast, {}, "values", 0, 500_000), 499_999)
+        self.assertEqual(compiler._parameter_list_position(model_ast, {}, "values", 0, 500_000.0), 499_999)
+        self.assertEqual(compiler._parameter_list_position(model_ast, {}, "values", 0, Decimal(1)), 0)
+        self.assertEqual(compiler._parameter_list_position(model_ast, {}, "values", 0, Decimal(500_000)), 499_999)
+        with self.assertRaisesRegex(SemanticError, "outside dimension"):
+            compiler._parameter_list_position(model_ast, {}, "values", 0, 500_000.5)
 
     def test_validate_shape_multi_dimensional(self):
         """Test validate_shape for multi-dimensional arrays with correct and incorrect shapes."""
