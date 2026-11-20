@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+### Fixed
+
+### Changed
+
+### Removed
+
+## [v2.9.2] - 2026-11-20
+
+### Added
+
 - Import a single dropped LP/MPS file from the editor or its tab bar; reject mixed or multiple import drops explicitly.
 - Add a CLI LP/MPS import command with progress reporting and Ctrl-C cancellation.
 
