@@ -184,7 +184,6 @@ class GurobiCodeGenerator:
         self.indent_level += 1
         self._add_code_line("if v.VarName in _pyopl_original_var_names:")
         self.indent_level += 1
-        self._add_code_line("print(f'{v.VarName}: {v.X}')")
         self._add_code_line("solution[v.VarName] = v.X")
         self.indent_level -= 1
         self.indent_level -= 1
@@ -207,7 +206,6 @@ class GurobiCodeGenerator:
         self.indent_level += 1
         self._add_code_line("if v.VarName in _pyopl_original_var_names:")
         self.indent_level += 1
-        self._add_code_line("print(f'{v.VarName}: {v.X}')")
         self._add_code_line("solution[v.VarName] = v.X")
         self.indent_level -= 1
         self.indent_level -= 1

@@ -16,6 +16,33 @@ from pyopl import pyopl_cli
 
 
 class TestCLI(unittest.TestCase):
+    def test_cli_large_data_solve_uses_interruptible_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            model = Path(directory) / "model.mod"
+            data = Path(directory) / "data.dat"
+            model.write_text("minimize 0;", encoding="utf-8")
+            data.write_bytes(b"x" * 1_100_000)
+            context = Mock()
+            context.Queue.return_value.get.return_value = ("done", None)
+            process = context.Process.return_value
+            process.pid = 123
+
+            def finish_worker():
+                Path(context.Process.call_args.kwargs["args"][4]).write_text('{"status": "OPTIMAL"}', encoding="utf-8")
+
+            process.start.side_effect = finish_worker
+            with (
+                patch.object(pyopl_cli.multiprocessing, "get_context", return_value=context),
+                patch.object(pyopl_cli, "_run_solve") as direct_solve,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                code = pyopl_cli.main(["solve", str(model), str(data)])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue()), {"status": "OPTIMAL"})
+            direct_solve.assert_not_called()
+            process.join.assert_called_once_with(timeout=1)
+
     def test_cli_import_runs_worker_and_reports_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "input.lp"

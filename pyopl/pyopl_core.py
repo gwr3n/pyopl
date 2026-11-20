@@ -6236,11 +6236,12 @@ def solve_with_gurobi(
         return results
 
     if loaded_ast and loaded_gurobi_code:
-        logger.info("\n--- Loaded AST from file ---")
-        logger.info(json.dumps(_json_safe(loaded_ast), indent=2))
-        if loaded_data_dict:
-            logger.info("\n--- Loaded Data Dictionary from file ---")
-            logger.info(json.dumps(_json_safe(loaded_data_dict), indent=2))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("\n--- Loaded AST from file ---")
+            logger.debug(json.dumps(_json_safe(loaded_ast), indent=2))
+            if loaded_data_dict:
+                logger.debug("\n--- Loaded Data Dictionary from file ---")
+                logger.debug(json.dumps(_json_safe(loaded_data_dict), indent=2))
         logger.info("\n--- Generated GurobiPy Code ---")
         logger.info(loaded_gurobi_code)
 
@@ -6368,11 +6369,12 @@ def solve_with_highs(
         return results
 
     if loaded_ast and loaded_highs_code:
-        logger.info("\n--- Loaded AST from file ---")
-        logger.info(json.dumps(_json_safe(loaded_ast), indent=2))
-        if loaded_data_dict:
-            logger.info("\n--- Loaded Data Dictionary from file ---")
-            logger.info(json.dumps(_json_safe(loaded_data_dict), indent=2))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("\n--- Loaded AST from file ---")
+            logger.debug(json.dumps(_json_safe(loaded_ast), indent=2))
+            if loaded_data_dict:
+                logger.debug("\n--- Loaded Data Dictionary from file ---")
+                logger.debug(json.dumps(_json_safe(loaded_data_dict), indent=2))
         logger.info("\n--- Generated HiGHS Code ---")
         logger.info(loaded_highs_code)
 

@@ -14,7 +14,6 @@ import shutil
 import sys
 import tempfile
 import threading
-import time
 
 # --- Third-Party Imports ---
 import tkinter as tk
@@ -24,6 +23,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from importlib.resources import files
+from multiprocessing.connection import Connection
 from multiprocessing.synchronize import Event as ProcessEvent
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -717,6 +717,7 @@ def _solve_wrapper(
     solver_settings: Optional[dict[str, Any]],
     q: multiprocessing.Queue,
     stop_event: Optional[ProcessEvent] = None,
+    result_conn: Optional[Connection] = None,
 ) -> None:
     """Wrapper to run solve in a separate process."""
     old_stdout = sys.stdout
@@ -746,11 +747,20 @@ def _solve_wrapper(
                 stop_requested=stop_event.is_set if stop_event is not None else None,
             )
         log_writer.flush()
-        q.put(("success", results))
+        if result_conn is not None:
+            result_conn.send(("success", results))
+        else:
+            q.put(("success", results))
     except Exception as e:
         log_writer.flush()
-        q.put(("error", f"{e}\n\n{traceback.format_exc()}"))
+        error = ("error", f"{e}\n\n{traceback.format_exc()}")
+        if result_conn is not None:
+            result_conn.send(error)
+        else:
+            q.put(error)
     finally:
+        if result_conn is not None:
+            result_conn.close()
         sys.stdout = old_stdout
         sys.stderr = old_stderr
 
@@ -1091,6 +1101,7 @@ class _SolverProcessState:
     result_queue: Optional[multiprocessing.Queue] = None
     session_id: Optional[str] = None
     stop_event: Optional[ProcessEvent] = None
+    result_reader: Optional[Connection] = None
 
     def start(
         self, model_file: str, data_file: str, solver_choice: str, solver_settings: Optional[dict[str, Any]], session_id: str
@@ -1099,16 +1110,27 @@ class _SolverProcessState:
             raise RuntimeError("Solver process resources are already in use")
         self.result_queue = multiprocessing.Queue()
         self.stop_event = multiprocessing.Event()
+        self.result_reader, result_writer = multiprocessing.Pipe(duplex=False)
         try:
             self.process = multiprocessing.Process(
                 target=_solve_wrapper,
-                args=(model_file, data_file, solver_choice, solver_settings, self.result_queue, self.stop_event),
+                args=(
+                    model_file,
+                    data_file,
+                    solver_choice,
+                    solver_settings,
+                    self.result_queue,
+                    self.stop_event,
+                    result_writer,
+                ),
             )
             self.process.start()
             self.session_id = session_id
         except Exception:
             self.cleanup(cancel_queue_thread=True)
             raise
+        finally:
+            result_writer.close()
 
     def handles(self) -> Optional[tuple[multiprocessing.Process, multiprocessing.Queue]]:
         if self.process is None or self.result_queue is None:
@@ -1119,6 +1141,15 @@ class _SolverProcessState:
         if self.result_queue is None:
             raise RuntimeError("Solver result queue is not available")
         message = self.result_queue.get_nowait()
+        return self._validate_message(message)
+
+    def read_result_nowait(self) -> _SolverMessage:
+        if self.result_reader is None or not self.result_reader.poll():
+            raise queue.Empty
+        return self._validate_message(self.result_reader.recv())
+
+    @staticmethod
+    def _validate_message(message: Any) -> _SolverMessage:
         if not isinstance(message, tuple) or len(message) != 2:
             raise ValueError("expected a (kind, payload) solver message")
         kind, payload = message
@@ -1161,10 +1192,14 @@ class _SolverProcessState:
 
     def cleanup(self, *, cancel_queue_thread: bool) -> None:
         result_queue = self.result_queue
+        result_reader = self.result_reader
         self.process = None
         self.result_queue = None
+        self.result_reader = None
         self.session_id = None
         self.stop_event = None
+        if result_reader is not None:
+            result_reader.close()
         if result_queue is None:
             return
         try:
@@ -1184,6 +1219,7 @@ class _SolverProcessState:
 class _EditorBufferState:
     path: Optional[str] = None
     saved_text: str = ""
+    saved_stat: Optional[tuple[int, int]] = None
     marked_tab_text: Optional[str] = None
     highlight_after_ids: dict[str, str] = field(default_factory=dict)
     highlight_version: int = 0
@@ -1902,6 +1938,7 @@ class OPLIDE(TkinterDnD.Tk):
 
         # Solver process
         self._solver_ipc = _SolverProcessState()
+        self._solver_stop_requested = False
         self._current_solver_choice: str = "gurobi"
         self._solver_progress_window: Optional[tk.Toplevel] = None
         self._solver_progress_canvas: Optional[tk.Canvas] = None
@@ -2831,6 +2868,9 @@ class OPLIDE(TkinterDnD.Tk):
         if not session_id:
             return
         if not hasattr(self, "model_text") or not hasattr(self, "data_text"):
+            return
+        if self._text_too_large_for_highlight(self.data_text):
+            logging.getLogger(__name__).info("Skipping in-memory session snapshot of large data file")
             return
         model_text = self.model_text.get("1.0", tk.END).rstrip("\n")
         data_text = self.data_text.get("1.0", tk.END).rstrip("\n")
@@ -4308,7 +4348,11 @@ class OPLIDE(TkinterDnD.Tk):
         label = current_label
         if label == editor.marked_tab_text:
             label = label[:-3]
-        dirty = self._get_editor_text(text_widget) != editor.saved_text
+        dirty = (
+            True
+            if text_widget is self.data_text and self._text_too_large_for_highlight(text_widget)
+            else self._get_editor_text(text_widget) != editor.saved_text
+        )
         display_label = f"{label} • " if dirty else label
         editor.marked_tab_text = display_label if dirty else None
         if display_label != current_label:
@@ -4874,6 +4918,8 @@ class OPLIDE(TkinterDnD.Tk):
             self.data_text.insert(tk.END, data_handle.read())
         self._data_editor_state.path = path
         self._data_editor_state.saved_text = self._get_editor_text(self.data_text)
+        stat = os.stat(path)
+        self._data_editor_state.saved_stat = (stat.st_size, stat.st_mtime_ns)
         self.highlight(self.data_text, is_data=True)
         self._restore_fold_state(path, self.data_gutter)
         self._update_caret_position(self.data_text)
@@ -4924,6 +4970,8 @@ class OPLIDE(TkinterDnD.Tk):
                 handle.close()
                 self._data_editor_state.path = path
                 self._data_editor_state.saved_text = "".join(saved_chunks)
+                stat = data_path.stat()
+                self._data_editor_state.saved_stat = (stat.st_size, stat.st_mtime_ns)
                 self.editor_notebook.tab(self.data_frame, text=f"Data: {data_path.name}")
                 self.editor_notebook.select(self.data_frame)
                 self.on_tab_changed(None)
@@ -5048,6 +5096,9 @@ class OPLIDE(TkinterDnD.Tk):
             return
         editor.path = path
         editor.saved_text = content
+        if widget is self.data_text:
+            stat = os.stat(path)
+            editor.saved_stat = (stat.st_size, stat.st_mtime_ns)
         self.editor_notebook.tab(frame, text=f"{label}: {os.path.basename(path)}")
         try:
             self._save_session()
@@ -5862,7 +5913,21 @@ class OPLIDE(TkinterDnD.Tk):
             return
 
         model_code = self.model_text.get(1.0, tk.END).rstrip("\n")
-        data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
+        data_code: Optional[str] = None
+        data_path = self._data_editor_state.path
+        if data_path and not os.path.isfile(data_path):
+            self.status_var.set(f"Data file not found: {data_path}")
+            return
+        if data_path and os.path.getsize(data_path) > 1_000_000:
+            if self._data_editor_state.marked_tab_text is not None:
+                self.status_var.set("Save the modified large data file before solving.")
+                return
+            stat = os.stat(data_path)
+            if self._data_editor_state.saved_stat != (stat.st_size, stat.st_mtime_ns):
+                self.status_var.set("Large data file changed on disk; reopen it before solving.")
+                return
+        else:
+            data_code = self.data_text.get(1.0, tk.END).rstrip("\n")
 
         solver_choice = self.solver.get() if hasattr(self, "solver") else "gurobi"
         operation = self._start_foreground_operation(
@@ -5896,7 +5961,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _prepare_solver_run(
         self,
         model_code: str,
-        data_code: str,
+        data_code: Optional[str],
         operation: _ForegroundOperation,
         model_file_override: Optional[str],
         data_file_override: Optional[str],
@@ -5924,7 +5989,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _validate_run_model_data(
         self,
         model_code: str,
-        data_code: str,
+        data_code: Optional[str],
         operation: _ForegroundOperation,
     ) -> bool:
         data_vars = {
@@ -5935,7 +6000,7 @@ class OPLIDE(TkinterDnD.Tk):
             )
             for match in re.finditer(pattern, model_code)
         }
-        if self._data_editor_state.path and os.path.exists(self._data_editor_state.path):
+        if data_code is not None and self._data_editor_state.path and os.path.exists(self._data_editor_state.path):
             try:
                 from .pyopl_core import OPLDataLexer, OPLDataParser
 
@@ -5950,7 +6015,9 @@ class OPLIDE(TkinterDnD.Tk):
                 return False
 
         missing_vars = [
-            variable for variable in data_vars if not re.search(r"\b" + re.escape(variable) + r"\s*(=|\[)", data_code)
+            variable
+            for variable in data_vars
+            if data_code is not None and not re.search(r"\b" + re.escape(variable) + r"\s*(=|\[)", data_code)
         ]
         if missing_vars:
             missing = ", ".join(missing_vars)
@@ -5963,7 +6030,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _save_run_model_files(
         self,
         model_code: str,
-        data_code: str,
+        data_code: Optional[str],
         tmp_dir: str,
         model_file_override: Optional[str],
         data_file_override: Optional[str],
@@ -5975,8 +6042,9 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             with open(model_file, "w", encoding="utf-8") as file_obj:
                 file_obj.write(model_code)
-            with open(data_file, "w", encoding="utf-8") as file_obj:
-                file_obj.write(data_code)
+            if data_code is not None:
+                with open(data_file, "w", encoding="utf-8") as file_obj:
+                    file_obj.write(data_code)
         except Exception as exc:
             self.status_var.set(f"Error saving temp files: {exc}")
             self._append_output(f"\nError saving temp files: {exc}\n", operation.session_id)
@@ -6031,6 +6099,13 @@ class OPLIDE(TkinterDnD.Tk):
                 self._finish_foreground_operation(active)
             return
 
+        if not getattr(self, "_solver_stop_requested", False):
+            self._solver_stop_requested = True
+            self._solver_ipc.request_stop()
+            self.status_var.set("Stopping solver; waiting for incumbent. Stop again to force termination.")
+            self.after(0, self._poll_solver, active)
+            return
+
         result = OPLIDE._collect_stopped_solver_result(self, active.session_id if active else None)
         self._cleanup_solver_ipc(cancel_queue_thread=True)
         self._stop_run_timer()
@@ -6050,8 +6125,18 @@ class OPLIDE(TkinterDnD.Tk):
         self._finish_foreground_operation(active)
 
     def _collect_stopped_solver_result(self, session_id: Optional[str]) -> Optional[dict[str, Any]]:
-        self._solver_ipc.request_stop()
-        result = OPLIDE._drain_stopped_solver_queue(self, session_id)
+        result: Optional[dict[str, Any]] = None
+        try:
+            kind, payload = self._solver_ipc.read_result_nowait()
+        except queue.Empty:
+            pass
+        except (EOFError, ValueError) as exc:
+            logging.getLogger(__name__).error("Invalid solver result during force stop: %s", exc)
+        else:
+            if kind == "success":
+                result = payload
+            elif kind == "error":
+                self._append_output(f"\nError during stop: {payload}\n", session_id)
         self._solver_ipc.join(timeout=0.1)
         if self._solver_ipc.process and self._solver_ipc.process.is_alive():
             self._solver_ipc.stop()
@@ -6073,32 +6158,9 @@ class OPLIDE(TkinterDnD.Tk):
             }
         return None
 
-    def _drain_stopped_solver_queue(self, session_id: Optional[str]) -> Optional[dict[str, Any]]:
-        result: Optional[dict[str, Any]] = None
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            try:
-                kind, payload = self._solver_ipc.read_nowait()
-            except queue.Empty:
-                if not self._solver_ipc.process or not self._solver_ipc.process.is_alive():
-                    break
-                time.sleep(0.02)
-                continue
-            except ValueError as exc:
-                logging.getLogger(__name__).error("Invalid solver message during stop: %s", exc)
-                break
-            if kind == "success":
-                result = payload
-                break
-            elif kind in ("progress", "log"):
-                OPLIDE._present_solver_stream_event(self, kind, payload)
-            elif kind == "error":
-                self._append_output(f"\nError during stop: {payload}\n", session_id)
-                break
-        return result
-
     def _cleanup_solver_ipc(self, *, cancel_queue_thread: bool) -> None:
         """Release solver process/queue resources to avoid multiprocessing tracker leaks."""
+        self._solver_stop_requested = False
         self._solver_ipc.cleanup(cancel_queue_thread=cancel_queue_thread)
 
     def _poll_solver(self, operation: Optional[_ForegroundOperation] = None) -> None:
@@ -6146,7 +6208,11 @@ class OPLIDE(TkinterDnD.Tk):
         model_error = isinstance(payload, dict) and payload.get("status") == "MODEL_ERROR"
         ide._finish_solver_progress(
             payload if isinstance(payload, dict) else None,
-            status="failed" if model_error else "complete",
+            status=(
+                "failed"
+                if model_error
+                else "stopped" if isinstance(payload, dict) and payload.get("status") == "INTERRUPTED" else "complete"
+            ),
         )
         ide._display_solve_results(
             payload,
@@ -6240,7 +6306,13 @@ class OPLIDE(TkinterDnD.Tk):
     def _drain_solver_queue(
         self, process: multiprocessing.Process, operation: Optional[_ForegroundOperation]
     ) -> Optional[_SolverMessage]:
-        while True:
+        for _ in range(200):
+            try:
+                return self._solver_ipc.read_result_nowait()
+            except queue.Empty:
+                pass
+            except (EOFError, ValueError) as exc:
+                return "error", f"Invalid solver worker result: {exc}"
             try:
                 kind, payload = self._solver_ipc.read_nowait()
             except queue.Empty:
@@ -6254,6 +6326,8 @@ class OPLIDE(TkinterDnD.Tk):
             if OPLIDE._present_solver_stream_event(self, kind, payload):
                 continue
             return kind, payload
+        self.after(10, self._poll_solver, operation)
+        return None
 
     def _handle_solver_process_exit(self, operation: Optional[_ForegroundOperation]) -> None:
         self._set_run_menu_running(False)
@@ -8246,7 +8320,8 @@ class OPLIDE(TkinterDnD.Tk):
         except Exception:
             pass
         try:
-            self.stop_model()  # ensure no stray solver process
+            self._solver_ipc.stop()
+            self._cleanup_solver_ipc(cancel_queue_thread=True)
         except Exception:
             pass
         self._save_settings()

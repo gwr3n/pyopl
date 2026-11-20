@@ -3,6 +3,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import unittest
 import warnings
 from builtins import open as builtin_open
@@ -970,7 +971,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy._solver_ipc.session_id, operation.session_id)
         process_cls.assert_called_once_with(
             target=pyopl_ide_bootstrap._solve_wrapper,
-            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue, mock.ANY),
+            args=("model.mod", "data.dat", "highs", {"time_limit": 4.0}, dummy._solver_ipc.result_queue, mock.ANY, mock.ANY),
         )
         self.assertIsNotNone(dummy._solver_ipc.stop_event)
         process.start.assert_called_once_with()
@@ -2077,6 +2078,55 @@ class TestPyOPLIDETyping(unittest.TestCase):
         dummy._set_run_menu_running.assert_not_called()
         dummy._show_solver_log_textbox.assert_not_called()
 
+    def test_run_model_uses_unchanged_large_data_file_without_reading_editor(self):
+        with TemporaryDirectory() as directory:
+            data_path = Path(directory) / "large.dat"
+            data_path.write_bytes(b"x" * 1_100_000)
+            stat = data_path.stat()
+            operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
+            host = mock.Mock()
+            host._solver_ipc.process = None
+            host.solver.get.return_value = "highs"
+            host.model_text.get.return_value = "dvar int x; minimize x;"
+            host.data_text.get.side_effect = AssertionError("large data was read on the GUI thread")
+            host._model_editor_state = pyopl_ide_bootstrap._EditorBufferState()
+            host._data_editor_state = pyopl_ide_bootstrap._EditorBufferState(
+                path=str(data_path), saved_stat=(stat.st_size, stat.st_mtime_ns)
+            )
+            host._start_foreground_operation.return_value = operation
+            with (
+                mock.patch.object(pyopl_ide_bootstrap.os, "getcwd", return_value=directory),
+                mock.patch.object(OPLIDE, "_start_solver_process", return_value=True) as start_solver,
+                mock.patch.object(OPLIDE, "_begin_solver_ui") as begin_ui,
+            ):
+                OPLIDE.run_model(host)
+
+            host.data_text.get.assert_not_called()
+            start_solver.assert_called_once()
+            self.assertEqual(start_solver.call_args.args[2], str(data_path))
+            self.assertEqual(data_path.stat().st_size, 1_100_000)
+            begin_ui.assert_called_once()
+
+    def test_large_data_session_does_not_snapshot_entire_editor(self):
+        host = mock.Mock()
+        host._text_too_large_for_highlight.return_value = True
+        OPLIDE._snapshot_output_session_artifacts(host, "session-1")
+        host.data_text.get.assert_not_called()
+        host._record_output_session_artifacts.assert_not_called()
+
+    def test_run_model_rejects_large_data_changed_on_disk(self):
+        with TemporaryDirectory() as directory:
+            data_path = Path(directory) / "large.dat"
+            data_path.write_bytes(b"x" * 1_100_000)
+            host = mock.Mock()
+            host._solver_ipc.process = None
+            host.model_text.get.return_value = "minimize 0;"
+            host._data_editor_state = pyopl_ide_bootstrap._EditorBufferState(path=str(data_path), saved_stat=(1_100_000, 0))
+            OPLIDE.run_model(host)
+            host.data_text.get.assert_not_called()
+            host._start_foreground_operation.assert_not_called()
+            self.assertIn("changed on disk", host.status_var.set.call_args.args[0])
+
     def test_save_run_model_files_uses_shared_solve_timestamp_for_unsaved_files(self):
         operation = pyopl_ide_bootstrap._ForegroundOperation("solve", "Solve Model", "session-1")
         dummy = SimpleNamespace(
@@ -2556,29 +2606,90 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _finish_solver_progress=mock.Mock(),
             _set_run_menu_running=mock.Mock(),
             _finish_foreground_operation=mock.Mock(),
+            after=mock.Mock(),
+            _poll_solver=mock.Mock(),
         )
         dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
             dummy, cancel_queue_thread=cancel_queue_thread
         )
 
         OPLIDE.stop_model(dummy)
+        dummy._display_solve_results.assert_not_called()
+        dummy.after.assert_called_once_with(0, dummy._poll_solver, operation)
         OPLIDE._poll_solver(dummy, operation)
 
         stop_event.set.assert_called_once_with()
         process.terminate.assert_not_called()
         process.kill.assert_not_called()
-        result_queue.cancel_join_thread.assert_called_once_with()
+        result_queue.join_thread.assert_called_once_with()
         self.assertEqual(result_queue.get_nowait.call_count, 1)
-        dummy._display_solve_results.assert_called_once_with(
-            {"status": "INTERRUPTED", "objective_value": 4.0, "solution": solution, "stats": {"NodeCount": 3}},
-            "session-1",
-            None,
-        )
+        self.assertIs(dummy._display_solve_results.call_args.args[0]["solution"], solution)
+        self.assertEqual(dummy._display_solve_results.call_args.kwargs, {"session_id": "session-1", "solver_choice": None})
         dummy._finish_solver_progress.assert_called_once_with(
             {"status": "INTERRUPTED", "objective_value": 4.0, "solution": solution, "stats": {"NodeCount": 3}},
             status="stopped",
         )
         dummy._finish_foreground_operation.assert_called_once_with(operation)
+
+    def test_solver_result_is_read_before_queued_logs(self):
+        solution = {f"x_{index}": float(index) for index in range(10_800)}
+        terminal = mock.Mock()
+        terminal.poll.return_value = True
+        terminal.recv.return_value = ("success", {"status": "INTERRUPTED", "solution": solution})
+        logs = mock.Mock()
+        state = pyopl_ide_bootstrap._SolverProcessState(mock.Mock(), logs, result_reader=terminal)
+        host = SimpleNamespace(_solver_ipc=state)
+
+        kind, result = OPLIDE._drain_solver_queue(host, state.process, None)
+
+        self.assertEqual(kind, "success")
+        self.assertEqual(len(result["solution"]), 10_800)
+        logs.get_nowait.assert_not_called()
+
+    def test_solver_worker_sends_terminal_result_separately_from_logs(self):
+        from contextlib import nullcontext
+
+        logs = mock.Mock()
+        terminal = mock.Mock()
+        result = {"status": "INTERRUPTED", "solution": {"x": 1.0}}
+        with (
+            mock.patch.object(pyopl_ide_bootstrap, "_FdLogRedirector", return_value=nullcontext()),
+            mock.patch("pyopl.pyopl_core.solve", return_value=result),
+        ):
+            pyopl_ide_bootstrap._solve_wrapper("model.mod", "data.dat", "highs", None, logs, None, terminal)
+
+        terminal.send.assert_called_once_with(("success", result))
+        logs.put.assert_not_called()
+
+    def test_highs_worker_delivers_solution_over_result_channel(self):
+        with TemporaryDirectory() as directory:
+            model = Path(directory) / "model.mod"
+            data = Path(directory) / "data.dat"
+            model.write_text("dvar float+ x; minimize x; subject to { x >= 1; }", encoding="utf-8")
+            data.write_text("", encoding="utf-8")
+            state = pyopl_ide_bootstrap._SolverProcessState()
+            try:
+                state.start(str(model), str(data), "highs", {"output_flag": False}, "test-session")
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    try:
+                        kind, result = state.read_result_nowait()
+                        break
+                    except queue.Empty:
+                        while True:
+                            try:
+                                state.read_nowait()
+                            except queue.Empty:
+                                break
+                        time.sleep(0.05)
+                else:
+                    self.fail("Solver result channel did not deliver a result")
+                self.assertEqual(kind, "success")
+                self.assertEqual(result["status"], "OPTIMAL")
+                self.assertAlmostEqual(result["solution"]["x"], 1.0)
+            finally:
+                state.stop()
+                state.cleanup(cancel_queue_thread=True)
 
     def test_stop_model_reports_last_progress_when_worker_does_not_return(self):
         process = mock.Mock()
@@ -2599,16 +2710,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _finish_solver_progress=mock.Mock(),
             _set_run_menu_running=mock.Mock(),
             _finish_foreground_operation=mock.Mock(),
+            after=mock.Mock(),
+            _poll_solver=mock.Mock(),
         )
         dummy._cleanup_solver_ipc = lambda cancel_queue_thread: OPLIDE._cleanup_solver_ipc(
             dummy, cancel_queue_thread=cancel_queue_thread
         )
 
-        with (
-            mock.patch.object(pyopl_ide_bootstrap.time, "monotonic", side_effect=[0, 0, 4]),
-            mock.patch.object(pyopl_ide_bootstrap.time, "sleep"),
-        ):
-            OPLIDE.stop_model(dummy)
+        OPLIDE.stop_model(dummy)
+        process.terminate.assert_not_called()
+        OPLIDE.stop_model(dummy)
 
         process.terminate.assert_called_once_with()
         result = dummy._display_solve_results.call_args.args[0]

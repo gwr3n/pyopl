@@ -2844,7 +2844,11 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         sense = self.ast.get("objective", {}).get("type", "minimize")
         self._add_code_line(f"sense = '{sense}'")
         self._add_code_line("")
-        problem = self.build_problem()
+        self._sparse_codegen_only = True
+        try:
+            problem = self.build_problem()
+        finally:
+            self._sparse_codegen_only = False
 
         # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
         if len(problem.var_names) == 0:
@@ -3054,13 +3058,12 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line("print('Optimal solution found:')")
         self.indent_level -= 1
         self._add_code_line("solution = {}")
-        self._add_code_line("for name in original_var_names:")
+        self._add_code_line("original_name_set = set(original_var_names)")
+        self._add_code_line("for i, name in enumerate(var_names):")
         self.indent_level += 1
-        self._add_code_line("i = var_names.index(name)")
+        self._add_code_line("if name in original_name_set:")
+        self.indent_level += 1
         self._add_code_line("solution[name] = solution_values.col_value[i]")
-        self._add_code_line("if abs(solution_values.col_value[i]) > 1e-8:")
-        self.indent_level += 1
-        self._add_code_line("print(f'{name}: {solution_values.col_value[i]}')")
         self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("objective_value = highs.getObjectiveValue()")
@@ -4037,14 +4040,43 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         *,
         sense: str,
     ) -> None:
-        row = [0.0] * len(self.var_names)
+        row: dict[int, float] = {}
         for var_name, coef in coef_by_var.items():
-            row[self._resolve_coefficient_index(var_name)] += coef
-        self._append_sparse_row(state, row, rhs, sense=sense)
+            index = self._resolve_coefficient_index(var_name)
+            row[index] = row.get(index, 0.0) + coef
+        if sense == "eq":
+            row_idx, rows, cols, data, rhs_values = (
+                state.eq_row_idx,
+                state.A_eq_rows,
+                state.A_eq_cols,
+                state.A_eq_data,
+                state.b_eq,
+            )
+            state.eq_row_idx += 1
+        elif sense == "ub":
+            row_idx, rows, cols, data, rhs_values = (
+                state.ub_row_idx,
+                state.A_ub_rows,
+                state.A_ub_cols,
+                state.A_ub_data,
+                state.b_ub,
+            )
+            state.ub_row_idx += 1
+        else:
+            raise ValueError(f"Unsupported sparse row sense: {sense}")
+        for index, value in sorted(row.items()):
+            if abs(value) > LINEAR_ZERO_TOLERANCE:
+                rows.append(row_idx)
+                cols.append(index)
+                data.append(value)
+        rhs_values.append(rhs)
 
     def _finalize_constraint_state(self, state: _ConstraintBuildState) -> None:
         n_vars = len(self.var_names)
-        if len(state.b_eq) > 0:
+        dense_rows = (
+            not getattr(self, "_sparse_codegen_only", False) or n_vars * (len(state.b_eq) + len(state.b_ub)) <= 1_000_000
+        )
+        if len(state.b_eq) > 0 and dense_rows:
             dense_A_eq = [[0.0 for _ in range(n_vars)] for _ in range(len(state.b_eq))]
             for row_idx, col_idx, value in zip(state.A_eq_rows, state.A_eq_cols, state.A_eq_data):
                 dense_A_eq[row_idx][col_idx] = value
@@ -4053,7 +4085,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             self.A_eq = []
         self.b_eq = state.b_eq
 
-        if len(state.b_ub) > 0:
+        if len(state.b_ub) > 0 and dense_rows:
             dense_A_ub = [[0.0 for _ in range(n_vars)] for _ in range(len(state.b_ub))]
             for row_idx, col_idx, value in zip(state.A_ub_rows, state.A_ub_cols, state.A_ub_data):
                 dense_A_ub[row_idx][col_idx] = value
@@ -5076,36 +5108,31 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             return True
         return False
 
-    def _emit_plain_linear_constraint(self, constr, env, append_eq_row, append_ub_row) -> None:
+    def _emit_plain_linear_constraint(self, constr, env, state) -> None:
         left = constr["left"]
         right = constr["right"]
         lhs_dict, lhs_const = self._accumulate_sum_to_dict(left, env, sign=1)
         rhs_dict, rhs_const = self._accumulate_sum_to_dict(right, env, sign=1)
         logger.debug(f"[HighsCSCCodeGenerator] lhs_dict: {lhs_dict}, lhs_const: {lhs_const}")
         logger.debug(f"[HighsCSCCodeGenerator] rhs_dict: {rhs_dict}, rhs_const: {rhs_const}")
-        row = [0.0] * len(self.var_names)
+        row: dict[Any, float] = {}
         for vname, coef in lhs_dict.items():
-            idx = self._resolve_coefficient_index(vname)
-            logger.debug(f"[HighsCSCCodeGenerator] LHS vname: {vname}, coef: {coef}, idx: {idx}")
-            row[idx] += coef
+            row[vname] = row.get(vname, 0.0) + coef
         for vname, coef in rhs_dict.items():
-            idx = self._resolve_coefficient_index(vname)
-            logger.debug(f"[HighsCSCCodeGenerator] RHS vname: {vname}, coef: {coef}, idx: {idx}")
-            row[idx] -= coef
+            row[vname] = row.get(vname, 0.0) - coef
         rhs_value = rhs_const - lhs_const
-        logger.debug(f"[HighsCSCCodeGenerator] Final constraint row: {row}, rhs_value: {rhs_value}")
         if constr["op"] == "==":
-            append_eq_row(row, rhs_value)
+            self._append_sparse_coef_row(state, row, rhs_value, sense="eq")
         elif constr["op"] == "<=":
-            append_ub_row(row, rhs_value)
+            self._append_sparse_coef_row(state, row, rhs_value, sense="ub")
         elif constr["op"] == ">=":
-            append_ub_row([-v for v in row], -rhs_value)
+            self._append_sparse_coef_row(state, {name: -coef for name, coef in row.items()}, -rhs_value, sense="ub")
         elif constr["op"] in (">", "<"):
             adjusted_op, adjusted_rhs = self._strict_adjusted_rhs(constr["op"], rhs_value)
             if adjusted_op == "<=":
-                append_ub_row(row, adjusted_rhs)
+                self._append_sparse_coef_row(state, row, adjusted_rhs, sense="ub")
             else:
-                append_ub_row([-v for v in row], -adjusted_rhs)
+                self._append_sparse_coef_row(state, {name: -coef for name, coef in row.items()}, -adjusted_rhs, sense="ub")
         else:
             logger.debug(f"Unsupported op: {constr['op']}")
 
@@ -6310,7 +6337,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             handle_constraint,
         ):
             return
-        self._emit_plain_linear_constraint(constraint, env, append_eq_row, append_ub_row)
+        self._emit_plain_linear_constraint(constraint, env, state)
 
     def _not_equal_boolean_operands(self, left, right):
         left_is_boolean = self._is_declared_boolean_var_node(left)

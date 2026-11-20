@@ -18,8 +18,10 @@ import json
 import multiprocessing
 import os
 import queue
+import shutil
 import signal
 import sys
+import tempfile
 from contextlib import redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -68,6 +70,71 @@ def _run_solve(
         return results
     except Exception:
         raise
+
+
+def _solve_file_worker(model: str, data: Optional[str], solver: str, settings: Optional[dict], output: str, messages) -> None:
+    try:
+        with redirect_stdout(sys.stderr):
+            result = solve(model, data, solver=solver, solver_settings=settings)
+        with open(output, "w", encoding="utf-8") as file_obj:
+            json.dump(result, file_obj, indent=2, sort_keys=True, default=str)
+        messages.put(("done", None))
+    except Exception as exc:
+        messages.put(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        messages.close()
+        messages.join_thread()
+
+
+def _solve_large_data(model: Path, data: Path, solver: str, settings: Optional[dict], out_file: Optional[str]) -> int:
+    context = multiprocessing.get_context("spawn")
+    messages = context.Queue()
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "result.json"
+        process = context.Process(
+            target=_solve_file_worker,
+            args=(str(model), str(data), solver, settings, str(output), messages),
+        )
+        try:
+            process.start()
+            frame = 0
+            while True:
+                try:
+                    kind, detail = messages.get(timeout=0.2)
+                except queue.Empty:
+                    if not process.is_alive():
+                        raise RuntimeError(f"Solve worker exited unexpectedly (code {process.exitcode})")
+                    if sys.stderr.isatty():
+                        _show_progress_bar("Processing OPL model...", 0, frame)
+                        frame += 1
+                    continue
+                if kind == "error":
+                    raise RuntimeError(detail)
+                if kind != "done":
+                    raise RuntimeError(f"Unexpected solve worker message: {kind}")
+                if sys.stderr.isatty():
+                    print(file=sys.stderr)
+                if out_file:
+                    shutil.copyfile(output, out_file)
+                else:
+                    with output.open("r", encoding="utf-8") as result_file:
+                        shutil.copyfileobj(result_file, sys.stdout)
+                    print()
+                return 0
+        except KeyboardInterrupt:
+            process.terminate()
+            process.join(timeout=1)
+            if process.is_alive():
+                process.kill()
+            print("\nSolve interrupted", file=sys.stderr)
+            return 130
+        except Exception as exc:
+            print(f"\nError during solve: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            if process.pid is not None:
+                process.join(timeout=1)
+            messages.close()
 
 
 def _export_py(model_path: Path, data_path: Optional[Path], solver_key: str) -> str:
@@ -343,6 +410,8 @@ def _handle_solve(args: argparse.Namespace) -> int:
     try:
         solver_settings = _load_solver_settings(args.solver_settings)
         if args.out == "json":
+            if data_path and data_path.stat().st_size > 1_000_000:
+                return _solve_large_data(model_path, data_path, solver_key, solver_settings, args.out_file)
             with redirect_stdout(sys.stderr):
                 results = _run_solve(model_path, data_path, solver_key, solver_settings)
             _write_json_result(results, args.out_file)
@@ -388,9 +457,9 @@ def _import_paths(args: argparse.Namespace) -> Optional[tuple[Path, Path, Path]]
     return source, model_path, data_path
 
 
-def _show_import_progress(stage: str, percent: int, frame: int) -> None:
+def _show_progress_bar(stage: str, percent: int, frame: int) -> None:
     width = 24
-    if stage == "Reading model..." and percent == 0:
+    if stage in ("Reading model...", "Processing OPL model...") and percent == 0:
         position = frame % (width - 3)
         fill = " " * position + "====" + " " * (width - position - 4)
         suffix = ""
@@ -412,7 +481,7 @@ def _follow_import_progress(process, messages) -> None:
             if not process.is_alive():
                 raise RuntimeError(f"Import worker exited unexpectedly (code {process.exitcode})")
             if sys.stderr.isatty() and (not stage or stage == "Reading model..."):
-                _show_import_progress(stage or "Reading model...", 0, frame)
+                _show_progress_bar(stage or "Reading model...", 0, frame)
                 frame += 1
             continue
         if kind == "error":
@@ -426,7 +495,7 @@ def _follow_import_progress(process, messages) -> None:
         if new_stage != stage or percent != previous_percent:
             stage = new_stage
             previous_percent = percent
-            _show_import_progress(stage, percent, frame)
+            _show_progress_bar(stage, percent, frame)
 
 
 def _handle_import(args: argparse.Namespace) -> int:

@@ -5,13 +5,33 @@ from pathlib import Path
 
 import highspy
 
-from pyopl.highs_codegen_csc import HighsCSCCodeGenerator
+from pyopl.highs_codegen_csc import HighsCSCCodeGenerator, _ConstraintBuildState
 from pyopl.import_model import convert_file
 from pyopl.linear_problem_highs import build_highs_model, export_linear_problem
 from pyopl.pyopl_core import linear_problem_from_opl, parse_model
 
 
 class TestLinearProblemHighs(unittest.TestCase):
+    def test_codegen_keeps_large_constraint_rows_sparse(self):
+        generator = object.__new__(HighsCSCCodeGenerator)
+        generator.var_names = [f"x_{index}" for index in range(100_000)]
+        generator.var_indices = {"x_99999": 99_999}
+        generator.A_eq = []
+        generator.A_ub = []
+        generator._sparse_codegen_only = True
+        generator.highs_code_lines = []
+        generator.indent_level = 0
+        state = _ConstraintBuildState()
+
+        for _ in range(11):
+            generator._append_sparse_coef_row(state, {"x_99999": 3.0}, 5.0, sense="ub")
+        generator._finalize_constraint_state(state)
+
+        self.assertEqual(state.A_ub_cols, [99_999] * 11)
+        self.assertEqual(state.A_ub_data, [3.0] * 11)
+        self.assertEqual(generator.A_ub, [])
+        self.assertEqual(generator.b_ub, [5.0] * 11)
+
     def test_build_highs_model_and_export_lp_mps(self):
         ast = parse_model("dvar float+ x; minimize 2 * x + 3; subject to { x >= 1; x <= 4; }")
         problem = HighsCSCCodeGenerator(ast).build_problem()

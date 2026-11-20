@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve Gurobi and HiGHS incumbents on IDE Stop by prioritizing final results over solver logs and waiting asynchronously for graceful interruption; a second Stop forces termination.
+- Avoid sending one live-log message per solution variable before delivering the final solver result.
+- Keep the IDE responsive when starting solves with unchanged large data files by reusing their on-disk contents and deferring validation to the solver process; avoid duplicating large data in session snapshots.
+- Keep CLI solves interruptible during large data compilation and avoid eager serialization of solver input in logs.
+- Avoid dense constraint-matrix snapshots when generating HiGHS solve code; retain the existing dense `LinearProblem` export representation for now.
 - Show non-blocking progress when opening large data files from the file menu, drag-and-drop, exemplars, or saved sessions.
 - Keep the IDE responsive during native HiGHS import and open large generated data files in scheduled chunks.
 - Match the model import progress dialog's background, spacing, and controls to the active IDE theme.
