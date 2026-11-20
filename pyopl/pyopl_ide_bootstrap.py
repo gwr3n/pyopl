@@ -121,6 +121,8 @@ TOKEN_COLORS = {
 
 MAX_HIGHLIGHT_CHARS = 10_000
 MAX_FOLD_SCAN_CHARS = 1_000_000
+DIRTY_TAB_CHECK_DEBOUNCE_MS = 250
+DIRTY_TAB_CHECK_CHARS_PER_IDLE = 64 * 1024
 GENAI_MAX_PDF_PAGES = 5
 GENAI_PDF_RENDER_DPI = 180
 MAX_FOLD_VIEW_STATES = 100
@@ -1267,6 +1269,8 @@ class _EditorBufferState:
     saved_text: str = ""
     saved_stat: Optional[tuple[int, int]] = None
     marked_tab_text: Optional[str] = None
+    dirty_check_after_id: Optional[str] = None
+    dirty_check_version: int = 0
     highlight_after_ids: dict[str, str] = field(default_factory=dict)
     highlight_version: int = 0
     syntax_error: Optional[str] = None
@@ -4389,20 +4393,82 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _update_editor_tab(self, text_widget: tk.Text) -> None:
         editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        if text_widget is self.data_text and OPLIDE._text_too_large_for_highlight(self, text_widget):
+            OPLIDE._set_editor_tab_dirty(self, text_widget, True)
+            OPLIDE._schedule_large_data_dirty_check(self, text_widget)
+            return
+        if text_widget is self.data_text:
+            OPLIDE._cancel_large_data_dirty_check(self, editor)
+        OPLIDE._set_editor_tab_dirty(
+            self,
+            text_widget,
+            self._get_editor_text(text_widget) != editor.saved_text,
+        )
+
+    def _set_editor_tab_dirty(self, text_widget: tk.Text, dirty: bool) -> None:
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
         frame = self.model_frame if text_widget is self.model_text else self.data_frame
         current_label = self.editor_notebook.tab(frame, "text")
         label = current_label
         if label == editor.marked_tab_text:
             label = label[:-3]
-        dirty = (
-            True
-            if text_widget is self.data_text and OPLIDE._text_too_large_for_highlight(self, text_widget)
-            else self._get_editor_text(text_widget) != editor.saved_text
-        )
         display_label = f"{label} • " if dirty else label
         editor.marked_tab_text = display_label if dirty else None
         if display_label != current_label:
             self.editor_notebook.tab(frame, text=display_label)
+
+    def _cancel_large_data_dirty_check(self, editor: _EditorBufferState) -> None:
+        editor.dirty_check_version += 1
+        if editor.dirty_check_after_id:
+            try:
+                self.after_cancel(editor.dirty_check_after_id)
+            except tk.TclError:
+                pass
+            editor.dirty_check_after_id = None
+
+    def _schedule_large_data_dirty_check(self, text_widget: tk.Text) -> None:
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        OPLIDE._cancel_large_data_dirty_check(self, editor)
+        version = editor.dirty_check_version
+        editor.dirty_check_after_id = self.after(
+            DIRTY_TAB_CHECK_DEBOUNCE_MS,
+            OPLIDE._check_large_data_dirty_tab,
+            self,
+            text_widget,
+            version,
+            editor.saved_text,
+            0,
+        )
+
+    def _check_large_data_dirty_tab(self, text_widget: tk.Text, version: int, saved_text: str, offset: int) -> None:
+        editor = OPLIDE._editor_state_for_widget(self, text_widget)
+        if version != editor.dirty_check_version:
+            return
+        editor.dirty_check_after_id = None
+        if editor.saved_text is not saved_text:
+            return
+        if offset == 0:
+            count = text_widget.count("1.0", "end-1c", "chars")
+            current_length = int(count[0]) if count else len(self._get_editor_text(text_widget))
+            if current_length != len(saved_text):
+                return
+
+        chunk_end = min(offset + DIRTY_TAB_CHECK_CHARS_PER_IDLE, len(saved_text))
+        start = text_widget.index(f"1.0 + {offset} chars")
+        end = text_widget.index(f"1.0 + {chunk_end} chars")
+        if text_widget.get(start, end) != saved_text[offset:chunk_end]:
+            return
+        if chunk_end == len(saved_text):
+            OPLIDE._set_editor_tab_dirty(self, text_widget, False)
+            return
+        editor.dirty_check_after_id = self.after_idle(
+            OPLIDE._check_large_data_dirty_tab,
+            self,
+            text_widget,
+            version,
+            saved_text,
+            chunk_end,
+        )
 
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""

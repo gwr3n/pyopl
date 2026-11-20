@@ -445,6 +445,59 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             root.update()
             self.assertEqual(notebook.tab(data_frame, "text"), "Data: saved.dat")
 
+    def test_large_data_tab_marker_clears_when_text_returns_to_saved_baseline(self):
+        baseline = "x" * (pyopl_ide_bootstrap.MAX_HIGHLIGHT_CHARS + 2 * pyopl_ide_bootstrap.DIRTY_TAB_CHECK_CHARS_PER_IDLE)
+        data = ChunkedDummyText(baseline)
+        notebook = mock.Mock()
+        labels = {"data": "Data: large.dat"}
+        notebook.tab.side_effect = lambda frame, option=None, **kwargs: (
+            labels.update({frame: kwargs["text"]}) if kwargs else labels[frame]
+        )
+        scheduled = []
+
+        def schedule(_delay, callback, *args):
+            scheduled.append((callback, args))
+            return f"after-{len(scheduled)}"
+
+        def schedule_idle(callback, *args):
+            scheduled.append((callback, args))
+            return f"after-{len(scheduled)}"
+
+        host = SimpleNamespace(
+            model_text=DummyText(),
+            data_text=data,
+            model_frame="model",
+            data_frame="data",
+            editor_notebook=notebook,
+            _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(saved_text=baseline),
+            after=schedule,
+            after_idle=schedule_idle,
+            after_cancel=mock.Mock(),
+            _get_editor_text=lambda widget: widget.get("1.0", "end-1c"),
+            _text_too_large_for_highlight=lambda widget: OPLIDE._text_too_large_for_highlight(host, widget),
+        )
+
+        data.value = baseline + " edit"
+        OPLIDE._update_editor_tab(host, data)
+        self.assertEqual(labels["data"], "Data: large.dat • ")
+
+        data.value = baseline
+        while scheduled:
+            callback, args = scheduled.pop(0)
+            callback(*args)
+
+        self.assertEqual(labels["data"], "Data: large.dat")
+        self.assertIsNone(host._data_editor_state.marked_tab_text)
+
+        data.value = baseline[:-1] + "y"
+        OPLIDE._update_editor_tab(host, data)
+        while scheduled:
+            callback, args = scheduled.pop(0)
+            callback(*args)
+
+        self.assertEqual(labels["data"], "Data: large.dat • ")
+        self.assertIsNotNone(host._data_editor_state.marked_tab_text)
+
     def test_opened_data_is_clean_until_edited(self):
         class ModifiedText(ChunkedDummyText):
             modified = False
@@ -478,6 +531,9 @@ class TestIDEUtilitiesMore(unittest.TestCase):
             data_gutter=mock.Mock(),
             _model_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
+            after=mock.Mock(return_value="dirty-check"),
+            after_idle=mock.Mock(return_value="dirty-check-idle"),
+            after_cancel=mock.Mock(),
             _get_editor_text=lambda widget: widget.get("1.0", "end-1c"),
             _store_fold_state=mock.Mock(),
             _restore_fold_state=mock.Mock(),

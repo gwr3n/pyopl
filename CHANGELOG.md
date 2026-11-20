@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Clear large data tab dirty markers after the editor returns to the saved contents.
 - Keep imported and opened data tabs clean until edited, including large files.
 - Keep large model/data saves and Python/LP/MPS exports responsive with cancellable progress; preserve existing destinations until output is complete.
 - Restore editor dirty-tab updates and solver cleanup when closing the IDE.
