@@ -1,6 +1,15 @@
+import io
 import unittest
+from contextlib import redirect_stdout
 
 from pyopl.pyopl_core import OPLCompiler
+
+try:
+    import gurobipy  # noqa: F401
+
+    GUROBI_AVAILABLE = True
+except ImportError:
+    GUROBI_AVAILABLE = False
 
 
 class TestDexpr(unittest.TestCase):
@@ -59,6 +68,54 @@ class TestDexpr(unittest.TestCase):
         ast, code, _ = compiler.compile_model(model, solver="gurobi")
         self.assertIsNotNone(ast)
         self.assertGreater(len(code), 0)
+
+    @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
+    def test_filtered_variable_sums_preserve_matches_and_empty_results(self):
+        model = """
+            range V = 1..4;
+            {int} B = {1, 3};
+            {int} Empty = {v | v in V: v > 4};
+            tuple Entry { int index; };
+            {Entry} entries = {<1>, <2>, <3>, <4>};
+            dvar boolean x[B];
+            dvar float unused[Empty];
+            dexpr float value[v in V] =
+                sum(b in B: b == v) x[b] + sum(k in Empty: k == v) unused[k];
+            maximize sum(e in entries) e.index * value[e.index];
+            subject to {
+                x[1] == 1;
+                x[3] == 1;
+                sum(b in B: b == 2) x[b] == 0;
+                sum(b in B: 1 == b) x[b] == 1;
+            }
+        """
+        _, code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+        self.assertNotIn("for b in B if", code)
+        self.assertNotIn("for k in Empty if", code)
+        namespace = {"results_container": {}}
+        with redirect_stdout(io.StringIO()):
+            exec(code, namespace)
+        result = namespace["results_container"]["gurobi_output"]
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["objective_value"], 4.0)
+
+    @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
+    def test_filtered_sum_does_not_lookup_variables_from_a_different_domain(self):
+        model = """
+            range V = 1..3;
+            {int} B = {1, 3};
+            dvar boolean x[V];
+            dvar boolean y[B];
+            maximize sum(b in B: b == 2) x[b] + sum(b in B: b == b) y[b];
+            subject to { x[2] == 1; y[1] == 1; y[3] == 1; }
+        """
+        _, code, _ = OPLCompiler().compile_model(model, solver="gurobi")
+        namespace = {"results_container": {}}
+        with redirect_stdout(io.StringIO()):
+            exec(code, namespace)
+        result = namespace["results_container"]["gurobi_output"]
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["objective_value"], 2.0)
 
 
 if __name__ == "__main__":

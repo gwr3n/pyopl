@@ -1,17 +1,55 @@
+import io
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import highspy
 
 from pyopl.highs_codegen_csc import HighsCSCCodeGenerator, _ConstraintBuildState
 from pyopl.import_model import convert_file
 from pyopl.linear_problem_highs import build_highs_model, export_linear_problem
-from pyopl.pyopl_core import linear_problem_from_opl, parse_model
+from pyopl.pyopl_core import OPLCompiler, linear_problem_from_opl, parse_model
+
+try:
+    import gurobipy  # noqa: F401
+
+    GUROBI_AVAILABLE = True
+except ImportError:
+    GUROBI_AVAILABLE = False
 
 
 class TestLinearProblemHighs(unittest.TestCase):
+    def test_solution_vector_is_read_once_for_multiple_variables(self):
+        model = "dvar float+ x[1..3]; minimize sum(i in 1..3) x[i]; subject to { forall(i in 1..3) x[i] >= i; }"
+        _, code, _ = OPLCompiler().compile_model(model, solver="highs")
+        original_get_solution = highspy.Highs.getSolution
+        reads = []
+
+        class TrackedSolution:
+            def __init__(self, solution):
+                self.solution = solution
+                self.value_valid = solution.value_valid
+
+            @property
+            def col_value(self):
+                reads.append(1)
+                return self.solution.col_value
+
+        def get_solution(highs):
+            return TrackedSolution(original_get_solution(highs))
+
+        namespace = {"results_container": {}, "_pyopl_solver_settings": {"output_flag": False}}
+        with mock.patch.object(highspy.Highs, "getSolution", get_solution), redirect_stdout(io.StringIO()):
+            exec(code, namespace)
+
+        result = namespace["results_container"]["highs_output"]
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertEqual(result["solution"], {"x_1": 1.0, "x_2": 2.0, "x_3": 3.0})
+        self.assertEqual(len(reads), 1)
+
     def test_codegen_keeps_large_constraint_rows_sparse(self):
         generator = object.__new__(HighsCSCCodeGenerator)
         generator.var_names = [f"x_{index}" for index in range(100_000)]
@@ -59,6 +97,7 @@ class TestLinearProblemHighs(unittest.TestCase):
         highs.addRow(2.0, 4.0, 3, [0, 1, 2], [1.0, 2.0, -1.0])
         highs.changeObjectiveSense(highspy.ObjSense.kMaximize)
         highs.changeObjectiveOffset(7.0)
+        highs.run()
 
         with tempfile.TemporaryDirectory() as directory:
             for extension in ("lp", "mps"):
@@ -75,6 +114,13 @@ class TestLinearProblemHighs(unittest.TestCase):
                     problem = linear_problem_from_opl(model.read_text(), data.read_text())
                     self.assertEqual(problem.sense, "maximize")
                     self.assertEqual(problem.c, [-2.0, 1.0, -3.0])
+                    _, code, _ = OPLCompiler().compile_model(model.read_text(), data.read_text(), solver="highs")
+                    namespace = {"results_container": {}, "_pyopl_solver_settings": {"output_flag": False}}
+                    with redirect_stdout(io.StringIO()):
+                        exec(code, namespace)
+                    result = namespace["results_container"]["highs_output"]
+                    self.assertEqual(result["status"], "OPTIMAL")
+                    self.assertAlmostEqual(result["objective_value"], highs.getObjectiveValue())
 
     def test_import_rejects_quadratic_models_without_generating_files(self):
         highs = highspy.Highs()
@@ -90,6 +136,32 @@ class TestLinearProblemHighs(unittest.TestCase):
                 convert_file(source, model, data)
             self.assertFalse(model.exists())
             self.assertFalse(data.exists())
+
+    @unittest.skipUnless(GUROBI_AVAILABLE, "gurobipy is not available")
+    def test_imported_mixed_variable_model_solves_with_gurobi(self):
+        highs = highspy.Highs()
+        highs.setOptionValue("output_flag", False)
+        highs.addCols(3, [2.0, -1.0, 3.0], [0.0, 0.0, -highspy.kHighsInf], [1.0, 10.0, 5.0], 0, [0, 0, 0, 0], [], [])
+        highs.changeColIntegrality(0, highspy.HighsVarType.kInteger)
+        highs.changeColIntegrality(1, highspy.HighsVarType.kInteger)
+        highs.addRow(2.0, 4.0, 3, [0, 1, 2], [1.0, 2.0, -1.0])
+        highs.changeObjectiveSense(highspy.ObjSense.kMaximize)
+        highs.changeObjectiveOffset(7.0)
+        highs.run()
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "mixed.mps"
+            model = Path(directory) / "mixed.mod"
+            data = Path(directory) / "mixed.dat"
+            highs.writeModel(str(source))
+            convert_file(source, model, data)
+            _, code, _ = OPLCompiler().compile_model(model.read_text(), data.read_text(), solver="gurobi")
+            namespace = {"results_container": {}}
+            with redirect_stdout(io.StringIO()):
+                exec(code, namespace)
+            result = namespace["results_container"]["gurobi_output"]
+        self.assertEqual(result["status"], "OPTIMAL")
+        self.assertAlmostEqual(result["objective_value"], highs.getObjectiveValue())
 
     def test_import_unconstrained_model_preserves_infinite_bound(self):
         highs = highspy.Highs()

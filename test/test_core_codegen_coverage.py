@@ -484,7 +484,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("has_incumbent = solution_values.value_valid", highs_code)
         self.assertIn("status_str in ('TIME_LIMIT', 'INTERRUPTED') and has_incumbent", highs_code)
         self.assertIn("print('Incumbent solution found:')", highs_code)
-        self.assertIn("solution[name] = solution_values.col_value[i]", highs_code)
+        self.assertIn("solution[name] = column_values[i]", highs_code)
         self.assertNotIn("print(f'{name}: {solution_values.col_value[i]}')", highs_code)
         self.assertIn("results['stats'] = stats", highs_code)
         self.assertIn("stats['mip_node_count']", highs_code)

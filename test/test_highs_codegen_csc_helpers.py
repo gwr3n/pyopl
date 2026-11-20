@@ -595,6 +595,65 @@ class TestHighsCSCExpressionEvaluatorHelpers(unittest.TestCase):
         self.assertEqual(generator._static_iterator_domain_cache[id(string_iterators[0])], ["A", "B"])
         self.assertEqual(generator._iterator_domain_membership_cache[id(string_iterators[0])], frozenset({"A", "B"}))
 
+    def test_singleton_filter_reuses_named_set_across_outer_environments(self) -> None:
+        generator = make_generator()
+        generator.data_dict["Numbers"] = list(range(100))
+        iterator = {"iterator": "i", "range": {"type": "named_set", "name": "Numbers"}}
+        condition = {
+            "type": "binop",
+            "op": "==",
+            "left": {"type": "name", "value": "i"},
+            "right": {"type": "name", "value": "target"},
+        }
+        with mock.patch.object(generator, "_named_iterator_domain", wraps=generator._named_iterator_domain) as load:
+            for value in (1, 50, 101):
+                result = generator._iter_filtered_environments([iterator], {"target": value}, condition)
+                self.assertEqual([indices for _, indices in result], [(value,)] if value < 100 else [])
+        self.assertEqual(load.call_count, 1)
+
+    def test_singleton_filter_respects_changing_indexed_set_and_range(self) -> None:
+        generator = make_generator()
+        generator.data_dict["Groups"] = [[1, 2], [3, 4]]
+        condition = {
+            "type": "binop",
+            "op": "==",
+            "left": {"type": "name", "value": "i"},
+            "right": {"type": "name", "value": "target"},
+        }
+        domains: list[dict] = [
+            {"type": "indexed_set", "name": "Groups", "dimensions": [{"type": "name_reference_index", "name": "group"}]},
+            {
+                "type": "range_specifier",
+                "start": {"type": "number", "value": 1},
+                "end": {"type": "name", "value": "limit"},
+            },
+        ]
+        environments = [
+            ({"group": 1, "target": 2}, {"group": 2, "target": 3}),
+            ({"limit": 1, "target": 2}, {"limit": 3, "target": 2}),
+        ]
+        for domain, (first, second) in zip(domains, environments):
+            with self.subTest(domain=domain["type"]):
+                iterator = {"iterator": "i", "range": domain}
+                generator._iter_filtered_environments([iterator], first, condition)
+                result = generator._iter_filtered_environments([iterator], second, condition)
+                self.assertEqual([indices for _, indices in result], [(second["target"],)])
+
+    def test_singleton_filter_does_not_bind_a_shadowed_outer_iterator(self) -> None:
+        generator = make_generator()
+        iterator = {
+            "iterator": "i",
+            "range": {
+                "type": "range_specifier",
+                "start": {"type": "number", "value": 1},
+                "end": {"type": "number", "value": 3},
+            },
+        }
+        name = {"type": "name", "value": "i"}
+        condition = {"type": "binop", "op": "==", "left": name, "right": name}
+        result = generator._iter_filtered_environments([iterator], {"i": 2}, condition)
+        self.assertEqual([indices for _, indices in result], [(1,), (2,), (3,)])
+
     def test_bound_tightening_forall_keeps_multi_iterator_domains_separate(self) -> None:
         model = """
         range I = 1..3;
@@ -936,6 +995,30 @@ class TestHighsCSCGeneratorHelpers(unittest.TestCase):
 
         with self.assertRaisesRegex(SemanticError, "out of declared domain"):
             gen._lookup_var_or_param("x", [9])
+
+    def test_indexed_parameter_lookup_does_not_scan_variable_names(self) -> None:
+        generator = make_generator("""
+            range I = 1..3;
+            int p[I] = [10, 20, 30];
+            dvar float x[I];
+            minimize 0;
+            subject to { }
+            """)
+        generator.var_indices = {"x_1": 0, "x_2": 1, "x_3": 2}
+        with mock.patch.object(generator, "_find_symbolic_variable_name", side_effect=AssertionError("variable scan")):
+            self.assertEqual(generator._lookup_var_or_param("p", [2]), (False, 20.0, False))
+
+    def test_numeric_and_string_arrays_do_not_copy_to_check_for_key_value_pairs(self) -> None:
+        class NoSlices(list):
+            def __getitem__(self, key):
+                if isinstance(key, slice):
+                    raise AssertionError("array was copied")
+                return super().__getitem__(key)
+
+        generator = make_generator()
+        self.assertIsNone(generator._flat_parameter_list_to_dict(NoSlices([1, 2, 3, 4])))
+        self.assertIsNone(generator._flat_parameter_list_to_dict(NoSlices(["L", "E", "G", "L"])))
+        self.assertEqual(generator._flat_parameter_list_to_dict(["a", 1, "b", 2]), {"a": 1, "b": 2})
 
     def test_data_declaration_set_range_and_set_set_normalization(self) -> None:
         ast = {

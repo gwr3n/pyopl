@@ -146,7 +146,7 @@ class ExpressionEvaluator:
         Accepts float, str, or tuple results for handler compatibility.
         """
         # Debug: Log the incoming expression and environment
-        logger.debug(f"[EVAL_ENTRY] type={expr.get('type')}, expr={expr}, env={env}")
+        logger.debug("[EVAL_ENTRY] type=%s, expr=%s, env=%s", expr.get("type"), expr, env)
         if env is None:
             env = {}
         if not isinstance(expr, dict):
@@ -164,7 +164,7 @@ class ExpressionEvaluator:
         handler = self._get_handler(t)
         if handler:
             result = handler(expr, env)
-            logger.debug(f"[EVAL] Handler for type '{t}' returned: {result} (type: {type(result)})")
+            logger.debug("[EVAL] Handler for type '%s' returned: %s (type: %s)", t, result, type(result))
             return self._validate_handler_result(t, result)
         # Fallbacks for common literal types
         return self._handle_literal_fallback(t, expr, env)
@@ -1721,6 +1721,10 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             logger.debug(f"[resolve_variable] Found indexed variable: {variable_name}")
             return True, variable_name, False
 
+        declaration = self._find_decl(name)
+        if declaration is not None and declaration.get("type") != "dvar_indexed":
+            return None
+
         symbolic_name = self._find_symbolic_variable_name(name, variable_name)
         if symbolic_name is not None:
             logger.debug(f"[resolve_variable] Found symbolic indexed variable: {symbolic_name}")
@@ -1821,6 +1825,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
     @staticmethod
     def _parameter_list_pairs(val: list):
         if len(val) % 2 != 0 or not val:
+            return None
+        if not isinstance(val[0], (list, tuple, str)) or not isinstance(val[1], (int, float)):
             return None
         keys = val[::2]
         values = val[1::2]
@@ -2262,7 +2268,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         raise self._unsupported_type_error("expr in index bound", expression_type)
 
     def _iterator_domain_dynamic(self, iterator: dict, env: dict) -> list:
-        if not env:
+        range_type = (iterator.get("range") or {}).get("type")
+        if not env or range_type in ("named_set", "named_set_dimension", "named_range"):
             cache: dict[int, list[Any]] | None = getattr(self, "_static_iterator_domain_cache", None)
             if cache is None:
                 cache = {}
@@ -2400,6 +2407,18 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             return right
         return left if right.get("type") == "name" and right.get("value") == iterator_name else None
 
+    @staticmethod
+    def _references_iterator(node: Any, name: str) -> bool:
+        if isinstance(node, dict):
+            if node.get("type") == "name" and node.get("value") == name:
+                return True
+            if node.get("type") == "name_reference_index" and node.get("name") == name:
+                return True
+            return any(HighsCSCCodeGenerator._references_iterator(value, name) for value in node.values())
+        if isinstance(node, list):
+            return any(HighsCSCCodeGenerator._references_iterator(value, name) for value in node)
+        return False
+
     def _singleton_filtered_environment(
         self,
         iterators: list[dict],
@@ -2414,7 +2433,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         iterator = iterators[0]
         iterator_name = iterator.get("iterator")
         bound_expr = self._singleton_equality_bound(iterator_name, index_constraint)
-        if bound_expr is None:
+        if bound_expr is None or not isinstance(iterator_name, str) or self._references_iterator(bound_expr, iterator_name):
             return None
 
         try:
@@ -2432,6 +2451,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         return [(env, (value,))]
 
     def _iterator_domain_contains(self, iterator: dict, domain: list, value: Any) -> bool:
+        if (iterator.get("range") or {}).get("type") not in ("named_set", "named_set_dimension", "named_range"):
+            return value in domain
         cache: dict[int, frozenset[Any]] | None = getattr(self, "_iterator_domain_membership_cache", None)
         if cache is None:
             cache = {}
@@ -2843,15 +2864,14 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             "solver_options.update({key: value for key, value in globals().get('_pyopl_solver_settings', {}).items() "
             "if value is not None})"
         )
-        # Emit sense variable for use in sign fix
         sense = self.ast.get("objective", {}).get("type", "minimize")
-        self._add_code_line(f"sense = '{sense}'")
         self._add_code_line("")
         self._sparse_codegen_only = True
         try:
             problem = self.build_problem()
         finally:
             self._sparse_codegen_only = False
+        self._add_code_line(f"sense = '{sense}'")
 
         # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
         if len(problem.var_names) == 0:
@@ -3061,12 +3081,13 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line("print('Optimal solution found:')")
         self.indent_level -= 1
         self._add_code_line("solution = {}")
+        self._add_code_line("column_values = solution_values.col_value")
         self._add_code_line("original_name_set = set(original_var_names)")
         self._add_code_line("for i, name in enumerate(var_names):")
         self.indent_level += 1
         self._add_code_line("if name in original_name_set:")
         self.indent_level += 1
-        self._add_code_line("solution[name] = solution_values.col_value[i]")
+        self._add_code_line("solution[name] = column_values[i]")
         self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("objective_value = highs.getObjectiveValue()")

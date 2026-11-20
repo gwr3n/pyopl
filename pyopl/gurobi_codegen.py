@@ -3379,10 +3379,53 @@ class GurobiCodeGenerator:
         logger.debug(f"[GurobiCodeGen] SUM generated quicksum: gp.quicksum({generator})")
         return f"gp.quicksum({generator})"
 
+    def _filtered_lookup_key(self, condition, iterator, current_iterators):
+        if not isinstance(condition, dict) or condition.get("op") != "==":
+            return None
+        left, right = condition["left"], condition["right"]
+        if right.get("type") == "name" and right.get("value") == iterator:
+            left, right = right, left
+        if left.get("type") != "name" or left.get("value") != iterator or right.get("sem_type") not in ("int", "int+"):
+            return None
+        if right.get("type") in ("field_access", "name"):
+            source = right.get("base", {}) if right["type"] == "field_access" else right
+            if source.get("type") != "name" or source.get("value") == iterator or source.get("value") not in current_iterators:
+                return None
+        elif right.get("type") != "number":
+            return None
+        return self._traverse_expression(right, current_iterators, symbolic=True)
+
+    def _filtered_variable_lookup(self, expr_node, current_iterators):
+        iterators = expr_node["iterators"]
+        variable = expr_node["expression"]
+        if len(iterators) != 1 or variable.get("type") != "indexed_name":
+            return None
+        iterator = iterators[0]["iterator"]
+        domain = iterators[0]["range"]
+        dimensions = variable.get("dimensions", [])
+        if domain.get("type") != "named_set" or len(dimensions) != 1:
+            return None
+        if dimensions[0].get("type") != "name_reference_index" or dimensions[0].get("name") != iterator:
+            return None
+        declaration = self._find_declaration_by_name(variable["name"], types=["dvar_indexed"])
+        set_declaration = self._find_declaration_by_name(domain["name"], types=["typed_set", "typed_set_external"])
+        if not declaration or declaration.get("dimensions") != [{"type": "named_set_dimension", "name": domain["name"]}]:
+            return None
+        if not set_declaration or set_declaration.get("base_type") != "int":
+            return None
+        key = self._filtered_lookup_key(expr_node.get("index_constraint"), iterator, current_iterators)
+        if key is None:
+            return None
+        # A missing key must remain a zero-valued linear expression, not a Python boolean in constraints.
+        return f"gp.LinExpr({variable['name']}.get({key}, 0))"
+
     def _expr_sum(self, expr_node, current_iterators, symbolic):
         iterators = expr_node["iterators"]
         index_constraint = expr_node.get("index_constraint")
         inner_expression = expr_node["expression"]
+        lookup = self._filtered_variable_lookup(expr_node, current_iterators)
+        if lookup is not None:
+            return lookup
         reused = self._reused_comparison_sum(expr_node, current_iterators)
         if reused is not None:
             return reused

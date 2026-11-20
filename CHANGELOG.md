@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Avoid repeated copying of the HiGHS solution vector when collecting variable values after a solve.
+- Avoid quadratic Gurobi model construction for equality-filtered variable lookups in imported LP/MPS models.
+- Speed up HiGHS compilation of imported models by reusing static iterator domains and avoiding variable scans for indexed parameters.
+- Respect changing indexed-set and range domains and shadowed iterators when evaluating HiGHS equality filters.
+- Preserve the objective sense when imported HiGHS models contain a parameter named `sense`.
+
 ### Changed
 
 ### Removed
