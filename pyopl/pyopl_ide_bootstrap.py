@@ -2404,13 +2404,13 @@ class OPLIDE(TkinterDnD.Tk):
         # Theme
         theme_menu = tk.Menu(settings_menu, tearoff=0)
         theme_menu.add_radiobutton(
-            label="Light (Bootstrap)",
+            label="Light",
             variable=self.theme_var,
             value=_LIGHT_THEME,
             command=self._make_theme_cmd(_LIGHT_THEME),
         )
         theme_menu.add_radiobutton(
-            label="Dark (Bootstrap)",
+            label="Dark",
             variable=self.theme_var,
             value=_DARK_THEME,
             command=self._make_theme_cmd(_DARK_THEME),
@@ -4296,6 +4296,7 @@ class OPLIDE(TkinterDnD.Tk):
         """Show a themed short-text dialog and return the entered text or None."""
         dlg = tk.Toplevel(self)
         dlg.title(title)
+        OPLIDE._theme_dialog(self, dlg)
         dlg.transient(self)
         dlg.resizable(False, False)
 
@@ -4659,6 +4660,7 @@ class OPLIDE(TkinterDnD.Tk):
         exemplars = self._available_exemplars(models_dirs)
         dialog = tk.Toplevel(self)
         dialog.title("Retrieve Exemplar")
+        OPLIDE._theme_dialog(self, dialog)
         dialog.geometry("760x480")
         dialog.minsize(600, 320)
         dialog.transient(self)
@@ -6123,10 +6125,10 @@ class OPLIDE(TkinterDnD.Tk):
             canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#2563eb", outline="")
             x, y = ub_points
             canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#dc2626", outline="")
-        canvas.create_text(width - 88, 18, text="LB", fill="#2563eb", anchor="w")
-        canvas.create_line(width - 115, 18, width - 94, 18, fill="#2563eb", width=2)
-        canvas.create_text(width - 44, 18, text="UB", fill="#dc2626", anchor="w")
-        canvas.create_line(width - 71, 18, width - 50, 18, fill="#dc2626", width=2)
+        canvas.create_text(width - 88, 12, text="LB", fill="#2563eb", anchor="w")
+        canvas.create_line(width - 115, 12, width - 94, 12, fill="#2563eb", width=2)
+        canvas.create_text(width - 44, 12, text="UB", fill="#dc2626", anchor="w")
+        canvas.create_line(width - 71, 12, width - 50, 12, fill="#dc2626", width=2)
 
     @staticmethod
     def _clean_solver_progress_samples(samples: list[dict[str, Any]]) -> list[tuple[float, float]]:
@@ -6453,6 +6455,8 @@ class OPLIDE(TkinterDnD.Tk):
         operation: Optional[_ForegroundOperation],
     ) -> None:
         ide._solver_ipc.join(timeout=0.1)
+        if ide._solver_ipc.process is not None and ide._solver_ipc.process.is_alive():
+            ide._solver_ipc.stop()
 
         OPLIDE._cleanup_solver_ipc(ide, cancel_queue_thread=False)
         ide._set_run_menu_running(False)
@@ -7014,6 +7018,7 @@ class OPLIDE(TkinterDnD.Tk):
     def _review_exemplar_draft(self, draft: ExemplarDraft, models_root: Path) -> Optional[ExemplarDraft]:
         dialog = tk.Toplevel(self)
         dialog.title(f"Review Exemplar: {draft.name}")
+        OPLIDE._theme_dialog(self, dialog)
         dialog.geometry("920x680")
         dialog.minsize(640, 440)
         dialog.transient(self)
@@ -7021,6 +7026,7 @@ class OPLIDE(TkinterDnD.Tk):
         dialog.rowconfigure(0, weight=1)
         dialog.columnconfigure(0, weight=1)
 
+        colors = self._theme_palette(self.theme_var.get())
         notebook = ttk.Notebook(dialog)
         notebook.grid(row=0, column=0, sticky="nsew", padx=12, pady=(12, 8))
         editors: dict[str, tk.Text] = {}
@@ -7033,6 +7039,13 @@ class OPLIDE(TkinterDnD.Tk):
             frame.rowconfigure(0, weight=1)
             frame.columnconfigure(0, weight=1)
             editor = scrolledtext.ScrolledText(frame, wrap="word" if label == "Description" else "none", undo=True)
+            editor.configure(
+                bg=colors["editor_bg"],
+                fg=colors["editor_fg"],
+                insertbackground=colors["caret_fg"],
+                selectbackground=colors["list_select_bg"],
+                selectforeground=colors["editor_fg"],
+            )
             self._replace_scrolled_text_vbar(editor)
             editor.grid(row=0, column=0, sticky="nsew")
             self._overlay_scrollbar(editor, editor.vbar)
@@ -8375,30 +8388,34 @@ class OPLIDE(TkinterDnD.Tk):
         OPLIDE._apply_theme_styles(self, colors)
         OPLIDE._apply_theme_optional_widgets(self, colors)
 
+    def _theme_dialog(self, dialog: tk.Toplevel) -> None:
+        dialog.configure(bg=OPLIDE._theme_palette(self.theme_var.get())["root_bg"])
+
     @staticmethod
     def _theme_palette(theme: str) -> dict[str, str]:
         if theme == _DARK_THEME:
+            dark = "#121212"
             return {
-                "root_bg": "#212529",
-                "editor_bg": "#262b30",
-                "editor_fg": "#f8f9fa",
-                "caret_fg": "#f8f9fa",
-                "sidebar_bg": "#212529",
-                "output_bg": "#262b30",
-                "output_fg": "#f8f9fa",
+                "root_bg": dark,
+                "editor_bg": dark,
+                "editor_fg": "#c4c4c4",
+                "caret_fg": "#d4d4d4",
+                "sidebar_bg": dark,
+                "output_bg": "#151515",
+                "output_fg": "#d4d4d4",
                 "error_fg": "white",
-                "paned_bg": "#212529",
-                "sidebar_fg": "#f8f9fa",
-                "sidebar_muted": "#aab4be",
-                "list_select_bg": "#45484b",
-                "inset_border": "#45484b",
-                "status_bg": "#212529",
-                "status_fg": "#cfd6dd",
-                "status_meta_fg": "#8f9aa3",
-                "scrollbar_thumb_bg": "#495057",
-                "scrollbar_active_bg": "#5c636a",
-                "scrollbar_trough_bg": "#212529",
-                "ttk_scrollbar_trough_bg": "#262b30",
+                "paned_bg": dark,
+                "sidebar_fg": "#d4d4d4",
+                "sidebar_muted": "#9d9d9d",
+                "list_select_bg": "#264f78",
+                "inset_border": "#303030",
+                "status_bg": dark,
+                "status_fg": "#d4d4d4",
+                "status_meta_fg": "#9d9d9d",
+                "scrollbar_thumb_bg": "#424242",
+                "scrollbar_active_bg": "#555555",
+                "scrollbar_trough_bg": dark,
+                "ttk_scrollbar_trough_bg": dark,
             }
         return {
             "root_bg": "#f8f9fa",
@@ -8436,6 +8453,8 @@ class OPLIDE(TkinterDnD.Tk):
             "bg": colors["editor_bg"],
             "fg": colors["editor_fg"],
             "insertbackground": colors["caret_fg"],
+            "selectbackground": colors["list_select_bg"],
+            "selectforeground": colors["editor_fg"],
             "relief": tk.FLAT,
             "bd": 0,
             "highlightthickness": 1,
@@ -8456,6 +8475,8 @@ class OPLIDE(TkinterDnD.Tk):
                 output.config(
                     bg=colors["output_bg"],
                     fg=colors["output_fg"],
+                    selectbackground=colors["list_select_bg"],
+                    selectforeground=colors["output_fg"],
                     relief=tk.FLAT,
                     bd=0,
                     highlightthickness=1,
@@ -8471,7 +8492,45 @@ class OPLIDE(TkinterDnD.Tk):
             style.configure("Sidebar.TCheckbutton", indicatormargin=(0, 0, 4, 0))
             style.configure("TEntry", borderwidth=1, bordercolor=colors["inset_border"])
             style.map("TEntry", bordercolor=[("focus", colors["inset_border"])])
-            style.configure("TNotebook.Tab", padding=(12, 6))
+            if self.theme_var.get() == _DARK_THEME:
+                tab_strip_bg = "#242424"
+                style.configure("TFrame", background=colors["root_bg"])
+                style.configure("TLabel", background=colors["root_bg"], foreground=colors["sidebar_fg"])
+                style.configure("TLabelframe", background=colors["root_bg"], bordercolor=colors["inset_border"])
+                style.configure("TLabelframe.Label", background=colors["root_bg"], foreground=colors["sidebar_fg"])
+                style.configure(
+                    "TEntry",
+                    borderwidth=1,
+                    bordercolor=colors["inset_border"],
+                    fieldbackground=colors["editor_bg"],
+                    foreground=colors["editor_fg"],
+                )
+                style.configure(
+                    "TNotebook",
+                    background=tab_strip_bg,
+                    lightcolor=tab_strip_bg,
+                    darkcolor=tab_strip_bg,
+                    bordercolor=tab_strip_bg,
+                    tabmargins=(6, 2, 2, 0),
+                )
+                style.configure(
+                    "TNotebook.Tab",
+                    padding=(12, 6),
+                    background=tab_strip_bg,
+                    foreground=colors["sidebar_muted"],
+                    bordercolor=tab_strip_bg,
+                )
+                style.map(
+                    "TNotebook.Tab",
+                    background=[("selected", colors["editor_bg"])],
+                    lightcolor=[("selected", colors["editor_bg"]), ("!selected", tab_strip_bg)],
+                    bordercolor=[("selected", colors["editor_bg"])],
+                    foreground=[("selected", colors["sidebar_fg"])],
+                )
+                style.configure("TButton", background=colors["inset_border"], foreground=colors["sidebar_fg"])
+                style.map("TButton", background=[("active", "#383838"), ("pressed", "#383838")])
+            else:
+                style.configure("TNotebook.Tab", padding=(12, 6))
             style.configure("Sidebar.TFrame", background=colors["sidebar_bg"])
             style.configure(
                 "SidebarHeader.TLabel",
@@ -8493,7 +8552,7 @@ class OPLIDE(TkinterDnD.Tk):
             )
             for style_name, background, foreground in (
                 ("GenaiMode.TButton", colors["paned_bg"], colors["sidebar_muted"]),
-                ("GenaiModeActive.TButton", colors["list_select_bg"], colors["sidebar_fg"]),
+                ("GenaiModeActive.TButton", colors["inset_border"], colors["sidebar_fg"]),
             ):
                 style.configure(
                     style_name,
@@ -8504,7 +8563,7 @@ class OPLIDE(TkinterDnD.Tk):
                     padding=(10, 5),
                     font=self.interface_button_font,
                 )
-                style.map(style_name, background=[("active", colors["list_select_bg"]), ("pressed", colors["list_select_bg"])])
+                style.map(style_name, background=[("active", colors["inset_border"]), ("pressed", colors["inset_border"])])
             button_layout = OPLIDE._strip_focus_from_ttk_layout(self, style.layout("TButton"))
             for style_name in ("TButton", "GenaiMode.TButton", "GenaiModeActive.TButton"):
                 style.layout(style_name, button_layout)
@@ -8562,6 +8621,8 @@ class OPLIDE(TkinterDnD.Tk):
             "bg": colors["editor_bg"],
             "fg": colors["editor_fg"],
             "insertbackground": colors["caret_fg"],
+            "selectbackground": colors["list_select_bg"],
+            "selectforeground": colors["editor_fg"],
             "relief": tk.FLAT,
             "bd": 0,
             "highlightthickness": 1,
@@ -9430,6 +9491,7 @@ class _ComparisonDialog:
         dialog = tk.Toplevel(self.parent)
         self.dialog = dialog
         dialog.title("Compare models")
+        OPLIDE._theme_dialog(self.parent, dialog)
         dialog.transient(self.parent)
         dialog.geometry("760x600")
         dialog.minsize(680, 500)

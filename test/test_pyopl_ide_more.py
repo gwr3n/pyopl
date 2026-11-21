@@ -1987,6 +1987,31 @@ minimize x;
         self.assertEqual(dummy.status_var.value, "Error running model")
         dummy._finish_foreground_operation.assert_called_once_with(operation)
 
+    def test_terminal_result_stops_worker_still_flushing_logs(self):
+        worker = mock.Mock()
+        worker.process.is_alive.return_value = True
+        dummy = SimpleNamespace(
+            _solver_ipc=worker,
+            _cleanup_solver_ipc=mock.Mock(),
+            _set_run_menu_running=mock.Mock(),
+            _stop_run_timer=mock.Mock(),
+            _restore_output_textbox=mock.Mock(),
+            _finish_solver_progress=mock.Mock(),
+            _display_solve_results=mock.Mock(),
+            _finish_foreground_operation=mock.Mock(),
+        )
+
+        OPLIDE._finalize_solver_poll(dummy, "success", {"status": "OPTIMAL"}, None)
+
+        worker.stop.assert_called_once_with()
+        worker.cleanup.assert_called_once_with(cancel_queue_thread=False)
+        dummy._display_solve_results.assert_called_once()
+
+        worker.reset_mock()
+        worker.process.is_alive.return_value = False
+        OPLIDE._finalize_solver_poll(dummy, "success", {"status": "OPTIMAL"}, None)
+        worker.stop.assert_not_called()
+
     def test_poll_solver_solve_and_explain_skips_failed_solution(self):
         """Solve-and-explain success path skips GenAI explanation when solver output is unsuccessful."""
 
@@ -2207,6 +2232,9 @@ minimize x;
         lines = [call for call in canvas.calls if call[0] == "line"]
         self.assertTrue(any(call[2].get("width") == 2 for call in lines))
         self.assertEqual(len([call for call in lines if "width" not in call[2]]), 2)
+        legend_labels = [call for call in canvas.calls if call[0] == "text" and call[2].get("text") in ("LB", "UB")]
+        self.assertEqual([call[1][1] for call in legend_labels], [12, 12])
+        self.assertEqual([call[1][1] for call in lines if call[2].get("width") == 2][-2:], [12, 12])
 
     def test_solver_progress_window_uses_borderless_theme_surface(self):
         window = mock.Mock()

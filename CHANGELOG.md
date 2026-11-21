@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Stop a solver worker still flushing queued logs after its result is received so the IDE can quit after a Gurobi solve.
 - Avoid repeated copying of the HiGHS solution vector when collecting variable values after a solve.
 - Avoid quadratic Gurobi model construction for equality-filtered variable lookups in imported LP/MPS models.
 - Speed up HiGHS compilation of imported models by reusing static iterator domains and avoiding variable scans for indexed parameters.
@@ -16,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve the objective sense when imported HiGHS models contain a parameter named `sense`.
 
 ### Changed
+
+- Show the IDE themes as Light and Dark in the Settings menu.
+- Refine the IDE dark palette with an inset tab strip, darker output panel, and blue text selections.
+- Use a lighter dark-theme editor foreground for untagged text, including comments.
+- Apply the dark palette to Compare Models and Retrieve/Save Exemplar dialogs.
+- Raise the LB/UB chart legend to leave more room above the plotted lines.
 
 ### Removed
 

@@ -142,14 +142,17 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 app.destroy()
 
     def _assert_dark_theme_surfaces(self, app):
-        self.assertEqual(app.cget("bg"), app.style.colors.bg)
-        self.assertEqual(app.model_text.cget("bg"), app.style.colors.inputbg)
-        self.assertEqual(app.output_text.cget("bg"), app.style.colors.inputbg)
-        self.assertEqual(app.genai_prompt_text.cget("bg"), app.style.colors.inputbg)
-        self.assertEqual(app.request_listbox.cget("bg"), app.style.colors.inputbg)
-        self.assertEqual(app.style.lookup("Sidebar.TFrame", "background"), app.style.colors.bg)
-        self.assertEqual(app.model_text.cget("highlightbackground"), app.style.colors.border)
-        self.assertEqual(app.style.lookup("TEntry", "bordercolor"), app.style.colors.border)
+        colors = app._theme_palette(app.theme_var.get())
+        self.assertEqual(app.cget("bg"), colors["root_bg"])
+        self.assertEqual(app.model_text.cget("bg"), colors["editor_bg"])
+        self.assertEqual(app.output_text.cget("bg"), colors["output_bg"])
+        self.assertEqual(app.genai_prompt_text.cget("bg"), colors["editor_bg"])
+        self.assertEqual(app.request_listbox.cget("bg"), colors["editor_bg"])
+        self.assertEqual(app.style.lookup("Sidebar.TFrame", "background"), colors["sidebar_bg"])
+        self.assertEqual(app.model_text.cget("highlightbackground"), colors["inset_border"])
+        self.assertEqual(app.style.lookup("TEntry", "bordercolor"), colors["inset_border"])
+        self.assertEqual(app.style.lookup("TEntry", "fieldbackground"), colors["editor_bg"])
+        self.assertEqual(app.style.lookup("TLabelframe", "background"), colors["root_bg"])
 
         comparison = pyopl_ide_bootstrap._ComparisonDialog(app)
         comparison.open()
@@ -157,8 +160,9 @@ class TestPyOPLIDETyping(unittest.TestCase):
             comparison_root = comparison.dialog.winfo_children()[0]
             result_frame = comparison_root.grid_slaves(row=2, column=0)[0]
             result_text = result_frame.winfo_children()[0].winfo_children()[0]
+            self.assertEqual(comparison.dialog.cget("bg"), colors["root_bg"])
             self.assertEqual(result_text.cget("bg"), app.output_text.cget("bg"))
-            self.assertEqual(result_text.cget("highlightbackground"), app.style.colors.border)
+            self.assertEqual(result_text.cget("highlightbackground"), colors["inset_border"])
         finally:
             comparison.close()
         worker = mock.Mock()
@@ -171,12 +175,13 @@ class TestPyOPLIDETyping(unittest.TestCase):
             app.retrieve_exemplar()
             try:
                 exemplar_dialog = (set(app.winfo_children()) - existing_windows).pop()
+                self.assertEqual(exemplar_dialog.cget("bg"), colors["root_bg"])
                 content = exemplar_dialog.grid_slaves(row=2, column=0)[0]
                 for column in (0, 1):
                     frame = content.grid_slaves(row=0, column=column)[0]
                     widget = frame.grid_slaves(row=0, column=0)[0]
-                    self.assertEqual(widget.cget("bg"), app.style.colors.inputbg)
-                    self.assertEqual(widget.cget("highlightbackground"), app.style.colors.border)
+                    self.assertEqual(widget.cget("bg"), colors["editor_bg"])
+                    self.assertEqual(widget.cget("highlightbackground"), colors["inset_border"])
             finally:
                 app._exemplar_search_cleanup(None)
 
@@ -3125,12 +3130,30 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy.editor_notebook.calls[-1], {"style": "TNotebook", "padding": 0})
         for widget in (dummy.model_text, dummy.data_text, dummy.output_text, dummy.genai_prompt_text):
             self.assertEqual(widget.calls[-1]["highlightthickness"], 1)
-
         dummy.theme_var.value = "bootstrap-dark"
         OPLIDE._apply_theme_colors(dummy)
-        self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
+        self.assertEqual(dummy.model_text.calls[-1]["bg"], "#121212")
+        self.assertEqual(dummy.model_text.calls[-1]["fg"], "#c4c4c4")
+        self.assertEqual(dummy.model_text.calls[-1]["selectbackground"], "#264f78")
+        self.assertEqual(dummy.output_text.calls[-1]["bg"], "#151515")
+        self.assertEqual(dummy.output_text.calls[-1]["selectbackground"], "#264f78")
+        self.assertEqual(dummy.output_text.calls[-1]["fg"], "#d4d4d4")
+        for style_name in ("TFrame", "Sidebar.TFrame", "StatusBar.TFrame"):
+            self.assertEqual(dummy.style.configured[style_name]["background"], "#121212")
+        self.assertEqual(dummy.style.configured["TNotebook"]["background"], "#242424")
+        self.assertEqual(dummy.style.configured["TNotebook"]["tabmargins"], (6, 2, 2, 0))
+        self.assertEqual(dummy.style.configured["TLabelframe"]["background"], "#121212")
+        self.assertEqual(dummy.style.configured["TEntry"]["fieldbackground"], "#121212")
+        self.assertEqual(dummy.style.configured["TButton"]["background"], "#303030")
+        self.assertEqual(dummy.style.configured["GenaiModeActive.TButton"]["background"], "#303030")
+        self.assertEqual(dummy.style.configured["TNotebook.Tab"]["background"], "#242424")
+        self.assertEqual(dummy.style.configured["TNotebook.Tab"]["bordercolor"], "#242424")
+        self.assertEqual(dummy.style.mapped["TNotebook.Tab"]["background"], [("selected", "#121212")])
+        self.assertEqual(
+            dummy.style.mapped["TNotebook.Tab"]["lightcolor"], [("selected", "#121212"), ("!selected", "#242424")]
+        )
         for orientation in ("Vertical", "Horizontal"):
-            self.assertEqual(dummy.style.configured[f"{orientation}.TScrollbar"]["troughcolor"], "#262b30")
+            self.assertEqual(dummy.style.configured[f"{orientation}.TScrollbar"]["troughcolor"], "#121212")
 
     def test_populate_genai_model_menus_preserves_current_selection(self):
         class DummyVar:
