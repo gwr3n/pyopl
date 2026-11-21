@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+### Changed
+
+### Removed
+
+## [v2.9.2] - 2026-11-20
+
+### Added
+
+### Fixed
+
 - Stop a solver worker still flushing queued logs after its result is received so the IDE can quit after a Gurobi solve.
 - Avoid repeated copying of the HiGHS solution vector when collecting variable values after a solve.
 - Avoid quadratic Gurobi model construction for equality-filtered variable lookups in imported LP/MPS models.
