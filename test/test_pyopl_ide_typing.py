@@ -95,16 +95,52 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 preview = app._create_diff_preview_text(pyopl_ide_bootstrap.ttk.Frame(dialog))
                 self.assertEqual((int(preview.cget("padx")), int(preview.cget("pady"))), (8, 8))
                 padding = app.style.scaling.logical(5)
-                for widget in (app.model_text, app.data_text, app.output_text, app.genai_prompt_text, description):
+                for widget in (app.model_text, app.data_text, app.genai_prompt_text, description):
                     self.assertEqual((int(widget.cget("padx")), int(widget.cget("pady"))), (padding, padding))
+                self.assertEqual((int(app.output_text.cget("padx")), int(app.output_text.cget("pady"))), (padding, padding))
+                self.assertEqual(int(app.output_text.cget("highlightthickness")), 0)
+                self.assertEqual(int(app.output_frame.cget("highlightthickness")), 1)
+                self.assertEqual(int(app.request_listbox.cget("borderwidth")), padding)
+                self.assertEqual(int(app.sessions_surface.cget("highlightthickness")), 1)
                 app._show_solver_log_textbox()
                 log = app._solver_log_text
                 self.assertIsNotNone(log)
-                self.assertEqual(int(log.cget("highlightthickness")), 1)
+                self.assertEqual(int(log.cget("highlightthickness")), 0)
+                self.assertEqual((int(log.cget("padx")), int(log.cget("pady"))), (padding, padding))
                 for option in ("highlightbackground", "highlightcolor", "bg", "fg"):
                     self.assertEqual(log.cget(option), app.output_text.cget(option))
                 for theme in ("bootstrap-light", "bootstrap-dark"):
                     app.set_theme(theme)
+                    colors = app._theme_palette(theme)
+                    comparison = pyopl_ide_bootstrap._ComparisonDialog(app)
+                    comparison.open()
+                    try:
+                        comparison_root = comparison.dialog.winfo_children()[0]
+                        strategy_frame = comparison_root.grid_slaves(row=0, column=0)[0]
+                        path_frame = comparison_root.grid_slaves(row=1, column=0)[0]
+                        result_frame = comparison_root.grid_slaves(row=2, column=0)[0]
+                        button_frame = comparison_root.grid_slaves(row=3, column=0)[0]
+                        result_text = result_frame.winfo_children()[0].winfo_children()[0]
+                        path_entry = path_frame.grid_slaves(row=0, column=1)[0]
+                        self.assertEqual(comparison_root.cget("style"), "CompareDialog.TFrame")
+                        self.assertEqual(strategy_frame.cget("style"), "CompareDialog.TFrame")
+                        self.assertEqual(button_frame.cget("style"), "CompareDialog.TFrame")
+                        self.assertEqual(path_frame.cget("bg"), colors["root_bg"])
+                        self.assertEqual(result_frame.cget("bg"), colors["root_bg"])
+                        self.assertEqual(result_text.cget("bg"), colors["root_bg"])
+                        self.assertEqual(app.style.lookup("CompareDialog.TLabel", "background"), colors["root_bg"])
+                        self.assertEqual(app.style.lookup("CompareDialog.TEntry", "fieldbackground"), colors["root_bg"])
+                        self.assertEqual(path_entry.cget("style"), "CompareDialog.TEntry")
+                    finally:
+                        comparison.close()
+                    self.assertEqual(app.style.lookup("Sidebar.TCheckbutton", "background"), colors["sidebar_bg"])
+                    self.assertEqual(app.style.lookup("Sidebar.TCheckbutton", "foreground"), colors["sidebar_fg"])
+                    colors = app._theme_palette(theme)
+                    self.assertEqual(app.output_frame.cget("highlightbackground"), colors["inset_border"])
+                    self.assertEqual(app.sessions_surface.cget("highlightbackground"), colors["inset_border"])
+                    self.assertEqual(app.sessions_surface.cget("bg"), colors["sidebar_bg"])
+                    self.assertEqual(int(app.request_listbox.cget("borderwidth")), padding)
+                    self.assertEqual(int(app.request_listbox.cget("highlightthickness")), 0)
                     for item_list in (app.request_listbox, app.genai_attachment_listbox, listbox):
                         with self.subTest(theme=theme, item_list=item_list):
                             self.assertEqual(int(item_list.cget("borderwidth")), padding)
@@ -119,7 +155,6 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     for widget in (
                         app.model_text,
                         app.data_text,
-                        app.output_text,
                         app.genai_prompt_text,
                         description,
                         preview,
@@ -161,8 +196,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
             result_frame = comparison_root.grid_slaves(row=2, column=0)[0]
             result_text = result_frame.winfo_children()[0].winfo_children()[0]
             self.assertEqual(comparison.dialog.cget("bg"), colors["root_bg"])
-            self.assertEqual(result_text.cget("bg"), app.output_text.cget("bg"))
-            self.assertEqual(result_text.cget("highlightbackground"), colors["inset_border"])
+            self.assertEqual(result_text.cget("bg"), colors["root_bg"])
+            self.assertEqual(int(result_frame.cget("highlightthickness")), 1)
+            self.assertEqual(result_frame.cget("highlightbackground"), colors["inset_border"])
+            self.assertEqual(int(result_text.cget("highlightthickness")), 0)
         finally:
             comparison.close()
         worker = mock.Mock()
@@ -416,6 +453,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             _data_editor_state=pyopl_ide_bootstrap._EditorBufferState(),
             theme_var=SimpleNamespace(get=lambda: "bootstrap-light"),
             _theme_palette=OPLIDE._theme_palette,
+            style=mock.Mock(),
             genai_provider=None,
             genai_model=None,
             _active_operation=None,
@@ -443,9 +481,7 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.tk, "Toplevel", return_value=dialog),
             mock.patch.object(pyopl_ide_bootstrap.tk, "StringVar", DummyVar),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()),
-            mock.patch.object(
-                pyopl_ide_bootstrap.ttk, "LabelFrame", side_effect=lambda *_a, **_kw: mock.Mock()
-            ) as label_frame,
+            mock.patch.object(pyopl_ide_bootstrap.tk, "Frame", side_effect=lambda *_a, **_kw: mock.Mock()) as panel_frame,
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Label", side_effect=lambda *_a, **_kw: mock.Mock()),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Entry", side_effect=lambda *_a, **_kw: mock.Mock()),
             mock.patch.object(pyopl_ide_bootstrap.ttk, "Button", side_effect=make_button),
@@ -461,10 +497,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
             mock.patch.object(pyopl_ide_bootstrap.threading, "Thread", return_value=mock.Mock()) as thread_cls,
         ):
             OPLIDE.compare_models(host)
-            self.assertEqual([call.kwargs for call in label_frame.call_args_list], [{"padding": 10}, {"padding": 10}])
+            panel_options = [call.kwargs for call in panel_frame.call_args_list]
+            self.assertEqual(len(panel_options), 2)
+            for options in panel_options:
+                self.assertEqual(options["highlightthickness"], 1)
+                self.assertEqual(options["highlightbackground"], "#ced4da")
+                self.assertEqual(options["highlightcolor"], "#ced4da")
+                self.assertEqual(options["bd"], 0)
+                self.assertEqual((options["padx"], options["pady"]), (10, 10))
             result_options = scrolled_text.call_args.kwargs
-            self.assertEqual(result_options["highlightthickness"], 1)
-            self.assertEqual(result_options["highlightbackground"], "#ced4da")
+            self.assertEqual(result_options["highlightthickness"], 0)
             self.assertEqual(result_options["relief"], pyopl_ide_bootstrap.tk.FLAT)
             compare_button = buttons["Compare"]
             compare_button.command()
@@ -3112,12 +3154,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
             genai_prompt_text=DummyWidget(),
             editor_notebook=DummyWidget(),
         )
+        dummy.style.scaling = SimpleNamespace(logical=lambda value: value)
 
         OPLIDE._apply_theme_colors(dummy)
 
         self.assertEqual(dummy.style.configured["GenaiMode.TButton"]["font"], "TkDefaultFont")
         self.assertEqual(dummy.style.configured["GenaiModeActive.TButton"]["font"], "TkDefaultFont")
-        self.assertEqual(dummy.style.configured["Sidebar.TCheckbutton"]["indicatormargin"], (0, 0, 4, 0))
+        self.assertEqual(
+            dummy.style.configured["Sidebar.TCheckbutton"],
+            {"background": "#ffffff", "foreground": "#212529", "indicatormargin": (0, 0, 4, 0)},
+        )
         self.assertEqual(dummy.style.configured["TEntry"], {"borderwidth": 1, "bordercolor": "#ced4da"})
         self.assertEqual(dummy.style.mapped["TEntry"]["bordercolor"], [("focus", "#ced4da")])
         self.assertEqual(dummy.style.configured["TNotebook.Tab"], {"padding": (12, 6)})
@@ -3128,8 +3174,11 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertNotIn(f"{orientation}.TScrollbar", dummy.style.mapped)
         self.assertNotIn("TNotebook.Tab", dummy.style.mapped)
         self.assertEqual(dummy.editor_notebook.calls[-1], {"style": "TNotebook", "padding": 0})
-        for widget in (dummy.model_text, dummy.data_text, dummy.output_text, dummy.genai_prompt_text):
+        for widget in (dummy.model_text, dummy.data_text, dummy.genai_prompt_text):
             self.assertEqual(widget.calls[-1]["highlightthickness"], 1)
+        self.assertEqual(dummy.output_text.calls[-1]["highlightthickness"], 0)
+        self.assertEqual(dummy.output_text.calls[-1]["padx"], 5)
+        self.assertEqual(dummy.output_text.calls[-1]["pady"], 5)
         dummy.theme_var.value = "bootstrap-dark"
         OPLIDE._apply_theme_colors(dummy)
         self.assertEqual(dummy.model_text.calls[-1]["bg"], "#121212")
@@ -3138,6 +3187,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
         self.assertEqual(dummy.output_text.calls[-1]["bg"], "#151515")
         self.assertEqual(dummy.output_text.calls[-1]["selectbackground"], "#264f78")
         self.assertEqual(dummy.output_text.calls[-1]["fg"], "#d4d4d4")
+        self.assertEqual(
+            dummy.style.configured["Sidebar.TCheckbutton"],
+            {"background": "#121212", "foreground": "#d4d4d4", "indicatormargin": (0, 0, 4, 0)},
+        )
         for style_name in ("TFrame", "Sidebar.TFrame", "StatusBar.TFrame"):
             self.assertEqual(dummy.style.configured[style_name]["background"], "#121212")
         self.assertEqual(dummy.style.configured["TNotebook"]["background"], "#242424")

@@ -9,7 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Match the Attach output checkbox background and text color to the active sidebar theme.
+
 ### Changed
+
+- Use a consistent theme background throughout the Compare Models dialog.
+- Replace the Compare Models empty label frames with continuous one-pixel panel borders.
+- Restore inset padding for output text and session-list items while keeping thin borders on their surrounding panels.
 
 ### Removed
 

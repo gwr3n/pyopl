@@ -3182,11 +3182,11 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _setup_output(self, parent: tk.PanedWindow) -> None:
         """Create the output panel."""
-        output_frame = ttk.Frame(parent, relief=tk.FLAT, borderwidth=0)
+        output_frame = tk.Frame(parent, bd=0, highlightthickness=1)
         self.output_frame = output_frame
 
         container = ttk.Frame(output_frame)
-        container.pack(fill=tk.BOTH, expand=1, padx=5, pady=5)
+        container.pack(fill=tk.BOTH, expand=1)
         container.columnconfigure(0, weight=1)
         container.rowconfigure(0, weight=1)
 
@@ -3205,7 +3205,9 @@ class OPLIDE(TkinterDnD.Tk):
             fg="#212529",
             relief=tk.FLAT,
             bd=0,
-            highlightthickness=1,
+            highlightthickness=0,
+            padx=self.style.scaling.logical(5),
+            pady=self.style.scaling.logical(5),
         )
         self._replace_scrolled_text_vbar(self.output_text)
         self.output_text.pack(fill=tk.BOTH, expand=1)
@@ -3244,7 +3246,9 @@ class OPLIDE(TkinterDnD.Tk):
                 fg="#212529",
                 relief=tk.FLAT,
                 bd=0,
-                highlightthickness=1,
+                highlightthickness=0,
+                padx=self.style.scaling.logical(5),
+                pady=self.style.scaling.logical(5),
             )
             self._replace_scrolled_text_vbar(log_text)
             log_text.pack(fill=tk.BOTH, expand=1)
@@ -3453,12 +3457,19 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_sessions_panel = sessions_panel
 
         sessions_list = tk.Frame(sessions_panel, bd=0, highlightthickness=1)
-        sessions_list.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        sessions_list.grid(row=0, column=0, sticky="nsew")
         sessions_list.columnconfigure(0, weight=1)
         sessions_list.rowconfigure(0, weight=1)
         self.sessions_surface = sessions_list
 
-        self.request_listbox = tk.Listbox(sessions_list, exportselection=False, height=10, activestyle="none")
+        self.request_listbox = tk.Listbox(
+            sessions_list,
+            exportselection=False,
+            height=10,
+            activestyle="none",
+            borderwidth=self.style.scaling.logical(5),
+            highlightthickness=0,
+        )
         request_scroll = ttk.Scrollbar(sessions_list, orient=tk.VERTICAL, command=self.request_listbox.yview)
         self.request_listbox.configure(yscrollcommand=request_scroll.set)
         self.request_listbox.grid(row=0, column=0, sticky="nsew")
@@ -8449,6 +8460,13 @@ class OPLIDE(TkinterDnD.Tk):
             pane = getattr(self, pane_name, None)
             if pane is not None and pane.winfo_exists():
                 pane.config(bg=colors["paned_bg"], bd=0, relief=tk.FLAT, sashrelief=tk.FLAT)
+        output_frame = getattr(self, "output_frame", None)
+        if output_frame is not None:
+            output_frame.config(
+                bg=colors["root_bg"],
+                highlightbackground=colors["inset_border"],
+                highlightcolor=colors["inset_border"],
+            )
         editor_config = {
             "bg": colors["editor_bg"],
             "fg": colors["editor_fg"],
@@ -8479,7 +8497,9 @@ class OPLIDE(TkinterDnD.Tk):
                     selectforeground=colors["output_fg"],
                     relief=tk.FLAT,
                     bd=0,
-                    highlightthickness=1,
+                    highlightthickness=0,
+                    padx=self.style.scaling.logical(5),
+                    pady=self.style.scaling.logical(5),
                     highlightbackground=colors["inset_border"],
                     highlightcolor=colors["inset_border"],
                 )
@@ -8489,7 +8509,12 @@ class OPLIDE(TkinterDnD.Tk):
         try:
             style = self.style
             style.configure("Editor.TFrame", background=colors["editor_bg"])
-            style.configure("Sidebar.TCheckbutton", indicatormargin=(0, 0, 4, 0))
+            style.configure(
+                "Sidebar.TCheckbutton",
+                background=colors["sidebar_bg"],
+                foreground=colors["sidebar_fg"],
+                indicatormargin=(0, 0, 4, 0),
+            )
             style.configure("TEntry", borderwidth=1, bordercolor=colors["inset_border"])
             style.map("TEntry", bordercolor=[("focus", colors["inset_border"])])
             if self.theme_var.get() == _DARK_THEME:
@@ -8653,8 +8678,14 @@ class OPLIDE(TkinterDnD.Tk):
         surface = getattr(self, "sessions_surface", None)
         if surface is not None:
             surface.config(
-                bg=colors["inset_border"], highlightbackground=colors["inset_border"], highlightcolor=colors["inset_border"]
+                bg=colors["sidebar_bg"],
+                highlightthickness=1,
+                highlightbackground=colors["inset_border"],
+                highlightcolor=colors["inset_border"],
             )
+        request_list = getattr(self, "request_listbox", None)
+        if request_list is not None:
+            request_list.config(borderwidth=self.style.scaling.logical(5), highlightthickness=0)
 
     @staticmethod
     def _apply_theme_scrollbars(self: Any, colors: dict[str, str]) -> None:
@@ -9496,14 +9527,26 @@ class _ComparisonDialog:
         dialog.geometry("760x600")
         dialog.minsize(680, 500)
 
-        root = ttk.Frame(dialog, padding=12)
+        root = ttk.Frame(dialog, style="CompareDialog.TFrame", padding=12)
         root.pack(fill=tk.BOTH, expand=True)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(2, weight=1)
+        colors = self.parent._theme_palette(self.parent.theme_var.get())
+        self.parent.style.configure("CompareDialog.TFrame", background=colors["root_bg"])
+        self.parent.style.configure("CompareDialog.TLabel", background=colors["root_bg"], foreground=colors["sidebar_fg"])
+        self.parent.style.configure(
+            "CompareDialog.TEntry",
+            background=colors["root_bg"],
+            fieldbackground=colors["root_bg"],
+            foreground=colors["sidebar_fg"],
+            borderwidth=1,
+            bordercolor=colors["inset_border"],
+        )
+        self.parent.style.map("CompareDialog.TEntry", bordercolor=[("focus", colors["inset_border"])])
 
-        strategy_frame = ttk.Frame(root)
+        strategy_frame = ttk.Frame(root, style="CompareDialog.TFrame")
         strategy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        ttk.Label(strategy_frame, text="Comparison strategy").grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(strategy_frame, text="Comparison strategy", style="CompareDialog.TLabel").grid(row=0, column=0, padx=(0, 8))
         strategy_frame.columnconfigure(1, uniform="comparison-strategy")
         strategy_frame.columnconfigure(2, minsize=4)
         strategy_frame.columnconfigure(3, uniform="comparison-strategy")
@@ -9532,7 +9575,16 @@ class _ComparisonDialog:
         )
         concrete_button.grid(row=0, column=3, sticky="ew")
 
-        path_frame = ttk.LabelFrame(root, padding=10)
+        path_frame = tk.Frame(
+            root,
+            bg=colors["root_bg"],
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=colors["inset_border"],
+            highlightcolor=colors["inset_border"],
+            padx=10,
+            pady=10,
+        )
         path_frame.grid(row=1, column=0, sticky="ew")
         path_frame.columnconfigure(1, weight=1)
         path_frame.columnconfigure(3, minsize=90)
@@ -9597,8 +9649,10 @@ class _ComparisonDialog:
             var: tk.StringVar,
             browse_command: Callable[[], None],
         ) -> None:
-            ttk.Label(path_frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-            entry = ttk.Entry(path_frame, textvariable=var)
+            ttk.Label(path_frame, text=label, style="CompareDialog.TLabel").grid(
+                row=row, column=0, sticky="w", padx=(0, 8), pady=4
+            )
+            entry = ttk.Entry(path_frame, textvariable=var, style="CompareDialog.TEntry")
             entry.grid(row=row, column=1, sticky="ew", pady=4)
             browse_button = ttk.Button(path_frame, text="Browse...", command=browse_command)
             browse_button.grid(row=row, column=2, sticky="ew", padx=(8, 0), pady=4)
@@ -9612,23 +9666,29 @@ class _ComparisonDialog:
         mapping_generate_button = ttk.Button(path_frame, text="Generate")
         mapping_generate_button.grid(row=4, column=3, sticky="ew", padx=(8, 0), pady=4)
 
-        result_frame = ttk.LabelFrame(root, padding=10)
-        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
-        result_frame.rowconfigure(0, weight=1)
-        result_frame.columnconfigure(0, weight=1)
-
-        colors = self.parent._theme_palette(self.parent.theme_var.get())
-        result_text = scrolledtext.ScrolledText(
-            result_frame,
-            wrap=tk.WORD,
-            height=14,
-            bg=colors["output_bg"],
-            fg=colors["output_fg"],
-            relief=tk.FLAT,
+        result_frame = tk.Frame(
+            root,
+            bg=colors["root_bg"],
             bd=0,
             highlightthickness=1,
             highlightbackground=colors["inset_border"],
             highlightcolor=colors["inset_border"],
+            padx=10,
+            pady=10,
+        )
+        result_frame.grid(row=2, column=0, sticky="nsew", pady=(12, 0))
+        result_frame.rowconfigure(0, weight=1)
+        result_frame.columnconfigure(0, weight=1)
+
+        result_text = scrolledtext.ScrolledText(
+            result_frame,
+            wrap=tk.WORD,
+            height=14,
+            bg=colors["root_bg"],
+            fg=colors["output_fg"],
+            relief=tk.FLAT,
+            bd=0,
+            highlightthickness=0,
         )
         self.parent._replace_scrolled_text_vbar(result_text)
         result_text.grid(row=0, column=0, sticky="nsew")
@@ -9636,7 +9696,7 @@ class _ComparisonDialog:
         result_text.insert(tk.END, "Select a left and right model, then click Compare.\n")
         result_text.config(state="disabled")
 
-        button_frame = ttk.Frame(root)
+        button_frame = ttk.Frame(root, style="CompareDialog.TFrame")
         button_frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         button_frame.columnconfigure(0, weight=1)
         compare_button = ttk.Button(button_frame, text="Compare")
