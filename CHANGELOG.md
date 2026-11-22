@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Return HiGHS IIS constraints and variable bounds for infeasible models.
+- Return HiGHS IIS constraints with PyOPL labels and variable bounds for infeasible models.
 
 ### Fixed
 

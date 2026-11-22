@@ -31,13 +31,16 @@ class _ConstraintBuildState:
     A_eq_rows: list[int] = field(default_factory=list)
     A_eq_cols: list[int] = field(default_factory=list)
     A_eq_data: list[float] = field(default_factory=list)
+    A_eq_names: list[Optional[str]] = field(default_factory=list)
     b_eq: list[float] = field(default_factory=list)
     A_ub_rows: list[int] = field(default_factory=list)
     A_ub_cols: list[int] = field(default_factory=list)
     A_ub_data: list[float] = field(default_factory=list)
+    A_ub_names: list[Optional[str]] = field(default_factory=list)
     b_ub: list[float] = field(default_factory=list)
     eq_row_idx: int = 0
     ub_row_idx: int = 0
+    current_constraint_name: Optional[str] = None
 
 
 @dataclass
@@ -2873,9 +2876,9 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
                 infeasible_row = len(equality_rhs) + next(
                     index for index, rhs in enumerate(inequality_rhs) if not rhs >= -1e-9
                 )
+            constraint_name = (self.A_eq_names + self.A_ub_names)[infeasible_row] or f"constraint_{infeasible_row}"
             self._add_code_line(
-                f"results['iis'] = {{'constraints': [{{'name': 'constraint_{infeasible_row}', "
-                "'kind': 'constraint'}], 'bounds': []}"
+                f"results['iis'] = {{'constraints': [{{'name': {constraint_name!r}, " "'kind': 'constraint'}], 'bounds': []}"
             )
         self._add_code_line("results['solution'] = {}")
         self._add_code_line("results_container['highs_output'] = results")
@@ -3044,19 +3047,22 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         )
         self.indent_level -= 1
         self.indent_level -= 1
-        self._add_code_line("def add_highs_rows(rows, cols, values, rhs_values, equality):")
+        self._add_code_line("def add_highs_rows(rows, cols, values, rhs_values, row_names, equality):")
         self.indent_level += 1
         self._add_code_line("row_entries = [[] for _ in rhs_values]")
         self._add_code_line("for row_idx, col_idx, value in zip(rows, cols, values):")
         self.indent_level += 1
         self._add_code_line("row_entries[row_idx].append((col_idx, value))")
         self.indent_level -= 1
-        self._add_code_line("for rhs, entries in zip(rhs_values, row_entries):")
+        self._add_code_line("for rhs, entries, row_name in zip(rhs_values, row_entries, row_names):")
         self.indent_level += 1
         self._add_code_line("lower = float(rhs) if equality else -infinity")
         self._add_code_line("upper = float(rhs)")
         self._add_code_line("row_index = highs.getNumRow()")
+        self._add_code_line("if row_name is None:")
+        self.indent_level += 1
         self._add_code_line("row_name = f'constraint_{row_index}'")
+        self.indent_level -= 1
         self._add_code_line(
             "require_highs_ok(highs.addRow(lower, upper, len(entries), "
             "np.asarray([col for col, _ in entries], dtype=np.int32), "
@@ -3065,8 +3071,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line("require_highs_ok(highs.passRowName(row_index, row_name), f'name constraint row {row_name}')")
         self.indent_level -= 1
         self.indent_level -= 1
-        self._add_code_line("add_highs_rows(A_eq_rows, A_eq_cols, A_eq_data, b_eq, True)")
-        self._add_code_line("add_highs_rows(A_ub_rows, A_ub_cols, A_ub_data, b_ub, False)")
+        self._add_code_line("add_highs_rows(A_eq_rows, A_eq_cols, A_eq_data, b_eq, A_eq_names, True)")
+        self._add_code_line("add_highs_rows(A_ub_rows, A_ub_cols, A_ub_data, b_ub, A_ub_names, False)")
         self._add_code_line(
             "objective_sense = highspy.ObjSense.kMaximize if sense == 'maximize' else highspy.ObjSense.kMinimize"
         )
@@ -4130,12 +4136,14 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             rows = state.A_eq_rows
             cols = state.A_eq_cols
             data = state.A_eq_data
+            names = state.A_eq_names
             rhs_values = state.b_eq
         elif sense == "ub":
             row_idx = state.ub_row_idx
             rows = state.A_ub_rows
             cols = state.A_ub_cols
             data = state.A_ub_data
+            names = state.A_ub_names
             rhs_values = state.b_ub
         else:
             raise ValueError(f"Unsupported sparse row sense: {sense}")
@@ -4146,6 +4154,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
                 cols.append(idx)
                 data.append(coef)
         rhs_values.append(rhs)
+        names.append(state.current_constraint_name)
 
         if sense == "eq":
             state.eq_row_idx += 1
@@ -4165,20 +4174,22 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             index = self._resolve_coefficient_index(var_name)
             row[index] = row.get(index, 0.0) + coef
         if sense == "eq":
-            row_idx, rows, cols, data, rhs_values = (
+            row_idx, rows, cols, data, names, rhs_values = (
                 state.eq_row_idx,
                 state.A_eq_rows,
                 state.A_eq_cols,
                 state.A_eq_data,
+                state.A_eq_names,
                 state.b_eq,
             )
             state.eq_row_idx += 1
         elif sense == "ub":
-            row_idx, rows, cols, data, rhs_values = (
+            row_idx, rows, cols, data, names, rhs_values = (
                 state.ub_row_idx,
                 state.A_ub_rows,
                 state.A_ub_cols,
                 state.A_ub_data,
+                state.A_ub_names,
                 state.b_ub,
             )
             state.ub_row_idx += 1
@@ -4190,6 +4201,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
                 cols.append(index)
                 data.append(value)
         rhs_values.append(rhs)
+        names.append(state.current_constraint_name)
 
     def _finalize_constraint_state(self, state: _ConstraintBuildState) -> None:
         n_vars = len(self.var_names)
@@ -4204,6 +4216,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         else:
             self.A_eq = []
         self.b_eq = state.b_eq
+        self.A_eq_names = state.A_eq_names
 
         if len(state.b_ub) > 0 and dense_rows:
             dense_A_ub = [[0.0 for _ in range(n_vars)] for _ in range(len(state.b_ub))]
@@ -4213,14 +4226,17 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         else:
             self.A_ub = []
         self.b_ub = state.b_ub
+        self.A_ub_names = state.A_ub_names
 
         self._add_code_line(f"A_eq_rows = {state.A_eq_rows}")
         self._add_code_line(f"A_eq_cols = {state.A_eq_cols}")
         self._add_code_line(f"A_eq_data = {state.A_eq_data}")
+        self._add_code_line(f"A_eq_names = {state.A_eq_names}")
         self._add_code_line(f"b_eq = {state.b_eq}")
         self._add_code_line(f"A_ub_rows = {state.A_ub_rows}")
         self._add_code_line(f"A_ub_cols = {state.A_ub_cols}")
         self._add_code_line(f"A_ub_data = {state.A_ub_data}")
+        self._add_code_line(f"A_ub_names = {state.A_ub_names}")
         self._add_code_line(f"b_ub = {state.b_ub}")
 
     def _comparison_key(self, node, env):
@@ -6540,6 +6556,32 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._emit_integer_not_equal(diff_coef, diff_const, env, state)
 
     def _handle_constraint_node(self, constr, env, state, bool_expr_var, comparison_truth_var, append_eq_row, append_ub_row):
+        previous_name = state.current_constraint_name
+        label_template = constr.get("label_template")
+        if label_template is not None:
+            label = label_template.get("name", "ct")
+            iterators = label_template.get("iterators") or []
+            if iterators:
+                indices = ",".join(str(env[iterator]) for iterator in iterators)
+                state.current_constraint_name = f"{label}[{indices}]"
+            else:
+                state.current_constraint_name = label
+        elif "label" in constr:
+            state.current_constraint_name = constr["label"]
+        try:
+            self._dispatch_constraint_node(
+                constr,
+                env,
+                state,
+                bool_expr_var,
+                comparison_truth_var,
+                append_eq_row,
+                append_ub_row,
+            )
+        finally:
+            state.current_constraint_name = previous_name
+
+    def _dispatch_constraint_node(self, constr, env, state, bool_expr_var, comparison_truth_var, append_eq_row, append_ub_row):
         self._ensure_constraint_parameters_bound(constr)
         if self._try_enforce_bool_tree_literal_constraint(constr, env, bool_expr_var, append_eq_row):
             return

@@ -206,10 +206,10 @@ class TestCoreHelperCoverage(unittest.TestCase):
     def test_generated_highspy_code_returns_iis_for_infeasible_rows_and_bounds(self):
         cases = (
             (
-                "dvar float x; minimize x; subject to { x >= 2; x <= 1; }",
+                "dvar float x; minimize x; subject to { meet_demand: x >= 2; respect_capacity: x <= 1; }",
                 [
-                    {"name": "constraint_0", "kind": "constraint"},
-                    {"name": "constraint_1", "kind": "constraint"},
+                    {"name": "meet_demand", "kind": "constraint"},
+                    {"name": "respect_capacity", "kind": "constraint"},
                 ],
                 [],
             ),
@@ -219,8 +219,8 @@ class TestCoreHelperCoverage(unittest.TestCase):
                 [{"name": "x", "kind": "lower_bound"}],
             ),
             (
-                "minimize 0; subject to { 0 == 1; }",
-                [{"name": "constraint_0", "kind": "constraint"}],
+                "minimize 0; subject to { impossible_constant: 0 == 1; }",
+                [{"name": "impossible_constant", "kind": "constraint"}],
                 [],
             ),
         )
@@ -241,6 +241,36 @@ class TestCoreHelperCoverage(unittest.TestCase):
             self.assertEqual(result["status"], "INFEASIBLE")
             self.assertEqual(result["iis"]["constraints"], expected_constraints)
             self.assertEqual(result["iis"]["bounds"], expected_bounds)
+            self.assertNotIn("error", result["iis"])
+
+    def test_generated_highspy_code_keeps_labels_aligned_for_equalities_and_forall_rows(self):
+        models = (
+            (
+                "dvar float x; minimize x; subject to { upper: x <= 0; fixed: x == 1; }",
+                {"upper", "fixed"},
+            ),
+            (
+                "range I = 1..1; dvar float x[I]; minimize x[1]; subject to { "
+                "forall(i in I) { meet_demand: x[i] >= 2; respect_capacity: x[i] <= 1; } }",
+                {"meet_demand[1]", "respect_capacity[1]"},
+            ),
+        )
+
+        for model, expected_names in models:
+            with self.subTest(model=model), redirect_stdout(StringIO()):
+                _, code, _ = OPLCompiler().compile_model(model, solver="highs")
+                results_container = {}
+                exec(
+                    code,
+                    {
+                        "results_container": results_container,
+                        "_pyopl_solver_settings": {"output_flag": False},
+                    },
+                )
+
+            result = results_container["highs_output"]
+            self.assertEqual(result["status"], "INFEASIBLE")
+            self.assertEqual({item["name"] for item in result["iis"]["constraints"]}, expected_names)
             self.assertNotIn("error", result["iis"])
 
     def test_shipped_highs_settings_solve_with_native_options(self):
