@@ -273,6 +273,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
                     self.assertEqual(text_var.value, "Exemplar name")
                     entry.configure.assert_any_call(style="ShortTextHint.TEntry")
                     self.assertEqual(bindings["<Button-1>"](None), "break")
+                    self.assertEqual(bindings["<B1-Motion>"](None), "break")
+                    self.assertEqual(bindings["<Double-Button-1>"](None), "break")
+                    self.assertEqual(bindings["<KeyPress>"](SimpleNamespace(char="", keysym="Right")), "break")
+                    self.assertEqual(text_var.value, "Exemplar name")
                     entry.icursor.assert_called_with(0)
                     self.assertEqual(bindings["<<Cut>>"](None), "break")
                     if edit == "typed":
@@ -844,6 +848,10 @@ class TestPyOPLIDETyping(unittest.TestCase):
                 "ExemplarSearchHint.TEntry", foreground=OPLIDE._theme_palette("bootstrap-light")["sidebar_muted"]
             )
             self.assertEqual(bindings["<Button-1>"](None), "break")
+            self.assertEqual(bindings["<B1-Motion>"](None), "break")
+            self.assertEqual(bindings["<Double-Button-1>"](None), "break")
+            self.assertEqual(bindings["<KeyPress>"](SimpleNamespace(char="", keysym="Right")), "break")
+            self.assertEqual(value[0], "Search exemplars")
             entry.icursor.assert_called_with(0)
             bindings["<KeyRelease>"](None)
             search.schedule_search.call_args.args[1]()

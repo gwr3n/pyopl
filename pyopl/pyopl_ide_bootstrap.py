@@ -3382,6 +3382,9 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_prompt_text.edit_modified(False)
         self.genai_prompt_text.bind("<KeyPress>", self._on_genai_prompt_key)
         self.genai_prompt_text.bind("<Button-1>", self._on_genai_prompt_click)
+        self.genai_prompt_text.bind("<B1-Motion>", self._on_genai_prompt_click)
+        self.genai_prompt_text.bind("<Double-Button-1>", self._on_genai_prompt_click)
+        self.genai_prompt_text.bind("<Triple-Button-1>", self._on_genai_prompt_click)
         self.genai_prompt_text.bind("<<Paste>>", self._clear_genai_prompt_placeholder)
         self.genai_prompt_text.bind("<<Cut>>", self._clear_genai_prompt_placeholder)
         self.genai_prompt_text.bind("<<Modified>>", self._on_genai_prompt_modified)
@@ -3404,7 +3407,7 @@ class OPLIDE(TkinterDnD.Tk):
         self.genai_attachment_listbox = tk.Listbox(attachments, height=4, exportselection=False, activestyle="none")
         self.genai_attachment_listbox.grid(row=0, column=0, sticky="ew")
         with files("pyopl.icon").joinpath("attachments.png").open("rb") as icon_file:
-            self._genai_attachment_image = tk.PhotoImage(data=icon_file.read()).subsample(10)
+            self._genai_attachment_image = tk.PhotoImage(data=icon_file.read()).subsample(16)
         self.genai_attachment_empty_icon = tk.Label(
             self.genai_attachment_listbox, image=self._genai_attachment_image, bd=0, highlightthickness=0
         )
@@ -3599,9 +3602,13 @@ class OPLIDE(TkinterDnD.Tk):
             self._genai_prompt_placeholder_active = False
             self.genai_prompt_text.delete("1.0", tk.END)
 
-    def _on_genai_prompt_key(self, event: tk.Event) -> None:
+    def _on_genai_prompt_key(self, event: tk.Event) -> Optional[str]:
+        if not self._genai_prompt_placeholder_active:
+            return None
         if event.char or event.keysym in ("BackSpace", "Delete"):
             self._clear_genai_prompt_placeholder()
+            return None
+        return "break"
 
     def _on_genai_prompt_click(self, _event: tk.Event) -> Optional[str]:
         if self._genai_prompt_placeholder_active:
@@ -4343,9 +4350,14 @@ class OPLIDE(TkinterDnD.Tk):
                     text_var.set("")
                     entry.configure(style="TEntry")
 
-            def on_key(event: tk.Event) -> None:
+            def on_key(event: tk.Event) -> Optional[str]:
+                if not hint_active:
+                    return None
                 if event.char or event.keysym in ("BackSpace", "Delete"):
                     clear_hint()
+                elif event.keysym not in ("Tab", "ISO_Left_Tab", "Return", "KP_Enter", "Escape"):
+                    return "break"
+                return None
 
             def on_click(_event: tk.Event) -> Optional[str]:
                 if hint_active:
@@ -4363,6 +4375,9 @@ class OPLIDE(TkinterDnD.Tk):
             entry.bind("<KeyPress>", on_key)
             entry.bind("<KeyRelease>", show_hint)
             entry.bind("<Button-1>", on_click)
+            entry.bind("<B1-Motion>", on_click)
+            entry.bind("<Double-Button-1>", on_click)
+            entry.bind("<Triple-Button-1>", on_click)
             entry.bind("<<Paste>>", clear_hint)
             entry.bind("<<Cut>>", on_cut)
             show_hint()
@@ -4705,9 +4720,14 @@ class OPLIDE(TkinterDnD.Tk):
                 search_var.set("")
                 search_entry.configure(style="TEntry")
 
-        def on_search_key(event: tk.Event) -> None:
+        def on_search_key(event: tk.Event) -> Optional[str]:
+            if not hint_active:
+                return None
             if event.char or event.keysym in ("BackSpace", "Delete"):
                 clear_search_hint()
+            elif event.keysym not in ("Tab", "ISO_Left_Tab", "Return", "KP_Enter", "Escape"):
+                return "break"
+            return None
 
         def on_search_click(_event: tk.Event) -> Optional[str]:
             if hint_active:
@@ -4898,6 +4918,9 @@ class OPLIDE(TkinterDnD.Tk):
         ttk.Button(actions, text="Cancel", command=close_dialog).grid(row=0, column=1, padx=(8, 0))
         search_entry.bind("<KeyPress>", on_search_key)
         search_entry.bind("<Button-1>", on_search_click)
+        search_entry.bind("<B1-Motion>", on_search_click)
+        search_entry.bind("<Double-Button-1>", on_search_click)
+        search_entry.bind("<Triple-Button-1>", on_search_click)
         search_entry.bind("<KeyRelease>", schedule_search)
         search_entry.bind("<<Paste>>", on_search_paste)
         search_entry.bind("<<Cut>>", on_search_cut)

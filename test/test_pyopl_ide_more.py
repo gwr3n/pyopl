@@ -1097,6 +1097,10 @@ minimize x;
         self.assertEqual(prompt.get("1.0", "end-1c"), host.genai_prompt_title_var.get())
         self.assertTrue(prompt.tag_ranges("genai_placeholder"))
         self.assertIsNone(OPLIDE._collect_genai_prompt_input(host))
+        self.assertEqual(
+            OPLIDE._on_genai_prompt_key(host, SimpleNamespace(char="", keysym="Right")), "break"
+        )
+        self.assertEqual(OPLIDE._on_genai_prompt_click(host, None), "break")
 
         prompt.mark_set(tk.INSERT, "end-1c")
         prompt.event_generate("<Button-1>", x=200, y=5)
