@@ -203,6 +203,46 @@ class TestCoreHelperCoverage(unittest.TestCase):
         self.assertEqual(result["objective_value"], 11.0)
         self.assertEqual(result["stats"]["mip_dual_bound"], 11.0)
 
+    def test_generated_highspy_code_returns_iis_for_infeasible_rows_and_bounds(self):
+        cases = (
+            (
+                "dvar float x; minimize x; subject to { x >= 2; x <= 1; }",
+                [
+                    {"name": "constraint_0", "kind": "constraint"},
+                    {"name": "constraint_1", "kind": "constraint"},
+                ],
+                [],
+            ),
+            (
+                "dvar float+ x; minimize x; subject to { x <= -1; }",
+                [{"name": "constraint_0", "kind": "constraint"}],
+                [{"name": "x", "kind": "lower_bound"}],
+            ),
+            (
+                "minimize 0; subject to { 0 == 1; }",
+                [{"name": "constraint_0", "kind": "constraint"}],
+                [],
+            ),
+        )
+
+        for model, expected_constraints, expected_bounds in cases:
+            with self.subTest(model=model), redirect_stdout(StringIO()):
+                _, code, _ = OPLCompiler().compile_model(model, solver="highs")
+                results_container = {}
+                exec(
+                    code,
+                    {
+                        "results_container": results_container,
+                        "_pyopl_solver_settings": {"output_flag": False},
+                    },
+                )
+
+            result = results_container["highs_output"]
+            self.assertEqual(result["status"], "INFEASIBLE")
+            self.assertEqual(result["iis"]["constraints"], expected_constraints)
+            self.assertEqual(result["iis"]["bounds"], expected_bounds)
+            self.assertNotIn("error", result["iis"])
+
     def test_shipped_highs_settings_solve_with_native_options(self):
         settings_path = Path(__file__).resolve().parents[1] / "highs.json"
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -479,7 +519,7 @@ class TestCodeGeneratorCoverage(unittest.TestCase):
         self.assertIn("'kind': 'general_constraint'", gurobi_code)
         self.assertIn("solver_options.update", highs_code)
         self.assertIn("for option_name, option_value in solver_options.items()", highs_code)
-        self.assertIn("highs.setOptionValue(option_name, option_value)", highs_code)
+        self.assertIn("highs_model.setOptionValue(option_name, option_value)", highs_code)
         self.assertIn("HighsModelStatus.kTimeLimit: 'TIME_LIMIT'", highs_code)
         self.assertIn("has_incumbent = solution_values.value_valid", highs_code)
         self.assertIn("status_str in ('TIME_LIMIT', 'INTERRUPTED') and has_incumbent", highs_code)

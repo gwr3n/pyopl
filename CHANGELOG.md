@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Return HiGHS IIS constraints and variable bounds for infeasible models.
+
 ### Fixed
 
 - Match the Attach output checkbox background and text color to the active sidebar theme.

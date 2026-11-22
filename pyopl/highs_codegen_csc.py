@@ -2703,6 +2703,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.original_var_names: list[str] = []  # Variables declared in the PyOPL model
         self.var_indices = {}  # Map variable name to index in c, bounds, etc.
         self.bounds = []  # List of (low, high) for each variable
+        self.original_bounds: list[list[float | None]] = []
         self.c = []  # Objective coefficients
         self.A_eq = []
         self.b_eq = []
@@ -2776,6 +2777,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             self.bounds.append([0, 1])
         while len(self.integrality) < len(self.var_names):
             self.integrality.append(1)
+        while len(self.original_bounds) < len(self.var_names):
+            self.original_bounds.append(list(self.bounds[len(self.original_bounds)]))
         if len(self.c) < len(self.var_names):
             self.c.extend([0.0] * (len(self.var_names) - len(self.c)))
         elif len(self.c) > len(self.var_names):
@@ -2783,6 +2786,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
 
     def _refresh_problem_metadata_code_lines(self) -> None:
         bounds_py = "[" + ", ".join(f'[{b[0]}, {b[1] if b[1] is not None else "None"}]' for b in self.bounds) + "]"
+        original_bounds_py = repr(self.original_bounds)
         found_var_names = False
         found_bounds = False
         found_integrality = False
@@ -2803,6 +2807,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         if not found_var_names:
             self._add_code_line(f"var_names = {repr(self.var_names)}")
         self._add_code_line(f"original_var_names = {repr(self.original_var_names)}")
+        self._add_code_line(f"original_bounds = {original_bounds_py}")
         if not found_bounds:
             self._add_code_line(f"bounds = {bounds_py}")
         if not found_integrality:
@@ -2842,6 +2847,106 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._refresh_problem_metadata_code_lines()
         return self._snapshot_linear_problem()
 
+    def _emit_zero_variable_results(self, problem: LinearProblem) -> None:
+        equality_rhs = problem.b_eq or []
+        inequality_rhs = problem.b_ub or []
+        beq_ok = all(abs(rhs) <= 1e-9 for rhs in equality_rhs)
+        bub_ok = all(rhs >= -1e-9 for rhs in inequality_rhs)
+        feasible = beq_ok and bub_ok
+        try:
+            _, obj_const = self._eval_expr(self.ast["objective"]["expression"], {})
+            obj_val = float(obj_const) if isinstance(obj_const, (int, float)) else 0.0
+        except Exception:
+            obj_val = 0.0
+
+        self._add_code_line("")
+        self._add_code_line("# No decision variables: short-circuit without starting HiGHS")
+        self._add_code_line("results = {}")
+        if feasible:
+            self._add_code_line("results['status'] = 'OPTIMAL'")
+            self._add_code_line(f"results['objective_value'] = {obj_val}")
+        else:
+            self._add_code_line("results['status'] = 'INFEASIBLE'")
+            self._add_code_line("results['objective_value'] = None")
+            infeasible_row = next((index for index, rhs in enumerate(equality_rhs) if not abs(rhs) <= 1e-9), None)
+            if infeasible_row is None:
+                infeasible_row = len(equality_rhs) + next(
+                    index for index, rhs in enumerate(inequality_rhs) if not rhs >= -1e-9
+                )
+            self._add_code_line(
+                f"results['iis'] = {{'constraints': [{{'name': 'constraint_{infeasible_row}', "
+                "'kind': 'constraint'}], 'bounds': []}"
+            )
+        self._add_code_line("results['solution'] = {}")
+        self._add_code_line("results_container['highs_output'] = results")
+
+    def _emit_infeasible_iis_result(self) -> None:
+        self._add_code_line("if status_str == 'INFEASIBLE':")
+        self.indent_level += 1
+        self._add_code_line("try:")
+        self.indent_level += 1
+        self._add_code_line("iis_highs = highspy.Highs()")
+        self._add_code_line("configure_highs(iis_highs)")
+        self._add_code_line("require_highs_ok(iis_highs.passModel(highs.getLp()), 'copy model for IIS')")
+        self._add_code_line("for col_idx, (lower, upper) in enumerate(zip(iis_lower_bounds, iis_upper_bounds)):")
+        self.indent_level += 1
+        self._add_code_line(
+            "require_highs_ok(iis_highs.changeColBounds(col_idx, lower, upper), "
+            "f'restore original bounds for IIS column {col_idx}')"
+        )
+        self.indent_level -= 1
+        self._add_code_line(
+            "require_highs_ok(iis_highs.setOptionValue('iis_strategy', "
+            "highspy.IisStrategy.kIisStrategyIrreducible), 'set irreducible IIS strategy')"
+        )
+        self._add_code_line("iis_status, iis_data = iis_highs.getIis()")
+        self._add_code_line("require_highs_ok(iis_status, 'compute IIS')")
+        self._add_code_line("iis = {'constraints': [], 'bounds': []}")
+        self._add_code_line("for row_index in iis_data.row_index_:")
+        self.indent_level += 1
+        self._add_code_line("row_name_status, row_name = iis_highs.getRowName(row_index)")
+        self._add_code_line("require_highs_ok(row_name_status, f'get name for IIS row {row_index}')")
+        self._add_code_line("iis['constraints'].append({'name': row_name, 'kind': 'constraint'})")
+        self.indent_level -= 1
+        self._add_code_line("for col_index, bound_status in zip(iis_data.col_index_, iis_data.col_bound_):")
+        self.indent_level += 1
+        self._add_code_line(
+            "if bound_status in (highspy.IisBoundStatus.kIisBoundStatusLower, " "highspy.IisBoundStatus.kIisBoundStatusBoxed):"
+        )
+        self.indent_level += 1
+        self._add_code_line("iis['bounds'].append({'name': var_names[col_index], 'kind': 'lower_bound'})")
+        self.indent_level -= 1
+        self._add_code_line(
+            "if bound_status in (highspy.IisBoundStatus.kIisBoundStatusUpper, " "highspy.IisBoundStatus.kIisBoundStatusBoxed):"
+        )
+        self.indent_level += 1
+        self._add_code_line("iis['bounds'].append({'name': var_names[col_index], 'kind': 'upper_bound'})")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        # highspy does not expose IisModelStatusIrreducible, whose HiGHS value is 3.
+        self._add_code_line("if not iis_data.valid_ or iis_data.status_ != 3:")
+        self.indent_level += 1
+        self._add_code_line("iis['error'] = f'HiGHS could not verify an irreducible IIS " "(status {iis_data.status_})'")
+        self.indent_level -= 1
+        self._add_code_line(f"{self.results_varname}['iis'] = iis")
+        self._add_code_line("print('IIS constraints:')")
+        self._add_code_line("for item in iis['constraints']:")
+        self.indent_level += 1
+        self._add_code_line("print(f\"  {item['name']}\")")
+        self.indent_level -= 1
+        self._add_code_line("print('IIS bounds:')")
+        self._add_code_line("for item in iis['bounds']:")
+        self.indent_level += 1
+        self._add_code_line("print(f\"  {item['name']} ({item['kind']})\")")
+        self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("except Exception as iis_error:")
+        self.indent_level += 1
+        self._add_code_line(f"{self.results_varname}['iis'] = " "{'constraints': [], 'bounds': [], 'error': str(iis_error)}")
+        self._add_code_line("print(f'IIS computation failed: {iis_error}')")
+        self.indent_level -= 1
+        self.indent_level -= 1
+
     def generate_code(self) -> str:
         self._add_code_line("import numpy as np")
         self._add_code_line("import math")
@@ -2873,33 +2978,9 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
             self._sparse_codegen_only = False
         self._add_code_line(f"sense = '{sense}'")
 
-        # >>> NEW: zero-variable short-circuit (pure feasibility/constant objective) <<<
         if len(problem.var_names) == 0:
-            # Feasibility: with no variables, equalities require 0 == b_eq[i], inequalities require 0 <= b_ub[i]
-            beq_ok = all(abs(b) <= 1e-9 for b in (problem.b_eq or []))
-            bub_ok = all(b >= -1e-9 for b in (problem.b_ub or []))
-            feasible = beq_ok and bub_ok
-            # Constant objective value (evaluate at codegen time)
-            try:
-                _, obj_const = self._eval_expr(self.ast["objective"]["expression"], {})
-                obj_val = float(obj_const) if isinstance(obj_const, (int, float)) else 0.0
-            except Exception:
-                obj_val = 0.0
-
-            # Preserve previously emitted data/headers; append short-circuit result without starting HiGHS
-            self._add_code_line("")
-            self._add_code_line("# No decision variables: short-circuit without starting HiGHS")
-            self._add_code_line("results = {}")
-            if feasible:
-                self._add_code_line("results['status'] = 'OPTIMAL'")
-                self._add_code_line(f"results['objective_value'] = {obj_val}")
-            else:
-                self._add_code_line("results['status'] = 'INFEASIBLE'")
-                self._add_code_line("results['objective_value'] = None")
-            self._add_code_line("results['solution'] = {}")
-            self._add_code_line("results_container['highs_output'] = results")
+            self._emit_zero_variable_results(problem)
             return "\n".join(self.highs_code_lines)
-        # <<< END NEW >>>
         self._add_code_line("")
         self._add_code_line(f"{self.results_varname} = {{}}")
         self._add_code_line("try:")
@@ -2908,7 +2989,8 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line(
             "print(f'PyOPL/HiGHS: variables={len(var_names)}, equalities={len(b_eq)}, inequalities={len(b_ub)}, integrality={sum(1 for v in integrality if v)}')"
         )
-        self._add_code_line("highs = highspy.Highs()")
+        self._add_code_line("def configure_highs(highs_model):")
+        self.indent_level += 1
         self._add_code_line("for option_name, option_value in solver_options.items():")
         self.indent_level += 1
         self._add_code_line(
@@ -2918,15 +3000,24 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("option_value = float(option_value)")
         self.indent_level -= 1
-        self._add_code_line("option_status = highs.setOptionValue(option_name, option_value)")
+        self._add_code_line("option_status = highs_model.setOptionValue(option_name, option_value)")
         self._add_code_line("if option_status == highspy.HighsStatus.kError:")
         self.indent_level += 1
         self._add_code_line("raise ValueError(f'Invalid HiGHS option {option_name!r}: {option_value!r}')")
         self.indent_level -= 1
         self.indent_level -= 1
+        self.indent_level -= 1
+        self._add_code_line("highs = highspy.Highs()")
+        self._add_code_line("configure_highs(highs)")
         self._add_code_line("infinity = highs.getInfinity()")
         self._add_code_line("lower_bounds = [(-infinity if lower is None else float(lower)) for lower, _ in bounds]")
         self._add_code_line("upper_bounds = [(infinity if upper is None else float(upper)) for _, upper in bounds]")
+        self._add_code_line(
+            "iis_lower_bounds = [(-infinity if lower is None else float(lower)) for lower, _ in original_bounds]"
+        )
+        self._add_code_line(
+            "iis_upper_bounds = [(infinity if upper is None else float(upper)) for _, upper in original_bounds]"
+        )
         self._add_code_line(
             "costs = ([-float(value) for value in c] if sense == 'maximize' else [float(value) for value in c])"
         )
@@ -2964,11 +3055,14 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.indent_level += 1
         self._add_code_line("lower = float(rhs) if equality else -infinity")
         self._add_code_line("upper = float(rhs)")
+        self._add_code_line("row_index = highs.getNumRow()")
+        self._add_code_line("row_name = f'constraint_{row_index}'")
         self._add_code_line(
             "require_highs_ok(highs.addRow(lower, upper, len(entries), "
             "np.asarray([col for col, _ in entries], dtype=np.int32), "
             "np.asarray([value for _, value in entries], dtype=np.float64)), 'add constraint row')"
         )
+        self._add_code_line("require_highs_ok(highs.passRowName(row_index, row_name), f'name constraint row {row_name}')")
         self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("add_highs_rows(A_eq_rows, A_eq_cols, A_eq_data, b_eq, True)")
@@ -3112,6 +3206,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self._add_code_line(f"{self.results_varname}['message'] = status_message")
         self._add_code_line(f"{self.results_varname}['objective_value'] = None")
         self._add_code_line(f"{self.results_varname}['stats'] = stats")
+        self._emit_infeasible_iis_result()
         self.indent_level -= 1
         self.indent_level -= 1
         self._add_code_line("except Exception as e:")
@@ -3649,6 +3744,7 @@ class HighsCSCCodeGenerator(HighsCodeGeneratorBase):
         self.tuple_types = {}
         for declaration in self.ast["declarations"]:
             self._handle_variable_declaration(declaration, var_names, bounds, integrality)
+        self.original_bounds = [list(bound) for bound in bounds]
         self._tighten_bounds_from_constraints(bounds, var_names, self.var_indices, self.ast.get("constraints", []))
         self.var_names = var_names
         self.bounds = bounds
