@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Highlight the editor line containing the caret unless text is selected.
+- Highlight the active editor line number in the gutter.
 - Return HiGHS IIS constraints with PyOPL labels and variable bounds for infeasible models.
 
 ### Fixed

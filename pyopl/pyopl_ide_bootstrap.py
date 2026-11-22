@@ -452,6 +452,7 @@ class _EditorGutter:
         self._fold_text = ""
         self._redraw_after_id: Optional[str] = None
         self._foreground = "#7b8794"
+        self._active_line_foreground = self._foreground
         self._line_number_right = self.LINE_NUMBER_WIDTH - 4
         self._gutter_width = self.LINE_NUMBER_WIDTH
         self._fold_marker_x = self.FOLDING_WIDTH - 12
@@ -537,6 +538,8 @@ class _EditorGutter:
         try:
             self._update_width()
             self.canvas.delete("all")
+            active_line_ranges = self.text_widget.tag_ranges("CURRENT_LINE")
+            active_line = int(str(active_line_ranges[0]).split(".", 1)[0]) if active_line_ranges else None
             index = self.text_widget.index("@0,0")
             while True:
                 line_info = self.text_widget.dlineinfo(index)
@@ -550,7 +553,7 @@ class _EditorGutter:
                     anchor="ne",
                     text=str(line),
                     font=(self.owner.editor_font_family, self.owner.current_font_size),
-                    fill=self._foreground,
+                    fill=(self._active_line_foreground if line == active_line else self._foreground),
                 )
                 if line in self.fold_regions:
                     self._draw_fold_marker(line, y)
@@ -591,8 +594,9 @@ class _EditorGutter:
         if self.fold_regions and event.x >= self._fold_marker_x - 6:
             self.toggle_fold(line)
 
-    def configure_colors(self, background: str, foreground: str) -> None:
+    def configure_colors(self, background: str, foreground: str, active_line_foreground: str) -> None:
         self._foreground = foreground
+        self._active_line_foreground = active_line_foreground
         self.canvas.configure(background=background)
         self.schedule_redraw()
 
@@ -3121,6 +3125,11 @@ class OPLIDE(TkinterDnD.Tk):
 
         self.model_text.bind("<KeyRelease>", _on_model_changed)
         self.model_text.bind("<ButtonRelease-1>", _on_model_changed)
+        self.model_text.bind(
+            "<B1-Motion>",
+            lambda _event: self.after_idle(self._update_active_line_highlight, self.model_text),
+            add="+",
+        )
         self.model_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.model_text))
         self.model_text.bind("<Control-Key-a>", self._select_all_model)
 
@@ -3148,6 +3157,11 @@ class OPLIDE(TkinterDnD.Tk):
         self._overlay_scrollbar(self.data_text, self.data_text.vbar, on_scroll=self.data_gutter.schedule_redraw)
         self.data_text.bind("<KeyRelease>", _on_data_changed)
         self.data_text.bind("<ButtonRelease-1>", _on_data_changed)
+        self.data_text.bind(
+            "<B1-Motion>",
+            lambda _event: self.after_idle(self._update_active_line_highlight, self.data_text),
+            add="+",
+        )
         self.data_text.bind("<<Modified>>", lambda _event: self._on_editor_modified(self.data_text))
         self.data_text.bind("<Control-Key-a>", self._select_all_data)
 
@@ -3573,6 +3587,8 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _setup_tag_configs(self) -> None:
         """Configure syntax highlighting tags for editors."""
+        self.model_text.tag_configure("CURRENT_LINE")
+        self.data_text.tag_configure("CURRENT_LINE")
         for token, color in TOKEN_COLORS.items():
             self.model_text.tag_configure(token, foreground=color)
             self.data_text.tag_configure(token, foreground=color)
@@ -4499,12 +4515,19 @@ class OPLIDE(TkinterDnD.Tk):
 
     def _on_text_change(self, text_widget: tk.Text, is_data: bool = False) -> None:
         """Update caret position and syntax highlighting on text change."""
+        self._update_active_line_highlight(text_widget)
         # Keep caret responsive immediately
         self._update_caret_position(text_widget)
         gutter = self.data_gutter if is_data else self.model_gutter
         gutter.refresh()
         # Debounce highlighting so we don't re-lex/parse on every keystroke
         self._schedule_highlight(text_widget, is_data)
+
+    def _update_active_line_highlight(self, text_widget: tk.Text) -> None:
+        text_widget.tag_remove("CURRENT_LINE", "1.0", tk.END)
+        if text_widget.tag_ranges("sel"):
+            return
+        text_widget.tag_add("CURRENT_LINE", "insert linestart", "insert lineend +1c")
 
     def _cancel_scheduled_highlight(self, text_widget: tk.Text, kind: str) -> None:
         editor = OPLIDE._editor_state_for_widget(self, text_widget)
@@ -8434,6 +8457,7 @@ class OPLIDE(TkinterDnD.Tk):
                 "editor_bg": dark,
                 "editor_fg": "#c4c4c4",
                 "caret_fg": "#d4d4d4",
+                "active_line_bg": "#1f1f1f",
                 "sidebar_bg": dark,
                 "output_bg": "#151515",
                 "output_fg": "#d4d4d4",
@@ -8456,6 +8480,7 @@ class OPLIDE(TkinterDnD.Tk):
             "editor_bg": "#ffffff",
             "editor_fg": "#212529",
             "caret_fg": "#212529",
+            "active_line_bg": "#f2f3f5",
             "sidebar_bg": "#ffffff",
             "output_bg": "#f8f9fa",
             "output_fg": "#212529",
@@ -8506,10 +8531,12 @@ class OPLIDE(TkinterDnD.Tk):
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.config(**editor_config)
+                widget.tag_configure("CURRENT_LINE", background=colors["active_line_bg"])
+                OPLIDE._update_active_line_highlight(self, widget)
         for gutter_name in ("model_gutter", "data_gutter"):
             gutter = getattr(self, gutter_name, None)
             if gutter is not None:
-                gutter.configure_colors(colors["editor_bg"], colors["status_meta_fg"])
+                gutter.configure_colors(colors["editor_bg"], colors["status_meta_fg"], colors["editor_fg"])
         for widget_name in ("output_text", "_solver_log_text"):
             output = getattr(self, widget_name, None)
             if output is not None:

@@ -628,6 +628,22 @@ class TestIDEUtilitiesMore(unittest.TestCase):
         text_widget = EditorText("alpha\nbeta\ngamma", insert_line=2)
         self.assertEqual(ide._selected_editor_line_numbers(text_widget), (2, 2))
 
+    def test_active_line_highlight_tracks_caret_and_hides_for_selection(self):
+        tk = pyopl_ide_bootstrap.tk
+        text_widget = mock.Mock()
+        text_widget.tag_ranges.return_value = ()
+        ide = OPLIDE.__new__(OPLIDE)
+
+        OPLIDE._update_active_line_highlight(ide, text_widget)
+        text_widget.tag_remove.assert_called_once_with("CURRENT_LINE", "1.0", tk.END)
+        text_widget.tag_add.assert_called_once_with("CURRENT_LINE", "insert linestart", "insert lineend +1c")
+
+        text_widget.reset_mock()
+        text_widget.tag_ranges.return_value = ("1.1", "1.3")
+        OPLIDE._update_active_line_highlight(ide, text_widget)
+        text_widget.tag_remove.assert_called_once_with("CURRENT_LINE", "1.0", tk.END)
+        text_widget.tag_add.assert_not_called()
+
     def test_toggle_comment_uses_hash_and_selected_lines(self):
         ide = OPLIDE.__new__(OPLIDE)
         ide.model_text = EditorText("  alpha\n// beta\n# gamma", selection=("1.0", "2.1"))
@@ -921,6 +937,36 @@ minimize x;
         self.assertEqual(gutter._fold_marker_x, 60)
         gutter.canvas.configure.assert_called_with(width=72)
 
+    def test_editor_gutter_highlights_active_line_number(self):
+        gutter = _EditorGutter.__new__(_EditorGutter)
+        gutter.owner = SimpleNamespace(editor_font_family="TkFixedFont", current_font_size=12)
+        gutter.text_widget = mock.Mock()
+        gutter.text_widget.index.side_effect = lambda index: {
+            "end-1c": "10.0",
+            "@0,0": "2.0",
+            "2.0+1displaylines": "2.0",
+        }[index]
+        gutter.text_widget.cget.return_value = "TkFixedFont"
+        gutter.text_widget.dlineinfo.return_value = (0, 5, 200, 20, 16)
+        gutter.text_widget.tag_ranges.return_value = ("2.0", "3.0")
+        gutter.canvas = mock.Mock()
+        gutter.fold_regions = {}
+        gutter.folded_lines = set()
+        gutter._line_number_digits = 2
+        gutter._line_number_font = "TkFixedFont"
+        gutter._line_number_width = _EditorGutter.LINE_NUMBER_WIDTH
+        gutter._redraw_after_id = None
+        gutter.schedule_redraw = mock.Mock()
+        gutter.configure_colors("#ffffff", "#6b7785", "#212529")
+
+        gutter.redraw()
+
+        self.assertEqual(gutter.canvas.create_text.call_args.kwargs["fill"], "#212529")
+
+        gutter.text_widget.tag_ranges.return_value = ()
+        gutter.redraw()
+        self.assertEqual(gutter.canvas.create_text.call_args.kwargs["fill"], "#6b7785")
+
     def test_editor_gutter_preserves_fold_after_line_insertions_and_deletions(self):
         original = "// heading\n// § Bounds\nx >= 0;\nx <= 1;\n"
         cases = (
@@ -1097,9 +1143,7 @@ minimize x;
         self.assertEqual(prompt.get("1.0", "end-1c"), host.genai_prompt_title_var.get())
         self.assertTrue(prompt.tag_ranges("genai_placeholder"))
         self.assertIsNone(OPLIDE._collect_genai_prompt_input(host))
-        self.assertEqual(
-            OPLIDE._on_genai_prompt_key(host, SimpleNamespace(char="", keysym="Right")), "break"
-        )
+        self.assertEqual(OPLIDE._on_genai_prompt_key(host, SimpleNamespace(char="", keysym="Right")), "break")
         self.assertEqual(OPLIDE._on_genai_prompt_click(host, None), "break")
 
         prompt.mark_set(tk.INSERT, "end-1c")

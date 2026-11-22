@@ -3146,6 +3146,15 @@ class TestPyOPLIDETyping(unittest.TestCase):
             def tag_configure(self, *_args, **_kwargs):
                 pass
 
+            def tag_remove(self, *_args):
+                pass
+
+            def tag_ranges(self, *_args):
+                return ()
+
+            def tag_add(self, *_args):
+                pass
+
         dummy = SimpleNamespace(
             theme_var=DummyVar("bootstrap-light"),
             style=DummyStyle(),
