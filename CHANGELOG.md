@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Raise the editor live syntax validation and highlighting limit from 10,000 to 100,000 characters.
 - Reduce the size of the GenAI attachment paperclip icon.
 - Use a consistent theme background throughout the Compare Models dialog.
 - Replace the Compare Models empty label frames with continuous one-pixel panel borders.

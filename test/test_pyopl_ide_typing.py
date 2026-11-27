@@ -1860,6 +1860,16 @@ class TestPyOPLIDETyping(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertEqual(list(destination.parent.iterdir()), [])
 
+    def test_highlight_size_limit_allows_up_to_100000_characters(self):
+        for size, too_large in ((12_732, False), (100_000, False), (100_001, True)):
+            for use_count in (True, False):
+                with self.subTest(size=size, use_count=use_count):
+                    text = mock.Mock()
+                    text.count.return_value = (size,) if use_count else None
+                    text.get.return_value = "x" * size
+
+                    self.assertEqual(OPLIDE._text_too_large_for_highlight(None, text), too_large)
+
     def test_schedule_highlight_skips_large_model_text(self):
         class DummyText:
             def __init__(self):
