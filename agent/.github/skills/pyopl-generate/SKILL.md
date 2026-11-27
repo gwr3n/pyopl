@@ -1,6 +1,6 @@
 ---
 name: pyopl-generate
-description: "Generate a PyOPL .mod model and matching .dat data from a natural-language optimization problem. Use when asked to generate, formulate, create, or draft a PyOPL model, or to perform the IDE Generate Model & Data action. Includes grammar lookup, relevant few-shot exemplar retrieval, literate modeling, bounded compile-and-revise iterations, semantic alignment review, and file creation without Rhetor MCP."
+description: "Generate a PyOPL .mod model and matching .dat data from a natural-language optimization problem. Use when asked to generate, formulate, create, or draft a PyOPL model, or to perform the IDE Generate Model & Data action. Includes grammar lookup, relevant few-shot exemplar retrieval, literate style, bounded compile-and-revise iterations, semantic alignment review, and file creation without Rhetor MCP."
 argument-hint: "Describe the optimization problem and optionally provide target .mod/.dat paths or an additional exemplar folder"
 ---
 
@@ -39,7 +39,8 @@ Before generating artifacts, identify unresolved ambiguity. If in doubt, ask a c
    - When the prompt includes images, transcribe readable text and briefly describe relevant tables, labels, and relationships; append that compact context to the retrieval query. Continue using the original text and images as the semantic source of truth.
    - Treat each exemplar as a complete triple: a Markdown problem description plus matching `.mod` and `.dat` files. Prefer files with the same stem as the description; otherwise use the single clear model/data pair in that description's folder. Skip incomplete or ambiguous pairs.
    - Rank descriptions by semantic relevance to the unchanged problem description and use up to 3 of the strongest matches. If semantic ranking is unavailable, select only clearly relevant examples by direct inspection. Continue without exemplars when none are usable.
-   - Use exemplars for PyOPL syntax, formulation patterns, structure, and literate presentation only. Never copy their requirements, names, indices, or data unless the user's problem independently calls for them.
+   - Read the full selected `.mod` and `.dat` contents, including comments, before drafting.
+   - Use exemplars for structure and syntax only. Tailor names and indices to the user's problem. Never copy their requirements or data unless the user's problem independently calls for them.
    - Keep the selected exemplar set fixed across syntax and alignment revisions so later attempts retain the same grounding.
 
 4. Formulate privately.
@@ -48,12 +49,9 @@ Before generating artifacts, identify unresolved ambiguity. If in doubt, ask a c
    - Resolve units, signs, index domains, and links between decisions and constraints.
    - If data is absent, prepare a small plausible mock instance and disclose that assumption.
 
-5. Create complete artifacts using literate modeling.
+5. Create complete artifacts in literate style.
    - Write one complete `.mod` file and one matching `.dat` file.
-   - Organize declarations, objective, and constraints in a readable order that follows the problem formulation.
-   - Label the objective and every constraint with problem-domain names rather than generic numbering when practical.
-   - Add concise comments that explain the role and units of sets, parameters, and decision variables, plus the intent of each non-obvious objective term and constraint family.
-   - Keep comments synchronized with the mathematics and favor explanatory intent over restating syntax. This literate presentation is part of the generated artifact, not optional decoration.
+   - Label the objective and each constraint. Add concise comments explaining variables, parameters, and constraints, aligned to the problem (literate style).
    - Keep instance values in `.dat` unless the grammar requires inline values.
 
 6. Compile the pair.

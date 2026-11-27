@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Align the PyOPL Modeller agent and generation skill with GraphChain's shared "literate style" commenting guidance, removing additional prose-style prescriptions.
 - Raise the editor live syntax validation and highlighting limit from 10,000 to 100,000 characters.
 - Reduce the size of the GenAI attachment paperclip icon.
 - Use a consistent theme background throughout the Compare Models dialog.
